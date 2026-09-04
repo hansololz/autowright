@@ -7,7 +7,7 @@
 // pane (`toolbarRight`) and a rail header of its own.
 import React, { useEffect, useRef, useState } from 'react'
 import { LOG_TAIL, logKey, useStore } from './store'
-import { badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea } from './ui'
+import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea } from './ui'
 import type { Execution, ExecutionStep, LogLine } from './types'
 
 // null = the execution-scoped log (§5 execution.ndjson)
@@ -20,24 +20,31 @@ const rowBase: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', cursor: 'pointer',
 }
 
-// Selected rows keep their inline background — it wins over the ad-hover-row hover.
-function rowBg(selected: boolean): React.CSSProperties {
-  return selected
-    ? { background: 'var(--bg-active)', boxShadow: 'inset 2px 0 0 var(--accent)' }
-    : {}
+// §7 (the §9.2 step-navigator rule): the selected row is a plain, unfocusable,
+// text-selectable block marked by the accent bar and faint fill alone; the
+// other rows are buttons. A clicked row unmounts as it becomes the block, so
+// no focus ring can linger on it — never a box around a row.
+function RailRow({ selected, current, onSelect, children }: {
+  selected: boolean; current: 'step' | 'true'; onSelect: () => void; children: React.ReactNode
+}) {
+  return selected ? (
+    <div aria-current={current} style={{ ...rowBase, cursor: 'default', userSelect: 'text', background: 'var(--bg-active)', boxShadow: 'inset 2px 0 0 var(--accent)' }}>
+      {children}
+    </div>
+  ) : (
+    <button className="ad-btn-bare ad-hover-row ad-focus-inset" onClick={onSelect} style={rowBase}>
+      {children}
+    </button>
+  )
 }
 
 /** §7: the "Setup log" pseudo-row above step 1 — selects execution.ndjson. */
 export function ExecLogRow({ selected, onSelect }: { selected: boolean; onSelect: () => void }) {
   return (
-    <button
-      className="ad-btn-bare ad-hover-row ad-focus-inset"
-      onClick={onSelect}
-      style={{ ...rowBase, ...rowBg(selected) }}
-    >
+    <RailRow selected={selected} current="true" onSelect={onSelect}>
       <i className="fa-solid fa-terminal" style={{ fontSize: 9, width: 8, color: 'var(--text-faint)', flex: 'none' }} />
       <span style={{ flex: 1, fontSize: 11.5, color: 'var(--text-faint)', fontStyle: 'italic' }}>Setup log</span>
-    </button>
+    </RailRow>
   )
 }
 
@@ -49,11 +56,7 @@ export function StepRow({ step, selected, onSelect }: {
   const executing = step.status === 'executing'
   const dot = step.status === 'queued' ? 'var(--text-deco)' : badgeOf(step.status).c
   return (
-    <button
-      className="ad-btn-bare ad-hover-row ad-focus-inset"
-      onClick={onSelect}
-      style={{ ...rowBase, ...rowBg(selected) }}
-    >
+    <RailRow selected={selected} current="step" onSelect={onSelect}>
       <span style={{
         width: 7, height: 7, borderRadius: '50%', background: dot, flex: 'none',
         animation: executing ? PULSE : 'none',
@@ -71,7 +74,7 @@ export function StepRow({ step, selected, onSelect }: {
         </span>
       )}
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)', flex: 'none' }}>{step.duration}</span>
-    </button>
+    </RailRow>
   )
 }
 
@@ -129,7 +132,7 @@ export function RailHeader({ count }: { count: number }) {
   )
 }
 
-export function ExecutionView({ executionId, full, summary, layout, railFooter, toolbarRight }: {
+export function ExecutionView({ executionId, full, summary, layout, railFooter, toolbarRight, closing }: {
   executionId: string
   /** the full record (`executionFull`), undefined while loading */
   full: Execution | undefined
@@ -140,6 +143,8 @@ export function ExecutionView({ executionId, full, summary, layout, railFooter, 
   railFooter?: React.ReactNode
   /** modal: the run controls at the toolbar's right end */
   toolbarRight?: React.ReactNode
+  /** modal: true through the card's exit animation — the flip keys go inert */
+  closing?: boolean
 }) {
   // Per-field selectors (UI-GUIDE): a bare useStore() would re-render on every
   // store write anywhere — including each execution.log event of every other
@@ -211,6 +216,42 @@ export function ExecutionView({ executionId, full, summary, layout, railFooter, 
     const attempt = step === null ? null : latestN(steps[step])
     setSel({ step, attempt })
   }
+
+  // §7 flip keys — the §9.2 step-modal shape: ← / → move the selection one
+  // row through the rail's order (Setup log, then the steps), no wrap, no-op
+  // at the ends and while nothing is selected. Editable targets are ignored;
+  // the page's rail yields to any open modal (the keys must not flip logs
+  // under a Report-issue card), the modal's rail to its own closing card. A
+  // flip is the user's own selection (ends the auto-follow) and drops focus
+  // from whatever holds it, so keyboard mode never draws a ring.
+  // Read through refs so the listener is installed once per view, not once
+  // per store write (every live log event re-renders with a fresh `steps`).
+  const selRef = useRef(sel)
+  selRef.current = sel
+  const stepsRef = useRef(steps)
+  stepsRef.current = steps
+  useEffect(() => {
+    if (closing) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
+      if (layout === 'page' && anyModalOpen()) return
+      const cur = selRef.current
+      const count = stepsRef.current.length
+      if (cur === null || count === 0) return
+      // rail order as an index: 0 = Setup log, k = step k-1
+      const at = cur.step === null ? 0 : cur.step + 1
+      const to = e.key === 'ArrowLeft' ? at - 1 : at + 1
+      if (to < 0 || to > count) return
+      e.preventDefault()
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+      const step = to === 0 ? null : to - 1
+      manualSel.current = true
+      setSel({ step, attempt: step === null ? null : latestN(stepsRef.current[step]) })
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [closing, layout])
 
   const selStep = sel?.step != null ? steps[sel.step] : undefined
   const attempts = selStep?.attempts ?? []

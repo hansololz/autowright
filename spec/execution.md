@@ -226,7 +226,17 @@ step has more than one attempt; the count is the latest attempt's `number`, whic
 §4.5 prune) and the latest attempt's duration — rows carry no actions;
 skipping lives in the header's Skip-step button. Above step 1 sits a **"Setup log"**
 pseudo-row (terminal icon in place of a status dot) selecting the execution-scoped log.
-Selecting any row changes which log the LOGS pane shows. While the
+Selecting any row changes which log the LOGS pane shows. The **← / → arrow keys** move the
+selection too, one row at a time through the rail's order (Setup log, then step 1 … N — ← from
+step 1 lands on the Setup log; no wrap, a no-op at either end and while nothing is selected),
+the same flip keys as the §9.2 step-script modal: they ignore every editable target, they are
+inert while a modal covers the rail (the page's rail yields whenever any modal is open; the §11
+test-run modal's rail yields while its card is closing), and a key flip is the user's own
+selection — it ends the live auto-follow exactly like a click. The rail draws **no focus
+ring** (the §9.2 rule, applied here): the selected row is a plain, unfocusable block
+(`aria-current`, text-selectable), the other rows are buttons, a clicked row unmounts as it
+becomes the selected block, and a key flip drops focus from whatever holds it — so the 2 px
+accent bar and the faint fill alone mark the selection, never a box around a row. While the
 execution is live the selection auto-follows the executing step until the user selects a row
 themselves (reset when navigating to another execution); when a failed execution loads, the
 failed step's latest attempt is auto-selected. On a failed

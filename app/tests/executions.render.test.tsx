@@ -469,3 +469,118 @@ describe('execution page log cap (§7)', () => {
     expect(screen.queryByText(/Truncated/)).toBeNull()
   })
 })
+
+describe('execution page STEPS rail keys and selection (§7)', () => {
+  const attempt = { number: 1, status: 'succeeded' as const, duration: '1s', startedMs: NOW }
+  const seedThree = () => {
+    const full: Execution = {
+      ...ex('e1'),
+      steps: [
+        { name: 'Fetch page', status: 'succeeded', duration: '1s', attempts: [attempt] },
+        { name: 'Parse it', status: 'succeeded', duration: '1s', attempts: [attempt] },
+        { name: 'Send mail', status: 'succeeded', duration: '1s', attempts: [attempt] },
+      ],
+      result: null,
+    }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [ex('e1')],
+      executionFull: { e1: full }, execLogs: {},
+    })
+  }
+  // the LOGS pane header names the selected row (the "Setup log" eyebrow for
+  // the pseudo-row); the rail's selected block carries aria-current
+  const selectedRow = () => document.querySelector('[aria-current]') as HTMLElement
+  // the LOGS pane header repeats the selected step's name, so pick the rail's own row
+  const railRow = (name: string) => screen.getAllByText(name)
+    .map((el) => el.closest('button, [aria-current]'))
+    .find((el): el is HTMLElement => el instanceof HTMLElement)!
+
+  it('← / → move the selection one rail row, through the Setup log, and stop at both ends', () => {
+    seedThree()
+    render(<ExecutionPage />)
+    // a settled execution with no failure auto-selects the last attempted step
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Parse it')
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Setup log')
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Setup log')
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    expect(selectedRow().textContent).toContain('Fetch page')
+  })
+
+  it('the selected row is an unfocusable, text-selectable block and the others are buttons; a click swaps them', () => {
+    seedThree()
+    render(<ExecutionPage />)
+    const viewed = railRow('Send mail')
+    expect(viewed.tagName).toBe('DIV')
+    expect(viewed.getAttribute('tabindex')).toBeNull()
+    expect(viewed.style.userSelect).toBe('text')
+    expect(railRow('Fetch page').tagName).toBe('BUTTON')
+    expect(railRow('Setup log').tagName).toBe('BUTTON')
+    // a clicked row unmounts as it becomes the selected block — focus falls to the body
+    railRow('Fetch page').focus()
+    fireEvent.click(railRow('Fetch page'))
+    expect(railRow('Fetch page').tagName).toBe('DIV')
+    expect(railRow('Send mail').tagName).toBe('BUTTON')
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('a key flip drops focus from whatever holds it and ignores editable targets', () => {
+    seedThree()
+    render(<ExecutionPage />)
+    const other = railRow('Fetch page') as HTMLButtonElement
+    other.focus()
+    expect(document.activeElement).toBe(other)
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Parse it')
+    expect(document.activeElement).toBe(document.body)
+    // typing in a field never flips the selection
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    fireEvent.keyDown(input, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Parse it')
+    input.remove()
+  })
+
+  it('a key flip is the user\'s own selection: the live auto-follow stops', () => {
+    const full: Execution = {
+      ...ex('e1', { status: 'executing', duration: '' }),
+      steps: [
+        { name: 'Fetch page', status: 'succeeded', duration: '1s', attempts: [attempt] },
+        { name: 'Parse it', status: 'executing', duration: '', attempts: [{ ...attempt, status: 'executing' }] },
+      ],
+      result: null,
+    }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [ex('e1', { status: 'executing' })],
+      executionFull: { e1: full }, execLogs: {},
+    })
+    render(<ExecutionPage />)
+    expect(selectedRow().textContent).toContain('Parse it')
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Fetch page')
+    // a later store write while still live no longer re-follows the executing step
+    storeMod.useStore.setState({ executionFull: { e1: { ...full } } })
+    expect(selectedRow().textContent).toContain('Fetch page')
+  })
+
+  it('the page\'s rail yields to an open modal', async () => {
+    seedThree()
+    const { Modal } = await import('../src/ui')
+    render(
+      <>
+        <ExecutionPage />
+        <Modal onClose={() => {}} width={300}>{() => <div>Over the page</div>}</Modal>
+      </>,
+    )
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Send mail')
+  })
+})

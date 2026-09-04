@@ -186,7 +186,7 @@ export function TestRunModal({
       onClose={onClose} width={1120} ariaLabel="Test draft"
       cardStyle={{ padding: 0, width: 'min(1120px, 92vw)', overflow: 'hidden' }}
     >
-      {(close) => (
+      {(close, closing) => (
         <div className="ad-stepmodal" data-testid="test-modal" style={{
           height: TEST_MODAL_FRAME, display: 'flex', flexDirection: 'column', minWidth: 0,
         }}>
@@ -196,6 +196,7 @@ export function TestRunModal({
               full={full}
               summary={summary}
               layout="modal"
+              closing={closing}
               toolbarRight={
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 6 }}>
                   {live ? (
