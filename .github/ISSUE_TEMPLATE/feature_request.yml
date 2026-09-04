@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a product idea or feature for Autowright
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an idea. Please read [CONTRIBUTING.md](https://github.com/hansololz/autowright/blob/main/CONTRIBUTING.md) first.
+        Prefer one idea per issue. Design questions belong here; large PRs before agreement usually wait.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is painful or missing today?
+      placeholder: When I try to… I cannot…
+    validations:
+      required: true
+
+  - type: textarea
+    id: who
+    attributes:
+      label: Who it helps
+      description: You, newcomers, power users, etc.
+      placeholder: Primarily people who…
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The feature or product surface you have in mind. Sketches and examples welcome.
+      placeholder: Add a view that…
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, or why existing workarounds fall short.
+    validations:
+      required: false
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: Privacy, scope, measurement, trade-offs for the maintainer to weigh.
+    validations:
+      required: false
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope (optional)
+      description: What you are not asking for, to keep the discussion focused.
+    validations:
+      required: false
