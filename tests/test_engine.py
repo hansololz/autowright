@@ -1354,6 +1354,141 @@ def test_declared_step_secrets_injected(store):
     assert any("got 6 chars" in l["text"] for l in read_all_logs(store, h["id"]))
 
 
+def test_step_context_populates_only_referenced_secrets_and_agents(store, monkeypatch):
+    """§6/§6.1: the objects a step process receives hold only the secrets and
+    agents that step's yaml (or its own code literals) reference — never the
+    automation's full grant set."""
+    import copy
+    import json
+
+    from autowright import engine as engine_mod
+    from autowright import keychain
+    from autowright.engine import Engine
+
+    sec_a = add_secret(store, "SEC_A")
+    sec_b = add_secret(store, "SEC_B")
+    sec_c = add_secret(store, "SEC_C")
+    keychain.set_secret(sec_a, "value-a")
+    keychain.set_secret(sec_b, "value-b")
+    keychain.set_secret(sec_c, "value-c")
+
+    one_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    two_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    three_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    store.agents = [
+        {"id": one_id, "name": "One", "harness": "Claude Code", "model": "x"},
+        {"id": two_id, "name": "Two", "harness": "Claude Code", "model": "y"},
+        {"id": three_id, "name": "Three", "harness": "Claude Code", "model": "z"},
+    ]
+    store.default_agent_id = one_id
+
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [
+        # declares SEC_A + agent Two in the manifest, references neither in code
+        {"file": "01-yaml.py", "name": "Yaml", "description": "declared in yaml",
+         "secrets": [{"id": sec_a, "why": "auth"}],
+         "agent": True, "why": "judgment",
+         "agents": [{"id": two_id, "why": "answers"}],
+         "code": 'from autowright import log\nlog("yaml")\n'},
+        # declares nothing but the agents list; SEC_B arrives via the literal scan
+        {"file": "02-code.py", "name": "Code", "description": "literal subscript",
+         "agent": True, "why": "judgment",
+         "agents": [{"id": three_id, "why": "first"}, {"id": one_id, "why": "second"}],
+         "code": 'from autowright import log, secrets\n'
+                 f'log(len(secrets["{sec_b}"]))\n'},
+        {"file": "03-plain.py", "name": "Plain", "description": "no agent, no secrets",
+         "code": 'from autowright import log\nlog("plain")\n'},
+        {"file": "04-untagged.py", "name": "Untagged", "description": "agent step, no agents list",
+         "agent": True, "why": "judgment",
+         "code": 'from autowright import log\nlog("untagged")\n'},
+    ]
+    a = store.create_automation(ver, "Scoped objects", None,
+                                enabled_agents=[one_id, two_id, three_id],
+                                allowed_secrets=[sec_a, sec_b, sec_c])
+
+    captured = []
+
+    def fake(script, ctx, *args, **kwargs):
+        captured.append(copy.deepcopy(ctx))
+        return 0
+
+    monkeypatch.setattr(engine_mod, "run_step_process", fake)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "succeeded"
+    assert len(captured) == 4
+
+    # step 1: the yaml entry alone injects the value, and the yaml entry alone
+    # names the agent
+    assert set(captured[0]["secrets"]) == {sec_a}
+    assert [c["id"] for c in captured[0]["agents"]] == [two_id]
+    assert captured[0]["is_agent_step"]
+    # step 2: the literal secrets["<id>"] scan injects SEC_B; the agents list
+    # keeps the step's order, not the automation's enabled order
+    assert set(captured[1]["secrets"]) == {sec_b}
+    assert [c["id"] for c in captured[1]["agents"]] == [three_id, one_id]
+    # step 3: a plain step gets no secrets and no agents at all
+    assert captured[2]["secrets"] == {}
+    assert captured[2]["agents"] == []
+    assert not captured[2]["is_agent_step"]
+    # step 4: §6 first-enabled fallback — the only way an untagged step gets an
+    # agent, and it is the one the UI tag names
+    assert captured[3]["secrets"] == {}
+    assert [c["id"] for c in captured[3]["agents"]] == [one_id]
+
+    listed = [{two_id}, {three_id, one_id}, set(), {one_id}]
+    for ctx, ids in zip(captured, listed):
+        # §6.1: the automation-wide value map is the documented scan-only
+        # exception — main() pops it off ctx before building the SDK, so no
+        # step object is ever built from it. SEC_C is granted but referenced by
+        # no step, so it is never even fetched.
+        assert set(ctx["scan_secrets"]) == {sec_a, sec_b}
+        others = {k: v for k, v in ctx.items() if k not in ("secrets", "scan_secrets")}
+        blob = json.dumps(others, default=str)
+        for value in ("value-a", "value-b", "value-c"):
+            assert value not in blob
+        assert {c["id"] for c in ctx["agents"]} == ids
+        for unlisted in {one_id, two_id, three_id} - ids:
+            assert unlisted not in blob
+
+
+def test_agent_step_cannot_address_unlisted_enabled_agent(store):
+    """§6.1: an enabled, granted agent the step doesn't list is unreachable
+    through agents["<id>"] — the container holds only the step's declared
+    entries."""
+    from autowright.engine import Engine
+
+    listed_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    unlisted_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    store.agents = [
+        {"id": listed_id, "name": "Listed", "harness": "Claude Code", "model": "x"},
+        {"id": unlisted_id, "name": "Unlisted", "harness": "Claude Code", "model": "y"},
+    ]
+    store.default_agent_id = listed_id
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [
+        {"file": "01-reach.py", "name": "Reach", "description": "", "agent": True,
+         "why": "judgment",
+         "agents": [{"id": listed_id, "why": "answers the question"}],
+         "code": 'from autowright import agents\n'
+                 f'agents["{unlisted_id}"].ask("hi")\n'},
+    ]
+    a = store.create_automation(ver, "Unreachable", None,
+                                enabled_agents=[listed_id, unlisted_id])
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "failed"
+    logs = [l["text"] for l in read_all_logs(store, h["id"])]
+    # the error names only what the step declared — the unlisted agent's grant
+    # name never appears, and no harness was ever invoked
+    assert any("isn't among this step's declared agents" in t
+               and f"Listed ({listed_id})" in t for t in logs)
+    assert not any("Unlisted (" in t for t in logs)
+    assert not any(t.startswith("agent query →") for t in logs)
+
+
 def test_failure_reason_classification_direct():
     """§7 failure_reason: deterministic classification from exit code + the
     executor's structured error event."""

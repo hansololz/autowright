@@ -74,6 +74,19 @@ def test_secrets_underscore_attrs_raise_attribute_error():
         s._missing
 
 
+def test_secrets_container_holds_only_the_step_subset():
+    """§6/§6.1: the container holds the step's injected values only — every
+    other automation-wide grant raises, allowed or not."""
+    from autowright.executor import MissingSecret, Secrets
+
+    s = Secrets({TOKEN_ID: "abc"}, [TOKEN_ID, OTHER_ID, NOPE_ID],
+                {**SECRET_NAMES, NOPE_ID: "NOPE"})
+    assert s[TOKEN_ID] == "abc"
+    for other in (OTHER_ID, NOPE_ID):
+        with pytest.raises(MissingSecret, match="wasn't injected into this step"):
+            s[other]
+
+
 # ---------- Result ----------
 
 def test_result_status_validation(tmp_path, ctrl):
@@ -246,6 +259,18 @@ def test_ask_outside_agent_step_or_without_agents(ctrl, invoke_spy):
         make_agent(is_agent_step=False).ask("hi")
     with pytest.raises(RuntimeError, match="no enabled agent for this step"):
         make_agent(agents=[]).ask("hi")
+    assert invoke_spy == []
+
+
+def test_agents_container_holds_only_declared_entries(ctrl, invoke_spy):
+    """§6/§6.1: the container is built from the step's declared `agents:`
+    entries alone — an agent the automation enables but the step doesn't list
+    is not in it."""
+    ags = make_agents(make_ctx())
+    with pytest.raises(RuntimeError, match=rf"it can call: helper \({HELPER_ID}\)$"):
+        ags[LOCAL_ID]
+    with pytest.raises(RuntimeError, match="it can call: none$"):
+        make_agents(make_ctx(agents=[]))[HELPER_ID]
     assert invoke_spy == []
 
 
