@@ -319,21 +319,21 @@ def seed(store: Store) -> None:
         "| [Berserk](https://mangadex.org/title/berserk) | Ch. 379 | 3w ago | — | Ch. 378 |",
     ])
     manga_logs = [
-        ("sys", "▸ Step 1 — Read your manga list"),
+        ("step", 1),
         ("out", "7 lines · 6 valid links · 1 skipped (not a link)"),
         ("wrn", "line 5 isn’t a link — “one punch man new site??”"),
-        ("sys", "▸ Step 2 — Check each site for new chapters"),
+        ("step", 2),
         ("out", "mangaplus.shueisha.co.jp · One Piece — Ch. 1145 “The Weight of a Promise”"),
         ("out", "comikey.com · Kagurabachi — Ch. 94"),
         ("out", "mangadex.org · Vinland Saga — Ch. 218"),
         ("out", "mangadex.org · Berserk — Ch. 379"),
         ("out", "mangadex.org · Dandadan — Ch. 189"),
         ("out", "mangadex.org · Frieren — Ch. 142 “The Golden Land”"),
-        ("sys", "▸ Step 3 — Compare with memory"),
+        ("step", 3),
         ("out", "One Piece: 1144 → 1145 · new"),
         ("out", "Frieren: 141 → 142 · new"),
         ("out", "4 manga unchanged"),
-        ("sys", "▸ Step 4 — Notify and build the result"),
+        ("step", 4),
         ("out", "notification sent — “2 new chapters”"),
         ("out", "result saved · execution finished in 24.8s"),
     ]
@@ -367,18 +367,19 @@ def seed(store: Store) -> None:
         h["redacted_secrets"] = redacted or []
         if status in ("succeeded", "failed", "cancelled", "interrupted", "skipped"):
             h["finished_at"] = (started + timedelta(milliseconds=duration_ms or 0)).astimezone(timezone.utc).isoformat()
-        # Log lines route by file (§5 logs/): a "▸ Step N — name" sys marker
-        # switches to that step's latest attempt's file; lines before any
-        # marker are execution-level (execution.ndjson).
-        step_mark = re.compile(r"^▸ Step (\d+)")
+        # Log lines route by file (§5 logs/): a ("step", N) directive switches
+        # to that step's latest attempt's file and is never written itself (§7:
+        # an attempt log carries no opener line); lines before any directive
+        # are execution-level (execution.ndjson).
         cur = None
         seqs: dict[str, int] = {}
         for k, text in logs:
-            m = step_mark.match(text)
-            if k == "sys" and m and 0 < int(m.group(1)) <= len(step_dicts):
-                si = int(m.group(1)) - 1
+            if k == "step":
+                si = int(text) - 1
+                assert 0 <= si < len(step_dicts), (si, step_dicts)
                 sd = step_dicts[si]
                 cur = store.log_name(sd["file"], si, max(1, len(sd["attempts"])))
+                continue
             name = cur or store.EXEC_LOG
             seqs[name] = seqs.get(name, 0) + 1
             # §5: stored lines are {ts, k, seq, text} — `t` is derived at read.
@@ -413,11 +414,11 @@ def seed(store: Store) -> None:
              [("Find files changed since last night", "succeeded", 3900),
               ("Copy them to the backup drive", "succeeded", 35000),
               ("Prune old copies", "succeeded", 2300)],
-             [("sys", "▸ Step 1 — Find files changed since last night"),
+             [("step", 1),
               ("out", "142 files changed · 1.8 GB"),
-              ("sys", "▸ Step 2 — Copy them to the backup drive"),
+              ("step", 2),
               ("out", "142 of 142 copied · checksums ok"),
-              ("sys", "▸ Step 3 — Prune old copies"),
+              ("step", 3),
               ("out", "removed the copy from Jun 30 · 7 kept")],
              {"status": "ok", "chip": "All good"},
              files={"result.md": "Projects is fully backed up to the Vault drive. "
@@ -427,11 +428,11 @@ def seed(store: Store) -> None:
               ("Write the summary", "succeeded", 3100),
               ("Send the email", "failed", 3500),
               ("Record the send", "queued", None)],
-             [("sys", "▸ Step 1 — Gather the week’s numbers"),
+             [("step", 1),
               ("out", "4 sources read · 28 rows"),
-              ("sys", "▸ Step 2 — Write the summary"),
+              ("step", 2),
               ("out", "summary drafted · 214 words"),
-              ("sys", "▸ Step 3 — Send the email"),
+              ("step", 3),
               ("out", "connecting to smtp.fastmail.com…"),
               ("err", "sign-in failed — the server rejected the password (535)"),
               ("err", "the SMTP_PASSWORD secret may be out of date"),
@@ -456,7 +457,7 @@ def seed(store: Store) -> None:
               ("Check each site for new chapters", "skipped", 20100),
               ("Compare with memory", "succeeded", 300),
               ("Notify and build the result", "succeeded", 900)],
-             [("sys", "▸ Step 2 — Check each site for new chapters"),
+             [("step", 2),
               ("wrn", "mangadex.org didn’t respond after 3 tries — skipped"),
               ("out", "5 of 6 manga checked")],
              {"status": "attention", "chip": "5 of 6 checked"},
@@ -469,7 +470,7 @@ def seed(store: Store) -> None:
               ("Check each site for new chapters", "cancelled", 7800),
               ("Compare with memory", "queued", None),
               ("Notify and build the result", "queued", None)],
-             [("sys", "▸ Step 2 — Check each site for new chapters"),
+             [("step", 2),
               ("sys", "execution cancelled by you — nothing else will happen")])
     put_exec(shots, "v1", "interrupted", "Cron", now.replace(hour=21, minute=0) - timedelta(days=11), 3100,
              [("Find screenshots on the Desktop", "interrupted", 3100),
@@ -488,9 +489,9 @@ def seed(store: Store) -> None:
     put_exec(shots, "v1", "succeeded", "Cron", now.replace(hour=21, minute=0) - timedelta(days=4), 5200,
              [("Find screenshots on the Desktop", "succeeded", 1100),
               ("File them into monthly folders", "succeeded", 4100)],
-             [("sys", "▸ Step 1 — Find screenshots on the Desktop"),
+             [("step", 1),
               ("out", "38 screenshots found"),
-              ("sys", "▸ Step 2 — File them into monthly folders"),
+              ("step", 2),
               ("out", "38 filed into 2026-06")],
              {"status": "ok", "chip": "All good"},
              files={"result.md": "The desktop is clean. 38 screenshots went into 2026-06."})
@@ -501,7 +502,7 @@ def seed(store: Store) -> None:
               ("Send the email", "failed", 4200, [("failed", 3500), ("failed", 4200)]),
               ("Record the send", "queued", None)],
              [("sys", "retrying from step 3 — attempt 2"),
-              ("sys", "▸ Step 3 — Send the email"),
+              ("step", 3),
               ("err", "sign-in failed — the server rejected the password (535)")],
              redacted=["SMTP_PASSWORD"])
     store._refresh_exec_derived()

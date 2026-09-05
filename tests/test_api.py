@@ -687,7 +687,9 @@ def test_execution_and_execution_pages(client):
     assert all(len(s["attempts"]) == 1 for s in e["steps"])
     # §19 lazy log endpoint: per step attempt, and the execution log
     step_log = client.get(f"/executions/{execution_id}/logs", params={"step": 0, "attempt": 1}).json()
-    assert any(l["kind"] == "sys" for l in step_log["lines"])
+    # §7: no opener line; the attempt log is the step's own output only
+    assert step_log["lines"] and step_log["lines"][0]["text"] == "hello x3"
+    assert not any(l["kind"] == "sys" for l in step_log["lines"])
     assert all({"time", "kind", "sequence", "text"} == set(l) for l in step_log["lines"])
     assert client.get(f"/executions/{execution_id}/logs").json()["lines"] == []
     assert client.get(f"/executions/{execution_id}/logs", params={"step": 9, "attempt": 1}).json()["lines"] == []
@@ -1793,9 +1795,9 @@ def test_seed_then_state(client, home):
     # §5 logs/ layout: per-step-attempt files, lines {ts, t, k, seq, text}
     step1 = store.read_log(tabled["id"], 0, 1)
     assert step1 and all(set(l) == {"timestamp", "time", "kind", "sequence", "text"} for l in step1)
-    assert step1[0]["text"].startswith("▸ Step 1")
+    assert step1[0]["text"] == "7 lines · 6 valid links · 1 skipped (not a link)"  # no opener line
     step2 = store.read_log(tabled["id"], 1, 1)
-    assert any(l["text"].startswith("▸ Step 2") for l in step2)
+    assert step2 and step2[0]["text"].startswith("mangaplus.shueisha.co.jp")
     # a line before any step marker is execution-level → execution.ndjson
     shots_int = next(e for e in r["executions"] if e["status"] == "interrupted")
     int_logs = store.read_log(shots_int["id"])

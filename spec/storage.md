@@ -358,6 +358,9 @@ executions/
                                # new attempt's file below, §7)
       <stem>.a<n>.ndjson       # one log file per (step, attempt) — <stem> is the step's
                                # script file stem ("01-fetch-pages"), n the attempt number;
+                               # created on the attempt's first line (§7 writes no opener
+                               # line), so an attempt that logs nothing has no file and
+                               # reads as empty lines (§19);
                                # line shape {timestamp, kind: sys|out|wrn|err, sequence, text} —
                                # timestamp the §5 UTC form. Serialization derives a local clock
                                # label `time` (never stored): the storage read adds it beside

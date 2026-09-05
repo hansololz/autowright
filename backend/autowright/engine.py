@@ -977,7 +977,6 @@ class Engine:
                                   f"attempt {n - 1} failed — retrying (attempt {n})" if forever
                                   else f"attempt {n - 1} failed — retrying ({pass_tries} of {budget})",
                                   redactions)
-                    self._log(h, "sys", f"▸ Step {i + 1} — {s['name']}", redactions)
                     t0 = time.time()
                     agent_cfgs: list[dict] = []
                     rc = 1

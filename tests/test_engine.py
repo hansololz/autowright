@@ -35,7 +35,9 @@ def test_run_lifecycle_success(store):
     assert [s["status"] for s in h["steps"]] == ["succeeded", "succeeded"]
     logs = read_all_logs(store, h["id"])
     assert any("hello x3" in l["text"] for l in logs)
-    assert any(l["text"].startswith("▸ Step 1") for l in logs)
+    # §7: no synthetic opener; the attempt log starts with the step's own output
+    assert not any("▸ Step" in l["text"] for l in logs)
+    assert store.read_log(h["id"], 0, 1)[0]["text"] == "hello x3"
     # chip + status live on the execution header
     assert h["chip"] == "All good" and h["chip_status"] == "ok"
     # automation display state updated
@@ -93,7 +95,7 @@ def test_missing_secret_stops_before_step_one(store):
     logs = read_all_logs(store, h["id"])
     assert any(f"secret NOT_THERE isn't in your {SECRET_STORE}" in l["text"] for l in logs)
     # no step ever started
-    assert not any(l["text"].startswith("▸ Step") for l in logs)
+    assert all(not s["attempts"] for s in h["steps"])
 
 
 def test_secret_not_allowed_stops_before_step_one(store):
@@ -111,7 +113,7 @@ def test_secret_not_allowed_stops_before_step_one(store):
     assert h["status"] == "failed"
     logs = read_all_logs(store, h["id"])
     assert any("secret FORBIDDEN isn't allowed for this automation" in l["text"] for l in logs)
-    assert not any(l["text"].startswith("▸ Step") for l in logs)  # no step ever started
+    assert all(not s["attempts"] for s in h["steps"])  # no step ever started
     assert h["error"]["step"] is None
     assert h["error"]["reason"] == \
         "A step references a secret this automation isn't allowed to use."
@@ -135,7 +137,7 @@ def test_dangling_secret_id_stops_before_step_one(store):
     assert h["status"] == "failed"
     logs = read_all_logs(store, h["id"])
     assert any("a secret that no longer exists (99999999…)" in l["text"] for l in logs)
-    assert not any(l["text"].startswith("▸ Step") for l in logs)
+    assert all(not s["attempts"] for s in h["steps"])
     assert h["error"]["step"] is None
     assert h["error"]["reason"] == \
         "A step references a secret that no longer exists (99999999…)."
@@ -189,7 +191,7 @@ def test_package_install_failure_fails_execution_before_step_one(store, monkeypa
     assert any("installing packages: leftpad" in l["text"] for l in logs)
     assert any("package install failed — leftpad: no matching distribution" in l["text"]
                for l in logs)
-    assert not any(l["text"].startswith("▸ Step") for l in logs)
+    assert all(not s["attempts"] for s in h["steps"])
 
 
 def test_missing_step_script_fails_execution(store):
@@ -916,14 +918,19 @@ def test_log_files_per_step_attempt(store):
     wait_done(engine, h["id"])
     logs_dir = store.exec_dir(h["id"]) / "logs"
     assert (logs_dir / "01-say.a1.ndjson").exists()
-    assert (logs_dir / "02-finish.a1.ndjson").exists()
+    # §7: no opener line, so a step that prints nothing never creates its
+    # attempt file; the reader answers empty lines for it (§19)
+    assert not (logs_dir / "02-finish.a1.ndjson").exists()
+    assert store.read_log(h["id"], 1, 1) == []
     step1 = store.read_log(h["id"], 0, 1)
     for l in step1:
         assert set(l) == {"timestamp", "time", "kind", "sequence", "text"}
     assert [l["sequence"] for l in step1] == list(range(1, len(step1) + 1))
     texts = [l["text"] for l in step1]
-    assert "▸ Step 1 — Say hello" in texts and "hello x3" in texts
-    assert any("▸ Step 2 — Finish" in l["text"] for l in store.read_log(h["id"], 1, 1))
+    # §7: no opener line; the file opens with the step's own first output line
+    assert texts[0] == "hello x3"
+    assert not any("▸ Step" in t for t in texts)
+    assert not any("▸ Step" in l["text"] for l in store.read_log(h["id"], 1, 1))
     # the full exec payload carries steps+attempts but never inline logs (§19)
     served = store.exec_json(h, full=True)
     assert "logs" not in served

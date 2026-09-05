@@ -30,11 +30,15 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   appends an **attempt** (its `number` = the last attempt's `number` + 1 — monotonic per step,
   never re-derived from list length, since the §4.5 prune drops old entries) to that step; the
   step's status always equals its
-  latest attempt's status. Each attempt streams into its own log file (§5) — the sys opener
-  "▸ Step N — `<name>`", the step's own output, its timeout/cancel/skip lines, and the
+  latest attempt's status. Each attempt streams into its own log file (§5) — the step's own
+  output, its timeout/cancel/skip lines, and the
   automatic step-retry marker (emitted after the new attempt opens, so it lands in the new
   attempt's file) all land
-  there; execution-level lines (package installs, secret failures, the manual in-place retry
+  there. The engine writes **no opener line** when an attempt starts: the file begins with
+  the step's first line of output (or the first engine event), never a synthetic
+  "Step N: name" header, since the §7 LOGS pane already names the selected step in its header,
+  and a step that prints nothing shows the "No log lines here." empty state rather than a
+  header-only log. Execution-level lines (package installs, secret failures, the manual in-place retry
   marker, the final failure line) go to `logs/execution.ndjson`. Then the execution gets its final status,
   duration, result object; automation gets latest/resultChip/lastExecutionLabel "Today"; toast
   summarizes. An execution whose steps include `skipped` ones but no failures finishes
