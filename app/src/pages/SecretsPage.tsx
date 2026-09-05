@@ -35,7 +35,7 @@ export default function SecretsPage() {
   return (
     <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '26px 30px 70px' }}>
       <PageTitle
-        sub={`Stored in your ${copy.machine}’s ${copy.secretStore}. Scripts read them at execution time — the values never appear in logs.`}
+        sub={`Stored in your ${copy.machine}’s ${copy.secretStore}. Scripts read them at execution time. The values never appear in logs.`}
         right={<HeaderActions><BtnPrimary onClick={() => setModal({ mode: 'add' })}>Add secret</BtnPrimary></HeaderActions>}
       >
         Secrets
