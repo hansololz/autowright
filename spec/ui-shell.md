@@ -1483,7 +1483,10 @@ chips fill the pull input (placeholder "e.g. qwen3-coder:30b"; they don't start 
 SUGGESTED section is hidden while any model download is in progress (only one pull runs at a
 time and the pull input the chips fill is replaced by the download card, so the chips would be
 inert); when no chips remain, the section is hidden too. Below the
-pull input: link "Browse more models on Ollama ↗" (opens https://ollama.com/library).
+pull input: a "Browse more models on Ollama" button-styled link (`.ad-btn-soft`, the same
+outbound-link treatment as the §9.4 About page: label followed by the Font Awesome
+`fa-arrow-up-right-from-square` icon, 10 px, never the ↗ text glyph; not a suggestion chip, so
+it cannot be mistaken for a model) opening https://ollama.com/library in the browser.
 
 **Secrets.** List with add/edit modal, masked values, delete confirm (§4.8 — the confirm
 modal is titled "Delete this secret?" with the danger action "Delete secret"). The list's NAME

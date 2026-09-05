@@ -774,14 +774,17 @@ export default function AgentNewPage() {
                 </>
               )}
 
+              {/* §12 outbound link: the §9.4 soft-button treatment with the external-link
+                  icon, deliberately not a chip so it never reads as one more model. */}
               <a
                 href="https://ollama.com/library"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="ad-chip-btn"
-                style={{ marginBottom: 22 }}
+                className="ad-btn-soft"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, textDecoration: 'none', marginBottom: 22 }}
               >
-                Browse more models on Ollama <span style={{ fontWeight: 400, fontSize: 11 }}>↗</span>
+                Browse more models on Ollama
+                <i className="fa-solid fa-arrow-up-right-from-square" style={{ fontSize: 10 }} aria-hidden="true" />
               </a>
             </>
           )}
