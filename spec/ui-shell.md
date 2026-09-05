@@ -772,7 +772,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   border) is its own §14 overlay-scrollbar pane: a fixed 44 px header (the code pane's
   toolbar height, dim-hairline bottom border, so the two hairlines join into one line across
   the column divider and the eyebrows sit at one height) carrying, vertically centered, a
-  faint mono "STEPS" eyebrow with the step count right-aligned; then, directly under the
+  faint mono "STEPS" eyebrow alone (no step count — the pane's "STEP N OF M" already
+  carries it); then, directly under the
   hairline with no inset (as in the §7 rail — a row's own padding is its breathing room),
   one row per step in order — the number in faint mono, then
   the name (13/600 `--text` on the viewed row, 500 `--text-muted` on the others, hover

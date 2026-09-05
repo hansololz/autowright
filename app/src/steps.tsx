@@ -627,11 +627,10 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose }
             borderRight: '1px solid var(--hairline-dim)',
           }}>
             <div style={{
-              height: 44, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '0 18px 0 16px', borderBottom: '1px solid var(--hairline-dim)',
+              height: 44, flex: 'none', display: 'flex', alignItems: 'center',
+              padding: '0 16px', borderBottom: '1px solid var(--hairline-dim)',
             }}>
               <Eyebrow style={{ flex: 'none' }}>STEPS</Eyebrow>
-              <span style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)' }}>{steps.length}</span>
             </div>
             <ScrollArea wrapStyle={{ flex: 1, minHeight: 0 }}>
               <div style={{ paddingBottom: 12 }}>
