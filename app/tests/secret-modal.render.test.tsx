@@ -66,7 +66,7 @@ describe('§12 SecretModal value states', () => {
 
   it('add mode: plain textarea, no kept row or tag', () => {
     render(<SecretModal modal={{ mode: 'add' }} onClose={() => {}} />)
-    expect(screen.getByPlaceholderText(/Paste the password or API key — or leave blank/)).toBeTruthy()
+    expect(screen.getByPlaceholderText(/Paste the password or API key, or leave blank/)).toBeTruthy()
     expect(screen.queryByText('NOT SET')).toBeNull()
     expect(screen.queryByText('Current value is kept secret')).toBeNull()
   })

@@ -56,7 +56,7 @@ describe('agents and secrets e2e', () => {
     // nothing is written to the OS secret store.
     await page.getByRole('heading', { name: 'New secret' }).waitFor({ timeout: 10_000 })
     await page.getByPlaceholder('A short name, like MAIL_PASSWORD or CRM_API_KEY').fill('E2E_TOKEN')
-    await page.getByPlaceholder('What this secret is for — helps the drafting agent pick the right secret')
+    await page.getByPlaceholder('Where this secret is used, so the drafting agent knows when to use it')
       .fill('Placeholder for e2e')
     await page.getByRole('button', { name: `Save to ${COPY.secretStore}` }).click()
 
@@ -70,7 +70,7 @@ describe('agents and secrets e2e', () => {
     // Edit the description only (blank value keeps none stored).
     await page.getByTitle('Edit').click()
     await page.getByRole('heading', { name: 'Edit secret' }).waitFor({ timeout: 10_000 })
-    await page.getByPlaceholder('What this secret is for — helps the drafting agent pick the right secret')
+    await page.getByPlaceholder('Where this secret is used, so the drafting agent knows when to use it')
       .fill('Updated e2e description')
     await page.getByRole('button', { name: 'Save changes' }).click()
     await page.getByText('Updated e2e description').waitFor({ timeout: 10_000 })

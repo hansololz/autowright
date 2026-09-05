@@ -1495,11 +1495,11 @@ single-line input (Enter saves, Escape closes); its placeholder is a hint, not a
 value: "A short name, like MAIL_PASSWORD or CRM_API_KEY". In edit mode the name is not an
 input at all — it renders as a read-only chip (§4.8: names are immutable; only description
 and value are editable). Add mode refuses a name that already exists (client-side guard —
-"already exists — edit it from the list instead" — friendlier than surfacing the §19 POST's
+"already exists. Edit it from the list instead." — friendlier than surfacing the §19 POST's
 422 for the same rule). Add saves via §19 `POST /secrets`, edit via `PUT /secrets/{id}`.
 Below the name sits an optional
-single-line DESCRIPTION input (placeholder "What this secret is for — helps the drafting agent
-pick the right secret"), pre-filled when editing. The value field is a 3-row vertically
+single-line DESCRIPTION input (placeholder "Where this secret is used, so the drafting agent
+knows when to use it"), pre-filled when editing. The value field is a 3-row vertically
 resizable textarea (multi-line values allowed, §4.8) masked with `-webkit-text-security` unless
 Show is toggled; Enter inserts a newline, Cmd/Ctrl+Enter saves, Escape closes. **Editing a
 secret that has a value (`set: true`) never opens on an empty value field**: the API never
@@ -1519,8 +1519,8 @@ password or API key", and the intro copy reads "This secret has no value yet. Au
 that need it fail until you add one." (a blank save still just updates the description).
 A new secret saved with a
 blank value becomes a §4.8 placeholder (the add modal's value placeholder reads "Paste the
-password or API key — or leave blank to add the value later"; the success toast is then
-"Saved — add the value before an automation needs it."). The edit modal is titled
+password or API key, or leave blank to add the value later"; the success toast is then
+"Saved. Add the value before an automation needs it."). The edit modal is titled
 "Edit secret" with submit "Save changes"; add is "New secret" / "Save to Keychain". The
 add/edit modal is a shared component (`SecretModal.tsx`) — the §9.2 Discord trigger editor
 opens it in add mode from its New secret button and receives the saved secret (the §19 POST

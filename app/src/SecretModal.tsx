@@ -50,11 +50,11 @@ export function SecretModal({ modal, onClose, onSaved }: {
         const save = async () => {
           if (isAdd) {
             if (!name) { showToast('Give the secret a name.'); return }
-            if (!NAME_RE.test(name)) { showToast('Secret names must start with a letter — A–Z, 0–9 and _ only.'); return }
+            if (!NAME_RE.test(name)) { showToast('Secret names must start with a letter and use only A–Z, 0–9 and _.'); return }
             // §4.8 uniqueness — the §19 POST 422s on a duplicate; the guard
             // just gives the friendlier message.
             if (secrets.some((s) => s.name === name)) {
-              showToast(`${name} already exists — edit it from the list instead.`)
+              showToast(`${name} already exists. Edit it from the list instead.`)
               return
             }
           }
@@ -66,7 +66,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
               : await api.createSecret(name, value, description)
             close()
             showToast(isAdd
-              ? (value ? `Saved to your ${copy.secretStore}.` : 'Saved — add the value before an automation needs it.')
+              ? (value ? `Saved to your ${copy.secretStore}.` : 'Saved. Add the value before an automation needs it.')
               : 'Secret updated.')
             onSaved?.(saved)
           } catch (e) { showToast((e as Error).message) }
@@ -89,7 +89,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
             </h2>
             <p style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)', margin: '0 0 18px' }}>
               {isAdd
-                ? 'A password or API key your automations use — the value itself never appears in a script or a log.'
+                ? 'A password or API key your automations use. The value itself never appears in a script or a log.'
                 : hasStoredValue
                   ? 'The stored value stays as it is unless you replace it. A new value is used from the next execution onward.'
                   : 'This secret has no value yet. Automations that need it fail until you add one.'}
@@ -130,7 +130,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
               onChange={(e) => setDesc(e.target.value)}
               onKeyDown={onKeyDown}
               spellCheck={false}
-              placeholder="What this secret is for — helps the drafting agent pick the right secret"
+              placeholder="Where this secret is used, so the drafting agent knows when to use it"
               style={inputStyle}
             />
             <Eyebrow style={{ margin: '16px 0 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -151,7 +151,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
                     spellCheck={false}
                     rows={3}
                     placeholder={isAdd
-                      ? 'Paste the password or API key — or leave blank to add the value later'
+                      ? 'Paste the password or API key, or leave blank to add the value later'
                       : hasStoredValue
                         ? 'Paste the new value, or leave blank to keep the current one'
                         : 'Paste the password or API key'}
