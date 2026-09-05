@@ -597,3 +597,92 @@ describe('execution page STEPS rail keys and selection (§7)', () => {
     expect(selectedRow().textContent).toContain('Send mail')
   })
 })
+
+describe('execution page LOGS pane header controls + find in log (§7)', () => {
+  const attempt = { number: 1, status: 'succeeded' as const, duration: '1s', startedMs: NOW }
+  const line = (sequence: number, text: string) => ({ sequence, time: '12:00:00', kind: 'out' as const, text })
+  const seed = () => {
+    const full: Execution = {
+      ...ex('e1'),
+      steps: [
+        { name: 'Fetch page', status: 'succeeded', duration: '1s', attempts: [attempt] },
+        { name: 'Parse it', status: 'succeeded', duration: '1s', attempts: [attempt] },
+        { name: 'Send mail', status: 'succeeded', duration: '1s', attempts: [attempt] },
+      ],
+      result: null,
+    }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [ex('e1')],
+      executionFull: { e1: full },
+      execLogs: { e1: {
+        [storeMod.logKey(2, 1)]: [line(1, 'Sending mail to alice'), line(2, 'sent 3 mails'), line(3, 'done')],
+        [storeMod.logKey(1, 1)]: [line(1, 'parsed')],
+      } },
+    })
+  }
+  const selectedRow = () => document.querySelector('[aria-current]') as HTMLElement
+  const btn = (name: string) => screen.getByRole('button', { name }) as HTMLButtonElement
+  const marks = () => Array.from(document.querySelectorAll('mark')).map((m) => `${m.textContent}:${m.getAttribute('data-match')}`)
+
+  it('the header counts the loaded log\'s lines, singular at one', () => {
+    seed()
+    render(<ExecutionPage />)
+    expect(screen.getByText('3 lines')).toBeTruthy()
+    fireEvent.click(btn('Previous log'))
+    expect(screen.getByText('1 line')).toBeTruthy()
+  })
+
+  it('previous / next log chevrons walk the rail like ← / →, disabled at the ends', () => {
+    seed()
+    render(<ExecutionPage />)
+    expect(selectedRow().textContent).toContain('Send mail')
+    expect(btn('Next log').disabled).toBe(true)
+    expect(btn('Previous log').disabled).toBe(false)
+    fireEvent.click(btn('Previous log'))
+    expect(selectedRow().textContent).toContain('Parse it')
+    fireEvent.click(btn('Previous log'))
+    fireEvent.click(btn('Previous log'))
+    expect(selectedRow().textContent).toContain('Setup log')
+    expect(btn('Previous log').disabled).toBe(true)
+    fireEvent.click(btn('Next log'))
+    expect(selectedRow().textContent).toContain('Fetch page')
+  })
+
+  it('the find button opens the bar; typing marks hits over the text with a counter, and the query survives a log flip', () => {
+    seed()
+    render(<ExecutionPage />)
+    expect(screen.queryByTestId('find-bar')).toBeNull()
+    fireEvent.click(btn('Find in log'))
+    expect(btn('Find in log').getAttribute('aria-pressed')).toBe('true')
+    const field = screen.getByPlaceholderText('Find in log') as HTMLInputElement
+    fireEvent.change(field, { target: { value: 'mail' } })
+    expect(marks()).toEqual(['mail:current', 'mail:hit'])
+    expect(screen.getByTestId('find-counter').textContent).toBe('1 of 2')
+    fireEvent.keyDown(field, { key: 'Enter' })
+    expect(marks()).toEqual(['mail:hit', 'mail:current'])
+    expect(screen.getByTestId('find-counter').textContent).toBe('2 of 2')
+    // the times are not searched
+    fireEvent.change(field, { target: { value: '12:00' } })
+    expect(marks()).toEqual([])
+    expect(screen.getByTestId('find-counter').textContent).toBe('No matches')
+    // arrow keys in the field never flip the log; the flip keeps the bar and query
+    fireEvent.change(field, { target: { value: 'e' } })
+    fireEvent.keyDown(field, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.click(btn('Previous log'))
+    expect(selectedRow().textContent).toContain('Parse it')
+    expect((screen.getByPlaceholderText('Find in log') as HTMLInputElement).value).toBe('e')
+    expect(marks()).toEqual(['e:current'])
+    // Escape closes the bar and clears the query
+    fireEvent.keyDown(screen.getByPlaceholderText('Find in log'), { key: 'Escape' })
+    expect(screen.queryByTestId('find-bar')).toBeNull()
+    expect(marks()).toEqual([])
+  })
+
+  it('⌘F opens the find bar', () => {
+    seed()
+    render(<ExecutionPage />)
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    expect(screen.getByTestId('find-bar')).toBeTruthy()
+  })
+})

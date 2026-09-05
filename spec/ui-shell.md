@@ -854,7 +854,9 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   close ✕ (Escape and backdrop click also close, standard `Modal` behavior). The toolbar
   never scrolls, so the filename and the controls stay put through a long script and
   never overlap code.
-  **Find in script.** The find button, or ⌘F / Ctrl+F while the modal is open, opens a
+  **Find in script.** (The bar, its hook and its match/marking helpers are one shared
+  primitive; the §7 execution view's LOGS pane renders the same bar as "Find in log".)
+  The find button, or ⌘F / Ctrl+F while the modal is open, opens a
   36 px **find bar** under the toolbar (hairline bottom border, same ground; it stays open
   and keeps its query across step flips), left-aligned: a 280 px `.ad-input.compact` text field
   (placeholder "Find in script", focused on open — ⌘F on an open bar refocuses and

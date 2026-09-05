@@ -295,6 +295,31 @@ blinking cursor on the live attempt. Empty states: "No logs — this execution n
 started." when the execution has no steps; an empty Setup log shows "No setup events —
 installs, retries, and failures would appear here."; an empty step attempt shows "No log
 lines here."
+**Header controls.** The pane header's right end carries the §9.2 code-pane toolbar's own
+controls, in the same order and with the same primitives, so a log reads like a script: a faint
+mono "`<n>` lines" count of the loaded log ("1 line" in the singular; the count covers the kept
+tail under the 2000-line cap, and is absent while the record is still loading), then a control
+cluster of `.ad-btn-icon` buttons — a find button (`fa-magnifying-glass`, "Find in log",
+`aria-pressed` while the find bar is open) and previous / next log chevrons (`fa-chevron-left` /
+`-right`, "Previous log" / "Next log") that move the selection one rail row through the rail's
+order (Setup log, then the steps) exactly as the ← / → keys do, disabled at the ends and while
+nothing is selected. Both homes (page and §11 test-run modal) render the cluster; the modal's
+own toolbar controls (Skip step / Cancel / ✕) follow it. The header's right padding is the
+modal toolbar's 10 px so the cluster's glyphs sit on the 18 px content line, and on the page the
+26 px icon buttons overhang the header's 8 px padding (4 px each way) so the pane header keeps
+the rail header's 38 px height and the two hairlines stay aligned.
+**Find in log.** The find button, or ⌘F / Ctrl+F while the view is on screen (the page yields
+to any open modal, exactly as its flip keys do), opens the §9.2 **find bar** under the header —
+the same 36 px bar, same field, counter, up / down match chevrons and close ✕, with the
+placeholder and label "Find in log" — and every §9.2 find rule applies unchanged: a
+case-insensitive substring search over the log lines' text (times are not searched), `<mark>`
+highlights with the current match kept mid-pane by scrolling the log's own scroller, Enter /
+Shift+Enter stepping, Escape closing the bar and clearing the query without closing a modal,
+arrow keys in the field never flipping the log, and the bar and query surviving log flips while
+the current match resets to the first on a new query or a new selection. While the field holds a
+query the live auto-scroll pauses (a jump to a match must not be yanked back to the tail); it
+resumes when the query clears. The find bar searches the kept tail only — the truncation notice
+still explains what is missing.
 The pane is **capped at the last 2000 lines** of the selected log, the same cap the §7 text
 preview uses: the lazy fetch asks the §19 logs endpoint for that tail (`tail`), and live WS
 lines trim the kept buffer back to it, so a chatty run can never grow the view without bound.

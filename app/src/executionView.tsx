@@ -5,7 +5,8 @@
 // cap. One run UI, two homes: the rail holds only the step rows in both (it is
 // a selector, never a home for reference data); the modal adds its toolbar
 // controls to the pane (`toolbarRight`) and a rail header of its own.
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { FindBar, useFind } from './find'
 import { LOG_TAIL, logKey, useStore } from './store'
 import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea } from './ui'
 import type { Execution, ExecutionStep, LogLine } from './types'
@@ -205,14 +206,24 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   // past 1 means earlier lines were dropped — say so, like the §7 text preview.
   const logsTruncated = logs.length > 0 && logs[0].sequence > 1
 
+  // §7 find in log (find.tsx): the §9.2 bar over the lines' text — times are
+  // not searched. The bar and query survive log flips; the current match resets
+  // on a new query or a new selection.
+  const lines = useMemo(() => logs.map((l): React.ReactNode[] => [l.text]), [logs])
+  const find = useFind(lines, logRef, `${executionId}/${sel?.step ?? 'x'}/${sel?.attempt ?? 0}`)
+  const showFind = useRef(find.show)
+  showFind.current = find.show
+
   // Live auto-scroll — only while executing and only if the user hasn't scrolled up.
   // Keyed on the newest line, not the length: past the §7 cap the length stops
   // changing (each append trims one off the head) and the follow would freeze.
+  // Paused while the find field holds a query: a jump to a match must not be
+  // yanked back to the tail (§7).
   const lastSeq = logs.length ? logs[logs.length - 1].sequence : 0
   useEffect(() => {
     const el = logRef.current
-    if (el && liveSelected && stickRef.current) el.scrollTop = el.scrollHeight
-  }, [logs.length, lastSeq, liveSelected])
+    if (el && liveSelected && stickRef.current && !find.query) el.scrollTop = el.scrollHeight
+  }, [logs.length, lastSeq, liveSelected, find.query])
 
   const selectRow = (step: number | null) => {
     manualSel.current = true
@@ -233,24 +244,39 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   selRef.current = sel
   const stepsRef = useRef(steps)
   stepsRef.current = steps
+  // rail order as an index: 0 = Setup log, k = step k-1; -1 = nothing selected
+  const railAt = (cur: LogSel | null) => (cur === null ? -1 : cur.step === null ? 0 : cur.step + 1)
+  // Move the selection one rail row; false when there is no row that way.
+  const flip = (d: 1 | -1): boolean => {
+    const cur = selRef.current
+    const count = stepsRef.current.length
+    if (cur === null || count === 0) return false
+    const to = railAt(cur) + d
+    if (to < 0 || to > count) return false
+    const step = to === 0 ? null : to - 1
+    manualSel.current = true
+    setSel({ step, attempt: step === null ? null : latestN(stepsRef.current[step]) })
+    return true
+  }
+  const flipRef = useRef(flip)
+  flipRef.current = flip
   useEffect(() => {
     if (closing) return
     const onKey = (e: KeyboardEvent) => {
+      // §7 ⌘F / Ctrl+F opens the find bar (an open one refocuses); the page
+      // yields to any open modal, exactly as the flip keys do.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+        if (layout === 'page' && anyModalOpen()) return
+        e.preventDefault()
+        showFind.current()
+        return
+      }
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
       if (layout === 'page' && anyModalOpen()) return
-      const cur = selRef.current
-      const count = stepsRef.current.length
-      if (cur === null || count === 0) return
-      // rail order as an index: 0 = Setup log, k = step k-1
-      const at = cur.step === null ? 0 : cur.step + 1
-      const to = e.key === 'ArrowLeft' ? at - 1 : at + 1
-      if (to < 0 || to > count) return
+      if (!flipRef.current(e.key === 'ArrowLeft' ? -1 : 1)) return
       e.preventDefault()
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
-      const step = to === 0 ? null : to - 1
-      manualSel.current = true
-      setSel({ step, attempt: step === null ? null : latestN(stepsRef.current[step]) })
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -319,7 +345,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
         borderBottom: '1px solid var(--hairline)',
         ...(modal
           ? { height: MODAL_TOOLBAR, flex: 'none', padding: '0 14px 0 18px' }
-          : { minHeight: PAGE_HEADER, padding: '8px 18px' }),
+          : { minHeight: PAGE_HEADER, padding: '8px 10px 8px 18px' }),
       }}>
         {/* §7 header: "LOG k OF n" counter (the §9.2 modal's STEP N OF M idiom) + the
             step's name in the modal's dim mono; the Setup log is not one of the n
@@ -354,8 +380,32 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
         )}
         {redactNote}
         <div style={{ flex: 1 }} />
+        {/* §7 header controls — the §9.2 code-pane toolbar's line count + find
+            button + previous / next chevrons, here over logs: the chevrons walk
+            the rail exactly as ← / → do */}
+        {full && (
+          <>
+            <span style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)', flex: 'none' }}>
+              {logs.length} {logs.length === 1 ? 'line' : 'lines'}
+            </span>
+            {/* the 26 px icon buttons overhang the header's 8 px padding so the
+                pane header keeps the rail header's 38 px height (hairlines align) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', margin: modal ? '0 0 0 4px' : '-4px 0 -4px 4px' }}>
+              <button className="ad-btn-icon" aria-label="Find in log" aria-pressed={find.open} onClick={find.show}>
+                <i className="fa-solid fa-magnifying-glass" />
+              </button>
+              <button className="ad-btn-icon" aria-label="Previous log" disabled={railAt(sel) <= 0} onClick={() => flip(-1)}>
+                <i className="fa-solid fa-chevron-left" />
+              </button>
+              <button className="ad-btn-icon" aria-label="Next log" disabled={sel === null || railAt(sel) >= steps.length} onClick={() => flip(1)}>
+                <i className="fa-solid fa-chevron-right" />
+              </button>
+            </div>
+          </>
+        )}
         {toolbarRight}
       </div>
+      {find.open && <FindBar find={find} label="Find in log" />}
       <ScrollArea
         scrollRef={logRef}
         onScroll={() => {
@@ -385,14 +435,14 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
                 Truncated — showing the last {LOG_TAIL} lines. The full log is on disk.
               </div>
             )}
-            {logs.map((l) => (
+            {logs.map((l, k) => (
               <div key={l.sequence} style={{ display: 'flex', gap: 12 }}>
                 <span style={{ color: 'var(--text-deco)', flex: 'none' }}>{l.time}</span>
                 <span style={{
                   color: logColor(l.kind), whiteSpace: 'pre-wrap', minWidth: 0,
                   fontStyle: l.kind === 'sys' ? 'italic' : 'normal',
                 }}>
-                  {l.text}
+                  {find.marked[k]}
                 </span>
               </div>
             ))}
