@@ -1468,7 +1468,9 @@ stream's current step line under it, and failure
 shows "Install failed: `<first error line>`" with the button returning to "Install Ollama".
 **LOCAL MODEL** picker: radio list of installed Ollama models with
 size metadata, empty state "No local models installed yet. Download one below and it will show
-up here." Model pulls: one at a time — the backend streams `ollama.pull` WS events and the UI
+up here." **DOWNLOAD A MODEL**: one flex row of a `.ad-input.row.mono` field (placeholder
+"e.g. qwen3-coder:30b", Enter submits) and a primary **Download** button, the two at the
+button's height (§14 `.row`). Model pulls: one at a time — the backend streams `ollama.pull` WS events and the UI
 renders the event's `percent` field (the §19 single overall pull percent — one continuous bar,
 never the raw per-layer numbers, which reset 0–100 per layer; the UI never parses percents out
 of `line`). Right column shows "N%"; determinate bar once a percent has arrived, indeterminate

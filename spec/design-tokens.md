@@ -355,6 +355,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   - **Fields:** `.ad-input` owns geometry as well as chrome — default `11px 14px` padding,
     13 px sans, line-height 1.5 (forms, modals, the chat composer); `.compact` `7px 10px`
     12 px (in-card editors: trigger editor, parameter editors, memory rename, find bar);
+    `.row` `7px 14px` with a 19 px line-height at the default type (35 px tall with its
+    border, the standalone primary button's height), for a field that shares a flex row with
+    a standard button (the §12 agent form's model-download field) so the pair sits at the
+    button's own height instead of the button stretching to the taller default field;
     `.mono` swaps the family (secret values, cron expressions, model ids). Call sites set
     only width/height/rows/resize/text-align — never padding or font. The one form-label
     idiom is `Eyebrow` 8 px above the field; fields in a form are 16 px apart.

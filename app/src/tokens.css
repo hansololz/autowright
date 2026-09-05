@@ -442,6 +442,8 @@ textarea:disabled, input:disabled { opacity: .45; }
 }
 .ad-input::placeholder { color: var(--text-faint); }
 .ad-input.compact { padding: 7px 10px; font-size: 12px; }
+/* §14 row-height field: sits beside a standard button at the button's own height */
+.ad-input.row { padding: 7px 14px; line-height: 19px; }  /* 7+19+7 + 2px border = 35px */
 .ad-input.mono { font-family: var(--mono); }
 .ad-input:focus, .ad-input:focus-within { border-color: oklch(0.74 0.155 52 / 0.6); }
 /* one-line placeholder: the ask-box auto-grow sizes to typed content only, so a

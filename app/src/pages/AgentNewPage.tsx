@@ -721,7 +721,7 @@ export default function AgentNewPage() {
               {!pulling ? (
                 <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
                   <input
-                    className="ad-input mono"
+                    className="ad-input row mono"
                     value={pullText}
                     onChange={(e) => setPullText(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') startPull(pullText) }}
