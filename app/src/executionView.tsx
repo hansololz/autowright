@@ -15,6 +15,11 @@ export type LogSel = { step: number | null; attempt: number | null }
 
 export const RAIL_WIDTH = { page: 250, modal: 280 } as const
 export const MODAL_TOOLBAR = 44
+/** §7 page layout: the rail's STEPS header and the LOGS pane header share this
+ * minimum height (8 px of padding under a 38 px floor) so their eyebrows and
+ * hairlines align whatever the pane header holds — name text, attempt pills,
+ * chips — and a wrapped pane header still keeps its padding. */
+export const PAGE_HEADER = 38
 
 const rowBase: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', cursor: 'pointer',
@@ -273,7 +278,7 @@ export function ExecutionView({ executionId, full, summary, layout, railFooter, 
       {modal ? (
         <RailHeader count={steps.length} />
       ) : (
-        <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--hairline)' }}>
+        <div style={{ minHeight: PAGE_HEADER, display: 'flex', alignItems: 'center', padding: '8px 18px', borderBottom: '1px solid var(--hairline)' }}>
           <Eyebrow>STEPS</Eyebrow>
         </div>
       )}
@@ -317,12 +322,26 @@ export function ExecutionView({ executionId, full, summary, layout, railFooter, 
         borderBottom: '1px solid var(--hairline)',
         ...(modal
           ? { height: MODAL_TOOLBAR, flex: 'none', padding: '0 14px 0 18px' }
-          : { padding: '12px 18px' }),
+          : { minHeight: PAGE_HEADER, padding: '8px 18px' }),
       }}>
-        <Eyebrow style={{ display: 'inline-block', flex: '0 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {sel?.step != null ? selStep?.name : 'Setup log'}
-          {liveSelected ? ' · LIVE' : ''}
-        </Eyebrow>
+        {/* §7 header: "LOG k OF n" counter (the §9.2 modal's STEP N OF M idiom) + the
+            step's name in the modal's dim mono; the Setup log is not one of the n
+            logs, so the pseudo-row keeps its plain eyebrow */}
+        {sel?.step != null ? (
+          <>
+            <Eyebrow style={{ flex: 'none', whiteSpace: 'nowrap' }}>
+              LOG {sel.step + 1} OF {steps.length}{liveSelected ? ' · LIVE' : ''}
+            </Eyebrow>
+            <span style={{
+              font: '400 11px var(--mono)', color: 'var(--text-deco)', flex: '0 1 auto', minWidth: 0,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {selStep?.name}
+            </span>
+          </>
+        ) : (
+          <Eyebrow style={{ flex: 'none', whiteSpace: 'nowrap' }}>Setup log</Eyebrow>
+        )}
         {/* §7 attempt control — pills only when the step retried */}
         {attempts.length > 1 && (
           <span style={{ display: 'inline-flex', gap: 4, flex: 'none' }}>

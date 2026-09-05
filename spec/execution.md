@@ -255,8 +255,18 @@ and sends the §11 canned analyze chat message as a §8 chat job carrying this e
 as the §19 `executionId` — the RECENT EXECUTIONS context includes the run's error and log tails, and
 the agent's answer, rewrites, and follow-up actions land in the thread (§11).
 Test executions never show it — draft iteration already lives in the editor.
-The LOGS pane shows the selected step's log (header: step name, or "Setup log" for the
-pseudo-row, plus the redaction note "secrets redacted: `<name>`"); when the selected step has
+The LOGS pane shows the selected step's log. Its header opens with a faint mono
+**"LOG k OF n"** eyebrow (k = the selected step's 1-based position, n = the execution's step
+count, the same counter idiom as the §9.2 step-script modal's "STEP N OF M" toolbar) followed
+by the step's name in dimmer mono (the modal's filename treatment; ellipsized, never wrapped);
+the Setup log pseudo-row is not one of the n logs, so its header is the plain "Setup log"
+eyebrow with no counter. A live attempt appends " · LIVE" to the eyebrow. On the page the
+rail's STEPS header and the pane's header share one 38 px minimum height (8 px of vertical
+padding under that floor) with vertically centered content, so their eyebrows and
+bottom hairlines always align: the taller name text, attempt pills, and chips fit inside
+that height, and only wrapping at a narrow width grows the pane header (the modal layout
+pins both to its 44 px toolbar instead). The header also
+carries the redaction note "secrets redacted: `<name>`"; when the selected step has
 more than one attempt, a segmented **attempt control** sits in the header — one status-tinted
 pill per retained attempt ("Attempt 2 · Failed · 3s", pills labeled by attempt `number` — after the
 §4.5 prune the earliest pills are simply gone), latest selected by default. The pane is the

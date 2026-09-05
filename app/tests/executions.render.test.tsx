@@ -513,6 +513,19 @@ describe('execution page STEPS rail keys and selection (§7)', () => {
     expect(selectedRow().textContent).toContain('Fetch page')
   })
 
+  it('the LOGS pane header counts the selected step as LOG k OF n; the Setup log carries no counter', () => {
+    seedThree()
+    render(<ExecutionPage />)
+    expect(screen.getByText('LOG 3 OF 3')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(screen.getByText('LOG 2 OF 3')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(screen.queryByText(/LOG \d+ OF/)).toBeNull()
+    // the pseudo-row's plain eyebrow, plus the rail row itself
+    expect(screen.getAllByText('Setup log').length).toBe(2)
+  })
+
   it('the selected row is an unfocusable, text-selectable block and the others are buttons; a click swaps them', () => {
     seedThree()
     render(<ExecutionPage />)
