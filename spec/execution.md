@@ -313,7 +313,8 @@ by its chip status (changes = accent, ok = green, attention = orange); an execut
 gets no chip here — plus metadata chips; the execution's
 own status badge stays in the page title row, never here. View order: one **file view** per renderable
 file in alphabetical order (`.md` markdown, `.html` sandboxed iframe, images inline; titled
-by filename), then a collapsible **FILES footer** ("FILES · N" header, open by default here):
+by filename), then a collapsible **FILES footer** ("FILES · N" header, **collapsed** by default, like the
+PARAMETERS and WORKSPACE cards):
 the result-dir path in mono, every file as a row, and a "Show in Finder" button opening the dir
 in Finder. Rows are name + size, and a **previewable** file's row is itself expandable — chevron
 at the left, the file's content rendering inline below it when opened. Previewable covers the
@@ -322,7 +323,8 @@ text, horizontally scrollable, capped at 200 KB / 2000 lines with a trailing "Tr
 Show in Finder for the full file." note. Anything else (zip, pdf, xlsx, …) gets no chevron and a
 faint `no preview` `MetaChip`. Every row body starts **collapsed** regardless of the surface, and its
 bytes are fetched lazily on first open — expanding the footer itself costs no requests.
-Files present but none renderable → the section is just the footer.
+Files present but none renderable → the section is just the footer, **expanded** (the only surface
+with no view to show would otherwise be a lone collapsed row).
 No files at all → the whole view stack (footer included) is replaced by an
 `EmptyNotice`: "The latest execution didn't produce any result files."
 Deleted-automation handling: historical name, marked deleted.

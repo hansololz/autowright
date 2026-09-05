@@ -64,6 +64,7 @@ describe('ResultSection file-kind routing (§7)', () => {
     expect(screen.getByText('web page')).toBeTruthy()
     expect(screen.getByText('image')).toBeTruthy()
     expect(screen.getByText('FILES · 5')).toBeTruthy()
+    expect(footerCollapse(5).className).not.toContain('open')  // §7: footer starts collapsed
     expect(screen.getByText('no preview')).toBeTruthy()   // raw.bin never previews
     // md body renders through the shared Markdown component
     expect(await screen.findByText('Hello')).toBeTruthy()
@@ -93,6 +94,11 @@ describe('ResultSection file-kind routing (§7)', () => {
     section([f('chart.png')], { compact: true })
     expect(screen.queryByText('image')).toBeNull()
     expect(footerCollapse(1).className).toContain('open')
+  })
+
+  it('nothing renderable on the full page → the footer alone, expanded', () => {
+    section([f('data.csv'), f('raw.bin')])
+    expect(footerCollapse(2).className).toContain('open')
   })
 
   it('no files → the empty notice', () => {

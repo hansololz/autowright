@@ -324,7 +324,7 @@ export function ResultSection({ label, result, executionId, stamp, compact }: {
   label: string; result: ExecutionResult & { when?: string }; executionId: string
   stamp?: string  // freshness key — changes when the execution settles (see FileBody)
   // §9.2 LATEST RESULT: only `result.md` gets a view, and the FILES footer
-  // carries everything else — collapsed, unless there is no `result.md` to show.
+  // carries everything else.
   compact?: boolean
 }) {
   const [open, setOpen] = useState(true)
@@ -356,9 +356,11 @@ export function ResultSection({ label, result, executionId, stamp, compact }: {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {views.map((f) => <FileView key={f.name} executionId={executionId} file={f} stamp={stamp} />)}
+            {/* §7: the footer starts collapsed on every surface, unless it is the
+                only thing in the section (nothing renderable / no result.md). */}
             <FilesFooter
               files={files} path={result.path} executionId={executionId} stamp={stamp}
-              defaultOpen={!compact || !primary}
+              defaultOpen={views.length === 0}
             />
           </div>
         )}

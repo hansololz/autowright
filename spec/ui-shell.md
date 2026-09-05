@@ -501,7 +501,7 @@ Sections top to bottom:
   + metadata chips, then a **trimmed** version of the §7 result view stack for the latest
   execution: one file view for `result.md` (that exact name) expanded, and nothing else in the
   top slot no matter how many renderable files the run wrote — then the §7 **FILES footer**,
-  collapsed, its "FILES · N" count covering every file in the dir including `result.md`. A run
+  collapsed as on the execution page, its "FILES · N" count covering every file in the dir including `result.md`. A run
   that wrote no `result.md` gets no top view and the footer **expanded** instead, so the card is
   never blank; its rows still start collapsed and still expand to the same previews. Chip rules,
   per-session collapse state, and the no-files dashed placeholder are §7's, unchanged. The full
