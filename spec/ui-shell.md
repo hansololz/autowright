@@ -1000,7 +1000,8 @@ also open itself after an update (below) with the About page nowhere in sight.
 
 - **Autowright** — title with the running version beside it in mono (`v<version>` from
   `GET /state`); sub-line "Open source, MIT licensed. The whole app runs on this Mac.";
-  right-side "View on GitHub ↗" button-styled link to
+  right-side "View on GitHub" button-styled link (label followed by the Font Awesome
+  `fa-arrow-up-right-from-square` external-link icon, 10 px, never the ↗ text glyph) to
   https://github.com/hansololz/autowright (plain `target="_blank"` anchor — the main
   window's window-open handler denies the popup and routes the URL to
   `shell.openExternal`, so it lands in the default browser).
@@ -1014,7 +1015,7 @@ also open itself after an update (below) with the About page nowhere in sight.
   navigation (`will-navigate` → `preventDefault` for anything but the app's own URL): the
   preload exposes the backend bearer token, which must never be reachable from a remote origin.
 - **Website** — sub-line "The project's home page, with a quick tour of what Autowright
-  does."; right-side "autowright.ai ↗" link (same external-anchor mechanism) to
+  does."; right-side "autowright.ai" link (same icon and external-anchor mechanism) to
   https://autowright.ai (the §17 `docs/` landing page).
 
 **UPDATES**

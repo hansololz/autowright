@@ -14,7 +14,9 @@ import { row, rowDivided, rowSub, rowTitle } from './SettingsPage'
 // Card chrome comes from the shared .ad-card class; only overflow is local.
 const card: React.CSSProperties = { overflow: 'hidden' }
 
-const linkBtn: React.CSSProperties = { flex: 'none', textDecoration: 'none' }
+const linkBtn: React.CSSProperties = { flex: 'none', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 7 }
+// §9.4 external-link arrow: the same Font Awesome icon as the §9.5 Open GitHub issue button.
+const ExtIcon = () => <i className="fa-solid fa-arrow-up-right-from-square" style={{ fontSize: 10 }} aria-hidden="true" />
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -204,7 +206,8 @@ export default function AboutPage() {
             <div style={rowSub}>Open source, MIT licensed. The whole app runs on this {copy.machine}.</div>
           </div>
           <a className="ad-btn-soft" href={REPO_URL} target="_blank" rel="noopener noreferrer" style={linkBtn}>
-            View on GitHub ↗
+            View on GitHub
+            <ExtIcon />
           </a>
         </div>
         <div style={row}>
@@ -213,7 +216,8 @@ export default function AboutPage() {
             <div style={rowSub}>The project&rsquo;s home page, with a quick tour of what Autowright does.</div>
           </div>
           <a className="ad-btn-soft" href="https://autowright.ai" target="_blank" rel="noopener noreferrer" style={linkBtn}>
-            autowright.ai ↗
+            autowright.ai
+            <ExtIcon />
           </a>
         </div>
       </Section>
