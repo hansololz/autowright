@@ -769,8 +769,12 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   navigator) and capped at 82vh — an automation of short steps gets a card that fits them,
   never a mostly empty one. The left
   **step navigator** column (280 px, the card's own `--bg-menu` ground, hairline right
-  border) is its own §14 overlay-scrollbar pane: a faint mono "STEPS" eyebrow with the
-  step count right-aligned, then one row per step in order — the number in faint mono, then
+  border) is its own §14 overlay-scrollbar pane: a fixed 44 px header (the code pane's
+  toolbar height, dim-hairline bottom border, so the two hairlines join into one line across
+  the column divider and the eyebrows sit at one height) carrying, vertically centered, a
+  faint mono "STEPS" eyebrow with the step count right-aligned; then, directly under the
+  hairline with no inset (as in the §7 rail — a row's own padding is its breathing room),
+  one row per step in order — the number in faint mono, then
   the name (13/600 `--text` on the viewed row, 500 `--text-muted` on the others, hover
   brightening them). Clicking a row views that step. The unviewed rows are buttons; the
   viewed row is a plain, text-selectable block (`user-select: text`, not focusable) —

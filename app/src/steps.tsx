@@ -626,7 +626,10 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose }
             width: 280, flex: 'none', minHeight: 0, display: 'flex', flexDirection: 'column',
             borderRight: '1px solid var(--hairline-dim)',
           }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', padding: '16px 18px 8px 16px' }}>
+            <div style={{
+              height: 44, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '0 18px 0 16px', borderBottom: '1px solid var(--hairline-dim)',
+            }}>
               <Eyebrow style={{ flex: 'none' }}>STEPS</Eyebrow>
               <span style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)' }}>{steps.length}</span>
             </div>

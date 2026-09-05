@@ -246,7 +246,7 @@ export function TestRunModal({
               }}>
                 <RailHeader count={steps.length} />
                 <ScrollArea wrapStyle={{ flex: 1, minHeight: 0 }}>
-                  <div style={{ padding: '6px 0 12px' }}>
+                  <div style={{ paddingBottom: 12 }}>
                     {steps.length === 0 ? (
                       <EmptyLine>No steps yet — sync the workflow first.</EmptyLine>
                     ) : steps.map((s, i) => <PendingStepRow key={i} name={s.name} />)}

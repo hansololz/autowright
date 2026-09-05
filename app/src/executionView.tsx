@@ -305,7 +305,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
         )
         return modal ? (
           <ScrollArea wrapStyle={{ flex: 1, minHeight: 0 }}>
-            <div style={{ padding: '6px 0 12px' }}>{rows}</div>
+            <div style={{ paddingBottom: 12 }}>{rows}</div>
           </ScrollArea>
         ) : rows
       })()}
