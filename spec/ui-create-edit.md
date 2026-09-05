@@ -638,10 +638,11 @@ job and no separate drafting state — while the first turn runs:
   history over the live `detail` line), so a minutes-long call never looks stuck and web
   reads / retries stay visible. No detail (a non-streaming harness) leaves just the
   stage label. The BUILD and TEST cards never move during the first turn: the chat job,
-  the chained sync it arms, and the sync's landing all leave BUILD in its in-sync row
-  (a sync in flight or armed is never a BUILD state — BUILD card below) and TEST on its
+  the chained sync it arms, and the sync's landing all keep BUILD on its quiet one-line
+  row (the static "Syncing the steps with the spec…" text while the sync is armed or
+  running — never a spinner or dot; BUILD card below) and TEST on its
   one-line gate text (BUILD card and TEST card below), so the right column's spacing holds
-  from send to done and "Syncing the workflow…" is read in the thread, never in the cards.
+  from send to done and the live progress is read in the thread, never in the cards.
 - **Failures** — a `failed` job means a harness error or crash (§8: a validation
   double-failure never ends `failed` — it settles `blocked` with diagnosed blockers, handled
   under Blockers below). A failed chat job renders in the thread as a red-tinted error
@@ -690,7 +691,7 @@ from the turn action row's pill styling) — a quiet **Dismiss** plus, by source
   in-editor spec under a `## Constraints & resolutions` section (created on first use,
   extended after), one bullet per blocker — "`reason` — `fix`" — then runs a §8 `sync`
   against the amended spec and the thread progress entry re-enters "Syncing the workflow"
-  (the BUILD card keeps its in-sync row — a sync is never a card state). The
+  (the BUILD card shows its static syncing line — a sync never animates a card). The
   resolutions live in the spec document itself, so they survive later edits and syncs and
   version like any spec text. If the rebuild blocks again the new entry carries a muted
   "Previously resolved" list of this session's earlier resolutions, so a fix that didn't
@@ -1273,22 +1274,25 @@ editors enter with
   the text is a single line that shrinks with ellipsis (full text in its tooltip) and the
   buttons never wrap or clip; anything longer than a line (explainers, side-effect
   warnings, the full outcome) lives in the test-run modal's footer or the Save hint, never
-  in the cards. Both rows sit on the card's single 18 px horizontal inset (§14). **A job in flight is never a card state** — neither a
-  chat job nor a sync: the cards have no drafting state and no syncing state. During a
+  in the cards. Both rows sit on the card's single 18 px horizontal inset (§14). **A job in flight never animates a card** — neither a
+  chat job nor a sync: the cards have no drafting state, no spinner, no live detail. During a
   chat job they keep their current state with their controls disabled per the inputs
   lock; **while a sync runs or is armed** (a §8 `sync` job in flight however started —
   Sync now, Sync spec, a repair-block apply, a chat-armed pending sync — or a pending sync
-  waiting to fire) the workflow **counts as in sync for the BUILD card**: it shows its
-  in-sync row, controls disabled per the inputs lock — while the **TEST card treats a
-  running or armed sync exactly like out of sync** (its "Sync the steps before testing."
-  row, below): the steps are about to be rewritten, so nothing about them is testable
-  yet. The sync's live surface is the thread progress entry alone — its "Syncing the workflow…"
-  title, the live `detail` line, and the event feed — with the **Cancel** in the composer
-  (cancel semantics under Dirty gating above). So a sync started from the in-sync row
-  (Sync spec, or the first turn's chained sync) never moves the BUILD card, and one started
-  by Sync now trades the out-of-sync row for the in-sync row at the click, not at the
-  landing. When the sync fails, blocks, or is cancelled the workflow is out of sync again
-  and the out-of-sync row renders then.
+  waiting to fire) the BUILD card shows its **syncing row** (state 2 below): the same quiet
+  shape as the in-sync row with the static text "Syncing the steps with the spec…" — no
+  dot, no spinner, no stage or detail — and controls disabled per the inputs lock, so the
+  card says a sync is underway without ever claiming the steps already match. The **TEST
+  card treats a running or armed sync exactly like out of sync** (its "Sync the steps
+  before testing." row, below): the steps are about to be rewritten, so nothing about them
+  is testable yet. The sync's live surface is the thread progress entry alone — its
+  "Syncing the workflow…" title, the live `detail` line, and the event feed — with the
+  **Cancel** in the composer (cancel semantics under Dirty gating above). So a sync
+  started from the in-sync row (Sync spec, or the first turn's chained sync) only swaps
+  the row's text for the static syncing line, and one started by Sync now trades the
+  out-of-sync row for the syncing row at the click, not at the landing. When the sync
+  lands the in-sync row renders; when it fails, blocks, or is cancelled the workflow is
+  out of sync again and the out-of-sync row renders then.
   **BUILD card** — the workflow's sync state, one row, first match wins:
   1. **Out of sync** (and no sync running or armed): the amber dot + the status text
      naming the cause (Dirty gating above: "Out of sync — steps still match the old spec."
@@ -1302,11 +1306,14 @@ editors enter with
      `.ad-btn-primary.small` (§14), so the out-of-sync row is exactly as tall as every
      other card row — disabled per Dirty gating, never hidden. The Save button's amber hint says saving is locked; the
      card does not repeat it.
-  2. **In sync** (or a sync running or armed): the muted status text "In sync with the
-     spec." — no dot — with the faint **Sync spec** text button on the right (the same §8
-     `sync` call on demand; disabled per Dirty gating — e.g. while a test executes — never
-     hidden). The text keeps its wording while a sync runs — the card is quiet; the thread
-     says what is happening.
+  2. **Syncing** (a sync running or armed, however started): the muted static status text
+     "Syncing the steps with the spec…" — no dot, no spinner, no stage or detail line (the
+     thread says what is happening) — with the faint **Sync spec** text button on the
+     right, disabled for the duration (never hidden, never a Cancel — that lives in the
+     composer).
+  3. **In sync**: the muted status text "In sync with the spec." — no dot — with the faint
+     **Sync spec** text button on the right (the same §8 `sync` call on demand; disabled
+     per Dirty gating — e.g. while a test executes — never hidden).
   **TEST card** — the draft test's launcher and last outcome; the run itself lives in the
   test-run modal. One row, status text left and buttons right, first match wins:
   1. **Test executing** (a tracked live test, however started — also while the workflow

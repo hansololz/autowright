@@ -380,7 +380,9 @@ describe('CreateFlow BUILD and TEST cards (§11)', () => {
     // the chained sync's POST went out and its poll never answers — it stays in flight
     await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(2), { timeout: 3000 })
     expect(draftBody(1).mode).toBe('sync')
-    expect(within(screen.getByTestId('build-card')).getByText(/In sync with the spec/)).toBeTruthy()
+    // §11 state 2: the armed sync shows the static syncing line, never in-sync
+    expect(within(screen.getByTestId('build-card')).getByText('Syncing the steps with the spec…')).toBeTruthy()
+    expect(within(screen.getByTestId('build-card')).queryByText(/In sync with the spec/)).toBeNull()
     const card = screen.getByTestId('test-card')
     expect(within(card).getByText('Sync the steps before testing.')).toBeTruthy()
     expect(within(card).queryByText('Test succeeded.')).toBeNull()
@@ -1662,7 +1664,6 @@ describe('CreateFlow thread progress entry + input lock (§11)', () => {
   it('sync job: the sync line lives in the thread and the Save hint, never the cards; spinner in the thread, Cancel in the composer', () => {
     render(<CreateFlow />)
     const cards = () => [screen.getByTestId('build-card'), screen.getByTestId('test-card')]
-    const buildBefore = screen.getByTestId('build-card').textContent
     fireEvent.click(screen.getByText('Sync spec'))
     // the same live line renders in the thread and as the Save hint (one
     // unified stage vocabulary; no agent · model attribution — the composer's
@@ -1670,10 +1671,12 @@ describe('CreateFlow thread progress entry + input lock (§11)', () => {
     // flight is never a card state
     expect(screen.getAllByText('Syncing the workflow…').length).toBe(2)
     for (const card of cards()) expect(within(card).queryByText('Syncing the workflow…')).toBeNull()
-    // the BUILD card keeps its in-sync body byte for byte — it never moves
-    expect(screen.getByTestId('build-card').textContent).toBe(buildBefore)
+    // §11 state 2: the BUILD card swaps its text for the static syncing line —
+    // no dot, no spinner, no live detail, and never the in-sync claim
     const buildCard = screen.getByTestId('build-card')
-    expect(within(buildCard).getByText(/In sync with the spec\./)).toBeTruthy()
+    expect(within(buildCard).getByText('Syncing the steps with the spec…')).toBeTruthy()
+    expect(within(buildCard).queryByText(/In sync with the spec\./)).toBeNull()
+    expect(within(buildCard).queryByText(/Out of sync/)).toBeNull()
     // §11: the TEST card treats a running sync exactly like out of sync — the
     // steps are about to be rewritten, so it holds the gate row instead
     const testCard = screen.getByTestId('test-card')
@@ -1743,14 +1746,15 @@ describe('CreateFlow thread progress entry + input lock (§11)', () => {
     await waitFor(() => expect(screen.getByText('• Installing requests…')).toBeTruthy(), { timeout: 5000 })
     expect(screen.getAllByText('Syncing the workflow…').length).toBeGreaterThan(0)
     expect(screen.queryByText('Installing the packages…')).toBeNull()
-    // §11: the chained sync never moves the BUILD card — no out-of-sync row
-    // (the rewrite dirtied the draft, but the armed/running sync counts as in
-    // sync for the cards), the sync line only in the thread + Save hint
+    // §11: the chained sync never shows the out-of-sync row (the rewrite
+    // dirtied the draft, but the armed/running sync holds the static syncing
+    // line instead); the live sync line only in the thread + Save hint
     const buildCard = screen.getByTestId('build-card')
     expect(within(buildCard).queryByText('Sync now')).toBeNull()
     expect(within(buildCard).queryByText(/Out of sync/)).toBeNull()
     expect(within(buildCard).queryByText('Syncing the workflow…')).toBeNull()
-    expect(within(buildCard).getByText(/In sync with the spec\./)).toBeTruthy()
+    expect(within(buildCard).getByText('Syncing the steps with the spec…')).toBeTruthy()
+    expect(within(buildCard).queryByText(/In sync with the spec\./)).toBeNull()
   })
 
   it('Esc cancels a chat job like the composer Cancel and returns the prompt to the input', () => {

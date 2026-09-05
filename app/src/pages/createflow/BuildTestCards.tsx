@@ -1,6 +1,7 @@
 // §11 BUILD card and TEST card — the top two cards of the right column.
 // BUILD holds the workflow's sync state (out of sync: amber dot + reason +
-// Sync now; in sync: the quiet line + faint Sync spec). TEST launches the
+// Sync now; syncing: the static "Syncing the steps with the spec…" line;
+// in sync: the quiet line + faint Sync spec). TEST launches the
 // test-run modal and reports the outcome (never tested / executing with
 // progress / settled / a resumed last test); it owns the test-setup values
 // (test-only param values, the trigger-message mock), the §8
@@ -67,13 +68,14 @@ export interface BuildCardProps {
 }
 
 export function BuildCard({ rev, outOfSync, syncDisabled, agentGap, runSync }: BuildCardProps) {
-  // §11: a sync in flight or armed is never a card state — while one runs
-  // (however started) or a chat-armed pending sync waits to fire, the
-  // workflow counts as in sync for the cards. The sync's live surface is the
-  // thread progress entry alone, so the first turn's chat → chained sync →
-  // done never moves the card. A failed / blocked / cancelled sync leaves the
-  // workflow out of sync and the out-of-sync row renders then.
-  const showOutOfSync = outOfSync && !rev.syncBusy && !rev.pendingSync
+  // §11: a sync never animates the card — while one runs (however started)
+  // or a chat-armed pending sync waits to fire, the row shows the static
+  // syncing line (no dot, no spinner, no detail). The sync's live surface is
+  // the thread progress entry alone, so the first turn's chat → chained sync
+  // → done only swaps the row's text. A failed / blocked / cancelled sync
+  // leaves the workflow out of sync and the out-of-sync row renders then.
+  const syncing = !!rev.syncBusy || !!rev.pendingSync
+  const showOutOfSync = outOfSync && !syncing
   const outOfSyncText = rev.dirty ? 'Out of sync — steps still match the old spec.'
     : agentGap ? 'Out of sync — a step’s agent isn’t enabled.'
       : 'Out of sync — a step’s secret isn’t allowed.'
@@ -107,7 +109,7 @@ export function BuildCard({ rev, outOfSync, syncDisabled, agentGap, runSync }: B
         </div>
       ) : (
         <div style={rowStyle}>
-          <RowText>In sync with the spec.</RowText>
+          <RowText>{syncing ? 'Syncing the steps with the spec…' : 'In sync with the spec.'}</RowText>
           {/* §11: sync access on demand — faint, disabled per Dirty gating, never hidden */}
           <button className="ad-btn-text dim" disabled={syncDisabled} onClick={runSync} style={btnStyle}>
             Sync spec
