@@ -227,7 +227,7 @@ first row too, under the header), and a closing footer line "Values as used by t
 execution." (11.5/1.5 muted, `10px 18px 12px`, hairline-dim above).
 The card is omitted entirely when the execution has no params — never an empty card.
 Then a single
-**execution card** that joins the **STEPS rail** (left) and the **LOGS pane** (right) with an
+**execution card** that joins the **LOGS rail** (left) and the **LOGS pane** (right) with an
 internal divider — one card, since the rail's selection drives the pane. The rail and pane are
 one shared **execution view** (`executionView.tsx`: the rows, the selection and auto-follow
 rules, the lazy log fetch, the live auto-scroll and cap) that the §11 test-run modal renders
@@ -243,10 +243,12 @@ it a muted 11.5/1.5 line "The scratch directory the steps ran in. Shared across 
 retries, and deleted with the execution." The card sits at the page's bottom, closed, on
 purpose — the scratch dir is for inspecting what a run left behind, and its reveal button
 must never compete with the RESULT card's Show in Finder, which is the user-facing output.
-The STEPS rail's rows are **selectable**: each row shows the status dot (pulsing
-while executing), name, a right-aligned attempt-count `MetaChip` ("×2" — only when the
-step has more than one attempt; the count is the latest attempt's `number`, which survives the
-§4.5 prune) and the latest attempt's duration — rows carry no actions;
+The LOGS rail heads with a `LOGS` eyebrow (each row opens one log, so the rail is named
+for what it holds, on the page and in the §11 modal alike). Its rows are **selectable**: each
+row shows the status dot (pulsing while executing), name, a right-aligned attempt-count
+`MetaChip` ("×2" — only when the step has more than one attempt; the count is the latest
+attempt's `number`, which survives the §4.5 prune) and the latest attempt's duration — rows
+carry no actions;
 skipping lives in the header's Skip-step button. Above step 1 sits a **"Setup log"**
 pseudo-row (terminal icon in place of a status dot) selecting the execution-scoped log.
 Selecting any row changes which log the LOGS pane shows. The **← / → arrow keys** move the
@@ -280,7 +282,7 @@ count, the same counter idiom as the §9.2 step-script modal's "STEP N OF M" too
 by the step's name in dimmer mono (the modal's filename treatment; ellipsized, never wrapped);
 the Setup log pseudo-row is not one of the n logs, so its header is the plain "Setup log"
 eyebrow with no counter. A live attempt appends " · LIVE" to the eyebrow. On the page the
-rail's STEPS header and the pane's header share one 38 px minimum height (8 px of vertical
+rail's LOGS header and the pane's header share one 38 px minimum height (8 px of vertical
 padding under that floor) with vertically centered content, so their eyebrows and
 bottom hairlines always align: the taller name text, attempt pills, and chips fit inside
 that height, and only wrapping at a narrow width grows the pane header (the modal layout

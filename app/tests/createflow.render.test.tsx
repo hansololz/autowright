@@ -544,7 +544,7 @@ describe('CreateFlow test-run modal (§11)', () => {
     fireEvent.click(within(screen.getByTestId('test-card')).getByText('Open test'))
     const modal = screen.getByTestId('test-modal')
     expect(within(modal).queryByText('TEST DRAFT')).toBeNull()
-    expect(within(modal).getByText('STEPS')).toBeTruthy()
+    expect(within(modal).getByText('LOGS')).toBeTruthy()
     // §11 live toolbar: faint Skip step + muted Cancel
     expect(within(modal).getByText('Skip step')).toBeTruthy()
     expect(within(modal).getByText('Cancel')).toBeTruthy()

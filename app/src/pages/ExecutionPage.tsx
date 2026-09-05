@@ -1,6 +1,6 @@
 // Execution page (§7): full-width Result card on top, the run's inputs
 // (TRIGGER MESSAGE, PARAMETERS), then a single execution card joining the
-// selectable STEPS rail and the LOGS pane — the shared `ExecutionView`
+// selectable LOGS rail and the LOGS pane — the shared `ExecutionView`
 // (../executionView) — and the WORKSPACE card at the bottom; plus
 // skip-live-step, Cancel / Retry / Execute again. A §6 `queued` record renders
 // the waiting state instead of that body.
@@ -395,7 +395,7 @@ export default function ExecutionPage() {
               above the machinery; omitted when the execution has none. */}
           {params.length > 0 && <ParametersCard params={params} />}
 
-          {/* Execution card (§7): the shared STEPS rail + LOGS pane */}
+          {/* Execution card (§7): the shared LOGS rail + LOGS pane */}
           <ExecutionView
             key={`${e.id}:${retryKey}`}
             executionId={e.id}

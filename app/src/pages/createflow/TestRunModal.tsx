@@ -1,7 +1,7 @@
 // §11 test-run modal: the one surface for setting up, watching, and reading a
 // draft test — the TEST card only launches it and reports the outcome. It is
 // the §9.2 step-script modal's two-column frame carrying the §7 execution
-// view (STEPS rail + LOGS pane): a 280 px rail on the left, the --bg-code pane
+// view (LOGS rail + LOGS pane): a 280 px rail on the left, the --bg-code pane
 // with a fixed 44 px toolbar on the right, and a 36 px status footer across
 // the card. Two phases — setup (the draft's steps as inert rows, the
 // test-only values and trigger message in the pane, Run test in the toolbar)

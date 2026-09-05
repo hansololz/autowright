@@ -1,4 +1,4 @@
-// §7 execution view — the STEPS rail + LOGS pane that the execution page and
+// §7 execution view — the LOGS rail + LOGS pane that the execution page and
 // the §11 test-run modal both render: the "Setup log" pseudo-row over the
 // selectable step rows, the selection and auto-follow rules, the lazy
 // per-selection log fetch, live streaming with auto-scroll, and the 2000-line
@@ -16,7 +16,7 @@ export type LogSel = { step: number | null; attempt: number | null }
 
 export const RAIL_WIDTH = { page: 250, modal: 280 } as const
 export const MODAL_TOOLBAR = 44
-/** §7 page layout: the rail's STEPS header and the LOGS pane header share this
+/** §7 page layout: the rail's LOGS header and the LOGS pane header share this
  * minimum height (8 px of padding under a 38 px floor) so their eyebrows and
  * hairlines align whatever the pane header holds — name text, attempt pills,
  * chips — and a wrapped pane header still keeps its padding. */
@@ -125,14 +125,15 @@ function AttemptPill({ a, active, onSelect }: {
 }
 
 /** The §11 modal's rail header — shared by the setup and run phases so the
- * rail never shifts when a test starts: STEPS eyebrow + mono count. */
+ * rail never shifts when a test starts: LOGS eyebrow (the §7 rail's own header: each row
+ * opens one log, so the rail is named for what it holds) + mono count. */
 export function RailHeader({ count }: { count: number }) {
   return (
     <div style={{
       height: MODAL_TOOLBAR, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '0 18px', borderBottom: '1px solid var(--hairline)',
     }}>
-      <Eyebrow style={{ flex: 'none' }}>STEPS</Eyebrow>
+      <Eyebrow style={{ flex: 'none' }}>LOGS</Eyebrow>
       <span style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)' }}>{count}</span>
     </div>
   )
@@ -303,7 +304,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
         <RailHeader count={steps.length} />
       ) : (
         <div style={{ minHeight: PAGE_HEADER, display: 'flex', alignItems: 'center', padding: '8px 18px', borderBottom: '1px solid var(--hairline)' }}>
-          <Eyebrow>STEPS</Eyebrow>
+          <Eyebrow>LOGS</Eyebrow>
         </div>
       )}
       {(() => {
@@ -475,7 +476,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
       </div>
     )
   }
-  // Execution card (§7): STEPS rail + LOGS pane in one card — the rail's
+  // Execution card (§7): LOGS rail + LOGS pane in one card — the rail's
   // selection drives the pane, so they share a border.
   return (
     <div className="ad-card" style={{

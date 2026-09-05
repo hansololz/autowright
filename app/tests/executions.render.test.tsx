@@ -470,7 +470,7 @@ describe('execution page log cap (§7)', () => {
   })
 })
 
-describe('execution page STEPS rail keys and selection (§7)', () => {
+describe('execution page LOGS rail keys and selection (§7)', () => {
   const attempt = { number: 1, status: 'succeeded' as const, duration: '1s', startedMs: NOW }
   const seedThree = () => {
     const full: Execution = {
@@ -516,6 +516,8 @@ describe('execution page STEPS rail keys and selection (§7)', () => {
   it('the LOGS pane header counts the selected step as LOG k OF n; the Setup log carries no counter', () => {
     seedThree()
     render(<ExecutionPage />)
+    // §7: the rail is headed LOGS on the page too, the same eyebrow as the §11 modal's rail
+    expect(screen.getByText('LOGS')).toBeTruthy()
     expect(screen.getByText('LOG 3 OF 3')).toBeTruthy()
     fireEvent.keyDown(document, { key: 'ArrowLeft' })
     expect(screen.getByText('LOG 2 OF 3')).toBeTruthy()

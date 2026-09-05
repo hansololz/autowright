@@ -1410,7 +1410,7 @@ editors enter with
   chat thread. Advisory: a failed test never blocks saving.
 - **Test-run modal** — the one surface for setting up, watching, and reading a draft
   test; the TEST card only launches it and reports the outcome. It is the §9.2
-  step-script modal's two-column frame carrying the §7 execution page's **STEPS rail +
+  step-script modal's two-column frame carrying the §7 execution page's **LOGS rail +
   LOGS pane** (one shared execution view, §7 — the modal is not a second, smaller run
   UI): a §14 `Modal` card `min(1120px, 92vw)` wide, `overflow: hidden`, no header row and
   nothing that scrolls the card as a whole, height fixed for the life of the open modal
@@ -1421,7 +1421,8 @@ editors enter with
   answer is being read; the card shows the run with Open test. **Phases**, the modal's
   own state: **setup** (no tracked test record, or after Run again) and **run** (a
   tracked record exists — live or settled; opening with a record lands here). The
-  **left rail** (280 px, dim-hairline right border) heads with the `STEPS` eyebrow and a
+  **left rail** (280 px, dim-hairline right border) heads with the `LOGS` eyebrow (the §7 rail's own
+  header: each row opens one log, so the rail is named for what it holds) and a
   right-aligned mono step count; in the setup phase it lists the draft's steps as inert
   rows (a faint dot + the name — what will run, in order), in the run phase it is the §7
   rail as-is: the "Setup log" pseudo-row over the selectable step rows (status dot
