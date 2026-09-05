@@ -1140,7 +1140,7 @@ editors enter with
   all — old data — drops the clause) — and every step
   shows the §9.2 clock-icon time-limit tag and, when its §4.1 retry budget is set, the §9.2
   rotate-icon retry tag (same labels, tooltips, and hide-at-zero rule). Which agents a step calls is decided by
-  the drafting agent per the §8 selection rule — changing it happens through the spec or
+  the authoring agent per the §8 selection rule — changing it happens through the spec or
   build instructions plus sync (or the agent-enablement card), not per step. Step rows open the same §9.2 step-script modal (whole-row click; unlike the
   detail page's rows the editor's carry **no** right-edge expand glyph — the row's hover
   fill is the only affordance, and the button's "View script" `title` tooltip is kept on
@@ -1218,7 +1218,7 @@ editors enter with
   spinner) · **not installed** (amber — a
   saved automation whose packages went missing, found by the §19 check on page load) ·
   **failed** (red; the plain-word error beneath in mono, e.g. the §7 category wording with the
-  pip stderr tail). Beneath each row, the package's `why` — the drafting agent's one-line
+  pip stderr tail). Beneath each row, the package's `why` — the authoring agent's one-line
   purpose (§8 rule 5) — in faint text, so the card explains every install it asks the user
   to trust. Header counts "N of M installed" (no count when the list is empty). Amber
   and red rows share one **"Install" / "Retry"** button (the §19 install call; rows show

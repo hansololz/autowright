@@ -149,7 +149,7 @@ export class Backend {
 
   /** Seed one automation over the real HTTP API (it_harness.make_draft shape).
    * `steps` overrides the default two-step draft; `opts` adds params, the
-   * allowed-secrets grant list, or a drafting agent. */
+   * allowed-secrets grant list, or a authoring agent. */
   async createAutomation(
     name: string,
     steps?: Array<{ file: string; name: string; description: string; code: string }>,

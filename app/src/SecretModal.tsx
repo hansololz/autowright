@@ -130,7 +130,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
               onChange={(e) => setDesc(e.target.value)}
               onKeyDown={onKeyDown}
               spellCheck={false}
-              placeholder="Where this secret is used, so the drafting agent knows when to use it"
+              placeholder="Where this secret is used, so the authoring agent knows when to use it"
               style={inputStyle}
             />
             <Eyebrow style={{ margin: '16px 0 8px', display: 'flex', alignItems: 'center', gap: 8 }}>

@@ -161,7 +161,7 @@ remain plain dicts (§2).
   may be agent-seeded or the fallback, so create never 422s on a collision;
   `stepAgents`/`allowedSecrets` land as the automation's grants exactly as sent (§20 grant
   model — no all-on seed), with one narrow default: when `stepAgents` is **omitted
-  entirely**, the store seeds it with the drafting agent (`[agentId]`, empty without one) —
+  entirely**, the store seeds it with the authoring agent (`[agentId]`, empty without one) —
   an explicit empty list lands empty. Success consumes the §4.4
   pending create-mode slot (`<root>/draft/` is emptied on success), first migrating the
   slot's `chat.jsonl` into the new automation's container and appending the §4.4

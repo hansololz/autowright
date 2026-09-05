@@ -49,7 +49,7 @@ nextAtMs: epoch ms of the next enabled occurrence across all triggers (§4.3) | 
 instructions: optional multiline free-text user instructions to the agent
 notes: agent-owned working-knowledge document (markdown string, may be empty) — selectors and
   short HTML excerpts, API endpoints and quirks, approaches that failed and why, environment
-  facts the drafting agent discovered while building and testing, and the reason behind any
+  facts the authoring agent discovered while building and testing, and the reason behind any
   non-obvious choice a later sync might otherwise simplify away (rationale evident from the
   steps themselves is skipped). Written only by §8 agent
   responses (a chat or call-2 `notes.md` block — the agent keeps it a terse cheat sheet);
@@ -119,11 +119,11 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   the box tag's tooltip (§11). A step's effective packages are these entries unioned with the
   declared imports appearing in its code; a code-matched import with no declared entry falls
   back to the package declaration's why; with no why at all the tooltip drops its why clause. All three lists are chosen
-  by the drafting agent per the §8 selection rule (the SPEC and build instructions win when they
-  name a choice; the drafting agent's own judgment otherwise). timeout: optional per-step time
+  by the authoring agent per the §8 selection rule (the SPEC and build instructions win when they
+  name a choice; the authoring agent's own judgment otherwise). timeout: optional per-step time
   limit in seconds (positive int) enforced by the §6 watchdog; noTimeout: true removes the limit
   entirely (never combined with timeout — §8 validation); absent → the 900 s engine default (§6).
-  Both are written by the drafting agent per the §8 timeout rule (short by default; long or
+  Both are written by the authoring agent per the §8 timeout rule (short by default; long or
   unlimited only when the user asked). retries: optional per-step automatic retry budget
   (positive int ≤ 10): a failed attempt of the step is re-executed immediately, up to that
   many extra attempts per execution pass, before the step (and execution) fails (§7 step
@@ -131,7 +131,7 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   the user cancels/skips (never combined with retries — §8 validation; the persistent-
   automation shape, usually together with noTimeout). Both absent → 0: first failed attempt
   fails the step, and there is no automatic execution-level retry (§6). Like the timeout
-  pair, both are written by the drafting agent per the §8 retry rule. On disk and in the §8
+  pair, both are written by the authoring agent per the §8 retry rule. On disk and in the §8
   manifest the keys are spelled `no_timeout`, `infinite_retries` (§5 yaml is snake_case); the
   API serialization is `noTimeout`, `infiniteRetries` in every payload that carries steps,
   the §19 draft-job result included
@@ -141,7 +141,7 @@ spec: block list [{ kind: h1|h2|p|li, text }] — the human-readable spec. The �
   `p` block so an agent-written numbered list survives the round trip readable
 specMeta: "v3 · updated Yesterday" (shared time label)
 packages: [{ pip, import, why }] — the current version's §6.2 declared packages ([] when
-  none); why is the drafting agent's one-line GENERAL purpose (§8 rule 5 — required), shown
+  none); why is the authoring agent's one-line GENERAL purpose (§8 rule 5 — required), shown
   under the package's row on the §11 Packages card (per-step purposes live on the steps'
   own packages entries, above); versioned like spec/steps — each version
   entry below carries its own list
@@ -882,8 +882,8 @@ carries to decide this by.
   mode: default | ollama | custom, model }
 ```
 `description` is an optional free-text description ("What this agent is for. Shown on the Agents
-page and given to the drafting agent"), rendered as the detail line on the agent card and
-carried into the §8 grants yaml so the drafting agent knows what each enabled agent is for.
+page and given to the authoring agent"), rendered as the detail line on the agent card and
+carried into the §8 grants yaml so the authoring agent knows what each enabled agent is for.
 `model` is null when `mode` is `default` and required otherwise. Mode `custom` is valid with
 every harness: the user types the model as a free-text string and the app passes it verbatim
 to the harness CLI as `--model <model>` (§6, §19); the string is never validated by the app —
@@ -901,7 +901,7 @@ model it is already configured with. Display shows "Default model" when the mode
 the app default: a single `default_agent` id pointer in `agents.yaml` (§5) — never a
 per-record flag, so "exactly one default" holds structurally; the API serializes each
 agent's derived `default` bool and its derived `usedBy` — the automations that use the
-agent, as their drafting agent or via a current-version step's `agents:` entry ids (§4.1),
+agent, as their authoring agent or via a current-version step's `agents:` entry ids (§4.1),
 each entry `{ id, name }` (id is the automation's uuid — what the §12 chips navigate by;
 name is display). Deleting the default agent repoints the pointer and warns
 which automations use it.
@@ -942,8 +942,8 @@ anywhere (`PUT /secrets/{id}` edits only value/description and carries no name f
 §12 edit modal renders the name read-only). Uniqueness exists for the §8 grants yaml, the
 §20 name flags, and unambiguous display — ids are the binding, names are the display
 (same rule as §4.7 agents). `description` is an optional free-text description ("What this secret is for — shown
-on the Secrets page and given to the drafting agent"), stored next to the name in `secrets.yaml`
-(never in the Keychain) and carried into the §8 grants yaml so the drafting agent knows which
+on the Secrets page and given to the authoring agent"), stored next to the name in `secrets.yaml`
+(never in the Keychain) and carried into the §8 grants yaml so the authoring agent knows which
 secret to use. Values are arbitrary strings and may be multi-line (e.g. a PEM key). Values stored
 in macOS Keychain, masked at rest; the API never returns secret values — show/hide applies to the
 value being typed in the add/edit modal, not to stored values (so the §12 edit modal shows a

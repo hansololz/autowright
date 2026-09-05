@@ -183,7 +183,7 @@ def test_export_import_endpoints(client):
     assert set(body["summary"]) == {"secretsMatched", "agentsMatched", "unresolved",
                                     "packages", "renamedFrom", "os", "osMismatch"}
     assert body["summary"]["renamedFrom"] == "Port me"
-    # §5.1: the drafting agent matched the local record by name; nothing was
+    # §5.1: the authoring agent matched the local record by name; nothing was
     # created and nothing is unresolved
     matched = body["summary"]["agentsMatched"]
     assert [(g["name"], g["matchedTo"], g["matchedBy"]) for g in matched] == [
@@ -2285,7 +2285,7 @@ def test_repair_kills_orphaned_step_group(client, monkeypatch):
 
 def test_create_empty_step_agents_is_kept_empty(client):
     """§4.1: an explicit empty stepAgents list is a real choice — create must
-    not silently re-grant the drafting agent the user just unchecked."""
+    not silently re-grant the authoring agent the user just unchecked."""
     r = client.post("/automations", json={
         "name": "No agents", "agentId": "mock", "stepAgents": [],
         "allowedSecrets": [],
@@ -2293,7 +2293,7 @@ def test_create_empty_step_agents_is_kept_empty(client):
     })
     assert r.status_code == 200
     assert r.json()["stepAgents"] == []
-    # absent field still falls back to the drafting agent
+    # absent field still falls back to the authoring agent
     r2 = client.post("/automations", json={
         "name": "Default agents", "agentId": "mock",
         "draft": {"steps": [{"name": "S", "file": "01-s.py", "code": "log('x')"}]},

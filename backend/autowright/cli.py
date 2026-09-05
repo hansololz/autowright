@@ -1604,7 +1604,7 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                      "policy sections the validators enforce. Read this before writing step "
                      "files by hand."
                      "\n\n"
-                     "It is the same text the app gives its own drafting agents, and it ships "
+                     "It is the same text the app gives its own authoring agents, and it ships "
                      "with the app rather than with your automations, so re-read it after an "
                      "update instead of working from a saved copy. --json prints the "
                      "framework and build instruction files together.")

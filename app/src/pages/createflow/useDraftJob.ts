@@ -545,7 +545,7 @@ export function useDraftJob(d: DraftJobDeps) {
     }),
   })
 
-  // §11: a chat message starts one §8 `chat` job — the drafting agent gets the
+  // §11: a chat message starts one §8 `chat` job — the authoring agent gets the
   // in-editor draft (spec + steps + build instructions + notes), the grants
   // context, and the recent thread; the backend adds the RECENT EXECUTIONS and
   // PACKAGES context itself. One response may combine an answer with rewrites

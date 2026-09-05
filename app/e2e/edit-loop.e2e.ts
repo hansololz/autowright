@@ -16,7 +16,7 @@ describe('edit loop e2e', () => {
 
   it('syncs an edited spec, saves v2, and restores v1 as v3', async () => {
     backend = await new Backend().start()
-    const agent = await backend.createAgent('Sync Agent') // sync needs a drafting agent
+    const agent = await backend.createAgent('Sync Agent') // sync needs a authoring agent
     const { id } = await backend.createAutomation('Edit loop e2e', undefined, { agentId: agent.id })
     handle = await launchApp(backend.home, true)
     const { page } = handle

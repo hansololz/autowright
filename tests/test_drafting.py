@@ -390,7 +390,7 @@ def test_chat_prompt_carries_new_automation_rule():
 def test_prompts_carry_grants_yaml():
     # §8: grants render as yaml lists — name/description/harness/model per agent,
     # name/description per secret — in both calls, closed by the selection rule
-    # (spec/instructions win; otherwise the drafting agent's own judgment).
+    # (spec/instructions win; otherwise the authoring agent's own judgment).
     grants = {"agents": [{"name": "Claude Code", "description": "Best for coding judgment",
                           "harness": "Claude Code", "model": "harness default"},
                          {"name": "Local", "harness": "OpenCode", "model": "gemma4:e4b"}],
@@ -1957,7 +1957,7 @@ def test_validate_steps_package_blocks_and_number_min():
 
 def test_empty_grants_render_literal_none_in_every_prompt():
     # §8: an unchecked agents/secrets list reaches the prompt as the literal
-    # `none` — the drafting agent is told explicitly there is nothing to use.
+    # `none` — the authoring agent is told explicitly there is nothing to use.
     for p in (build_chat_prompt("x", None, GRANTS),
               build_steps_prompt("# T\n\nBody.", None, GRANTS)):
         assert "the id, copied exactly):\nnone" in p

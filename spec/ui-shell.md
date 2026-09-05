@@ -1362,7 +1362,7 @@ re-run right after the save), when the reconnect flow's check answers (§12 form
 when the edit form's "Check connection" action runs.
 Each card shows the agent's `description` detail line — the real §4.7 description only, never
 generated marketing copy (the description is drafting input, §8 grants yaml); when the description is empty
-the line reads "No description yet. Add one to tell the drafting AI what this agent is
+the line reads "No description yet. Add one to tell the authoring agent what this agent is
 for." —
 and a **USED BY** row of clickable automation chips (fallback "Not used by any automation yet.").
 USED BY means actual reference, not permission: an automation is listed when the agent is its
@@ -1411,8 +1411,11 @@ returns to the Agents page; a failed delete toasts the error and stays on the fo
 status is indicated by the absent "Make default" menu row — no chip anywhere.
 Fields, top to bottom in rendered
 order: name (required, placeholder "Name this agent"), optional description ("What this
-agent is for — shown on the Agents page and given to the drafting agent"), pick harness
-(Claude Code / Gemini CLI / Codex / OpenCode — all four selectable, §4.7), then the MODEL
+agent is for. The authoring agent reads this when choosing which agent handles each automation step"), pick harness
+(Claude Code / Gemini CLI / Codex / OpenCode — all four selectable, §4.7; each harness card
+carries a one-line blurb: Claude Code "Uses your Claude account or a local model managed by Ollama.", Gemini CLI
+"Uses your Google account.", Codex "Uses your ChatGPT account or a local model managed by Ollama.", OpenCode
+"Open-source. Works with any provider you’ve already set up, or a local model."), then the MODEL
 section — the mode rows live inside it (option labels "Default model" / "A specific model"
 (note "Type the model this harness should use") / "A local model" — the specific-model
 option renders for every harness; the local-model option renders enabled when the harness is
@@ -1501,7 +1504,7 @@ and value are editable). Add mode refuses a name that already exists (client-sid
 "already exists. Edit it from the list instead." — friendlier than surfacing the §19 POST's
 422 for the same rule). Add saves via §19 `POST /secrets`, edit via `PUT /secrets/{id}`.
 Below the name sits an optional
-single-line DESCRIPTION input (placeholder "Where this secret is used, so the drafting agent
+single-line DESCRIPTION input (placeholder "Where this secret is used, so the authoring agent
 knows when to use it"), pre-filled when editing. The value field is a 3-row vertically
 resizable textarea (multi-line values allowed, §4.8) masked with `-webkit-text-security` unless
 Show is toggled; Enter inserts a newline, Cmd/Ctrl+Enter saves, Escape closes. **Editing a

@@ -86,7 +86,7 @@ function AgentCard({ ag, check }: { ag: Agent; check: AgentCheck | undefined }) 
       </div>
       {/* Detail line = the §4.7 description (drafting input) — never generated copy. */}
       <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: ag.description?.trim() ? 'var(--text-muted)' : 'var(--text-faint)' }}>
-        {ag.description?.trim() ? ag.description : 'No description yet. Add one to tell the drafting AI what this agent is for.'}
+        {ag.description?.trim() ? ag.description : 'No description yet. Add one to tell the authoring agent what this agent is for.'}
       </p>
       {uses.length > 0 ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

@@ -61,7 +61,7 @@ describe('AgentNewPage (§12)', () => {
     fireEvent.click(screen.getByText('Claude Code'))          // harness card → mode 'default'
     fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: ' My writer ' } })
     fireEvent.change(
-      screen.getByPlaceholderText('What this agent is for. Shown on the Agents page and given to the drafting agent'),
+      screen.getByPlaceholderText('What this agent is for. The authoring agent reads this when choosing which agent handles each automation step'),
       { target: { value: 'Cloud drafting' } })
     fireEvent.click(screen.getByText('Add agent'))
     await waitFor(() => expect(mockedApi.addAgent).toHaveBeenCalledTimes(1))

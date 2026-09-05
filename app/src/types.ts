@@ -55,7 +55,7 @@ export interface Step {
 export interface PackageDep {
   pip: string
   import: string
-  why?: string // §8 rule 5 — the drafting agent's one-line purpose, shown under the §11 row
+  why?: string // §8 rule 5 — the authoring agent's one-line purpose, shown under the §11 row
                // (absent only on transient check/outdated response entries)
   status?: 'installed' | 'missing' | 'failed' | 'installing'
   version?: string

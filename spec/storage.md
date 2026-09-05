@@ -493,7 +493,7 @@ manifest.yaml                # format_version: 2 (import rejects any other with 
                              #   import stamps it as §4.1 `originOs` and a mismatch with
                              #   the running platform flags the §4.1 os-mismatch problem
                              #   — never a rejection),
-                             # agent: the drafting agent's REF - the agents.yaml entry the
+                             # agent: the authoring agent's REF - the agents.yaml entry the
                              #   imported agent_id resolves through (absent when none),
                              # triggers: [{kind, expression? | timezone? | run_if_missed? | channel+secret… | from…}] —
                              #   (`run_if_missed: false` only when a cron opted out, §4.3;
@@ -572,7 +572,7 @@ order, and a claimed record leaves the candidate pool for every later pass.
   by (higher similarity score, then the local default agent, then name casefold, then id);
   (3) similarity best-match over the unclaimed agents regardless of harness. Else
   unresolved.
-- **The drafting agent** (manifest `agent` ref) resolves through the same ladder as an
+- **The authoring agent** (manifest `agent` ref) resolves through the same ladder as an
   ordinary agents.yaml entry. When it lands unresolved, or the manifest has no `agent`,
   the imported `agent_id` is the local default agent (null when the machine has no
   agents). That fallback claims no record and never stands in for the same ref's step
@@ -650,9 +650,9 @@ answers 422 and writes nothing):
   drafting context carries the wanted names and descriptions so the chat agent can help.
   Nothing unresolved is ever granted.
 - **Grants — auto-grant every match.** `allowedSecrets` = the matched secrets;
-  `stepAgents` = the matched step agents plus the resolved drafting agent (deduped, the
-  drafting agent first when it was not already among them, so a bare `agent: true` step's
-  first-enabled-agent fallback lands on the drafting agent). Both are passed **directly
+  `stepAgents` = the matched step agents plus the resolved authoring agent (deduped, the
+  authoring agent first when it was not already among them, so a bare `agent: true` step's
+  first-enabled-agent fallback lands on the authoring agent). Both are passed **directly
   into the automation-creation call** as its grant
   lists (one write): there is no post-create grant patch, so no window ever exists in which
   the automation is stored with different grants than it ends up with. A clean import

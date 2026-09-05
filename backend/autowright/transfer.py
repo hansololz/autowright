@@ -136,7 +136,7 @@ def _referenced_secret_ids(refs: _ExportRefs, ver: dict,
 
 
 def _referenced_agent_ids(store: Store, refs: _ExportRefs, a: dict, ver: dict) -> list[str]:
-    """The drafting agent + every step-referenced agent (manifest entry ids
+    """The authoring agent + every step-referenced agent (manifest entry ids
     and agents["<id>"] code subscripts, §4.1) — deduped by record id, archive
     order stable (drafting first, then per-step sorted ids)."""
     out: list[str] = []
@@ -804,7 +804,7 @@ def match_archive(store: Store, arch: dict) -> dict:
             agent_how[e["ref"]] = "similarity"
             del unclaimed_a[rec["id"]]
 
-    # §5.1: the drafting agent resolves through the same ladder; unresolved or
+    # §5.1: the authoring agent resolves through the same ladder; unresolved or
     # absent falls back to the local default agent. The fallback claims no
     # record and never stands in for the same ref's step references.
     drafting = agent_res.get(arch["agent"]) if arch.get("agent") else None
@@ -1009,9 +1009,9 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
                     else {**t, "secret": secret_id_by_ref[t["secret"]]})}
                 for t in arch["triggers"]]
     # §5.1 grants — auto-grant every match: the matched secrets, and the
-    # matched step agents plus the resolved drafting agent (drafting first
+    # matched step agents plus the resolved authoring agent (drafting first
     # when it was not already among them, so a bare `agent: true` step's
-    # first-enabled-agent fallback lands on the drafting agent). Passed
+    # first-enabled-agent fallback lands on the authoring agent). Passed
     # directly into the creation call as its grant lists (one write) — no
     # post-create grant patch, so no window ever exists in which the
     # automation is stored with different grants. Nothing unresolved is ever

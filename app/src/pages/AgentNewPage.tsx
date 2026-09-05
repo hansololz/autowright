@@ -12,9 +12,9 @@ type HarnessId = 'claude' | 'gemini' | 'codex' | 'opencode'
 
 
 const HARNESSES: { id: HarnessId; name: string; description: string }[] = [
-  { id: 'claude', name: 'Claude Code', description: 'Uses your Claude account. The most capable option, with nothing extra to pay.' },
-  { id: 'gemini', name: 'Gemini CLI', description: 'Uses your Google account. Generous free tier.' },
-  { id: 'codex', name: 'Codex', description: 'Uses your ChatGPT account.' },
+  { id: 'claude', name: 'Claude Code', description: 'Uses your Claude account or a local model managed by Ollama.' },
+  { id: 'gemini', name: 'Gemini CLI', description: 'Uses your Google account.' },
+  { id: 'codex', name: 'Codex', description: 'Uses your ChatGPT account or a local model managed by Ollama.' },
   { id: 'opencode', name: 'OpenCode', description: 'Open-source. Works with any provider you’ve already set up, or a local model.' },
 ]
 
@@ -429,7 +429,7 @@ export default function AgentNewPage() {
       <BackLink label="Agents" onClick={() => go('agents')} style={{ marginBottom: 10 }} />
       <PageTitle
         raw
-        sub="Pick the harness that writes your automations, then choose which model it uses. The agent never executes anything. Autowright does."
+        sub="Pick the harness that writes your automations, then choose which model it uses."
         right={editAgent && (
           <HeaderActions>
             {/* §12: edit-mode overflow menu — the agent actions moved off the card. */}
@@ -504,7 +504,7 @@ export default function AgentNewPage() {
         className="ad-input"
         value={description}
         onChange={(e) => setDesc(e.target.value)}
-        placeholder="What this agent is for. Shown on the Agents page and given to the drafting agent"
+        placeholder="What this agent is for. The authoring agent reads this when choosing which agent handles each automation step"
         rows={2}
         style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', marginBottom: 22 }}
       />

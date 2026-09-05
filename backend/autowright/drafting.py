@@ -311,7 +311,7 @@ def spec_as_md(current: dict | None) -> str:
 
 def _grants_yaml(entries: list[dict]) -> str:
     """§8: grant lists render as yaml (agents: id/name/description/harness/model,
-    secrets: id/name/description) so the drafting agent can weigh each entry when
+    secrets: id/name/description) so the authoring agent can weigh each entry when
     deciding which agents and secrets the automation should use — and copy the
     exact ids its manifest entries and code subscripts must carry."""
     if not entries:
@@ -1910,7 +1910,7 @@ class DraftJobs:
             blockers = [{
                 "reason": "The draft didn't build — the agent's response failed "
                           f"validation{attempts_phrase(attempts)}.",
-                "fix": "Simplify or clarify the spec, or try a different drafting agent, then rebuild.",
+                "fix": "Simplify or clarify the spec, or try a different authoring agent, then rebuild.",
                 "details": "\n".join(errors[:8]),
             }]
         return blockers

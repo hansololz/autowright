@@ -411,7 +411,7 @@ def _secrets_json() -> list[dict]:
 def _agent_grant(g: dict) -> dict:
     """§8 grants yaml entry: id, name, description, harness, model — the id is
     what the drafted manifest entries and agents["<id>"] code subscripts must
-    carry, so the drafting agent needs it verbatim."""
+    carry, so the authoring agent needs it verbatim."""
     e = {"id": g["id"], "name": harness.grant_name(g)}
     if g.get("description"):
         e["description"] = g["description"]

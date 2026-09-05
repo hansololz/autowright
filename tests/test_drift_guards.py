@@ -109,7 +109,7 @@ def test_curated_packages_are_declared_dependencies():
 
 def test_curated_list_matches_the_framework_instructions():
     """Home 3, `instructions/framework-instructions.md`: the §8 contract
-    preamble the drafting agent reads. It names *import* modules."""
+    preamble the authoring agent reads. It names *import* modules."""
     text = _read("backend/autowright/instructions/framework-instructions.md")
     m = re.search(r"## Allowed imports\s+Python stdlib,(.*?)— always available",
                   text, re.S)

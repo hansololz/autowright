@@ -435,7 +435,7 @@ The curated list ships with the app (installed in the bundled interpreter) and i
 verbatim in the §8 contract preamble.
 
 **Declared packages.** When a task genuinely needs a library beyond the curated list (the
-task-solving ladder still prefers stdlib + curated first), the drafting agent declares it in
+task-solving ladder still prefers stdlib + curated first), the authoring agent declares it in
 `manifest.yaml` (§8): `packages: [{ pip: pandas, import: pandas, why: "…" }]` — one entry per
 distribution: the bare distribution name (PEP 503 name only — **no version specifier**; the
 installed distribution is the single source of truth for the version, see the install model
@@ -445,7 +445,7 @@ are never declared; what
 must be declared is every **runtime companion** the task's usage needs beyond that — optional
 extras and binary-bundling wheels (e.g. yt-dlp merging streams needs ffmpeg → declare
 `imageio-ffmpeg` alongside it and wire its path in the step). The §8 contract instructs the
-drafting agent to declare the complete set a task needs, so an execution never discovers a
+authoring agent to declare the complete set a task needs, so an execution never discovers a
 missing companion at runtime. Declared packages extend the import allowlist for that version's steps only:
 §8 validation and the executor's runtime re-check both accept stdlib + curated + `autowright` +
 the version's declared imports (shared module `imports_check.py`, which takes the declared
@@ -503,7 +503,7 @@ version at its next execution automatically.
 
 **Native tools (deliberately deferred).** System binaries (ffmpeg, tesseract, …) are not
 installable — pip is the only channel. That never justifies a contorted workaround: the
-drafting agent goes straightforward-first (§8 `framework-instructions.md`). When a pip
+authoring agent goes straightforward-first (§8 `framework-instructions.md`). When a pip
 package bundles a genuinely equivalent static binary (e.g. `imageio-ffmpeg` — binary ships
 inside the wheel; the step passes its path to the tool), it wins — a bundled equal beats
 asking the user to install anything. Otherwise the steps target the **canonical tool for
@@ -520,7 +520,7 @@ agent already **knows** is missing (the user said so; a run proved it) yields a 
 `sqlite3`, `osascript`, `transmission-remote` — with `shutil.which` against the §6.1 step
 `PATH`, at prompt build (presence + resolved path only, pure stat calls — never a version
 subprocess, so no cache is needed). The result feeds the §8 SYSTEM TOOLS prompt section in
-every drafting call, so the drafting agent designs against CLIs that really exist on this
+every drafting call, so the authoring agent designs against CLIs that really exist on this
 Mac instead of hedging. Curated, not exhaustive: absence from the list never means absence
 from the Mac, and the pre-flight above stays mandatory either way — a tool can be
 uninstalled between drafting and a run.

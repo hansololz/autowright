@@ -24,7 +24,7 @@ describe('editor chat e2e', () => {
     backend = null
   })
 
-  /** Seed an automation with a drafting agent and open its editor. */
+  /** Seed an automation with a authoring agent and open its editor. */
   async function openEditor(name: string, steps?: Array<{ file: string; name: string; description: string; code: string }>) {
     backend = await new Backend().start()
     const agent = await backend.createAgent('Chat Agent')

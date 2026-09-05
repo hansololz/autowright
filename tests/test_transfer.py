@@ -178,7 +178,7 @@ def test_export_layout_and_numeric_refs(store):
     """§5.1 format 2: uuids never travel - refs are the archive's reference
     format, assigned per kind in listing order (secrets by record name, agents
     drafting-first), and every id reference rides them: step entries, code
-    subscripts, the discord trigger's secret, the manifest's drafting agent."""
+    subscripts, the discord trigger's secret, the manifest's authoring agent."""
     a = _build(store)
     data = transfer.export_automation(store, a)
     z = zipfile.ZipFile(io.BytesIO(data))
@@ -191,7 +191,7 @@ def test_export_layout_and_numeric_refs(store):
     # reserved for future version gating)
     assert manifest["app_version"] == __version__
     assert manifest["name"] == "Watcher"
-    # the drafting agent travels as its agents.yaml ref, never a name or id
+    # the authoring agent travels as its agents.yaml ref, never a name or id
     assert manifest["agent"] == "1"
     # cron + app_start + discord + imessage, no ids/off; the one-shot time
     # trigger never travels, and the discord token secret rides its ref
@@ -391,7 +391,7 @@ def test_import_rejects_id_or_name_keyed_step_entries(store):
 def test_import_rejects_refs_missing_from_the_archive(store):
     """§5.1 ref closure: every ref must resolve against the archive's own
     agents.yaml / secrets.yaml - step entries, code subscripts, the discord
-    trigger's token secret, and the manifest's drafting agent alike."""
+    trigger's token secret, and the manifest's authoring agent alike."""
     cases = [
         ("step '01-a.py' references secret 9", dict(
             secrets=[_sec("1", "API_KEY")],
@@ -561,7 +561,7 @@ def test_claim_rule_gives_a_local_record_to_one_ref_only(store):
 
 def _unresolved_archive():
     """One unmatched secret (code subscript + step entry) and one unmatched
-    agent (step entry), plus the manifest drafting agent pointing at it."""
+    agent (step entry), plus the manifest authoring agent pointing at it."""
     return _archive(
         name="Needs fixing",
         secrets=[_sec("1", "MAIL_PASS", "mail password")],
@@ -692,7 +692,7 @@ def test_import_onto_an_empty_machine_succeeds_with_no_agent(store, monkeypatch,
 
 def test_import_on_same_machine_matches_everything_and_grants_it(store):
     """§5.1: a same-machine round trip matches every reference by name, grants
-    every match (drafting agent first), and lands under the deduped name."""
+    every match (authoring agent first), and lands under the deduped name."""
     a = _build(store)
     data = transfer.export_automation(store, a)
     b, summary = transfer.import_automation(store, data)
@@ -708,7 +708,7 @@ def test_import_on_same_machine_matches_everything_and_grants_it(store):
     assert summary["unresolved"] == []
     assert "unresolved_references" not in b
     assert store.auto_json(b)["unresolvedReferences"] == {}
-    # §5.1 grants: matched secrets in archive order; drafting agent first
+    # §5.1 grants: matched secrets in archive order; authoring agent first
     assert b["allowed_secrets"] == [ids["API_KEY"], ids["BOT_TOKEN"], ids["MAIL_PASS"]]
     assert b["enabled_agents"] == [gids["Researcher"], gids["Coder"]]
     assert b["agent_id"] == gids["Researcher"]
@@ -788,7 +788,7 @@ def test_import_grants_ride_the_creation_call(store):
 
 
 def test_enabled_agents_put_the_drafting_agent_first(store):
-    """§5.1: the drafting agent leads stepAgents when it wasn't already among
+    """§5.1: the authoring agent leads stepAgents when it wasn't already among
     them, so a bare `agent: true` step's first-enabled-agent fallback lands on
     it - even when the archive lists it second."""
     ids = _put_agents(store, [_agent("Coder", harness="Codex"), _agent("Researcher")])
@@ -856,7 +856,7 @@ def test_import_writes_only_the_automation(store):
 
 
 def test_import_without_manifest_agent_uses_default_pointer(store):
-    """§5.1/§4.7: an archive exported with no drafting agent lands on THE
+    """§5.1/§4.7: an archive exported with no authoring agent lands on THE
     app-default agent - resolved through the single `default_agent` pointer."""
     ids = _put_agents(store, [_agent("Researcher"), _agent("Coder")], default=1)
     a, _ = transfer.import_automation(store, _archive())
