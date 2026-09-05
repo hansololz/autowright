@@ -9,7 +9,7 @@ import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import { BackLink, Badge, EmptyNotice, Eyebrow, FailureNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, waitedLabel } from '../ui'
-import { ResultSection } from '../result'
+import { ResultSection, ViewCard } from '../result'
 import { ExecutionView } from '../executionView'
 import type { Execution, ParamDef, TriggerPayload } from '../types'
 
@@ -65,16 +65,15 @@ function TriggerMessage({ payload }: { payload: TriggerPayload }) {
 }
 
 /** §7 PARAMETERS card — the run's other input: the execution's snapshot of
- * its param definitions with the values as used. Read-only settings rows
- * (§14), never controls; omitted by the caller when there are no params. */
+ * its param definitions with the values as used. A collapsible view card in
+ * the RESULT section's idiom, collapsed by default (reference data, read on
+ * demand); read-only settings rows (§14), never controls. Omitted by the
+ * caller when there are no params. */
 function ParametersCard({ params }: { params: ParamDef[] }) {
   return (
-    <div className="ad-card">
-      <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--hairline)' }}>
-        <Eyebrow>PARAMETERS</Eyebrow>
-      </div>
+    <ViewCard title={`PARAMETERS · ${params.length}`} defaultOpen={false}>
       {params.map((p) => (
-        <div key={p.name} style={{ display: 'flex', alignItems: 'flex-start', gap: 20, padding: '15px 18px', borderBottom: '1px solid var(--hairline-dim)' }}>
+        <div key={p.name} style={{ display: 'flex', alignItems: 'flex-start', gap: 20, padding: '15px 18px', borderTop: '1px solid var(--hairline-dim)' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600 }}>{p.label}</div>
             {p.help && <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--text-muted)', marginTop: 3 }}>{p.help}</div>}
@@ -84,25 +83,23 @@ function ParametersCard({ params }: { params: ParamDef[] }) {
           </div>
         </div>
       ))}
-      <div style={{ padding: '10px 18px 12px', fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-muted)' }}>
+      <div style={{ padding: '10px 18px 12px', borderTop: '1px solid var(--hairline-dim)', fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-muted)' }}>
         Values as used by this execution.
       </div>
-    </div>
+    </ViewCard>
   )
 }
 
 /** §7 WORKSPACE card — the scratch dir the steps ran in, for inspecting what
- * a run left behind. Sits at the page's bottom so its reveal never competes
- * with the RESULT card's Show in Finder (the user-facing output). */
+ * a run left behind. A collapsible view card, collapsed by default, at the
+ * page's bottom so its reveal never competes with the RESULT card's Show in
+ * Finder (the user-facing output). */
 function WorkspaceCard({ path }: { path: string }) {
   // §9 per-OS copy rule: the reveal button's label.
   const copy = usePlatformCopy()
   return (
-    <div className="ad-card" data-testid="workspace-card">
-      <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--hairline)' }}>
-        <Eyebrow>WORKSPACE</Eyebrow>
-      </div>
-      <div style={{ padding: '12px 18px 14px' }}>
+    <ViewCard title="WORKSPACE" defaultOpen={false} testId="workspace-card">
+      <div style={{ padding: '0 18px 14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{
             flex: 1, minWidth: 0, fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)',
@@ -123,7 +120,7 @@ function WorkspaceCard({ path }: { path: string }) {
           The scratch directory the steps ran in. Shared across steps and retries, and deleted with the execution.
         </div>
       </div>
-    </div>
+    </ViewCard>
   )
 }
 

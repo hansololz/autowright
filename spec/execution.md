@@ -214,12 +214,17 @@ The message is the
 run's input — steps read it via §6.1 — so the page keeps it visible below the outcome and above
 the machinery. Next, on executions whose snapshot carries any param definitions, the
 **PARAMETERS card** — the run's other input, so it sits with the trigger message above the
-machinery rather than beside the logs. Card-header idiom (§14): the `PARAMETERS` eyebrow in a
-`12px 18px` header over a hairline, then one **settings row** (§14: `15px 18px`) per param —
-13.5/600 label, its help description 12/1.55 muted beneath, and the §4.2 one-line summary value
-right-aligned (12.5/500 `--text-2`, wrapping within the row's right half; never a control, this
-is a read-only snapshot) — rows divided by `--hairline-dim`, and a closing footer line
-"Values as used by this execution." (11.5/1.5 muted, `10px 18px 12px`, hairline-dim above).
+machinery rather than beside the logs. It is a **collapsible view card** in the RESULT
+section's idiom (§14 collapsible header: `Caret` + mono 12.5/500 title, `.ad-btn-bare
+.ad-hover-row .ad-focus-inset`), titled "PARAMETERS · N" (N = param count, the FILES footer's
+counter pattern, so the closed header still says what is inside) and **collapsed by default**
+— the values are reference data, read on demand; collapse state is per-session only (never
+persisted), like the result views'. Open, the body holds one **settings row** (§14: `15px 18px`)
+per param — 13.5/600 label, its help description 12/1.55 muted beneath, and the §4.2 one-line
+summary value right-aligned (12.5/500 `--text-2`, wrapping within the row's right half; never
+a control, this is a read-only snapshot) — rows divided by `--hairline-dim` (one above the
+first row too, under the header), and a closing footer line "Values as used by this
+execution." (11.5/1.5 muted, `10px 18px 12px`, hairline-dim above).
 The card is omitted entirely when the execution has no params — never an empty card.
 Then a single
 **execution card** that joins the **STEPS rail** (left) and the **LOGS pane** (right) with an
@@ -230,14 +235,15 @@ inside its frame — one run UI, two homes; the rail holds only the step rows in
 is a selector, never a home for reference data), the modal adds its toolbar controls to the
 pane. Last, below the execution card, the **WORKSPACE card** (`data-testid="workspace-card"`;
 omitted when the record carries no `workspace` path — a pre-workspace record): the same
-card-header idiom — `WORKSPACE` eyebrow over a hairline — then a `12px 18px 14px` body whose
-first row is the §5 `workspace/` path in faint mono (ellipsized from the left like the FILES
-footer's result-dir path) with a `.ad-btn-ghost` §9 reveal button ("Show in Finder", the
-per-OS §9 label, folder icon) at its right, and beneath it a muted 11.5/1.5 line "The scratch
-directory the steps ran in. Shared across steps and retries, and deleted with the
-execution." The card sits at the page's bottom on purpose — the scratch dir is for inspecting
-what a run left behind, and its reveal button must never compete with the RESULT card's Show
-in Finder, which is the user-facing output. The STEPS rail's rows are **selectable**: each row shows the status dot (pulsing
+collapsible view card, titled "WORKSPACE" and **collapsed by default** (state per-session
+only). Open, a `0 18px 14px` body whose first row is the §5 `workspace/` path in faint mono
+(ellipsized from the left like the FILES footer's result-dir path) with a `.ad-btn-ghost` §9
+reveal button ("Show in Finder", the per-OS §9 label, folder icon) at its right, and beneath
+it a muted 11.5/1.5 line "The scratch directory the steps ran in. Shared across steps and
+retries, and deleted with the execution." The card sits at the page's bottom, closed, on
+purpose — the scratch dir is for inspecting what a run left behind, and its reveal button
+must never compete with the RESULT card's Show in Finder, which is the user-facing output.
+The STEPS rail's rows are **selectable**: each row shows the status dot (pulsing
 while executing), name, a right-aligned attempt-count `MetaChip` ("×2" — only when the
 step has more than one attempt; the count is the latest attempt's `number`, which survives the
 §4.5 prune) and the latest attempt's duration — rows carry no actions;

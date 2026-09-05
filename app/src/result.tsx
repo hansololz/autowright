@@ -45,13 +45,15 @@ const KIND_LABEL = { md: 'markdown', html: 'web page', img: 'image', text: 'text
 
 // ---------- collapsible view card ----------
 
-function ViewCard({ title, kind, meta, mono = true, defaultOpen = true, children }: {
-  title: string; kind?: string; meta?: string; mono?: boolean; defaultOpen?: boolean
+// Also the §7 execution page's PARAMETERS and WORKSPACE cards (collapsed by
+// default there), so every collapsible card on that page shares one header.
+export function ViewCard({ title, kind, meta, mono = true, defaultOpen = true, testId, children }: {
+  title: string; kind?: string; meta?: string; mono?: boolean; defaultOpen?: boolean; testId?: string
   children: React.ReactNode
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="ad-card" style={{ overflow: 'hidden' }}>
+    <div className="ad-card" style={{ overflow: 'hidden' }} data-testid={testId}>
       <button
         className="ad-btn-bare ad-hover-row ad-focus-inset"
         onClick={() => setOpen(!open)}
