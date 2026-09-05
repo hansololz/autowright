@@ -72,12 +72,17 @@ describe('create flow e2e', () => {
     // Execution page: result section, both steps in the rail, logs.
     await page.getByText('Mock run — nothing new.').waitFor({ timeout: 20_000 })
     await page.getByText('All good').first().waitFor()
-    // The LOGS rail rows are buttons ("<name> <duration>"); the names also
-    // appear in the result's step list, so target the rail by role.
+    // The LOGS rail (§7): the auto-selected row — the last step with an
+    // attempt — is a plain block marked aria-current="step"; every other row
+    // is a button ("<name> <duration>"). The names also appear in the result's
+    // step list, so target the rail by role / attribute.
     await page.getByRole('button', { name: /Check for changes/ }).waitFor()
-    await page.getByRole('button', { name: /Build the result/ }).waitFor()
-    // Selecting step 1 shows its real log line (fake step's `log(...)`).
+    await page.locator('[aria-current="step"]', { hasText: 'Build the result' }).waitFor()
+    // Selecting step 1 shows its real log line (fake step's `log(...)`) and
+    // hands step 2 back its button.
     await page.getByRole('button', { name: /Check for changes/ }).click()
+    await page.getByRole('button', { name: /Build the result/ }).waitFor()
+    await page.locator('[aria-current="step"]', { hasText: 'Check for changes' }).waitFor()
     await page.getByText(/nothing to do in mock mode/).waitFor({ timeout: 20_000 })
     await shot(page, 'create-execution-page.png')
   }, 120_000)

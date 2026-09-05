@@ -931,9 +931,11 @@ def test_log_files_per_step_attempt(store):
     assert texts[0] == "hello x3"
     assert not any("▸ Step" in t for t in texts)
     assert not any("▸ Step" in l["text"] for l in store.read_log(h["id"], 1, 1))
-    # the full exec payload carries steps+attempts but never inline logs (§19)
+    # the full exec payload carries steps+attempts and the `logs` dir path
+    # (§4.5, backs "Show logs in Finder"), never inline log lines (§19)
     served = store.exec_json(h, full=True)
-    assert "logs" not in served
+    assert served["logs"] == str(logs_dir)
+    assert not isinstance(served["logs"], list)
     assert [s["attempts"][0]["number"] for s in served["steps"]] == [1, 1]
 
 
