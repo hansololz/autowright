@@ -317,7 +317,9 @@ controls. Test ids in the app (all in `app/src`): `nav-rail` (the §9 nav rail �
 harness's `clickNav` measures its width), `agent-card` (§12 agent cards),
 `onboard-agent-card` (§10 step-2 found-agent cards; every connected card carries the same
 "Use as default →" button, so the id is what scopes an assertion to one agent),
-`execution-row` (§9 executions-list rows), `param-row-<name>` (§9.2 parameter rows, one
+`execution-row` (§9 executions-list rows), `workspace-card` (§7 execution page's WORKSPACE
+card — its reveal button shares the RESULT card's per-OS "Show in Finder" label, so the id is
+what scopes an assertion to it), `param-row-<name>` (§9.2 parameter rows, one
 per param), `spec-edit` / `spec-editor` (§11 SPEC card's Edit button and its edit
 textarea), `sync-steps` (§11 Build panel's Sync now / Sync spec button), `test-draft-toggle` (§11 test
 panel's Test draft setup-toggle button — its "Test draft" label also appears on the chat

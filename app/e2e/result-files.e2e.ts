@@ -50,9 +50,9 @@ describe('result files e2e', () => {
     await page.getByText('Alpha', { exact: true }).waitFor()
     // The file also lists in the FILES footer (name appears in view title too).
     await page.getByText('result.md').first().waitFor()
-    // §7 workspace link sits at the steps rail's bottom — presence only,
-    // never clicked (it would open a real file-manager window).
-    await page.getByRole('button', { name: `Show workspace in ${COPY.fileManager}` }).waitFor()
+    // §7 WORKSPACE card sits at the page's bottom — presence only, never
+    // clicked (it would open a real file-manager window).
+    await page.getByTestId('workspace-card').getByRole('button', { name: COPY.reveal }).waitFor()
     await shot(page, 'result-files.png')
   }, 120_000)
 })

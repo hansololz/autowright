@@ -2,9 +2,9 @@
 // the §11 test-run modal both render: the "Setup log" pseudo-row over the
 // selectable step rows, the selection and auto-follow rules, the lazy
 // per-selection log fetch, live streaming with auto-scroll, and the 2000-line
-// cap. One run UI, two homes: the page adds the parameters block and workspace
-// link to the rail (`railFooter`), the modal adds its toolbar controls to the
-// pane (`toolbarRight`) and a rail header of its own.
+// cap. One run UI, two homes: the rail holds only the step rows in both (it is
+// a selector, never a home for reference data); the modal adds its toolbar
+// controls to the pane (`toolbarRight`) and a rail header of its own.
 import React, { useEffect, useRef, useState } from 'react'
 import { LOG_TAIL, logKey, useStore } from './store'
 import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea } from './ui'
@@ -137,15 +137,13 @@ export function RailHeader({ count }: { count: number }) {
   )
 }
 
-export function ExecutionView({ executionId, full, summary, layout, railFooter, toolbarRight, closing }: {
+export function ExecutionView({ executionId, full, summary, layout, toolbarRight, closing }: {
   executionId: string
   /** the full record (`executionFull`), undefined while loading */
   full: Execution | undefined
   /** the header-list record — covers status/note/redaction before `full` lands */
   summary: Execution | undefined
   layout: 'page' | 'modal'
-  /** page: the parameters block and workspace link under the steps */
-  railFooter?: React.ReactNode
   /** modal: the run controls at the toolbar's right end */
   toolbarRight?: React.ReactNode
   /** modal: true through the card's exit animation — the flip keys go inert */
@@ -311,7 +309,6 @@ export function ExecutionView({ executionId, full, summary, layout, railFooter, 
           </ScrollArea>
         ) : rows
       })()}
-      {railFooter}
     </div>
   )
 

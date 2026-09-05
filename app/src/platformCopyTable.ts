@@ -16,7 +16,7 @@ export interface PlatformCopy {
   // Keychain" line.
   secretStore: string
   // §9 table reveal target — the file manager's own name, for labels that name
-  // it inside a longer phrase ("Show workspace in Finder").
+  // it inside a longer phrase ("Shown in Finder — …", the §9.2 memory toast).
   fileManager: string
   // §9 table reveal action — the standard button label.
   reveal: string

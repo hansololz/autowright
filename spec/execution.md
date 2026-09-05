@@ -212,19 +212,32 @@ page shows), one card:
 
 The message is the
 run's input — steps read it via §6.1 — so the page keeps it visible below the outcome and above
-the machinery, then a single
+the machinery. Next, on executions whose snapshot carries any param definitions, the
+**PARAMETERS card** — the run's other input, so it sits with the trigger message above the
+machinery rather than beside the logs. Card-header idiom (§14): the `PARAMETERS` eyebrow in a
+`12px 18px` header over a hairline, then one **settings row** (§14: `15px 18px`) per param —
+13.5/600 label, its help description 12/1.55 muted beneath, and the §4.2 one-line summary value
+right-aligned (12.5/500 `--text-2`, wrapping within the row's right half; never a control, this
+is a read-only snapshot) — rows divided by `--hairline-dim`, and a closing footer line
+"Values as used by this execution." (11.5/1.5 muted, `10px 18px 12px`, hairline-dim above).
+The card is omitted entirely when the execution has no params — never an empty card.
+Then a single
 **execution card** that joins the **STEPS rail** (left) and the **LOGS pane** (right) with an
 internal divider — one card, since the rail's selection drives the pane. The rail and pane are
 one shared **execution view** (`executionView.tsx`: the rows, the selection and auto-follow
 rules, the lazy log fetch, the live auto-scroll and cap) that the §11 test-run modal renders
-inside its frame — one run UI, two homes; the page adds the parameters block and workspace
-link to the rail, the modal adds its toolbar controls to the pane. Beneath the steps the
-rail holds the **PARAMETERS block** — per param: label, its help description, and the §4.2
-one-line summary value ("Values as used by this execution."). At the rail's bottom sits a quiet
-**workspace link** — a `.ad-btn-text.small` button, "Show workspace in Finder" — opening the execution's
-§5 `workspace/` dir (the scratch dir the steps ran in — for inspecting what a run left behind)
-per the §4.9 Show-in-Finder rule; deliberately low-key so it never competes with the RESULT
-card's Show in Finder, which is the user-facing output. The STEPS rail's rows are **selectable**: each row shows the status dot (pulsing
+inside its frame — one run UI, two homes; the rail holds only the step rows in both homes (it
+is a selector, never a home for reference data), the modal adds its toolbar controls to the
+pane. Last, below the execution card, the **WORKSPACE card** (`data-testid="workspace-card"`;
+omitted when the record carries no `workspace` path — a pre-workspace record): the same
+card-header idiom — `WORKSPACE` eyebrow over a hairline — then a `12px 18px 14px` body whose
+first row is the §5 `workspace/` path in faint mono (ellipsized from the left like the FILES
+footer's result-dir path) with a `.ad-btn-ghost` §9 reveal button ("Show in Finder", the
+per-OS §9 label, folder icon) at its right, and beneath it a muted 11.5/1.5 line "The scratch
+directory the steps ran in. Shared across steps and retries, and deleted with the
+execution." The card sits at the page's bottom on purpose — the scratch dir is for inspecting
+what a run left behind, and its reveal button must never compete with the RESULT card's Show
+in Finder, which is the user-facing output. The STEPS rail's rows are **selectable**: each row shows the status dot (pulsing
 while executing), name, a right-aligned attempt-count `MetaChip` ("×2" — only when the
 step has more than one attempt; the count is the latest attempt's `number`, which survives the
 §4.5 prune) and the latest attempt's duration — rows carry no actions;
