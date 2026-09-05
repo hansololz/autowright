@@ -1350,7 +1350,7 @@ shows an admin prompt.
 
 ## 12. Agents & Secrets pages
 
-**Agents.** Tile grid of agent cards — same grid as the Automations list (§9.1,
+**Agents.** Page header sub-line: "Used for authoring automations and by automations for non-trivial tasks." Tile grid of agent cards — same grid as the Automations list (§9.1,
 `repeat(auto-fill, minmax(310px, 1fr))`), not a vertical list. Cards carry no action row —
 only the transient `LoadingRow` (Checking locally… / Reconnecting…) pins to the card bottom
 (`margin-top: auto`) while a check is in flight. Badge states Checking (cyan) / Connecting / Ready (green) /
@@ -1411,7 +1411,7 @@ returns to the Agents page; a failed delete toasts the error and stays on the fo
 status is indicated by the absent "Make default" menu row — no chip anywhere.
 Fields, top to bottom in rendered
 order: name (required, placeholder "Name this agent"), optional description ("What this
-agent is for. The authoring agent reads this when choosing which agent handles each automation step"), pick harness
+agent is for. The authoring agent reads this when picking an agent for non-trivial tasks"), pick harness
 (Claude Code / Gemini CLI / Codex / OpenCode — all four selectable, §4.7; each harness card
 carries a one-line blurb: Claude Code "Uses your Claude account or a local model managed by Ollama.", Gemini CLI
 "Uses your Google account.", Codex "Uses your ChatGPT account or a local model managed by Ollama.", OpenCode

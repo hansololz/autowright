@@ -504,7 +504,7 @@ export default function AgentNewPage() {
         className="ad-input"
         value={description}
         onChange={(e) => setDesc(e.target.value)}
-        placeholder="What this agent is for. The authoring agent reads this when choosing which agent handles each automation step"
+        placeholder="What this agent is for. The authoring agent reads this when picking an agent for non-trivial tasks"
         rows={2}
         style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', marginBottom: 22 }}
       />
