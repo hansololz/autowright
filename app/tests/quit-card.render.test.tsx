@@ -54,7 +54,7 @@ describe('QUIT card (§4.9)', () => {
     render(<SettingsPage />)
     await screen.findByText('QUIT')
     await screen.findByText('Quit Autowright entirely')
-    await screen.findByText(/schedules and message triggers pause until you next log in/)
+    await screen.findByText(/Schedules and message triggers pause until you next log in/)
     await screen.findByRole('button', { name: 'Quit…' })
   })
 

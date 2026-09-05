@@ -12,10 +12,10 @@ type HarnessId = 'claude' | 'gemini' | 'codex' | 'opencode'
 
 
 const HARNESSES: { id: HarnessId; name: string; description: string }[] = [
-  { id: 'claude', name: 'Claude Code', description: 'Uses your Claude account. The most capable option — nothing extra to pay.' },
+  { id: 'claude', name: 'Claude Code', description: 'Uses your Claude account. The most capable option, with nothing extra to pay.' },
   { id: 'gemini', name: 'Gemini CLI', description: 'Uses your Google account. Generous free tier.' },
   { id: 'codex', name: 'Codex', description: 'Uses your ChatGPT account.' },
-  { id: 'opencode', name: 'OpenCode', description: 'Open-source — works with any provider you’ve already set up, or a local model.' },
+  { id: 'opencode', name: 'OpenCode', description: 'Open-source. Works with any provider you’ve already set up, or a local model.' },
 ]
 
 const HARNESS_NAME: Record<HarnessId, string> = {
@@ -180,7 +180,7 @@ export default function AgentNewPage() {
   const setupDone = (h: HarnessId) => {
     setHInst('idle')
     void refreshDet()
-    showToast(`${HARNESS_NAME[h]} is set up — ready to save.`)
+    showToast(`${HARNESS_NAME[h]} is set up. Ready to save.`)
   }
   const startHarnessSignin = (h: HarnessId) => {
     void api.loginHarness(h)
@@ -261,7 +261,7 @@ export default function AgentNewPage() {
         if (got) {
           setPulling(null)
           setModel(got)
-          showToast(`${got} installed — selected for this agent.`)
+          showToast(`${got} installed. Selected for this agent.`)
         }
       }).catch(() => { /* backend hiccup — keep polling */ })
     }, 2000)
@@ -274,7 +274,7 @@ export default function AgentNewPage() {
     if (!pulling || !ollamaPull?.done || ollamaPull.model !== pulling) return
     if (ollamaPull.ok === false) {
       setPulling(null)
-      showToast(`Download failed — ${ollamaPull.line || `couldn't pull ${pulling}`}`)
+      showToast(`Download failed: ${ollamaPull.line || `couldn't pull ${pulling}`}`)
     }
   }, [ollamaPull, pulling, showToast])
 
@@ -290,7 +290,7 @@ export default function AgentNewPage() {
   const startPull = (raw: string) => {
     const nm = raw.trim()
     if (!nm) { showToast('Type a model name, like qwen3-coder:30b.'); return }
-    if (pulling) { showToast(`One download at a time — ${pulling} is still downloading.`); return }
+    if (pulling) { showToast(`One download at a time. ${pulling} is still downloading.`); return }
     const have = installedVariant(nm, models)
     if (have) { showToast(`${have} is already installed.`); return }
     // A previous attempt's terminal ollama.pull event may still sit in the
@@ -312,8 +312,8 @@ export default function AgentNewPage() {
       window.setTimeout(() => {
         setFix(ok ? 'done' : 'needs')
         showToast(ok
-          ? 'Connected — signed in as you.'
-          : 'Still signed out — finish signing in, then try again.', 2600)
+          ? 'Connected. Signed in as you.'
+          : 'Still signed out. Finish signing in, then try again.', 2600)
       }, Math.max(0, 1700 - (Date.now() - t0)))
     })
   }
@@ -330,7 +330,7 @@ export default function AgentNewPage() {
     if (!editAgent) return
     try {
       await api.patchAgent(editAgent.id, { default: true })
-      showToast(`${agentLabel} is now the default — new automations use it.`)
+      showToast(`${agentLabel} is now the default. New automations use it.`)
     } catch (e) { showToast((e as Error).message) }
   }
 
@@ -343,8 +343,8 @@ export default function AgentNewPage() {
     const secs = ((performance.now() - t0) / 1000).toFixed(1)
     setFix(st === 'ready' ? 'done' : 'needs')
     showToast(st === 'ready'
-      ? `${agentLabel} answered in ${secs} s — ready.`
-      : `${agentLabel} didn't answer — needs setup.`)
+      ? `${agentLabel} answered in ${secs} s. Ready.`
+      : `${agentLabel} didn't answer. It needs setup.`)
   }
 
   const confirmDelete = async () => {
@@ -355,7 +355,7 @@ export default function AgentNewPage() {
       const { [editAgent.id]: _gone, ...rest } = useStore.getState().agentChecks
       useStore.setState({ agentChecks: rest })
       go('agents')
-      showToast('Agent removed — automations it wrote still execute on schedule.')
+      showToast('Agent removed. Automations it wrote still execute on schedule.')
     } catch (e) { showToast((e as Error).message) }
   }
 
@@ -398,11 +398,11 @@ export default function AgentNewPage() {
         // Saved config may change readiness — refresh the cached badge (§12).
         void runAgentCheck(editAgent.id, 'connecting')
         go('agents')
-        showToast(`Changes saved — ${payload.name} is ready.`)
+        showToast(`Changes saved. ${payload.name} is ready.`)
       } else {
         await api.addAgent(payload)
         go('agents')
-        showToast(`${payload.name} added — ready to write automations.`)
+        showToast(`${payload.name} added. Ready to write automations.`)
       }
     } catch (e) {
       // §4.7/§19: the backend's duplicate-name 422 surfaces like the inline
@@ -429,7 +429,7 @@ export default function AgentNewPage() {
       <BackLink label="Agents" onClick={() => go('agents')} style={{ marginBottom: 10 }} />
       <PageTitle
         raw
-        sub="Pick the harness that writes your automations, then choose which model it uses. The agent never executes anything — Autowright does."
+        sub="Pick the harness that writes your automations, then choose which model it uses. The agent never executes anything. Autowright does."
         right={editAgent && (
           <HeaderActions>
             {/* §12: edit-mode overflow menu — the agent actions moved off the card. */}
@@ -469,7 +469,7 @@ export default function AgentNewPage() {
 
       {fix === 'needs' && (
         <AmberNotice
-          body="This agent is signed out — reconnect it to create or edit automations."
+          body="This agent is signed out. Reconnect it to create or edit automations."
           btn="Reconnect"
           onBtn={reconnect}
           style={{ marginBottom: 22 }}
@@ -493,8 +493,8 @@ export default function AgentNewPage() {
           <span style={{ width: 7, height: 7, borderRadius: '50%', background: P.red, flex: 'none' }} />
           <span style={{ fontWeight: 500, fontSize: 12.5, color: 'var(--red-text)' }}>
             {nameErr === 'taken'
-              ? `An agent named ${name.trim()} already exists — pick a different name.`
-              : 'A name is required — give this agent a name before saving.'}
+              ? `An agent named ${name.trim()} already exists. Pick a different name.`
+              : 'A name is required. Give this agent a name before saving.'}
           </span>
         </div>
       )}
@@ -504,7 +504,7 @@ export default function AgentNewPage() {
         className="ad-input"
         value={description}
         onChange={(e) => setDesc(e.target.value)}
-        placeholder="What this agent is for — shown on the Agents page and given to the drafting agent"
+        placeholder="What this agent is for. Shown on the Agents page and given to the drafting agent"
         rows={2}
         style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', marginBottom: 22 }}
       />
@@ -573,7 +573,7 @@ export default function AgentNewPage() {
           </div>
         ) : hInst === 'signin' ? (
           <AmberNotice
-            body={`Finish signing in — Autowright opened ${hMethod === 'browser' ? 'your browser' : 'Terminal'}. Waiting for the sign-in…`}
+            body={`Finish signing in. Autowright opened ${hMethod === 'browser' ? 'your browser' : 'Terminal'}. Waiting for the sign-in…`}
             btn="Reopen"
             onBtn={() => startHarnessSignin(harness)}
             style={{ marginBottom: 16 }}
@@ -581,8 +581,8 @@ export default function AgentNewPage() {
         ) : (
           <AmberNotice
             body={hInst === 'failed'
-              ? `Install failed — ${hErr ?? 'something went wrong'}`
-              : `${HARNESS_NAME[harness]} isn’t installed on this ${copy.machine} yet — Autowright can download and set it up for you.`}
+              ? `Install failed: ${hErr ?? 'something went wrong'}`
+              : `${HARNESS_NAME[harness]} isn’t installed on this ${copy.machine} yet. Autowright can download and set it up for you.`}
             btn={hInst === 'failed' ? 'Try again' : 'Download & set up'}
             onBtn={installPicked}
             style={{ marginBottom: 16 }}
@@ -603,7 +603,7 @@ export default function AgentNewPage() {
               // so its row renders disabled with the reason.
               harness === 'gemini'
                 ? { id: 'ollama' as const, name: 'A local model', note: 'Gemini CLI can’t drive local models.', disabled: true }
-                : { id: 'ollama' as const, name: 'A local model', note: `Pick a model served on this ${copy.machine} through Ollama — best for simple steps`, disabled: false },
+                : { id: 'ollama' as const, name: 'A local model', note: `Pick a model served on this ${copy.machine} through Ollama. Best for simple steps`, disabled: false },
             ]).map((md, i, arr) => {
               const on = mode === md.id
               return (
@@ -669,7 +669,7 @@ export default function AgentNewPage() {
               </div>
             ) : (
               <AmberNotice
-                body={inst === 'failed' ? `Install failed — ${instErr ?? 'something went wrong'}` : olMissingMsg}
+                body={inst === 'failed' ? `Install failed: ${instErr ?? 'something went wrong'}` : olMissingMsg}
                 btn={inst === 'failed' ? 'Try again' : 'Install Ollama'}
                 onBtn={() => installOllama()}
                 style={{ marginBottom: 16 }}
@@ -712,7 +712,7 @@ export default function AgentNewPage() {
                 </div>
               ) : (
                 <EmptyNotice
-                  body="No local models installed yet — download one below and it will show up here."
+                  body="No local models installed yet. Download one below and it will show up here."
                   style={{ marginBottom: 14 }}
                 />
               )}
@@ -815,8 +815,8 @@ export default function AgentNewPage() {
               {delUses.length > 0 && (
                 <p style={{ color: P.amber, margin: '8px 0 0' }}>
                   {delUses.length === 1
-                    ? `“${delUses[0].name}” uses this agent. It still executes on schedule — you’ll just need another agent to edit it.`
-                    : `${delUses.length} automations use this agent — they still execute on schedule, but you’ll need another agent to edit them.`}
+                    ? `“${delUses[0].name}” uses this agent. It still executes on schedule. You’ll just need another agent to edit it.`
+                    : `${delUses.length} automations use this agent. They still execute on schedule, but you’ll need another agent to edit them.`}
                 </p>
               )}
             </>

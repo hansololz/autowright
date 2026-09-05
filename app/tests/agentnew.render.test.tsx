@@ -61,7 +61,7 @@ describe('AgentNewPage (§12)', () => {
     fireEvent.click(screen.getByText('Claude Code'))          // harness card → mode 'default'
     fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: ' My writer ' } })
     fireEvent.change(
-      screen.getByPlaceholderText('What this agent is for — shown on the Agents page and given to the drafting agent'),
+      screen.getByPlaceholderText('What this agent is for. Shown on the Agents page and given to the drafting agent'),
       { target: { value: 'Cloud drafting' } })
     fireEvent.click(screen.getByText('Add agent'))
     await waitFor(() => expect(mockedApi.addAgent).toHaveBeenCalledTimes(1))
@@ -77,7 +77,7 @@ describe('AgentNewPage (§12)', () => {
     render(<AgentNewPage />)
     fireEvent.click(screen.getByText('Codex'))
     fireEvent.click(screen.getByText('Add agent'))
-    expect(await screen.findByText('A name is required — give this agent a name before saving.')).toBeTruthy()
+    expect(await screen.findByText('A name is required. Give this agent a name before saving.')).toBeTruthy()
     const nameInput = screen.getByPlaceholderText('Name this agent')
     expect(scrollSpy).toHaveBeenCalledTimes(1)
     expect(scrollSpy.mock.instances[0]).toBe(nameInput)
@@ -99,12 +99,12 @@ describe('AgentNewPage (§12)', () => {
     // case-insensitive collision with the named agent
     fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'fast LOCAL' } })
     fireEvent.click(screen.getByText('Add agent'))
-    expect(await screen.findByText('An agent named fast LOCAL already exists — pick a different name.')).toBeTruthy()
+    expect(await screen.findByText('An agent named fast LOCAL already exists. Pick a different name.')).toBeTruthy()
     expect(mockedApi.addAgent).not.toHaveBeenCalled()
     // collision with the unnamed agent's harness fallback
     fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'codex' } })
     fireEvent.click(screen.getByText('Add agent'))
-    expect(await screen.findByText('An agent named codex already exists — pick a different name.')).toBeTruthy()
+    expect(await screen.findByText('An agent named codex already exists. Pick a different name.')).toBeTruthy()
     expect(mockedApi.addAgent).not.toHaveBeenCalled()
     // a free name clears the error and saves
     fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'Fresh name' } })
@@ -392,6 +392,6 @@ describe('AgentNewPage (§12)', () => {
 
     storeMod.useStore.getState().applyEvent({ event: 'harness.install', id: 'codex', done: true, ok: true })
     await waitFor(() => expect(mockedApi.loginHarness).toHaveBeenCalledWith('codex'))
-    expect(await screen.findByText(/Finish signing in — Autowright opened your browser/)).toBeTruthy()
+    expect(await screen.findByText(/Finish signing in\. Autowright opened your browser/)).toBeTruthy()
   })
 })

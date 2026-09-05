@@ -1362,8 +1362,8 @@ re-run right after the save), when the reconnect flow's check answers (§12 form
 when the edit form's "Check connection" action runs.
 Each card shows the agent's `description` detail line — the real §4.7 description only, never
 generated marketing copy (the description is drafting input, §8 grants yaml); when the description is empty
-the line reads "No description yet — add one in Edit to tell the drafting AI what this agent
-is for." —
+the line reads "No description yet. Add one to tell the drafting AI what this agent is
+for." —
 and a **USED BY** row of clickable automation chips (fallback "Not used by any automation yet.").
 USED BY means actual reference, not permission: an automation is listed when the agent is its
 writer (`agent_id`) or a current-version step carries the agent's id in its `agents` list. The
@@ -1381,13 +1381,13 @@ Every card carries one action: a square accent icon button at the title row's ri
 (`.ad-btn-exec` — the same style as the Automations list's per-card Execute now button — plug
 glyph). Clicking it does not navigate; what it does follows the cached check. On a Ready card
 it is "Check connection" (title/aria): the same timed §19 check as the edit form's menu row —
-badge back to Checking while it runs, success toasts "`<name>` answered in X.X s — ready.",
-failure toasts "`<name>` didn't answer — needs setup." On a Needs-setup card it is
+badge back to Checking while it runs, success toasts "`<name>` answered in X.X s. Ready.",
+failure toasts "`<name>` didn't answer. It needs setup." On a Needs-setup card it is
 "Reconnect": the reconnect check (badge flips to Connecting, LoadingRow "Reconnecting…"),
-success toasts "Connected — signed in as you.", failure toasts "Still signed out — finish
+success toasts "Connected. Signed in as you.", failure toasts "Still signed out. Finish
 signing in, then try again." While a check is in flight the button renders disabled with a
 spinner glyph (title/aria "Checking…"), like the list's executing state. Empty state (dashed card): "No agents yet. Existing automations still execute on
-schedule — but you need an agent to create or edit them." + CTA "Add your first agent".
+schedule, but you need an agent to create or edit them." + CTA "Add your first agent".
 
 **New / Edit agent** form (720 px, one form — title "Add an agent" and submit "Add agent",
 switching to "Edit agent" / "Save changes" when editing). Edit mode is addressed by navigation state: opening a card puts
@@ -1399,14 +1399,14 @@ In edit mode only, the title row carries an overflow (ellipsis) menu button at i
 its popover opens right-aligned. It holds, for ready agents (per the session-cached check),
 "Check connection" — a real §19 `/agents/{id}/check` call timed by the renderer: the cached
 check returns to Checking while it runs (so the Agents-page badge reflects it), success
-toasts "`<name>` answered in X.X s — ready.", failure flips the cached check to Needs setup,
-shows the form's reconnect banner, and toasts "`<name>` didn't answer — needs setup." — and,
-when not default, "Make default" (toast "`<name>` is now the default — new automations use
+toasts "`<name>` answered in X.X s. Ready.", failure flips the cached check to Needs setup,
+shows the form's reconnect banner, and toasts "`<name>` didn't answer. It needs setup." — and,
+when not default, "Make default" (toast "`<name>` is now the default. New automations use
 it.", the name falling back to the harness name; the default flag is read live from the
 store, so the row disappears once the change lands). For every agent it holds "Remove agent…"
 (red, confirm modal — same title, body, and used-by warning as before); while a check is in
 flight only "Remove agent…" is offered. Confirming the removal deletes the agent, drops its
-cached check, toasts "Agent removed — automations it wrote still execute on schedule.", and
+cached check, toasts "Agent removed. Automations it wrote still execute on schedule.", and
 returns to the Agents page; a failed delete toasts the error and stays on the form. Default
 status is indicated by the absent "Make default" menu row — no chip anywhere.
 Fields, top to bottom in rendered
@@ -1417,7 +1417,7 @@ section — the mode rows live inside it (option labels "Default model" / "A spe
 (note "Type the model this harness should use") / "A local model" — the specific-model
 option renders for every harness; the local-model option renders enabled when the harness is
 Claude Code, Codex, or OpenCode (§4.7) and carries the note "Pick a model served on this Mac
-through Ollama — best for simple steps"; when the harness is Gemini CLI the local-model row
+through Ollama. Best for simple steps"; when the harness is Gemini CLI the local-model row
 renders disabled with the note "Gemini CLI can't drive local models." — a disabled row is
 never selectable, and switching to Gemini CLI while the local-model mode is picked moves the
 selection back to "Default model") — with the model input below (required for specific-model and
@@ -1429,32 +1429,32 @@ provider/model form).
 failed detect gates nothing). An uninstalled harness's card carries an amber NOT INSTALLED
 `MiniBadge` and stays selectable, but while the picked harness is uninstalled the MODEL section
 is hidden, saving is gated (submitting toasts "Download and set up `<Harness>` first."), and an
-amber notice "`<Harness>` isn't installed on this Mac yet — Autowright can download and set it
+amber notice "`<Harness>` isn't installed on this Mac yet. Autowright can download and set it
 up for you." offers **Download & set up** — the real §19 `POST /agents/install`, rendered like
 the Ollama install card ("Installing `<Harness>`…", determinate bar only when the
-`harness.install` stream carries a percent; failure "Install failed — `<first error line>`" +
+`harness.install` stream carries a percent; failure "Install failed: `<first error line>`" +
 Try again; a form that finds the install already running for the picked harness reattaches via
 §19 `GET /agents/install/{id}`; the stream's current step line renders under the bar). After a
 finished install the form asks §19
 `GET /agents/signin/{id}`; when signed out it starts the §19 sign-in help
-(`POST /agents/login`) and shows "Finish signing in — Autowright opened Terminal / your
+(`POST /agents/login`) and shows "Finish signing in. Autowright opened Terminal / your
 browser. Waiting for the sign-in…" with a **Reopen** button, polling `GET /agents/signin/{id}`
 every 2 s. Setup finishes (install done, plus sign-in when it was needed) with a re-detect and
-the toast "`<Harness>` is set up — ready to save.", which ungates the form. An
+the toast "`<Harness>` is set up. Ready to save.", which ungates the form. An
 already-installed but signed-out harness never gates — saving such an agent surfaces through
 the Needs setup badge and the reconnect banner, as before. The
 submit button renders disabled-styled until valid but stays clickable: submitting with a missing
-name shows an inline red error "A name is required — give this agent a name before saving." (red
+name shows an inline red error "A name is required. Give this agent a name before saving." (red
 input border, clears on typing) and smooth-scrolls the Name field to the center of the view,
 focusing the input — the submit button sits at the bottom of a long page, so the error must be
 brought on-screen; submitting a name that collides with another agent's effective §4.7 grant
 name (case-insensitive, excluding the agent being edited) shows the same inline treatment
-with "An agent named `<name>` already exists — pick a different name.", and a backend 422
+with "An agent named `<name>` already exists. Pick a different name.", and a backend 422
 from the same rule surfaces identically; an uninstalled picked harness toasts "Download and set up
 `<Harness>` first."; missing Ollama toasts "Install Ollama first."; otherwise "Pick
-a harness and a model first." Success toasts: "`<name>` added — ready to write automations." /
-"Changes saved — `<name>` is ready." When editing a signed-out agent, the form shows a reconnect
-banner: "This agent is signed out — reconnect it to create or edit automations." + Reconnect
+a harness and a model first." Success toasts: "`<name>` added. Ready to write automations." /
+"Changes saved. `<name>` is ready." When editing a signed-out agent, the form shows a reconnect
+banner: "This agent is signed out. Reconnect it to create or edit automations." + Reconnect
 button. The local-model mode is gated on Ollama being
 installed and ready: while missing, the notice "Local models need Ollama, which isn't
 installed on this Mac yet."; once ready, a green check "Ollama is installed and active."
@@ -1462,9 +1462,9 @@ Inline install flow: button "Install Ollama" starts a real §19
 `POST /agents/install` for Ollama; the label "Installing Ollama…" renders a determinate bar
 when the `harness.install` stream carries a percent (indeterminate otherwise) with the
 stream's current step line under it, and failure
-shows "Install failed — `<first error line>`" with the button returning to "Install Ollama".
+shows "Install failed: `<first error line>`" with the button returning to "Install Ollama".
 **LOCAL MODEL** picker: radio list of installed Ollama models with
-size metadata, empty state "No local models installed yet — download one below and it will show
+size metadata, empty state "No local models installed yet. Download one below and it will show
 up here." Model pulls: one at a time — the backend streams `ollama.pull` WS events and the UI
 renders the event's `percent` field (the §19 single overall pull percent — one continuous bar,
 never the raw per-layer numbers, which reset 0–100 per layer; the UI never parses percents out

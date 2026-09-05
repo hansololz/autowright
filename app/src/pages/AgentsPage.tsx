@@ -27,14 +27,14 @@ function AgentCard({ ag, check }: { ag: Agent; check: AgentCheck | undefined }) 
       void runAgentCheck(ag.id).then((st) => {
         const secs = ((performance.now() - t0) / 1000).toFixed(1)
         showToast(st === 'ready'
-          ? `${ag.name || ag.harness} answered in ${secs} s — ready.`
-          : `${ag.name || ag.harness} didn't answer — needs setup.`)
+          ? `${ag.name || ag.harness} answered in ${secs} s. Ready.`
+          : `${ag.name || ag.harness} didn't answer. It needs setup.`)
       })
     } else {
       void runAgentCheck(ag.id, 'connecting').then((st) => {
         showToast(st === 'ready'
-          ? 'Connected — signed in as you.'
-          : 'Still signed out — finish signing in, then try again.', 2600)
+          ? 'Connected. Signed in as you.'
+          : 'Still signed out. Finish signing in, then try again.', 2600)
       })
     }
   }
@@ -86,7 +86,7 @@ function AgentCard({ ag, check }: { ag: Agent; check: AgentCheck | undefined }) 
       </div>
       {/* Detail line = the §4.7 description (drafting input) — never generated copy. */}
       <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: ag.description?.trim() ? 'var(--text-muted)' : 'var(--text-faint)' }}>
-        {ag.description?.trim() ? ag.description : 'No description yet — add one in Edit to tell the drafting AI what this agent is for.'}
+        {ag.description?.trim() ? ag.description : 'No description yet. Add one to tell the drafting AI what this agent is for.'}
       </p>
       {uses.length > 0 ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -148,7 +148,7 @@ export default function AgentsPage() {
   return (
     <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '26px 30px 70px' }}>
       <PageTitle
-        sub="The AI that writes your automations. It never executes anything — Autowright does that. New automations use your default agent."
+        sub="The AI that writes your automations. It never executes anything. Autowright does that. New automations use your default agent."
         right={<HeaderActions><BtnPrimary onClick={() => go('agentNew')}>Add agent</BtnPrimary></HeaderActions>}
       >
         Agents
@@ -161,7 +161,7 @@ export default function AgentsPage() {
         </div>
       ) : (
         <EmptyState
-          text="No agents yet. Existing automations still execute on schedule — but you need an agent to create or edit them."
+          text="No agents yet. Existing automations still execute on schedule, but you need an agent to create or edit them."
           cta={<BtnPrimary onClick={() => go('agentNew')}>Add your first agent</BtnPrimary>}
         />
       )}

@@ -881,7 +881,7 @@ carries to decide this by.
 { id: uuid, name, description, harness: Claude Code | Gemini CLI | Codex | OpenCode,
   mode: default | ollama | custom, model }
 ```
-`description` is an optional free-text description ("What this agent is for — shown on the Agents
+`description` is an optional free-text description ("What this agent is for. Shown on the Agents
 page and given to the drafting agent"), rendered as the detail line on the agent card and
 carried into the §8 grants yaml so the drafting agent knows what each enabled agent is for.
 `model` is null when `mode` is `default` and required otherwise. Mode `custom` is valid with
