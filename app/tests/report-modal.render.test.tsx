@@ -92,9 +92,9 @@ describe('report issue nav row (§9)', () => {
 describe('report modal (§9.5)', () => {
   it('assembles the prefill URL: bug label, title, text, environment block', async () => {
     await openModal()
-    fireEvent.change(screen.getByPlaceholderText('One-line summary'),
+    fireEvent.change(screen.getByPlaceholderText('Summary'),
       { target: { value: 'Executions page freezes' } })
-    fireEvent.change(screen.getByPlaceholderText('What did you expect, and what happened instead?'),
+    fireEvent.change(screen.getByPlaceholderText(/^What did you expect, and what happened instead\?/),
       { target: { value: 'it broke' } })
     const href = openHref()
     expect(href).toContain('github.com/hansololz/autowright/issues/new')
@@ -122,7 +122,7 @@ describe('report modal (§9.5)', () => {
 
   it('feature toggle switches label, prompt, and body heading; text survives; info toggle drops the environment', async () => {
     await openModal()
-    fireEvent.change(screen.getByPlaceholderText('What did you expect, and what happened instead?'),
+    fireEvent.change(screen.getByPlaceholderText(/^What did you expect, and what happened instead\?/),
       { target: { value: 'keep me' } })
     fireEvent.click(screen.getByText('Feature request'))
     expect(openHref()).toContain('labels=enhancement')

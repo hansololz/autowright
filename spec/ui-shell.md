@@ -999,7 +999,7 @@ also open itself after an update (below) with the About page nowhere in sight.
 **APP**
 
 - **Autowright** — title with the running version beside it in mono (`v<version>` from
-  `GET /state`); sub-line "Open source, MIT licensed — the whole app runs on this Mac.";
+  `GET /state`); sub-line "Open source, MIT licensed. The whole app runs on this Mac.";
   right-side "View on GitHub ↗" button-styled link to
   https://github.com/hansololz/autowright (plain `target="_blank"` anchor — the main
   window's window-open handler denies the popup and routes the URL to
@@ -1013,7 +1013,7 @@ also open itself after an update (below) with the About page nowhere in sight.
   must not be able to launch a local app on a user click. Both windows also block top-frame
   navigation (`will-navigate` → `preventDefault` for anything but the app's own URL): the
   preload exposes the backend bearer token, which must never be reachable from a remote origin.
-- **Website** — sub-line "The project's home page — a quick tour of what Autowright
+- **Website** — sub-line "The project's home page, with a quick tour of what Autowright
   does."; right-side "autowright.ai ↗" link (same external-anchor mechanism) to
   https://autowright.ai (the §17 `docs/` landing page).
 
@@ -1040,7 +1040,7 @@ also open itself after an update (below) with the About page nowhere in sight.
   `update-check` (one fetch of the §3 feed) and reads "Checking…" (disabled) while in
   flight. Results render in the row's sub-line: `available` → "Version `<x.y.z>` is
   available." and the button becomes **"Download update"**; `uptodate` → "You're up
-  to date."; `error` → "Couldn't reach GitHub — try again later." The version
+  to date."; `error` → "Couldn't reach GitHub. Try again later." The version
   compare (in main) is numeric on dot-split parts, ignoring a leading `v`; a
   malformed version counts as not newer. "Download update" calls `update-download`
   and reads "Downloading…" (disabled); while it runs a §14 `ProgressBar` renders
@@ -1049,16 +1049,16 @@ also open itself after an update (below) with the About page nowhere in sight.
   finishes it holds 100% while Squirrel verifies and stages the
   update (§3 — on macOS; the other OSes settle when the download finishes). On `{ ok }` the bar goes
   away and the button becomes **"Restart to
-  update"** with sub-line "Update downloaded — restarts the app, not your
+  update"** with sub-line "Update downloaded. Only the app restarts, not your
   automations."; on `{ error }` the sub-line shows "Update failed: `<error>`" and
   the button reverts to "Check for updates" (an unsigned dev build always lands
   here — same code path, real Squirrel error). "Restart to update" calls
-  `update-install`; a `{ busy }` answer renders "An automation is executing — the
+  `update-install`; a `{ busy }` answer renders "An automation is executing. The
   update installs when you restart after it finishes." and keeps the button;
   otherwise the app quits and relaunches updated (the backend restarts on the next
   launch's §3 version-compare flow). Idle sub-line follows the toggle below: off →
-  "Updates are only checked when you ask — nothing runs in the background."; on →
-  "Checks once a day — downloads still start only when you ask."
+  "Updates are only checked when you ask. Nothing runs in the background."; on →
+  "Checks once a day. Downloads still start only when you ask."
   **Homebrew-managed fork:** the page asks §3 `update-brew-managed` at mount and again
   on every "Check for updates" press (so a brew install or uninstall reflects without
   an app restart). When it answers true, only the `available` state changes: sub-line
@@ -1102,7 +1102,7 @@ also open itself after an update (below) with the About page nowhere in sight.
 
 **LEGAL**
 
-- **Privacy policy** — sub-line "What Autowright collects — nothing — and where
+- **Privacy policy** — sub-line "What Autowright collects, which is nothing, and where
   your data lives."; right-side "View" button opens the doc modal (title
   "Privacy policy") rendering `docs/PRIVACY.md` (§17) — the canonical
   copy, shipped into the bundle by the raw import, so the same text serves
@@ -1144,7 +1144,7 @@ also open itself after an update (below) with the About page nowhere in sight.
 
 The LEGAL card ends with a muted disclaimer paragraph (footer text inside the
 card, below the rows): "Autowright is provided as is, without warranty of any
-kind (MIT License). Automations execute scripts written by an AI agent — those
+kind (MIT License). Automations execute scripts written by an AI agent. Those
 scripts can do anything your user account can do on this Mac. Review every
 change before you accept and execute it. You are responsible for what your
 automations do; the author accepts no liability for any damage or loss they
@@ -1153,16 +1153,16 @@ cause."
 ### 9.5 Report issue modal
 
 Reached only from the §9 "Report an issue" nav row. A shared-`Modal` dialog, title "Report
-an issue" with a muted sub-line directly under it — "Reports are filed as GitHub issues — a
+an issue" with a muted sub-line directly under it — "Reports are filed as GitHub issues. A
 GitHub account is required." — so the requirement is stated before the user types. Open
 state held in one store boolean `reportOpen` (open/close actions) — opening never navigates,
 closing restores nothing because nothing changed. Contents, top to bottom:
 
 - **Type toggle** — Bug / Feature request pair, default Bug. Decides the GitHub label
   (`bug` / `enhancement`).
-- **Title** — single-line input, placeholder "One-line summary". Becomes the issue title.
+- **Title** — single-line input, placeholder "Summary". Becomes the issue title.
 - **Details textarea** — multiline, label and placeholder follow the type toggle. Bug: label
-  "What happened?", placeholder "What did you expect, and what happened instead?". Feature
+  "What happened?", placeholder "What did you expect, and what happened instead? Please give me as much context as possible so I can reproduce the issue.". Feature
   request: label "What do you need?", placeholder "What would it do, and why do you need
   it?". Text entered survives toggling the type — only label/placeholder swap. Used verbatim
   in the issue body.
@@ -1181,7 +1181,8 @@ closing restores nothing because nothing changed. Contents, top to bottom:
   literal; with no platform-info at all the line reads "Unknown OS (version unknown)"). Nothing else — no location, backend, or update state. **Never** in
   the block or the issue body: the backend bearer token, secret names or values, raw log
   contents.
-- Footer: quiet **Cancel** (closes) · primary **"Open GitHub issue ↗"** — an anchor carrying
+- Footer: quiet **Cancel** (closes) · primary **"Open GitHub issue"** followed by the Font
+  Awesome `fa-arrow-up-right-from-square` external-link icon (11 px, not the ↗ text glyph) — an anchor carrying
   `.ad-btn-primary`; the §14 link-as-button rule keeps `--on-accent` text and no underline on
   hover, so it is indistinguishable from a real primary button.
 

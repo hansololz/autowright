@@ -153,8 +153,8 @@ export default function AboutPage() {
   const updSub = {
     // §9.4: the idle line follows the automatic-check toggle below.
     idle: settings?.automaticUpdateCheck
-      ? 'Checks once a day — downloads still start only when you ask.'
-      : 'Updates are only checked when you ask — nothing runs in the background.',
+      ? 'Checks once a day. Downloads still start only when you ask.'
+      : 'Updates are only checked when you ask. Nothing runs in the background.',
     checking: 'Checking…',
     current: "You're up to date.",
     available: 'version' in upd
@@ -164,14 +164,14 @@ export default function AboutPage() {
       : '',
     downloading: 'version' in upd ? `Version ${upd.version} is available.` : '',
     downloaded: upd.state === 'downloaded' && upd.busy
-      ? 'An automation is executing — the update installs when you restart after it finishes.'
-      : 'Update downloaded — restarts the app, not your automations.',
+      ? 'An automation is executing. The update installs when you restart after it finishes.'
+      : 'Update downloaded. Only the app restarts, not your automations.',
     failed: upd.state === 'failed' ? `Update failed: ${upd.error}` : '',
     // §3: a carried detail wins — the no-feed line must never read as a
     // network hiccup the user could retry away.
     error: upd.state === 'error' && upd.error
       ? upd.error
-      : "Couldn't reach GitHub — try again later.",
+      : "Couldn't reach GitHub. Try again later.",
   }[upd.state]
 
   // One action button for the whole flow: check → download → restart. On a
@@ -201,7 +201,7 @@ export default function AboutPage() {
               Autowright
               <span style={{ font: `500 11px var(--mono)`, color: 'var(--text-faint)', marginLeft: 6 }}>v{version}</span>
             </div>
-            <div style={rowSub}>Open source, MIT licensed — the whole app runs on this {copy.machine}.</div>
+            <div style={rowSub}>Open source, MIT licensed. The whole app runs on this {copy.machine}.</div>
           </div>
           <a className="ad-btn-soft" href={REPO_URL} target="_blank" rel="noopener noreferrer" style={linkBtn}>
             View on GitHub ↗
@@ -210,7 +210,7 @@ export default function AboutPage() {
         <div style={row}>
           <div style={{ flex: 1 }}>
             <div style={rowTitle}>Website</div>
-            <div style={rowSub}>The project&rsquo;s home page — a quick tour of what Autowright does.</div>
+            <div style={rowSub}>The project&rsquo;s home page, with a quick tour of what Autowright does.</div>
           </div>
           <a className="ad-btn-soft" href="https://autowright.ai" target="_blank" rel="noopener noreferrer" style={linkBtn}>
             autowright.ai ↗
@@ -276,7 +276,7 @@ export default function AboutPage() {
         <div style={rowDivided}>
           <div style={{ flex: 1 }}>
             <div style={rowTitle}>Privacy policy</div>
-            <div style={rowSub}>What Autowright collects — nothing — and where your data lives.</div>
+            <div style={rowSub}>What Autowright collects, which is nothing, and where your data lives.</div>
           </div>
           <button className="ad-btn-soft" onClick={() => openDoc('privacy')} style={{ flex: 'none' }}>
             View
@@ -302,7 +302,7 @@ export default function AboutPage() {
         </div>
         <div style={{ padding: '13px 18px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--text-faint)' }}>
           Autowright is provided as is, without warranty of any kind (MIT License). Automations
-          execute scripts written by an AI agent — those scripts can do anything your user account
+          execute scripts written by an AI agent. Those scripts can do anything your user account
           can do on this {copy.machine}. Review every change before you accept and execute it. You are
           responsible for what your automations do; the author accepts no liability for any damage
           or loss they cause.

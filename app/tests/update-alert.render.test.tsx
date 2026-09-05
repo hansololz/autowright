@@ -134,7 +134,7 @@ describe('About updates row ↔ shared state (§9.4)', () => {
     render(<AboutPage />)
     fireEvent.click(screen.getByText('Check for updates'))
     await waitFor(() => expect(
-      screen.getByText("Couldn't reach GitHub — try again later."),
+      screen.getByText("Couldn't reach GitHub. Try again later."),
     ).toBeTruthy())
   })
 
@@ -149,7 +149,7 @@ describe('About updates row ↔ shared state (§9.4)', () => {
     await waitFor(() => expect(
       screen.getByText('Updates are not supported on this platform yet.'),
     ).toBeTruthy())
-    expect(screen.queryByText("Couldn't reach GitHub — try again later.")).toBeNull()
+    expect(screen.queryByText("Couldn't reach GitHub. Try again later.")).toBeNull()
   })
 
   it('a background check landing while the row sits idle flips it live', async () => {

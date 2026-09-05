@@ -43,7 +43,7 @@ export default function ReportModal() {
   // §9.5: details label/placeholder and body heading follow the type toggle;
   // entered text survives toggling.
   const details = kind === 'bug'
-    ? { label: 'What happened?', placeholder: 'What did you expect, and what happened instead?', heading: '### What happened' }
+    ? { label: 'What happened?', placeholder: 'What did you expect, and what happened instead? Please give me as much context as possible so I can reproduce the issue.', heading: '### What happened' }
     : { label: 'What do you need?', placeholder: 'What would it do, and why do you need it?', heading: '### What do you need' }
 
   // §9.5 open action: plain anchor — the §9.4 external-URL policy routes it to
@@ -67,7 +67,7 @@ export default function ReportModal() {
             <div>
               <h2 style={{ margin: '0 0 6px', fontSize: 15, fontWeight: 600 }}>Report an issue</h2>
               <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
-                Reports are filed as GitHub issues — a GitHub account is required.
+                Reports are filed as GitHub issues. A GitHub account is required.
               </div>
             </div>
 
@@ -86,7 +86,7 @@ export default function ReportModal() {
               <input
                 className="ad-input" value={title}
                 style={{ width: '100%', boxSizing: 'border-box' }}
-                placeholder="One-line summary"
+                placeholder="Summary"
                 onChange={(e) => setTitle(e.target.value)}
               />
             </div>
@@ -122,8 +122,11 @@ export default function ReportModal() {
               data-testid="report-open"
               className="ad-btn-primary"
               href={href} target="_blank" rel="noopener noreferrer"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}
             >
-              Open GitHub issue ↗
+              Open GitHub issue
+              {/* §9.5: Font Awesome external-link arrow, not the ↗ text glyph */}
+              <i className="fa-solid fa-arrow-up-right-from-square" style={{ fontSize: 11 }} aria-hidden="true" />
             </a>
           </div>
         </div>
