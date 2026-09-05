@@ -90,7 +90,7 @@ describe('COMMAND LINE card (§4.9)', () => {
     cliInstall.mockResolvedValue({ ok: true })
     cliStatus.mockResolvedValueOnce({ state: 'installed', path: USER, onPath: true })
     render(<SettingsPage />)
-    await screen.findByText(/Turning this on installs to ~\/\.local\/bin — no password needed\./)
+    await screen.findByText(/Turning this on installs to ~\/\.local\/bin\. No password needed\./)
     // No PATH row while off — it belongs to on+installed only.
     expect(screen.queryByText('Add it to your PATH')).toBeNull()
     const card = (await screen.findByText('COMMAND LINE')).parentElement as HTMLElement
@@ -146,7 +146,7 @@ describe('COMMAND LINE card (§4.9)', () => {
     await waitFor(() => expect(cliUninstall).toHaveBeenCalledTimes(1))
     // Simulate the settings.changed refresh, then the card shows off+missing.
     useStore.setState({ settings: { ...SETTINGS, cliEnabled: false } })
-    await screen.findByText(/Not installed — manage automations from the Terminal/)
+    await screen.findByText(/Not installed\. Manage automations from the Terminal/)
   })
 
   it('on + missing: turning off needs no confirm — nothing to delete, plain patch', async () => {
@@ -178,7 +178,7 @@ describe('COMMAND LINE card (§4.9)', () => {
     setup(false)
     cliStatus.mockResolvedValue({ state: 'installed', path: USER, onPath: true })
     render(<SettingsPage />)
-    await screen.findByText(new RegExp(`Still installed at ${USER.replace(/[/.]/g, '\\$&')} — turn on to keep it up to date`))
+    await screen.findByText(new RegExp(`Still installed at ${USER.replace(/[/.]/g, '\\$&')}\\. Turn on to keep it up to date`))
     expect(screen.queryByText('Delete the command')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
   })
@@ -191,7 +191,7 @@ describe('COMMAND LINE card (§4.9)', () => {
     render(<SettingsPage />)
     // §4.9 missing-warning row: own title + description, Reinstall action.
     await screen.findByText(/CLI is missing/)
-    await screen.findByText(/autowright wasn’t found in ~\/\.local\/bin — it may have been deleted or moved\. Reinstall it to keep using it from the Terminal\./)
+    await screen.findByText(/autowright wasn’t found in ~\/\.local\/bin\. It may have been deleted or moved\. Reinstall it to keep using it from the Terminal\./)
     fireEvent.click(await screen.findByRole('button', { name: 'Reinstall' }))
     await waitFor(() => expect(cliInstall).toHaveBeenCalledTimes(1))
     // §3: Reinstall is a settled card install — first-run marker set.

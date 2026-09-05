@@ -173,7 +173,7 @@ export default function SettingsPage() {
     setResetStage('preparing')
     void (async () => {
       const r = await window.autowright?.resetAll?.().catch((e: Error) => ({ error: e.message }))
-      if (r && 'busy' in r) showToast('An automation is executing — reset when it finishes.')
+      if (r && 'busy' in r) showToast('An automation is executing. Reset when it finishes.')
       else if (r && 'error' in r) showToast(r.error)
       // on { ok } the app is quitting — keep the overlay up until it does
       if (r && 'ok' in r) return
@@ -314,7 +314,7 @@ export default function SettingsPage() {
               <div style={rowTitle}>Keep execution history forever</div>
               <div style={rowSub}>
                 {settings.keepForever
-                  ? 'Nothing is ever removed — execution data grows until you clear it yourself.'
+                  ? 'Nothing is ever removed. Execution data grows until you clear it yourself.'
                   : 'Turn on to never remove old executions and logs.'}
               </div>
             </div>
@@ -330,7 +330,7 @@ export default function SettingsPage() {
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 20 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={rowTitle}>Automations &amp; settings</div>
-                <div style={rowSub}>Your automations and preferences — small, and always on this {copy.machine}.</div>
+                <div style={rowSub}>Your automations and preferences. Small, and always on this {copy.machine}.</div>
               </div>
               <button
                 className="ad-btn-soft"
@@ -389,11 +389,11 @@ export default function SettingsPage() {
                       <div style={rowSub}>
                         {cli.state === 'installed' && (settings.cliEnabled
                           ? `Installed at ${cli.path}`
-                          : `Still installed at ${cli.path} — turn on to keep it up to date.`)}
+                          : `Still installed at ${cli.path}. Turn on to keep it up to date.`)}
                         {cli.state === 'missing' && (settings.cliEnabled
-                          ? `Not installed — manage automations from ${copy.terminalNoun}.`
-                          : `Not installed — manage automations from ${copy.terminalNoun}. Turning this on installs to ${copy.cliBinDir} — no password needed.`)}
-                        {cli.state === 'foreign' && `A different autowright is already at ${cli.path} — Autowright won’t touch it.`}
+                          ? `Not installed. Manage automations from ${copy.terminalNoun}.`
+                          : `Not installed. Manage automations from ${copy.terminalNoun}. Turning this on installs to ${copy.cliBinDir}. No password needed.`)}
+                        {cli.state === 'foreign' && `A different autowright is already at ${cli.path}. Autowright won’t touch it.`}
                       </div>
                     </div>
                     {cli.state !== 'foreign' && (
@@ -412,7 +412,7 @@ export default function SettingsPage() {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ ...rowTitle, color: 'var(--amber)' }}>The <code>autowright</code> CLI is missing</div>
                         <div style={rowSub}>
-                          {`autowright wasn’t found in ${copy.cliBinDir} — it may have been deleted or moved. Reinstall it to keep using it from ${copy.terminalNoun}.`}
+                          {`autowright wasn’t found in ${copy.cliBinDir}. It may have been deleted or moved. Reinstall it to keep using it from ${copy.terminalNoun}.`}
                         </div>
                       </div>
                       <button className="ad-btn-soft" onClick={() => { void cliInstall() }} disabled={cliBusy} style={{ flex: 'none' }}>
@@ -438,7 +438,7 @@ export default function SettingsPage() {
             <div style={{ flex: 1 }}>
               <div style={rowTitle}>Developer mode</div>
               <div style={rowSub}>
-                Logs every backend request and every AI request — including the full prompt — to the backend log. Press ` to show the logs panel.
+                Logs every backend request and every AI request, including the full prompt, to the backend log. Press ` to show the logs panel.
               </div>
             </div>
             <Toggle on={settings.developerMode} onChange={(v) => patch({ developerMode: v })} />
@@ -454,7 +454,7 @@ export default function SettingsPage() {
               <div style={{ flex: 1 }}>
                 <div style={rowTitle}>Quit Autowright entirely</div>
                 <div style={rowSub}>
-                  Stops the background service too — schedules and message triggers pause until you next log in or open Autowright.
+                  Stops the background service too. Schedules and message triggers pause until you next log in or open Autowright.
                 </div>
               </div>
               <button

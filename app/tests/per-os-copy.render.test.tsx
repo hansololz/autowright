@@ -121,7 +121,7 @@ describe('§9 per-OS copy — Settings', () => {
     expect(screen.getAllByRole('button', { name: 'Show in Explorer' }).length).toBe(2)
     expect(screen.queryByText('Show in Finder')).toBeNull()
     expect(screen.getByText('Keep this PC awake')).toBeTruthy()
-    expect(screen.getByText(/Your automations and preferences — small, and always on this PC\./)).toBeTruthy()
+    expect(screen.getByText(/Your automations and preferences\. Small, and always on this PC\./)).toBeTruthy()
     // §4.9 PATH row — the Windows hint says to open a new terminal.
     await screen.findByText('Add it to your PATH')
     expect(screen.getByText(
@@ -172,8 +172,8 @@ describe('§9 per-OS copy — Settings', () => {
     setupMissingCli('windows', false)
     render(<SettingsPage />)
     await screen.findByText(
-      'Not installed — manage automations from a terminal. Turning this on installs to '
-      + '%LOCALAPPDATA%\\Autowright\\bin — no password needed.',
+      'Not installed. Manage automations from a terminal. Turning this on installs to '
+      + '%LOCALAPPDATA%\\Autowright\\bin. No password needed.',
     )
     expect(screen.queryByText(/the Terminal/)).toBeNull()
     expect(screen.queryByText(/~\/\.local\/bin/)).toBeNull()
@@ -181,9 +181,9 @@ describe('§9 per-OS copy — Settings', () => {
     cleanup()
     setupMissingCli('windows', true)  // enabled + missing → the reinstall warning row
     render(<SettingsPage />)
-    await screen.findByText('Not installed — manage automations from a terminal.')
+    await screen.findByText('Not installed. Manage automations from a terminal.')
     expect(screen.getByText(
-      'autowright wasn’t found in %LOCALAPPDATA%\\Autowright\\bin — it may have been '
+      'autowright wasn’t found in %LOCALAPPDATA%\\Autowright\\bin. It may have been '
       + 'deleted or moved. Reinstall it to keep using it from a terminal.',
     )).toBeTruthy()
     expect(screen.queryByText(/the Terminal/)).toBeNull()
@@ -193,16 +193,16 @@ describe('§9 per-OS copy — Settings', () => {
     setupMissingCli('', false)
     render(<SettingsPage />)
     await screen.findByText(
-      'Not installed — manage automations from the Terminal. Turning this on installs to '
-      + '~/.local/bin — no password needed.',
+      'Not installed. Manage automations from the Terminal. Turning this on installs to '
+      + '~/.local/bin. No password needed.',
     )
 
     cleanup()
     setupMissingCli('macos', true)
     render(<SettingsPage />)
-    await screen.findByText('Not installed — manage automations from the Terminal.')
+    await screen.findByText('Not installed. Manage automations from the Terminal.')
     expect(screen.getByText(
-      'autowright wasn’t found in ~/.local/bin — it may have been deleted or moved. '
+      'autowright wasn’t found in ~/.local/bin. It may have been deleted or moved. '
       + 'Reinstall it to keep using it from the Terminal.',
     )).toBeTruthy()
   })

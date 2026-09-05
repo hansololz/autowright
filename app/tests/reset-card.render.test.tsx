@@ -131,7 +131,7 @@ describe('RESET card (§4.9)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete everything' }))
     finishModalAnim('Delete all data and quit app?')
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(
-      'An automation is executing — reset when it finishes.'))
+      'An automation is executing. Reset when it finishes.'))
     const btn = await screen.findByRole('button', { name: 'Reset…' })
     expect(btn).toHaveProperty('disabled', false)
     // The progress overlay closes too (its exit-timeout fallback unmounts it).

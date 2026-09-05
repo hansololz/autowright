@@ -1029,7 +1029,7 @@ notifications: attention | all — "Only when something needs attention" / "Afte
   gating); the stored value keeps §20 CLI parity everywhere.
 days: int ≥ 1 (default 90) — history retention; keepForever: bool disables cleanup
 developerMode: bool (default false) — "Developer mode" ("Logs every backend request and every AI
-  request — including the full prompt — to the backend log. Press `` ` `` to show the logs
+  request, including the full prompt, to the backend log. Press `` ` `` to show the logs
   panel.") — gates request logging, the per-request log files under `<logs>/requests/` (§5),
   the §5 build-failure records under `<logs>/build-failures/`, and the `` ` ``-key log
   overlay (§9.3)
@@ -1083,10 +1083,10 @@ on disk (`missing`) the flip just patches false — no modal, nothing to delete.
 extra action by
 setting × disk state: on+`installed` → "Installed at `<path>`" (`onPath` no longer affects
 the card — the PATH help lives in the PATH row below, shown for every on+`installed`); on+`missing` (the user deleted the file by hand) → "Not
-installed — manage automations from the Terminal."; off+`installed` → "Still installed at `<path>` — turn on to keep it up to
-date."; off+`missing` → "Not installed — manage automations from the Terminal. Turning
-this on installs to ~/.local/bin — no password needed."; `foreign` (either setting) → "A
-different `autowright` is already at `<path>` — Autowright won't touch it.", no toggle, no
+installed. Manage automations from the Terminal."; off+`installed` → "Still installed at `<path>`. Turn on to keep it up to
+date."; off+`missing` → "Not installed. Manage automations from the Terminal. Turning
+this on installs to ~/.local/bin. No password needed."; `foreign` (either setting) → "A
+different `autowright` is already at `<path>`. Autowright won't touch it.", no toggle, no
 buttons. There is no standalone Delete button — removal rides the disable confirm above
 (an off+`installed` leftover, possible after a failed uninstall, is removed by turning the
 toggle on and off again). The card can grow **one
@@ -1133,7 +1133,7 @@ every interaction for the whole run.
 
 A **RESET** card sits at the very bottom of the page (below QUIT), rendered only when the
 preload bridge exists (like QUIT; no stored setting), gated on no live executions through
-its §3 IPC (busy → toast "An automation is executing — reset when it finishes." and the row
+its §3 IPC (busy → toast "An automation is executing. Reset when it finishes." and the row
 resets; unlike QUIT there is no force path), and showing the §9 busy spinner on
 the row button while its flow runs: one row titled "Delete all data and quit app", detail "Erases every
 automation, execution, agent, secret, and setting from this Mac, then Autowright quits.
@@ -1153,7 +1153,7 @@ non-dismissable — no close button, no backdrop-click, no Escape (it is not the
 `Modal`, which bakes both in) — so nothing in the window is reachable while data is being
 erased; it still enters and exits on the §14 fade tokens like any two-way surface. The
 row button reads "Resetting…" (§9 busy spinner) beneath it. Then, per the IPC result:
-busy (live execution) → the overlay closes, toast "An automation is executing — reset
+busy (live execution) → the overlay closes, toast "An automation is executing. Reset
 when it finishes." and the row resets; error → overlay closes, toast the error text, row
 resets; success → the overlay stays up until the app quits (§3 reset flow: no relaunch,
 and the next launch runs §10 onboarding as on a fresh install; the service registration,
