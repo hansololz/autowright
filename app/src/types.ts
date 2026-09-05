@@ -277,6 +277,7 @@ export interface Execution {
   params?: ParamDef[]
   triggerPayload?: TriggerPayload | null
   workspace?: string  // §4.5: the execution's workspace dir — §7 Finder link
+  logs?: string  // §4.5: the execution's logs dir — §7 LOGS pane reveal button
 }
 
 export interface Agent {

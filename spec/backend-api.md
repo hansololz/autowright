@@ -454,8 +454,8 @@ remain plain dicts (§2).
   above it; one without the other answers 422 (never a silent default - the same rule as the
   log route's step/attempt pair) ·
   `GET /executions/{id}` (steps
-  with attempts + params + error + result + `triggerPayload` (§4.5) — logs are lazy, never
-  inline) ·
+  with attempts + params + error + result + `triggerPayload` + the `workspace` / `logs` dir
+  paths (§4.5) — logs are lazy, never inline) ·
   `GET /executions/{id}/logs?step=&attempt=&tail=` → `{ lines: [{time, kind, sequence, text}] }` — both
   `step` and `attempt`
   select that step attempt's file, neither selects `logs/execution.ndjson`, one without the

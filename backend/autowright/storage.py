@@ -2237,6 +2237,8 @@ class Store:
             out["result"] = self.result_json(h)
             # §4.5: full-record-only — backs the §7 "Show workspace in Finder" link
             out["workspace"] = str(self.exec_dir(h["id"]) / "workspace")
+            # §4.5: full-record-only — backs the §7 LOGS pane's "Show logs in Finder"
+            out["logs"] = str(self.exec_dir(h["id"]) / "logs")
             # §4.5: a list — display surfaces join it themselves.
             out["redactedSecrets"] = f["redacted_secrets"] or None
             out["params"] = f.get("params", [])

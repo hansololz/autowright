@@ -788,6 +788,9 @@ steps: [{ name, file, status, duration, attempts: [{ number, status, duration, s
 result: result object | null
 workspace: string — full-record-only: absolute path of the execution's `workspace/` dir (§5),
   backing the §7 workspace link ("Show workspace in Finder", §4.9 Show-in-Finder rule)
+logs: string — full-record-only: absolute path of the execution's `logs/` dir (§5), backing
+  the §7 LOGS pane's "Show logs in Finder" button (§4.9 Show-in-Finder rule; the dir exists
+  from record creation, so the button never has to guess)
 redactedSecrets: secret names redacted in logs (a list) | null when none — display surfaces join it
 params: the execution's snapshot of the automation's param definitions + resolved values — the
   §4.2 value-merged serialization, taken at execution start; stored in execution.yaml (§5),
@@ -818,7 +821,8 @@ agentPgids: int list — on-disk only (never in list/full JSON), default empty: 
 ```
 
 Logs are not part of the record payload: they live as per-step-attempt NDJSON files in the
-execution directory (§5) and are fetched lazily per selected step/attempt (§19).
+execution directory (§5) and are fetched lazily per selected step/attempt (§19); the record
+carries only the `logs` dir path above, so the §7 pane can reveal the files themselves.
 
 Result object:
 ```

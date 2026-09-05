@@ -682,7 +682,9 @@ def test_execution_and_execution_pages(client):
     assert e["status"] == "succeeded"
     assert e["result"]["chip"] == "All good"
     assert e["result"]["chipStatus"] == "ok"  # served from the execution header
-    assert "logs" not in e  # §19: logs are lazy, never inline
+    # §19: logs are lazy, never inline — `logs` is the §4.5 logs-dir path, not lines
+    assert isinstance(e["logs"], str) and e["logs"].endswith("logs")
+    assert not any(isinstance(s.get("logs"), list) for s in e["steps"])
     assert [s["status"] for s in e["steps"]] == ["succeeded", "succeeded"]
     assert all(len(s["attempts"]) == 1 for s in e["steps"])
     # §19 lazy log endpoint: per step attempt, and the execution log
@@ -3155,6 +3157,9 @@ def test_exec_full_workspace_path_and_redact_list(client):
     assert full["workspace"] == str(store.exec_dir(h["id"]) / "workspace")
     import os
     assert os.path.isabs(full["workspace"])
+    # §4.5: the logs dir path beside it — the §7 pane's "Show logs in Finder"
+    assert full["logs"] == str(store.exec_dir(h["id"]) / "logs")
+    assert os.path.isdir(full["logs"])
     # §4.5: redact is a LIST — display surfaces join it themselves
     assert full["redactedSecrets"] == ["MY_TOKEN", "OTHER_KEY"]
 

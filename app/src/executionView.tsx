@@ -7,6 +7,7 @@
 // controls to the pane (`toolbarRight`) and a rail header of its own.
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { FindBar, useFind } from './find'
+import { usePlatformCopy } from './platformCopy'
 import { LOG_TAIL, logKey, useStore } from './store'
 import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea } from './ui'
 import type { Execution, ExecutionStep, LogLine } from './types'
@@ -156,6 +157,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   // execution.
   const execLogs = useStore((s) => s.execLogs)
   const loadExecLogs = useStore((s) => s.loadExecLogs)
+  const copy = usePlatformCopy()
   const e = full ?? summary
   const steps = full?.steps ?? []
   const executing = e?.status === 'executing'
@@ -392,6 +394,17 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
             {/* the 26 px icon buttons overhang the header's 8 px padding so the
                 pane header keeps the rail header's 38 px height (hairlines align) */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', margin: modal ? '0 0 0 4px' : '-4px 0 -4px 4px' }}>
+              {/* §7 reveal button: the execution's logs/ dir (§4.5 `logs`) — the
+                  truncation note's "full log on disk", one click away */}
+              <button
+                className="ad-btn-icon"
+                aria-label={`Show logs in ${copy.fileManager}`}
+                title={`Show logs in ${copy.fileManager}`}
+                disabled={!full.logs}
+                onClick={() => { if (full.logs) void window.autowright?.revealPath(full.logs) }}
+              >
+                <i className="fa-regular fa-folder-open" />
+              </button>
               <button className="ad-btn-icon" aria-label="Find in log" aria-pressed={find.open} onClick={find.show}>
                 <i className="fa-solid fa-magnifying-glass" />
               </button>

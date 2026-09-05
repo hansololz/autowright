@@ -626,6 +626,18 @@ describe('execution page LOGS pane header controls + find in log (§7)', () => {
   const btn = (name: string) => screen.getByRole('button', { name }) as HTMLButtonElement
   const marks = () => Array.from(document.querySelectorAll('mark')).map((m) => `${m.textContent}:${m.getAttribute('data-match')}`)
 
+  it('the reveal button opens the record\'s logs dir through reveal-path (§7)', () => {
+    seed()
+    const revealPath = vi.fn(() => Promise.resolve())
+    ;(window as unknown as { autowright: Record<string, unknown> }).autowright.revealPath = revealPath
+    storeMod.useStore.setState({ executionFull: { e1: { ...storeMod.useStore.getState().executionFull.e1, logs: '/data/executions/e1/logs' } } })
+    render(<ExecutionPage />)
+    const reveal = btn('Show logs in Finder')
+    expect(reveal.disabled).toBe(false)
+    fireEvent.click(reveal)
+    expect(revealPath).toHaveBeenCalledWith('/data/executions/e1/logs')
+  })
+
   it('the header counts the loaded log\'s lines, singular at one', () => {
     seed()
     render(<ExecutionPage />)

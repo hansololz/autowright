@@ -301,7 +301,13 @@ lines here."
 controls, in the same order and with the same primitives, so a log reads like a script: a faint
 mono "`<n>` lines" count of the loaded log ("1 line" in the singular; the count covers the kept
 tail under the 2000-line cap, and is absent while the record is still loading), then a control
-cluster of `.ad-btn-icon` buttons — a find button (`fa-magnifying-glass`, "Find in log",
+cluster of `.ad-btn-icon` buttons — first a **reveal button** (`fa-regular fa-folder-open` — the
+outlined weight, so the glyph carries the same thin stroke as the magnifier and chevrons beside
+it, unlike the solid folder on the page's ghost reveal buttons — labeled
+"Show logs in Finder" — the per-OS §9 phrase, "Show logs in Explorer" / "Show logs in file
+manager") that opens the execution's §5 `logs/` dir (the §4.5 `logs` path) through the §9
+`reveal-path` IPC, so the truncation note's "full log on disk" is one click away and a user
+can hand the raw NDJSON files to someone; then a find button (`fa-magnifying-glass`, "Find in log",
 `aria-pressed` while the find bar is open) and previous / next log chevrons (`fa-chevron-left` /
 `-right`, "Previous log" / "Next log") that move the selection one rail row through the rail's
 order (Setup log, then the steps) exactly as the ← / → keys do, disabled at the ends and while
