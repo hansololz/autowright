@@ -1,20 +1,18 @@
-// Executions list (§7): every execution across all automations. The All
-// filter stacks Executing and Queued (§6 firing queue) sections above Finished;
-// every other segment shows exactly one table — Executing/Queued their live
-// rows, a terminal segment that status's finished rows. The store holds only
-// the §19 window (live rows plus the newest finished page); the terminal
-// filters and the pager bring deeper history in via GET /executions.
+// Executions list (§7): every execution across all automations, stacked as
+// Executing and Queued (§6 firing queue) sections above Finished. The store
+// holds only the §19 window (live rows plus the newest finished page); the
+// §7 filter modal — statuses, automations, a started-time range — and the
+// pager bring deeper history in via GET /executions. Every filter is one
+// predicate applied server-side and to the window's rows alike.
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
-import { Badge, EmptyNotice, Eyebrow, HeaderActions, PageTitle, PULSE, waitedLabel } from '../ui'
+import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageTitle, PULSE, waitedLabel } from '../ui'
 import type { Execution } from '../types'
-
-// §7: the sections' own order — the live segments carry the section names.
-// Labels are the §4.6 words capitalized ("Executing", "Queued"), then the five
-// terminal statuses.
-const FILTERS = ['All', 'Executing', 'Queued', 'Succeeded', 'Failed', 'Cancelled', 'Skipped', 'Interrupted'] as const
-type Filter = (typeof FILTERS)[number]
+import FilterModal, {
+  DEFAULT_FILTERS, LIVE_STATUSES, activeCount, filtersActive, resolveRange, statusLabel, timeLabel,
+} from './FilterModal'
+import type { ExecutionFilters } from './FilterModal'
 
 const GRID = '2fr 1.1fr .8fr .6fr 1fr'
 
@@ -108,9 +106,39 @@ const byCanonicalOrder = (a: Execution, b: Execution) =>
 export default function ExecutionsList() {
   const executions = useStore((s) => s.executions)
   const executionsTotal = useStore((s) => s.executionsTotal)
+  const automations = useStore((s) => s.automations)
   const showToast = useStore((s) => s.showToast)
   const go = useStore((s) => s.go)
-  const [filt, setFilt] = useState<Filter>('All')
+  // §7 filters: view state like the pager — reset on unmount, never stored.
+  const [filters, setFilters] = useState<ExecutionFilters>(DEFAULT_FILTERS)
+  const [modalOpen, setModalOpen] = useState(false)
+  const filtered = filtersActive(filters)
+  // §7: one predicate, the same on the server and over the window's rows —
+  // status ∈ selection (when any), automation id ∈ selection (when any),
+  // startedMs within the inclusive bounds. Presets resolve against the clock
+  // at every use.
+  const range = resolveRange(filters.time, Date.now())
+  const selectedStatuses = new Set<string>(filters.statuses)
+  const selectedIds = new Set(filters.automations)
+  const matches = (e: Execution) =>
+    (selectedStatuses.size === 0 || selectedStatuses.has(e.status)) &&
+    (selectedIds.size === 0 || (e.automationId !== null && selectedIds.has(e.automationId))) &&
+    (range.from === undefined || e.startedMs >= range.from) &&
+    (range.to === undefined || e.startedMs <= range.to)
+  // §7: the Finished section exists only while the status selection is empty
+  // or names a terminal status — live statuses alone render no table and
+  // fetch nothing.
+  const terminalSelected = filters.statuses.filter((s) => !LIVE_STATUSES.includes(s))
+  const hasFinished = filters.statuses.length === 0 || terminalSelected.length > 0
+  // §19 query for every fetch: each selected terminal status (`finished` =
+  // every terminal status when none is selected) plus the other dimensions.
+  const query = {
+    status: terminalSelected.length > 0 ? terminalSelected : 'finished',
+    ...(filters.automations.length > 0 ? { automation: filters.automations } : {}),
+    ...(range.from !== undefined ? { startedFromMs: range.from } : {}),
+    ...(range.to !== undefined ? { startedToMs: range.to } : {}),
+  }
+  const filterKey = JSON.stringify(filters)
   // §7 fetched pages and the page number: view state only — reset on unmount
   // and on every filter change. `serverTotal` is the current filter's match
   // count from the last fetch (null until one lands).
@@ -120,52 +148,50 @@ export default function ExecutionsList() {
   const [busy, setBusy] = useState(false)
   const fetchSeq = useRef(0)
 
+  // §7: the filter applies to every section — the live rows filter
+  // client-side (the window always holds every live row, so they never fetch).
   const executing = executions
-    .filter((e) => e.status === 'executing')
+    .filter((e) => e.status === 'executing' && matches(e))
     .sort((a, b) => b.startedMs - a.startedMs)
   // §6 firing queue: oldest wait first — the drain order, so the next one to
   // run reads top.
   const queued = executions
-    .filter((e) => e.status === 'queued')
+    .filter((e) => e.status === 'queued' && matches(e))
     .sort((a, b) => (a.queuedMs || a.startedMs) - (b.queuedMs || b.startedMs))
 
-  // §7: the live segments read the window directly; only All and the terminal
-  // segments deal in finished rows (and only those ever fetch).
-  const liveSegment = filt === 'Executing' || filt === 'Queued'
-  const matchesFilter = (e: Execution) =>
-    e.status !== 'queued' && e.status !== 'executing' &&
-    (filt === 'All' || e.status === filt.toLowerCase())
+  const matchesFinished = (e: Execution) =>
+    e.status !== 'queued' && e.status !== 'executing' && hasFinished && matches(e)
   // §7 merge: fetched pages join the live window, window wins on an id both
   // hold (it is fresher — events land there), in the canonical order.
-  const windowFinished = executions.filter(matchesFilter)
+  const windowFinished = executions.filter(matchesFinished)
   const windowIds = new Set(windowFinished.map((e) => e.id))
-  const finished = [...windowFinished, ...fetched.filter((e) => !windowIds.has(e.id) && matchesFilter(e))]
+  const finished = [...windowFinished, ...fetched.filter((e) => !windowIds.has(e.id) && matchesFinished(e))]
     .sort(byCanonicalOrder)
 
-  // §7: a terminal filter fetches its own first page — the window may hold
-  // only a slice of that status (it shows its matching rows while this is in
+  // §7: a filter fetches its own first Finished page — the window may hold
+  // only a slice of the matches (it shows its matching rows while this is in
   // flight, but never the empty card — that means "the server answered
-  // empty", not "the answer hasn't arrived"). All needs no fetch (the window
-  // is its first page), and the live segments never fetch (the window always
-  // holds every live row).
+  // empty", not "the answer hasn't arrived"). Unfiltered, the window is the
+  // first page and nothing fetches; a live-only status selection has no
+  // Finished section to fetch for.
   const [firstFetchDone, setFirstFetchDone] = useState(true)
   useEffect(() => {
     const n = ++fetchSeq.current
     setFetched([])
     setServerTotal(null)
     setPage(0)
-    if (filt === 'All' || filt === 'Executing' || filt === 'Queued') {
+    if (!filtered || !hasFinished) {
       setFirstFetchDone(true)
       return
     }
     setFirstFetchDone(false)
-    void api.listExecutions({ status: filt.toLowerCase(), limit: PAGE }).then((r) => {
+    void api.listExecutions({ ...query, limit: PAGE }).then((r) => {
       if (n !== fetchSeq.current) return
       setFetched(r.executions)
       setServerTotal(r.total)
     }, (err: Error) => { if (n === fetchSeq.current) showToast(err.message) })
       .finally(() => { if (n === fetchSeq.current) setFirstFetchDone(true) })
-  }, [filt])
+  }, [filterKey])
 
   // §7 absorption: a /state refresh replaces the window wholesale, and new
   // finishes push old rows out of it — a row that leaves the window
@@ -198,16 +224,16 @@ export default function ExecutionsList() {
     return () => clearInterval(t)
   }, [anyQueued])
 
-  // Labels appear as soon as the page holds more than one section — and the
-  // three-section stack belongs to the All filter alone (§7).
-  const labelled = filt === 'All' && (executing.length > 0 || queued.length > 0)
+  // Labels appear as soon as the page holds more than one section (§7).
+  const liveSections = (executing.length > 0 ? 1 : 0) + (queued.length > 0 ? 1 : 0)
+  const labelled = liveSections + (hasFinished ? 1 : 0) > 1
 
-  // §7 pager: the filter's match total sizes the readout. All ALWAYS derives
-  // its total from the pill count minus live rows — executionsTotal is trued
-  // up by every /state refresh, while a fetch's serverTotal freezes at fetch
-  // time (pinning it would strand the last page's newest rows behind a
-  // disabled Next). Terminal filters have only their fetches to go by.
-  const total = filt === 'All'
+  // §7 pager: the filter's match total sizes the readout. Unfiltered, the
+  // total ALWAYS derives from the pill count minus live rows — executionsTotal
+  // is trued up by every /state refresh, while a fetch's serverTotal freezes
+  // at fetch time (pinning it would strand the last page's newest rows behind
+  // a disabled Next). A filter has only its fetches to go by.
+  const total = !filtered
     ? Math.max(0, executionsTotal - executing.length - queued.length)
     : (serverTotal ?? finished.length)
   // Clamp the page when the total shrinks beneath it (a retention sweep, a
@@ -230,8 +256,7 @@ export default function ExecutionsList() {
     const n = fetchSeq.current
     setBusy(true)
     void api.listExecutions({
-      // §19: `finished` = any terminal status — the All filter's page query.
-      status: filt === 'All' ? 'finished' : filt.toLowerCase(),
+      ...query,
       limit: PAGE,
       before: { startedMs: last.startedMs, id: last.id },
     }).then((r) => {
@@ -243,102 +268,114 @@ export default function ExecutionsList() {
       .finally(() => setBusy(false))
   }
 
+  // §7 filter line: one chip per selected status, per selected automation,
+  // one for the time range, then Clear filters.
+  const nameOf = (id: string) => automations.find((a) => a.id === id)?.name ?? id.slice(0, 8)
+  const timeChip = timeLabel(filters.time)
+  const count = activeCount(filters)
+
+  // §7 empty copy: unfiltered, the page's own words; under any filter, one
+  // card for every case.
+  const emptyTitle = filtered ? 'No matching executions'
+    : labelled ? 'No finished executions yet' : 'No executions yet'
+  const emptyBody = filtered ? 'Executions matching these filters will appear here.'
+    : labelled ? 'Finished executions will appear here.'
+      : 'Execute an automation — every execution will appear right here.'
+  // §7: a filter that leaves no section with rows shows the one card as the
+  // whole body — but never while its first fetch is still on the wire.
+  const nothing = liveSections === 0 && finished.length === 0
+
   return (
     <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '26px 30px 70px' }}>
+      {modalOpen && (
+        <FilterModal
+          filters={filters}
+          onApply={(f) => setFilters(f)}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
       <PageTitle
+        style={filtered ? { marginBottom: 12 } : undefined}
         right={
           <HeaderActions>
-            <div className="ad-seg" role="group" aria-label="Filter executions">
-              {FILTERS.map((f) => (
-                <button
-                  key={f}
-                  className="ad-seg-btn"
-                  aria-pressed={filt === f}
-                  onClick={() => setFilt(f)}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
+            <BtnGhost onClick={() => setModalOpen(true)} title="Filter by status, automation, and start time">
+              {count > 0 ? `Filter · ${count}` : 'Filter'}
+            </BtnGhost>
           </HeaderActions>
         }
       >
         Executions
       </PageTitle>
+      {filtered && (
+        <div
+          data-testid="executions-filter-line"
+          style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 20 }}
+        >
+          {filters.statuses.map((s) => <MetaChip key={s}>{statusLabel(s)}</MetaChip>)}
+          {filters.automations.map((id) => <MetaChip key={id}>{nameOf(id)}</MetaChip>)}
+          {timeChip && <MetaChip>{timeChip}</MetaChip>}
+          <button className="ad-btn-text dim" onClick={() => setFilters(DEFAULT_FILTERS)} style={{ marginLeft: 4 }}>
+            Clear filters
+          </button>
+        </div>
+      )}
 
-      {filt === 'All' && executing.length > 0 && (
-        <>
-          <Eyebrow style={sectionLabel}>EXECUTING</Eyebrow>
-          <Table rows={executing} go={go} />
-        </>
-      )}
-      {filt === 'All' && queued.length > 0 && (
-        <>
-          <Eyebrow style={{ ...sectionLabel, marginTop: executing.length > 0 ? 26 : 0 }}>QUEUED</Eyebrow>
-          <Table rows={queued} go={go} queued />
-        </>
-      )}
-      {liveSegment ? (
-        // §7 live segments: one table, no section label, never fetched or
-        // paged — the window always holds every live row.
-        (filt === 'Executing' ? executing : queued).length === 0 ? (
-          <EmptyNotice
-            title={`No ${filt.toLowerCase()} executions`}
-            body="Executions matching this filter will appear here."
-          />
-        ) : (
-          <Table
-            rows={filt === 'Executing' ? executing : queued}
-            go={go}
-            queued={filt === 'Queued'}
-          />
-        )
+      {nothing ? (
+        firstFetchDone ? <EmptyNotice title={emptyTitle} body={emptyBody} /> : null
       ) : (
         <>
-          {labelled && <Eyebrow style={{ ...sectionLabel, marginTop: 26 }}>FINISHED</Eyebrow>}
-          {/* §7: no empty card while the segment's first fetch is on the
-            * wire — the card means the server answered empty. */}
-          {finished.length === 0 && !firstFetchDone ? null
-          : finished.length === 0 ? (
-            <EmptyNotice
-              title={filt !== 'All' ? `No ${filt.toLowerCase()} executions`
-                : labelled ? 'No finished executions yet' : 'No executions yet'}
-              body={filt === 'All' && !labelled
-                ? 'Execute an automation — every execution will appear right here.'
-                : filt === 'All'
-                  ? 'Finished executions will appear here.'
-                  : 'Executions matching this filter will appear here.'}
-            />
-          ) : (
+          {executing.length > 0 && (
             <>
-              <Table rows={visible} go={go} />
-              {/* §7 pager: only when the total exceeds one page — a short
-                * table looks exactly as it did before paging existed. */}
-              {total > PAGE && (
-                <div
-                  data-testid="executions-pager"
-                  style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 12 }}
-                >
-                  <button
-                    className="ad-btn-text dim"
-                    disabled={p === 0}
-                    onClick={() => setPage(p - 1)}
-                  >
-                    Prev
-                  </button>
-                  <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>·</span>
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-                    {`${(p * PAGE + 1).toLocaleString('en-US')}–${(p * PAGE + visible.length).toLocaleString('en-US')} of ${total.toLocaleString('en-US')}`}
-                  </span>
-                  <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>·</span>
-                  <button
-                    className="ad-btn-text dim"
-                    disabled={busy || p * PAGE + visible.length >= total}
-                    onClick={next}
-                  >
-                    Next
-                  </button>
-                </div>
+              {labelled && <Eyebrow style={sectionLabel}>EXECUTING</Eyebrow>}
+              <Table rows={executing} go={go} />
+            </>
+          )}
+          {queued.length > 0 && (
+            <>
+              {labelled && <Eyebrow style={{ ...sectionLabel, marginTop: executing.length > 0 ? 26 : 0 }}>QUEUED</Eyebrow>}
+              <Table rows={queued} go={go} queued />
+            </>
+          )}
+          {hasFinished && (
+            <>
+              {labelled && <Eyebrow style={{ ...sectionLabel, marginTop: liveSections > 0 ? 26 : 0 }}>FINISHED</Eyebrow>}
+              {/* §7: no empty card while the first fetch is on the wire — the
+                * card means the server answered empty. */}
+              {finished.length === 0 && !firstFetchDone ? null
+              : finished.length === 0 ? (
+                <EmptyNotice title={emptyTitle} body={emptyBody} />
+              ) : (
+                <>
+                  <Table rows={visible} go={go} />
+                  {/* §7 pager: only when the total exceeds one page — a short
+                    * table looks exactly as it did before paging existed. */}
+                  {total > PAGE && (
+                    <div
+                      data-testid="executions-pager"
+                      style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 12 }}
+                    >
+                      <button
+                        className="ad-btn-text dim"
+                        disabled={p === 0}
+                        onClick={() => setPage(p - 1)}
+                      >
+                        Prev
+                      </button>
+                      <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>·</span>
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                        {`${(p * PAGE + 1).toLocaleString('en-US')}–${(p * PAGE + visible.length).toLocaleString('en-US')} of ${total.toLocaleString('en-US')}`}
+                      </span>
+                      <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>·</span>
+                      <button
+                        className="ad-btn-text dim"
+                        disabled={busy || p * PAGE + visible.length >= total}
+                        onClick={next}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

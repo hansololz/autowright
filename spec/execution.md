@@ -405,22 +405,91 @@ in Executing because their columns differ and because "waiting on a slot" is a d
 from "executing now". With nothing live or queued
 the page stays a single unlabeled table; as soon as either section exists, every rendered
 section gets a small mono label (EXECUTING / QUEUED / FINISHED) and an empty Finished section
-shows the filter's empty-state card. That card's title: "No `<filter>` executions" ("No
-succeeded executions", "No executing executions" - the filter name lowercased) under a
-filter; on All, "No finished
-executions yet" when sections are labelled, else "No executions yet". Body: "Executions
-matching this filter will appear here." under a filter; on All, "Finished executions will
-appear here." when labelled, else "Execute an automation — every execution will appear
-right here." The status filter is the page title's segmented control: **All · Executing ·
-Queued · Succeeded · Failed · Cancelled · Skipped · Interrupted** - single-select, in the
-sections' own order. The three-section stack belongs to **All** alone; every other segment
-shows exactly one table with no sections stacked above it (and no mono section label - a
-single table needs none). A terminal segment shows that status's finished rows. **Executing**
-shows just the `executing` rows (normal columns) and **Queued** just the `queued` rows (its
-own columns, below); segment labels are the section names, which are the §4.6 words
-capitalized ("Executing", "Queued") - execution terminology everywhere, never "Running" or
-"run" wording on this page. Both live segments read entirely from the §19 window - every
-live row always rides it - so neither ever fetches, pages, or renders the pager. The Queued
+shows the empty-state card. That card's title with no filter applied: "No finished
+executions yet" when sections are labelled, else "No executions yet"; body "Finished
+executions will appear here." when labelled, else "Execute an automation — every execution
+will appear right here." Under any filter (status, automation, or time) the card reads "No
+matching executions" / "Executions matching these filters will appear here." - and when a
+filter leaves no section with rows at all, that one card is the page's whole body. Section
+labels are the §4.6 words capitalized ("Executing", "Queued") - execution terminology
+everywhere, never "Running" or "run" wording on this page. The live sections read entirely
+from the §19 window - every live row always rides it - so neither ever fetches, pages, or
+renders the pager. The page's only filter control is the **Filter modal** below: there is
+no segmented control (one lived in the title until 2026-09-06; it could only ever show a
+single status and duplicated the modal's STATUS section, so it went).
+
+**Filter modal.** A quiet **Filter** button (`BtnGhost`, alone in the title's
+`HeaderActions` right slot) opens the **Filter executions** modal (`FilterModal.tsx`; `Modal`,
+width 560, standard §14 anatomy: title 15/600 "Filter executions", subtitle "Narrow the
+list. Filters stay until you clear them or leave the page.", `Eyebrow` sections, footer
+row). It holds the page's three filter dimensions together, one section each, top to
+bottom:
+- **STATUS** - the §4.6 vocabulary as **multi-select** cells, in the sections' own order:
+  Executing · Queued · Succeeded · Failed · Cancelled · Skipped · Interrupted, a
+  **four-column** grid (two rows, the second holding three) inside an `.ad-card`; each cell
+  is a whole-cell `.ad-btn-bare .ad-hover-row` button with a `CheckBox`, `role="checkbox"`
+  + `aria-checked`, `10px 12px`; cells carry a `--hairline-dim` divider below them except on
+  the grid's last row, and to their left except in the first column - the matrix reads as
+  cells. No cell checked means **every** status. Any combination is allowed, live and
+  terminal together ("Executing" + "Failed" shows the executing section above a Finished
+  table of failed rows).
+- **AUTOMATIONS** - multi-select rows, one per automation the store holds (the §19 `/state`
+  list, sorted by name, case-insensitive), each a whole-row `CheckBox` button
+  (`role="checkbox"` + `aria-checked`), inside an `.ad-card` `ScrollArea` capped at 220 px;
+  above the rows, a `.ad-input compact` "Find an automation" field appears once the list
+  exceeds 8, narrowing the rows by case-insensitive name substring (checked rows stay
+  checked while hidden). No row checked means **any** automation. A row of a deleted
+  automation (§4.5 `automationDeleted`) cannot be selected here - the modal lists live
+  automations only - and a create-mode test row (null `automationId`) never matches a
+  non-empty selection. The empty card (no automations at all) reads `EmptyLine` "No
+  automations yet."
+- **STARTED** - single-choice preset cells in the same grid treatment, **three columns,
+  two rows**: **Any time · Last hour · Last 24 hours · Last 7 days · Last 30 days · Custom
+  range**. The grids are wide rather than tall on purpose: the modal's default state fits
+  inside the §14 84vh card cap on the §9 minimum window height (640) with up to four
+  automations, so Apply is in view without scrolling; past that the card scrolls inside
+  (the `Modal` primitive's scroller). Presets are
+  **relative**: they resolve against the clock at every use (each fetch, each render of the
+  client-side predicate), so "Last 24 hours" stays honest on a page left open. Custom range
+  reveals two native `type="datetime-local"` fields (`.ad-input compact mono`, `colorScheme:
+  dark`, 16 px apart under FROM / TO eyebrows, local time) below the grid; either may stay
+  empty (an open end), both empty reads as any time, and a FROM later than TO disables
+  Apply with the title "From must be before To". A custom TO covers the whole picked
+minute (a `datetime-local` value has minute resolution). Bounds are **inclusive** on the row's
+  §4.5 `startedMs` - the canonical time every table column shows (a queued row's `started`
+  is its queued stamp, so the range reads the QUEUED AT column for those).
+Footer (§14 modal row): a `.ad-btn-text dim` **Reset** on the left (`marginRight: auto`;
+returns every section to any status / any automation / any time inside the modal, not yet
+applied), then `BtnGhost` **Cancel** and `BtnPrimary` **Apply**. The modal edits a draft:
+Cancel, Escape and the backdrop discard it (no `guardClose` - a filter draft is cheap to
+redo), Apply commits it and closes. Filter state is page view state like the pager - held
+by the page component, reset on unmount, never stored or synced.
+
+**Filter line.** While any filter is applied, a filter line renders between the title and
+the first section (12 px under the title, flex-wrap, gap 6): one `MetaChip` per selected
+status (its label, in the sections' order), one per selected automation (its name), one
+for the time range (the preset's label, or a custom range as "From `<local datetime>`",
+"Until `<local datetime>`", "`<from>` – `<to>`" in `toLocaleString` short form), and a
+trailing `.ad-btn-text dim` **Clear filters** that drops every filter. The Filter button
+reads **"Filter · N"** while N of the three dimensions (status, automations, time) are
+active, plain "Filter" otherwise.
+
+**Filter semantics.** Every filter dimension is one predicate applied the same way in
+both places: the server (§19 `GET /executions`: `status` repeated once per selected
+terminal status, `automation` repeated once per selected id, `startedFromMs`/`startedToMs`
+for the range) and the client-side predicate over the window's rows (status ∈ selection
+when any; automation id ∈ selection when any; `startedMs` within the inclusive bounds).
+The predicate applies to **every section** - Executing and Queued filter the window's live
+rows client-side and still never fetch, and a section whose rows all fall outside the
+filter is simply not rendered. The **Finished** section exists only while the status
+selection is empty or names at least one terminal status; a selection of live statuses
+alone renders no Finished table and fetches nothing. The window is the Finished section's
+first page **only while no filter at all is applied**: with any filter applied, the page
+fetches its first Finished page (`?status=<each selected terminal status>` - or
+`status=finished` when the status selection is empty - `&automation=…&startedFromMs=…&limit=50`),
+because the window may hold only a slice of the matching rows, and its pager total is that
+fetch's `total` (not the pill count). Changing any dimension resets fetched pages and the
+page number. The Queued
 table swaps
 the last two columns for **QUEUED FOR** (elapsed since §4.5 `queuedMs`, ticking every second)
 and **QUEUED AT**; a queued row has no duration and has not started, so showing either would be
@@ -439,24 +508,24 @@ rides into the renderer whole. §19 `GET /state` ships a **window**, not the ful
 `queued` and `executing` header, the 50 newest finished headers (exactly one page), and
 `executionsTotal` (the count of every header the backend holds, §4.5 test rows included - the
 §9 sidebar pill's number). The page derives Executing, Queued, and the first Finished page from
-that window, so it opens with no fetch of its own. Deeper history and the terminal filters
-come from §19 `GET /executions` (the Executing and Queued segments never fetch - the window is
-already complete for live rows): picking a terminal filter fetches that status's newest page
-(`?status=<status>&limit=50`; while the fetch is in flight the section shows the window's
-matching rows). **Paging applies to finished rows alone**: the finished table renders one
-50-row page at a time behind a quiet text **pager** under it - under the FINISHED section on
-All (the EXECUTING and QUEUED sections above always render every live row in full), under the
-single table on a terminal segment. The pager reads **"Prev · 1–50 of 1,240 · Next"**: the
-range is the rows on screen, the total is the filter's server `total` (on All,
-`executionsTotal` minus the live rows), thousands-separated and trued up by every `/state`
-refresh; Prev and Next disable at their edges. The pager renders only when that total
+that window, so it opens with no fetch of its own. Deeper history and every filter come
+from §19 `GET /executions` (the Executing and Queued sections never fetch - the window is
+already complete for live rows): applying a filter fetches the matching newest finished page
+(the query in the filter semantics above; while the fetch is in flight the section shows
+the window's matching rows). **Paging applies to finished rows alone**: the finished table
+renders one 50-row page at a time behind a quiet text **pager** under it - under the
+FINISHED section (the EXECUTING and QUEUED sections above always render every live row in
+full). The pager reads **"Prev · 1–50 of 1,240 · Next"**: the range is the rows on screen,
+the total is the filter's server `total` (unfiltered, `executionsTotal` minus the live
+rows), thousands-separated and trued up by every `/state` refresh; Prev and Next disable at their edges. The pager renders only when that total
 exceeds 50 - one page needs no controls, and a short table looks exactly as it did before
 paging existed. Rows fetched so far accumulate in the page component, merged with the window
 by id (window wins - it is fresher) and sorted in the canonical order; the visible page is
 that merged finished list's slice at `page × 50`. **Prev** - and any page whose rows are
 already in hand - re-slices with no request; **Next** past the rows in hand fetches the next
 page with the keyset cursor - `beforeStartedMs`/`beforeId` from the last finished row in
-hand, `status=finished` when the filter is All - and advances only when it lands. A failed
+hand, the same filter query as the first page (`status=finished` when unfiltered) - and
+advances only when it lands. A failed
 page fetch surfaces the standard error toast and stays on the current page, pager in place.
 An execution finishing mid-view lands at the top of Finished via its §19 event and can push the
 current slice's rows down by one - the canonical order shared by window, keyset, and index
@@ -467,12 +536,12 @@ in the accumulated set, or the page the user is on silently loses it and every d
 shifts against the readout. The store's own window is re-trimmed after every execution
 event merge to exactly what `/state` would answer — every live header plus the 50 newest
 finished — so a long-lived window never accumulates one header per run; the accumulated
-set is what keeps deeper rows. A terminal segment whose first page fetch is still in flight
-never shows the "No <status> executions" empty card - the card means the server answered
+set is what keeps deeper rows. A filter whose first page fetch is still in flight
+never shows the "No matching executions" empty card - the card means the server answered
 empty, not that the answer hasn't arrived. Fetched pages and the page number are view state only,
-held by the page component: they reset when the page unmounts and whenever the filter
-changes (each filter change starts from its own fresh first page), and are never stored or
-synced. Executing and Queued are never capped or paged.
+held by the page component: they reset when the page unmounts and whenever any filter
+dimension changes (each filter change starts from its own fresh first page), and are never
+stored or synced. Executing and Queued are never capped or paged.
 Both are naturally small (`AUTOWRIGHT_QUEUE_TTL_S`, §15, caps a wait at 120 s by default) and
 both are the live rows the page exists to surface. The pill's `executionsTotal` is kept in
 step by the §19 execution events (a header id the store has never seen counts as one more)

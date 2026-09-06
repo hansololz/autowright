@@ -3540,10 +3540,16 @@ def test_executions_envelope_and_canonical_order(client):
 
 
 def test_executions_unknown_status_is_422(client):
-    """§19: an unknown status names the vocabulary, never an empty list."""
+    """§19: an unknown status names the vocabulary, never an empty list — and
+    one bad value among the repeats is still 422, never a silent narrowing to
+    the good ones."""
     r = client.get("/executions", params={"status": "bogus"})
     assert r.status_code == 422
     assert "finished" in r.json()["detail"] and "succeeded" in r.json()["detail"]
+
+    among = client.get("/executions", params=[("status", "failed"), ("status", "bogus")])
+    assert among.status_code == 422
+    assert "finished" in among.json()["detail"]
 
 
 def test_executions_finished_filter_excludes_live_rows(client):
@@ -3564,6 +3570,30 @@ def test_executions_finished_filter_excludes_live_rows(client):
     only_failed = client.get("/executions", params={"status": "failed"}).json()
     assert [e["id"] for e in only_failed["executions"]] == [failed["id"]]
     assert only_failed["total"] == 1
+
+
+def test_executions_status_filter_repeats_as_a_union(client):
+    """§19: `status` may repeat — the repeats are a union, matching rows in
+    any of them (the §7 filter modal's multi-select), and `finished` may sit
+    among them, widening the union to every terminal status."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Unioned", "mock")
+    done = _exec_at(a, 1)
+    failed = _exec_at(a, 2, status="failed")
+    queued = _exec_at(a, 3, status="queued")
+    running = _exec_at(a, 4, status="executing")
+
+    union = client.get("/executions", params=[("status", "failed"),
+                                              ("status", "executing")]).json()
+    assert [e["id"] for e in union["executions"]] == [running["id"], failed["id"]]
+    assert union["total"] == 2
+
+    # `finished` among the repeats adds every terminal status to the union
+    with_group = client.get("/executions", params=[("status", "queued"),
+                                                   ("status", "finished")]).json()
+    assert [e["id"] for e in with_group["executions"]] == [queued["id"], failed["id"], done["id"]]
+    assert with_group["total"] == 3
 
 
 def test_executions_limit_caps_rows_not_total(client):
@@ -3611,6 +3641,105 @@ def test_executions_keyset_cursor_pages_without_gaps(client):
                  # timestamp filter (every id compares > "") and re-emit ties
                  {"beforeStartedMs": last["startedMs"], "beforeId": ""}):
         assert client.get("/executions", params=half).status_code == 422
+
+
+def test_executions_automation_filter_repeats_and_skips_create_mode(client):
+    """§19: `automation` filters to automation ids and may repeat —
+    `automation=a&automation=b` matches rows of either (the §7 filter modal's
+    multi-select); a single value still narrows to one, and a create-mode test
+    row (no automation id) never matches a non-empty selection."""
+    from autowright.storage import store
+
+    first = store.create_automation(make_version(), "First", "mock")
+    second = store.create_automation(make_version(), "Second", "mock")
+    third = store.create_automation(make_version(), "Third", "mock")
+    one = _exec_at(first, 1)
+    two = _exec_at(second, 2)
+    _exec_at(third, 3)
+    # §4.5 create-mode test: no automation to filter by
+    create_mode = store.create_execution({"id": None, "name": "Draft"}, "test", None,
+                                         "test", steps=[], status="succeeded")
+    store.update_execution(create_mode)
+    assert client.get("/executions").json()["total"] == 4
+
+    both = client.get("/executions", params=[("automation", first["id"]),
+                                             ("automation", second["id"])]).json()
+    assert [e["id"] for e in both["executions"]] == [two["id"], one["id"]]
+    assert both["total"] == 2
+
+    just_one = client.get("/executions", params={"automation": first["id"]}).json()
+    assert [e["id"] for e in just_one["executions"]] == [one["id"]]
+    assert just_one["total"] == 1
+
+
+def test_executions_started_range_bounds_inclusively(client):
+    """§19: startedFromMs / startedToMs bound the row's §4.5 startedMs
+    **inclusively** — the §7 time range. Either works alone, and a bound
+    landing exactly on a row's stamp keeps that row."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Ranged", "mock")
+    early, middle, late = (_exec_at(a, minute) for minute in (1, 2, 3))
+    ms = {e["id"]: e["startedMs"] for e in client.get("/executions").json()["executions"]}
+
+    # both bounds sit exactly on a row's stamp — both those rows are in
+    both = client.get("/executions", params={"startedFromMs": ms[early["id"]],
+                                             "startedToMs": ms[middle["id"]]}).json()
+    assert [e["id"] for e in both["executions"]] == [middle["id"], early["id"]]
+    assert both["total"] == 2
+
+    from_only = client.get("/executions", params={"startedFromMs": ms[late["id"]]}).json()
+    assert [e["id"] for e in from_only["executions"]] == [late["id"]]
+    assert from_only["total"] == 1
+
+    to_only = client.get("/executions", params={"startedToMs": ms[early["id"]]}).json()
+    assert [e["id"] for e in to_only["executions"]] == [early["id"]]
+    assert to_only["total"] == 1
+
+
+def test_executions_started_range_composes_with_status_and_cursor(client):
+    """§19: every filter composes with every other by AND, and with the
+    keyset cursor — the §7 page sends the range alongside `status` and pages
+    inside it, with `total` the filtered match count throughout."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Composed", "mock")
+    oldest = _exec_at(a, 1)
+    fail_low = _exec_at(a, 2, status="failed")
+    _exec_at(a, 3)
+    fail_high = _exec_at(a, 4, status="failed")
+    newest = _exec_at(a, 5)
+    ms = {e["id"]: e["startedMs"] for e in client.get("/executions").json()["executions"]}
+    span = {"startedFromMs": ms[fail_low["id"]], "startedToMs": ms[fail_high["id"]]}
+
+    inside = client.get("/executions", params=span).json()
+    ids = [e["id"] for e in inside["executions"]]
+    assert oldest["id"] not in ids and newest["id"] not in ids
+    assert inside["total"] == 3
+
+    failed = client.get("/executions", params={**span, "status": "failed"}).json()
+    assert [e["id"] for e in failed["executions"]] == [fail_high["id"], fail_low["id"]]
+    assert failed["total"] == 2
+
+    page1 = client.get("/executions", params={**span, "status": "failed", "limit": 1}).json()
+    assert [e["id"] for e in page1["executions"]] == [fail_high["id"]]
+    assert page1["total"] == 2
+    page2 = client.get("/executions", params={
+        **span, "status": "failed", "limit": 1,
+        "beforeStartedMs": ms[fail_high["id"]], "beforeId": fail_high["id"]}).json()
+    assert [e["id"] for e in page2["executions"]] == [fail_low["id"]]
+    assert page2["total"] == 2          # the cursor never shrinks the count
+
+
+def test_executions_started_range_rejects_inverted_and_negative_bounds(client):
+    """§19: a from above the to answers 422 naming both parameters, and
+    either bound is an int ≥ 0."""
+    r = client.get("/executions", params={"startedFromMs": 2_000, "startedToMs": 1_000})
+    assert r.status_code == 422
+    assert "startedFromMs" in r.json()["detail"] and "startedToMs" in r.json()["detail"]
+
+    assert client.get("/executions", params={"startedFromMs": -1}).status_code == 422
+    assert client.get("/executions", params={"startedToMs": -1}).status_code == 422
 
 
 def test_state_executions_window_and_total(client, monkeypatch):

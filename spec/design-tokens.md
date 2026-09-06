@@ -151,11 +151,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   takes precedence over the hover state). `.ad-btn-bare` resets button chrome (no
   background/border/padding, inherited font/color/text-align, full-width) so clickable
   cards and rows can be real `<button>`s (§9 keyboard convention) while their surface class
-  (`.ad-card-click`, `.ad-hover-row`) keeps owning the visuals. `.ad-seg` is the segmented
-  filter group (hairline border, radius 8, overflow hidden) of `.ad-seg-btn` segments
-  (13 px, 7 px 14 px, hairline left divider between segments, `--bg-active` wash +
-  `--text` on the active segment via `aria-pressed`, `--t-hover` transition) — the
-  Executions All / Succeeded / Failed control; never hand-rolled from `.ad-btn-text`.
+  (`.ad-card-click`, `.ad-hover-row`) keeps owning the visuals. (There is no segmented
+  filter group any more: the Executions page's `.ad-seg` control was retired on 2026-09-06
+  for the §7 Filter modal; a future segmented filter is a new primitive, never hand-rolled
+  from `.ad-btn-text`.)
   **Checkbox** — one look everywhere, owned by a single `tokens.css` rule; there is no
   other checkbox rendering in the app (never the browser's native box, never a per-page
   glyph). Geometry: 15×15 px, radius 4, `1px solid var(--border-hover)` on a transparent

@@ -130,7 +130,7 @@ back as the next version.
 ```
 autowright automation execute <name> -f            # run now, stream logs
 autowright automation execute <name> --version v2  # or "draft"
-autowright execution list [-n 20] [--automation <name>] [--status failed]
+autowright execution list [-n 20] [--automation <name>]... [--status failed]... [--since 2026-09-01] [--until 2026-09-06T18:00]
 autowright execution show [<id>]                   # steps, error, result files (default: latest)
 autowright execution tail [<id>]                   # full logs (streams while live)
 autowright execution result [<id>] [file]          # list result files / print one to stdout

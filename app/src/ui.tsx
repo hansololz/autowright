@@ -953,7 +953,15 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
         maxHeight: '84vh', display: 'flex', flexDirection: 'column',
         ...cardStyle,
       }}>
-        <ScrollArea wrapStyle={{ minHeight: 0 }} style={{ maxHeight: '100%' }}>
+        {/* The wrap is itself a shrinkable flex column and the scroller a
+          * min-height-0 flex item: a percentage height against the card's
+          * auto-height wrap never resolved, so a modal taller than the cap
+          * used to paint its footer past the card's edge instead of
+          * scrolling (the §7 filter modal on a short window). */}
+        <ScrollArea
+          wrapStyle={{ minHeight: 0, display: 'flex', flexDirection: 'column' }}
+          style={{ height: 'auto', flex: '1 1 auto', minHeight: 0 }}
+        >
           {children(() => setClosing(true), closing)}
         </ScrollArea>
       </div>

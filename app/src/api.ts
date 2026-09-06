@@ -118,13 +118,20 @@ export const api = {
   // §19 executions query — §7 paging: status filter (a §4.6 status or
   // 'finished' = any terminal one), keyset cursor, envelope with the match
   // total (what sizes the pager readout).
+  // §19: `automation` and `status` repeat once per value (the §7 filter
+  // modal's multi-selects); `startedFromMs`/`startedToMs` are the inclusive
+  // §7 time range.
   listExecutions: (opts: {
-    automation?: string; status?: string; limit?: number
+    automation?: string | string[]; status?: string | string[]; limit?: number
+    startedFromMs?: number; startedToMs?: number
     before?: { startedMs: number; id: string }
   } = {}) => {
+    const many = (v: string | string[] | undefined) => v === undefined ? [] : Array.isArray(v) ? v : [v]
     const q = [
-      ...(opts.automation !== undefined ? [`automation=${encodeURIComponent(opts.automation)}`] : []),
-      ...(opts.status !== undefined ? [`status=${opts.status}`] : []),
+      ...many(opts.automation).map((id) => `automation=${encodeURIComponent(id)}`),
+      ...many(opts.status).map((s) => `status=${s}`),
+      ...(opts.startedFromMs !== undefined ? [`startedFromMs=${opts.startedFromMs}`] : []),
+      ...(opts.startedToMs !== undefined ? [`startedToMs=${opts.startedToMs}`] : []),
       ...(opts.limit !== undefined ? [`limit=${opts.limit}`] : []),
       ...(opts.before ? [`beforeStartedMs=${opts.before.startedMs}`, `beforeId=${opts.before.id}`] : []),
     ]

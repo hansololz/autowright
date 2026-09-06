@@ -348,7 +348,7 @@ is always rightmost, with one exception: an icon-only overflow ellipsis (⋯) si
 right edge, after the primary. At most one primary per header, and a list page's main create
 action is that primary (New automation, Add agent, Add secret). Icons appear only on stateful
 primaries (e.g. Execute now / Executing…) and icon-only buttons — text secondaries carry no
-icons. Filters (the Executions page's segmented All / Succeeded / Failed control) are not
+icons. Filters (the Executions page's §7 Filter button) are not
 actions and sit alone in the right slot.
 
 ### 9.1 Automations list

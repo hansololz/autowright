@@ -1872,6 +1872,65 @@ def test_cmd_execution_list_filters_and_limit(capsys):
     assert "[e1]" in out[1]
 
 
+def test_cmd_execution_list_repeats_the_status_filter(capsys):
+    """§20: --status repeats — each value rides as its own §19 `status` query
+    value, so rows in any of them match."""
+    gets = _auto_gets(**{"/executions?limit=20&status=failed&status=cancelled":
+                         {"executions": [dict(FULL_EXEC, id="e0")], "total": 1}})
+    _run(_RouteClient(gets), "execution", "list",
+         "--status", "failed", "--status", "cancelled")
+    assert "[e0]" in capsys.readouterr().out
+
+
+def test_cmd_execution_list_repeats_the_automation_filter(capsys):
+    """§20: --automation repeats — each reference resolves the usual way and
+    rides as its own §19 `automation` value, so the two ids match rows of
+    either."""
+    other = dict(FULL_AUTO, id="def45678-0000-0000-0000-000000000000", name="Weekly Digest")
+    gets = {"/automations": [FULL_AUTO, other],
+            f"/automations/{AUTO_ID}": FULL_AUTO, f"/automations/{other['id']}": other,
+            f"/executions?limit=20&automation={AUTO_ID}&automation={other['id']}":
+                {"executions": [dict(FULL_EXEC, id="e0")], "total": 1}}
+    _run(_RouteClient(gets), "execution", "list",
+         "--automation", "Daily Report", "--automation", "Weekly Digest")
+    assert "[e0]" in capsys.readouterr().out
+
+
+def test_cmd_execution_list_since_and_until_ride_as_the_inclusive_range():
+    """§20 --since / --until: a local YYYY-MM-DD or YYYY-MM-DDTHH:MM becomes
+    the inclusive §19 startedFromMs / startedToMs, and a bare date on --until
+    means the end of that day."""
+    from datetime import datetime
+
+    from autowright.cli import _local_stamp_ms
+
+    # local time, so the expectation is computed the same way rather than pinned
+    frm = int(datetime(2026, 9, 1, 0, 0).timestamp() * 1000)
+    until = int(datetime(2026, 9, 6, 23, 59, 59, 999_000).timestamp() * 1000)
+    assert _local_stamp_ms("2026-09-01", end_of_day=False) == frm
+    assert _local_stamp_ms("2026-09-06", end_of_day=True) == until
+
+    path = f"/executions?limit=20&startedFromMs={frm}&startedToMs={until}"
+    gets = _auto_gets(**{path: {"executions": [], "total": 0}})
+    _run(_RouteClient(gets), "execution", "list",
+         "--since", "2026-09-01", "--until", "2026-09-06")
+
+    # a minute-resolution value rides as exactly that minute on both ends
+    at = int(datetime(2026, 9, 6, 18, 30).timestamp() * 1000)
+    assert _local_stamp_ms("2026-09-06T18:30", end_of_day=True) == at
+    minute_path = f"/executions?limit=20&startedFromMs={at}&startedToMs={at}"
+    _run(_RouteClient(_auto_gets(**{minute_path: {"executions": [], "total": 0}})),
+         "execution", "list", "--since", "2026-09-06T18:30", "--until", "2026-09-06T18:30")
+
+
+def test_cmd_execution_list_rejects_a_malformed_since():
+    """§20: a value in neither accepted form is a usage error naming both."""
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(_auto_gets()), "execution", "list", "--since", "last tuesday")
+    assert ei.value.code != 0
+    assert "YYYY-MM-DD" in str(ei.value.code) and "YYYY-MM-DDTHH:MM" in str(ei.value.code)
+
+
 def test_cmd_execution_show_prints_trigger_message_error_and_result(capsys):
     gets = {"/executions": {"executions": [FULL_EXEC], "total": 1},
             f"/executions/{FULL_EXEC['id']}": FULL_EXEC}

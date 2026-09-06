@@ -298,22 +298,6 @@ textarea:disabled, input:disabled { opacity: .45; }
   font: inherit; color: inherit; text-align: left;
 }
 
-/* segmented filter group (§14 — Executions All / Succeeded / Failed) */
-.ad-seg {
-  display: inline-flex; align-items: stretch;
-  border: 1px solid var(--border-btn); border-radius: 8px; overflow: hidden;
-}
-.ad-seg-btn {
-  font: 500 13px var(--sans); color: var(--text-muted); padding: 7px 14px;
-  background: none; white-space: nowrap;
-  transition: color var(--t-hover) var(--ease-enter), background var(--t-hover) var(--ease-enter);
-}
-.ad-seg-btn + .ad-seg-btn { border-left: 1px solid var(--hairline); }
-.ad-seg-btn:hover:not(:disabled) { color: var(--text); }
-.ad-seg-btn[aria-pressed='true'] { color: var(--text); background: var(--bg-active); }
-/* the group clips its segments — keep the focus ring inside the clip */
-.ad-seg-btn:focus-visible { outline-offset: -2px; }
-
 /* inset focus ring for controls clipped by an overflow:hidden card (§9) */
 .ad-focus-inset:focus-visible { outline-offset: -2px; }
 

@@ -54,9 +54,14 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   accepts, with a `metavar` wherever the placeholder name isn't self-describing. Fixed
   vocabularies are **enumerated in the help itself**, never referenced by § number:
   `execution list --status` registers the §4.6 statuses plus the §19 `finished` group value
-  (any terminal status) as argparse `choices` (an unlisted value
+  (any terminal status) as argparse `choices` and repeats (each sent as one §19 `status`
+  value - rows in any of them match; an unlisted value
   is a usage error rather than a silently empty list — the §19 filter is an equality match, so
-  nothing outside the vocabulary could ever have matched; `-n` rides to the server as the §19
+  nothing outside the vocabulary could ever have matched); `--automation` repeats (each
+  resolved by the usual reference rules and sent as one §19 `automation` value), and
+  `--since` / `--until` take a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (`--until` with a
+  bare date means the end of that day) and ride as the inclusive §19
+  `startedFromMs` / `startedToMs` - a value in neither form is a usage error; `-n` rides to the server as the §19
   `limit`, so only the printed rows cross the wire, while reference resolution still reads
   the uncapped list — §19), `settings set` lists its keys with
   each one's value form, and `param set` lists the per-kind value forms. Every `<automation>`

@@ -443,14 +443,20 @@ remain plain dicts (§2).
   rendered from (the §4.3 entries, exactly as sourced for the prompt), so a re-attach
   apply can prove the base list that `triggers` ops index is still the one the agent saw
   (§11 — on any difference the ops are dropped, never applied to a changed list).
-- `GET /executions?automation=&status=&limit=&beforeStartedMs=&beforeId=` →
+- `GET /executions?automation=&status=&startedFromMs=&startedToMs=&limit=&beforeStartedMs=&beforeId=` →
   `{ executions, total }` (headers only — no steps; rows carry the §4.5 `triggerSender`),
   sorted in the §7 canonical order: `startedMs` desc, id asc on ties, the §5
   §7 canonical order (`startedMs` desc, `id` asc on ties — computed over the in-memory
   headers; the §5 `executions.db` index only seeds that set at startup). `automation`
-  filters to one automation id (exact).
-  `status` filters to one §4.6 execution status, or the literal `finished`, which matches
-  every terminal status (everything but `queued`/`executing`); an unknown value answers 422
+  filters to automation ids (exact) and **may repeat** - `automation=a&automation=b` matches
+  rows of either (the §7 filter modal's multi-select); a row with no automation id (a
+  create-mode test) never matches. `startedFromMs` / `startedToMs` (optional ints ≥ 0,
+  either alone or both) bound the row's `startedMs` **inclusively** - the §7 time range;
+  a from above the to answers 422 naming both parameters. Every filter composes with every
+  other by AND, and with the cursor.
+  `status` filters to §4.6 execution statuses and **may repeat** (`status=failed&status=executing`
+  matches rows in either); the literal `finished` matches every terminal status (everything
+  but `queued`/`executing`) and may sit among the repeats; an unknown value answers 422
   naming the vocabulary, never an empty list. `limit` (optional int ≥ 1; anything lower
   answers 422) caps the returned rows; omitted means every match - §20 reference resolution
   reads the uncapped list, while the §7 page always sends 50. `total` counts every match

@@ -1,14 +1,14 @@
-// Component tests for the §7 executions list: the three-section stack that
-// belongs to All alone (Executing / Queued / Finished), the Queued table's own
-// columns, and the drain order — a §6 queued firing must read top-down in the
-// order it will actually run. Every other segment shows exactly one table:
-// Executing and Queued their live rows straight out of the §19 window (never a
-// fetch), a terminal segment only that status's finished rows.
+// Component tests for the §7 executions list: the three-section stack
+// (Executing / Queued / Finished), the Queued table's own columns, and the
+// drain order — a §6 queued firing must read top-down in the order it will
+// actually run. The filter modal's STATUS selection is the page's only status
+// control: the live rows always read straight out of the §19 window (never a
+// fetch), while a terminal status fetches its own finished page.
 // ExecutionsList renders for real (happy-dom) with the store seeded and the
 // api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { Attempt, Execution } from '../src/types'
+import type { Attempt, Automation, Execution } from '../src/types'
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
@@ -67,10 +67,30 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
-// The filter buttons live in the header's segmented group — a row's status
-// badge carries the same words, so the group scopes the query.
-const filterButton = (label: string) =>
-  within(screen.getByRole('group', { name: 'Filter executions' })).getByText(label)
+// §7: the Filter modal is the page's only filter control — every status a
+// test applies goes through its STATUS grid.
+const openModal = () => {
+  fireEvent.click(screen.getByRole('button', { name: /^Filter/ }))
+  return screen.getByRole('dialog', { name: 'Filter executions' })
+}
+// The modal unmounts on its exit animation, which happy-dom never runs —
+// end it by hand after the footer button that closed it.
+const finishModalAnim = () => {
+  const dlg = screen.getByRole('dialog', { name: 'Filter executions' })
+  fireEvent.animationEnd(dlg.parentElement!)
+}
+const apply = (dlg: HTMLElement) => {
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Apply' }))
+  finishModalAnim()
+}
+// Check status cells in the modal's STATUS grid and apply — the whole flow
+// behind every status this file filters by.
+const applyStatuses = (...labels: string[]) => {
+  const dlg = openModal()
+  for (const label of labels) fireEvent.click(within(dlg).getByRole('checkbox', { name: label }))
+  apply(dlg)
+}
+const filterLine = () => screen.getByTestId('executions-filter-line')
 
 describe('executions list sections (§7)', () => {
   it('splits queued firings out of Executing into their own Queued section', () => {
@@ -135,7 +155,7 @@ describe('executions list sections (§7)', () => {
     expect(screen.getByText('Test')).toBeTruthy()
   })
 
-  it('hides the live rows under a terminal filter — that segment is one table of finished rows', async () => {
+  it('hides the live rows under a terminal status — one table of finished rows', async () => {
     seed([
       ex('e-run', { status: 'executing', duration: '', endedMs: 0 }),
       ex('e-wait', { status: 'queued', duration: '', endedMs: 0, queuedMs: NOW - 1_000 }),
@@ -144,9 +164,9 @@ describe('executions list sections (§7)', () => {
     ])
     render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Succeeded'))
+    applyStatuses('Succeeded')
     await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
-    expect(mockedApi.listExecutions).toHaveBeenCalledWith({ status: 'succeeded', limit: 50 })
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({ status: ['succeeded'], limit: 50 })
     // only the matching finished row survives — the live rows are not stacked above it
     expect(screen.getAllByTestId('execution-row').length).toBe(1)
     expect(screen.getByText('e-ok')).toBeTruthy()
@@ -160,9 +180,9 @@ describe('executions list sections (§7)', () => {
   })
 })
 
-// §7 live segments: Executing and Queued each show exactly one table read
-// straight out of the §19 window — no section label, no fetch, no paging.
-describe('executions list live segments (§7)', () => {
+// §7 live statuses: Executing or Queued alone shows exactly one table read
+// straight out of the §19 window — no Finished section, no fetch, no paging.
+describe('executions list live statuses (§7)', () => {
   const liveMix = () => [
     ex('e-run', { status: 'executing', duration: '2.0s', endedMs: 0 }),
     ex('q-new', { status: 'queued', duration: '', endedMs: 0, queuedMs: NOW - 2_000 }),
@@ -174,7 +194,7 @@ describe('executions list live segments (§7)', () => {
     seed(liveMix())
     render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Executing'))
+    applyStatuses('Executing')
     expect(screen.getAllByTestId('execution-row').length).toBe(1)
     expect(screen.getByText('e-run')).toBeTruthy()
     expect(screen.queryByText('q-old')).toBeNull()
@@ -189,11 +209,11 @@ describe('executions list live segments (§7)', () => {
     expect(mockedApi.listExecutions).not.toHaveBeenCalled()
   })
 
-  it('keeps the Queued segment\'s own columns and drain order, and never fetches', () => {
+  it('keeps the Queued table\'s own columns and drain order, and never fetches', () => {
     seed(liveMix())
     const { container } = render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Queued'))
+    applyStatuses('Queued')
     const rows = screen.getAllByTestId('execution-row')
     expect(rows.length).toBe(2)
     expect(screen.getByText('QUEUED FOR')).toBeTruthy()
@@ -208,34 +228,34 @@ describe('executions list live segments (§7)', () => {
     expect(mockedApi.listExecutions).not.toHaveBeenCalled()
   })
 
-  it('names the live segment in its empty state', () => {
+  it('reads the filtered empty card when a live status matches nothing', () => {
     seed([ex('e-run', { status: 'executing', duration: '', endedMs: 0 })])
     const { unmount } = render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Queued'))
-    expect(screen.getByText('No queued executions')).toBeTruthy()
-    expect(screen.getByText('Executions matching this filter will appear here.')).toBeTruthy()
+    applyStatuses('Queued')
+    expect(screen.getByText('No matching executions')).toBeTruthy()
+    expect(screen.getByText('Executions matching these filters will appear here.')).toBeTruthy()
     unmount()
 
     seed([ex('e-wait', { status: 'queued', duration: '', endedMs: 0, queuedMs: NOW - 1_000 })])
     render(<ExecutionsList />)
-    fireEvent.click(filterButton('Executing'))
-    expect(screen.getByText('No executing executions')).toBeTruthy()
+    applyStatuses('Executing')
+    expect(screen.getByText('No matching executions')).toBeTruthy()
     expect(mockedApi.listExecutions).not.toHaveBeenCalled()
   })
 })
 
-// §7 status filter: All, the two live segments, and the five §4.6 terminal
-// statuses. Picking a terminal filter fetches that status's own newest page
-// (§19), because the window may hold only a slice of it.
+// §7 status filter: the modal's STATUS grid holds the §4.6 vocabulary as
+// multi-select cells. Picking a terminal status fetches that status's own
+// newest page (§19), because the window may hold only a slice of it.
 describe('executions list status filter (§7)', () => {
-  it('renders All, the live segments, and the five terminal statuses in the sections\' order', () => {
+  it('offers the two live statuses and the five terminal ones in the sections\' order, with no All cell', () => {
     seed([ex('e-done')])
     render(<ExecutionsList />)
 
-    const group = screen.getByRole('group', { name: 'Filter executions' })
-    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual([
-      'All', 'Executing', 'Queued', 'Succeeded', 'Failed', 'Cancelled', 'Skipped', 'Interrupted',
+    const grid = within(openModal()).getByRole('group', { name: 'Status' })
+    expect(within(grid).getAllByRole('checkbox').map((b) => b.textContent)).toEqual([
+      'Executing', 'Queued', 'Succeeded', 'Failed', 'Cancelled', 'Skipped', 'Interrupted',
     ])
   })
 
@@ -250,21 +270,22 @@ describe('executions list status filter (§7)', () => {
     ])
     render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Failed'))
+    applyStatuses('Failed')
     await waitFor(() => expect(screen.getByText('e-fetch')).toBeTruthy())
-    expect(mockedApi.listExecutions).toHaveBeenCalledWith({ status: 'failed', limit: 50 })
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({ status: ['failed'], limit: 50 })
     expect(screen.getByText('e-win')).toBeTruthy()      // the window's matching row stays
     expect(screen.queryByText('e-ok')).toBeNull()       // a non-matching one does not
     expect(screen.getAllByTestId('execution-row').length).toBe(2)
   })
 
-  it('names the filter in the empty state when nothing matches', async () => {
+  it('reads the filtered empty card when nothing matches', async () => {
     seed([ex('e-done')])
     render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Cancelled'))
+    applyStatuses('Cancelled')
     await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
-    expect(screen.getByText('No cancelled executions')).toBeTruthy()
+    expect(screen.getByText('No matching executions')).toBeTruthy()
+    expect(screen.getByText('Executions matching these filters will appear here.')).toBeTruthy()
   })
 
   it('renders a fetched row the window already holds exactly once — the window wins', async () => {
@@ -275,7 +296,7 @@ describe('executions list status filter (§7)', () => {
     seed([ex('e-dup', { status: 'failed', automationName: 'Window copy' })])
     render(<ExecutionsList />)
 
-    fireEvent.click(filterButton('Failed'))
+    applyStatuses('Failed')
     await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
     expect(screen.getAllByTestId('execution-row').length).toBe(1)
     expect(screen.getByText('Window copy')).toBeTruthy()
@@ -431,7 +452,7 @@ describe('executions list finished paging (§7)', () => {
     // 165 headers minus the 115 live rows is exactly one page — no pager
     expect(screen.queryByTestId('executions-pager')).toBeNull()
 
-    fireEvent.click(filterButton('Executing'))
+    applyStatuses('Executing')
     expect(screen.getAllByTestId('execution-row').length).toBe(60)
     expect(screen.queryByTestId('executions-pager')).toBeNull()
     expect(mockedApi.listExecutions).not.toHaveBeenCalled()
@@ -441,6 +462,289 @@ describe('executions list finished paging (§7)', () => {
 // §7 log cap: the LOGS pane shows the last 2000 lines and says so when earlier
 // lines were dropped. Log sequences are gapless from 1 (§5), so a kept head past
 // 1 is the truncation signal.
+// §7 filter modal: the three dimensions (status, automations, started-time
+// range) edited as one draft and committed by Apply — the page's only filter
+// control. Every applied dimension puts its chips on the filter line under the
+// title, counts toward the Filter button's number, and rides as one predicate
+// on the server and the window's rows alike.
+describe('executions filter modal (§7)', () => {
+  const auto = (over: Partial<Automation> = {}): Automation => ({
+    id: 'a1', name: 'Alpha', description: '', version: 1, triggers: [], triggerChip: 'No triggers',
+    allTriggersOff: false, nextAtMs: null, instructions: '', notes: '', lastStatus: 'succeeded',
+    live: [], maxParallel: 1, maxQueued: 0, resultChip: null, resultStatus: null,
+    lastExecutionLabel: '', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
+    unresolvedReferences: {},
+    snapshotSettings: { preVersion: true, preClear: true, preRestore: true }, specMeta: '',
+    ...over,
+  })
+  const BETA = auto({ id: 'a2', name: 'Beta' })
+
+  const seedBoth = (executions: Execution[], automations: Automation[],
+                    executionsTotal = executions.length) =>
+    storeMod.useStore.setState({ page: 'executions', executions, executionsTotal, automations })
+
+  const automationRows = (dlg: HTMLElement) =>
+    within(within(dlg).getByRole('group', { name: 'Automations' }))
+
+  it('opens the three sections, and Cancel discards the draft', () => {
+    seedBoth([ex('e-done')], [auto(), BETA])
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    expect(within(dlg).getByText('STATUS')).toBeTruthy()
+    expect(within(dlg).getByText('AUTOMATIONS')).toBeTruthy()
+    expect(within(dlg).getByText('STARTED')).toBeTruthy()
+
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Beta' }))
+    fireEvent.click(within(dlg).getByRole('button', { name: 'Cancel' }))
+    finishModalAnim()
+
+    expect(screen.queryByRole('dialog', { name: 'Filter executions' })).toBeNull()
+    expect(screen.queryByTestId('executions-filter-line')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy()
+    expect(mockedApi.listExecutions).not.toHaveBeenCalled()
+  })
+
+  it('applies an automation: one fetch, a chip, a count, and the other rows gone', async () => {
+    seedBoth([
+      ex('e-alpha'),
+      ex('e-beta', { automationId: 'a2', automationName: 'Beta' }),
+    ], [auto(), BETA])
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Beta' }))
+    apply(dlg)
+
+    // §7: any applied filter fetches its own first page — the window may
+    // hold only a slice of the matches
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({
+      status: 'finished', limit: 50, automation: ['a2'],
+    })
+    expect(within(filterLine()).getByText('Beta')).toBeTruthy()
+    expect(within(filterLine()).getByText('Clear filters')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Filter · 1' })).toBeTruthy()
+    // the client-side predicate is the same one — the other automation's
+    // window row disappears
+    expect(screen.getAllByTestId('execution-row').length).toBe(1)
+    expect(screen.queryByText('e-alpha')).toBeNull()
+
+    fireEvent.click(within(filterLine()).getByText('Clear filters'))
+    expect(screen.queryByTestId('executions-filter-line')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy()
+    expect(screen.getAllByTestId('execution-row').length).toBe(2)
+    // unfiltered, the window is the first page — nothing to fetch
+    expect(mockedApi.listExecutions).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves a STARTED preset against the clock and hides rows outside it', async () => {
+    const WEEK = 7 * 24 * 60 * 60 * 1000
+    seedBoth([
+      ex('e-recent'),
+      ex('e-old', { startedMs: NOW - WEEK - 1000, endedMs: NOW - WEEK - 1000 }),
+    ], [auto()])
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('radio', { name: 'Last 7 days' }))
+    apply(dlg)
+
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({
+      status: 'finished', limit: 50, startedFromMs: NOW - WEEK,
+    })
+    expect(within(filterLine()).getByText('Last 7 days')).toBeTruthy()
+    expect(screen.getAllByTestId('execution-row').length).toBe(1)
+    expect(screen.getByText('e-recent')).toBeTruthy()
+    expect(screen.queryByText('e-old')).toBeNull()
+  })
+
+  it('sends two checked statuses in the vocabulary\'s order, whatever order they were clicked', async () => {
+    seedBoth([
+      ex('e-bad', { status: 'failed' }),
+      ex('e-stop', { status: 'cancelled', startedMs: NOW - 1_000, endedMs: NOW - 1_000 }),
+      ex('e-ok', { startedMs: NOW - 2_000, endedMs: NOW - 2_000 }),
+    ], [auto()])
+    render(<ExecutionsList />)
+
+    // clicked bottom-up — the query and the chips still read in the §4.6 order
+    applyStatuses('Cancelled', 'Failed')
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({
+      status: ['failed', 'cancelled'], limit: 50,
+    })
+    expect(within(filterLine()).getByText('Failed')).toBeTruthy()
+    expect(within(filterLine()).getByText('Cancelled')).toBeTruthy()
+    const line = filterLine().textContent!
+    expect(line.indexOf('Failed')).toBeLessThan(line.indexOf('Cancelled'))
+    // status counts toward the Filter button's number like any other dimension
+    expect(screen.getByRole('button', { name: 'Filter · 1' })).toBeTruthy()
+    expect(screen.getAllByTestId('execution-row').length).toBe(2)
+    expect(screen.queryByText('e-ok')).toBeNull()
+
+    // Clear filters resets the status dimension too
+    fireEvent.click(within(filterLine()).getByText('Clear filters'))
+    expect(screen.queryByTestId('executions-filter-line')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy()
+    expect(screen.getAllByTestId('execution-row').length).toBe(3)
+  })
+
+  it('fetches nothing for a live-only selection, and hides the finished rows', () => {
+    seedBoth([
+      ex('e-run', { status: 'executing', duration: '', endedMs: 0 }),
+      ex('e-done'),
+    ], [auto()])
+    render(<ExecutionsList />)
+
+    applyStatuses('Executing')
+
+    expect(screen.getAllByTestId('execution-row').length).toBe(1)
+    expect(screen.getByText('e-run')).toBeTruthy()
+    expect(screen.queryByText('e-done')).toBeNull()
+    // no Finished section at all — nothing to fetch or page
+    expect(screen.queryByText('FINISHED')).toBeNull()
+    expect(mockedApi.listExecutions).not.toHaveBeenCalled()
+  })
+
+  it('stacks the executing section above the failed rows when both are picked', async () => {
+    seedBoth([
+      ex('e-run', { status: 'executing', duration: '', endedMs: 0 }),
+      ex('e-bad', { status: 'failed', startedMs: NOW - 1_000, endedMs: NOW - 1_000 }),
+      ex('e-ok', { startedMs: NOW - 2_000, endedMs: NOW - 2_000 }),
+    ], [auto()])
+    const { container } = render(<ExecutionsList />)
+
+    applyStatuses('Executing', 'Failed')
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
+    // only the terminal half of the selection rides the §19 query
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({ status: ['failed'], limit: 50 })
+
+    // two sections, so both carry their labels
+    const text = container.textContent!
+    expect(text.indexOf('e-run')).toBeGreaterThan(text.indexOf('EXECUTING'))
+    expect(text.indexOf('e-run')).toBeLessThan(text.indexOf('FINISHED'))
+    expect(text.indexOf('e-bad')).toBeGreaterThan(text.indexOf('FINISHED'))
+    expect(screen.queryByText('e-ok')).toBeNull()
+    expect(screen.getAllByTestId('execution-row').length).toBe(2)
+  })
+
+  it('filters a live status client-side and still never fetches', () => {
+    seedBoth([
+      ex('r-alpha', { status: 'executing', duration: '', endedMs: 0 }),
+      ex('r-beta', { status: 'executing', duration: '', endedMs: 0, automationId: 'a2', automationName: 'Beta' }),
+      ex('e-done'),
+    ], [auto(), BETA])
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Executing' }))
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Beta' }))
+    apply(dlg)
+
+    expect(screen.getAllByTestId('execution-row').length).toBe(1)
+    expect(screen.getByText('r-beta')).toBeTruthy()
+    expect(screen.queryByText('r-alpha')).toBeNull()
+    // the window always holds every live row (§19) — a filter never changes that
+    expect(mockedApi.listExecutions).not.toHaveBeenCalled()
+  })
+
+  it('reads "No matching executions" when a live status matches nothing', () => {
+    seedBoth([ex('r-alpha', { status: 'executing', duration: '', endedMs: 0 })],
+             [auto(), BETA])
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Executing' }))
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Beta' }))
+    apply(dlg)
+
+    // §7: under any filter the card reads the same everywhere
+    expect(screen.getByText('No matching executions')).toBeTruthy()
+    expect(screen.getByText('Executions matching these filters will appear here.')).toBeTruthy()
+    expect(mockedApi.listExecutions).not.toHaveBeenCalled()
+  })
+
+  it('disables Apply on a custom range whose From lands after its To', () => {
+    seedBoth([ex('e-done')], [auto()])
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('radio', { name: 'Custom range' }))
+    fireEvent.change(within(dlg).getByLabelText('From'), { target: { value: '2026-09-06T10:00' } })
+    fireEvent.change(within(dlg).getByLabelText('To'), { target: { value: '2026-09-05T10:00' } })
+
+    const applyBtn = within(dlg).getByRole('button', { name: 'Apply' }) as HTMLButtonElement
+    expect(applyBtn.disabled).toBe(true)
+    expect(applyBtn.title).toBe('From must be before To')
+
+    // widening the To past the From re-enables it
+    fireEvent.change(within(dlg).getByLabelText('To'), { target: { value: '2026-09-07T10:00' } })
+    expect((within(dlg).getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('carries the modal filters on the pager\'s keyset fetch', async () => {
+    const rows = (n: number, from = 0) =>
+      Array.from({ length: n }, (_, i) =>
+        ex(`e-${String(from + i).padStart(4, '0')}`, {
+          automationId: 'a2', automationName: 'Beta',
+          startedMs: NOW - (from + i) * 1000, endedMs: NOW - (from + i) * 1000,
+        }))
+    const windowRows = rows(50)
+    // the filter's own first page, then the keyset page under it
+    mockedApi.listExecutions
+      .mockResolvedValueOnce({ executions: windowRows, total: 120 })
+      .mockResolvedValue({ executions: rows(50, 50), total: 120 })
+    seedBoth(windowRows, [auto(), BETA], 120)
+    render(<ExecutionsList />)
+
+    const dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Beta' }))
+    apply(dlg)
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
+
+    const pager = () => screen.getByTestId('executions-pager')
+    await waitFor(() => expect(within(pager()).getByText('1–50 of 120')).toBeTruthy())
+    fireEvent.click(within(pager()).getByText('Next'))
+
+    await waitFor(() => expect(screen.getByText('e-0050')).toBeTruthy())
+    expect(mockedApi.listExecutions).toHaveBeenLastCalledWith({
+      status: 'finished', limit: 50, automation: ['a2'],
+      before: { startedMs: windowRows[49].startedMs, id: windowRows[49].id },
+    })
+    expect(within(pager()).getByText('51–100 of 120')).toBeTruthy()
+  })
+
+  it('shows the automation search only past 8 rows, and keeps a hidden row checked', () => {
+    const many = Array.from({ length: 9 }, (_, i) => auto({ id: `a${i}`, name: `Auto ${i}` }))
+    seedBoth([ex('e-done')], many.slice(0, 8))
+    const { rerender } = render(<ExecutionsList />)
+
+    // eight automations is still a plain list
+    expect(within(openModal()).queryByLabelText('Find an automation')).toBeNull()
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Filter executions' }))
+      .getByRole('button', { name: 'Cancel' }))
+    finishModalAnim()
+
+    seedBoth([ex('e-done')], many)
+    rerender(<ExecutionsList />)
+    let dlg = openModal()
+    const search = within(dlg).getByLabelText('Find an automation')
+    fireEvent.click(within(dlg).getByRole('checkbox', { name: 'Auto 1' }))
+
+    // a case-insensitive name substring narrows the rows
+    fireEvent.change(search, { target: { value: 'auto 3' } })
+    dlg = screen.getByRole('dialog', { name: 'Filter executions' })
+    expect(automationRows(dlg).getAllByRole('checkbox').length).toBe(1)
+    expect(within(dlg).queryByRole('checkbox', { name: 'Auto 1' })).toBeNull()
+
+    // §7: a checked row stays checked while the search hides it
+    fireEvent.change(search, { target: { value: '' } })
+    dlg = screen.getByRole('dialog', { name: 'Filter executions' })
+    expect(within(dlg).getByRole('checkbox', { name: 'Auto 1' }).getAttribute('aria-checked')).toBe('true')
+  })
+})
+
 describe('execution page log cap (§7)', () => {
   const line = (sequence: number) => ({ time: '00:00', kind: 'out' as const, sequence, text: `line ${sequence}` })
   const withLogs = (lines: ReturnType<typeof line>[]) => {

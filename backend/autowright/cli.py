@@ -1047,14 +1047,34 @@ def cmd_snapshot_delete(c: Client, args) -> None:
 
 # ---------------------------------------------------------------- execution
 
+def _local_stamp_ms(text: str, *, end_of_day: bool) -> int:
+    """§20 `--since` / `--until`: a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`
+    as epoch ms — the §19 inclusive `startedFromMs` / `startedToMs`. A bare
+    date on `--until` means the end of that day."""
+    from datetime import datetime, timedelta
+    for fmt, whole_day in (("%Y-%m-%dT%H:%M", False), ("%Y-%m-%d", True)):
+        try:
+            dt = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if whole_day and end_of_day:
+            dt = dt + timedelta(days=1, milliseconds=-1)
+        return int(dt.timestamp() * 1000)
+    raise SystemExit(f"error: {text!r} is not a YYYY-MM-DD or YYYY-MM-DDTHH:MM local time")
+
+
 def cmd_execution_list(c: Client, args) -> None:
     # §20: -n rides to the server as the §19 limit — only the printed rows
     # cross the wire.
     q = [f"limit={args.n}"]
-    if args.automation:
-        q.append(f"automation={find_automation(c, args.automation)['id']}")
-    if args.status:
-        q.append(f"status={args.status}")
+    for ref in args.automation or []:
+        q.append(f"automation={find_automation(c, ref)['id']}")
+    for value in args.status or []:
+        q.append(f"status={value}")
+    if args.since:
+        q.append(f"startedFromMs={_local_stamp_ms(args.since, end_of_day=False)}")
+    if args.until:
+        q.append(f"startedToMs={_local_stamp_ms(args.until, end_of_day=True)}")
     data = c.req("GET", "/executions?" + "&".join(q))
     if args.json:
         _pjson(data)
@@ -2089,18 +2109,27 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                     "  autowright execution list\n"
                     "  autowright execution list -n 50\n"
                     "  autowright execution list --automation report\n"
-                    "  autowright execution list --status failed")
+                    "  autowright execution list --status failed\n"
+                    "  autowright execution list --since 2026-09-01 --until 2026-09-06")
     p.add_argument("-n", type=int, default=20, metavar="COUNT",
                    help="how many to print (default: 20)")
-    p.add_argument("--automation", metavar="AUTOMATION",
-                   help="only executions of one automation, named as anywhere else: its "
-                        "name, a unique part of its name, its id, or an id prefix")
-    p.add_argument("--status", metavar="STATUS",
+    p.add_argument("--automation", metavar="AUTOMATION", action="append",
+                   help="only executions of this automation, named as anywhere else: its "
+                        "name, a unique part of its name, its id, or an id prefix; repeat "
+                        "the flag to include several automations")
+    p.add_argument("--status", metavar="STATUS", action="append",
                    choices=["queued", "executing", "succeeded", "failed",
                             "cancelled", "skipped", "interrupted", "finished"],
                    help="only executions in this state: queued (waiting for a free slot), "
                         "executing, succeeded, failed, cancelled, skipped, interrupted, "
-                        "or finished (any of the last five)")
+                        "or finished (any of the last five); repeat the flag to include "
+                        "several states")
+    p.add_argument("--since", metavar="WHEN",
+                   help="only executions started at or after this local time: "
+                        "YYYY-MM-DD or YYYY-MM-DDTHH:MM")
+    p.add_argument("--until", metavar="WHEN",
+                   help="only executions started at or before this local time: "
+                        "YYYY-MM-DD (the whole day) or YYYY-MM-DDTHH:MM")
     p = _sub(eg, "show", cmd_execution_show, "print one execution's steps, error, and result",
              json_flag=True,
              description="One execution in detail: how it ended and how long it took, every "

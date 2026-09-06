@@ -1575,17 +1575,26 @@ EXECUTIONS_PAGE_LIMIT = 50  # §7: the /state finished window and the page size
 
 
 @app.get("/executions", dependencies=[Depends(auth)])
-def list_execs(automation: str | None = None, status: str | None = None,
+def list_execs(automation: list[str] | None = Query(None), status: list[str] | None = Query(None),
+               started_from_ms: int | None = Query(None, ge=0, alias="startedFromMs"),
+               started_to_ms: int | None = Query(None, ge=0, alias="startedToMs"),
                limit: int | None = Query(None, ge=1),
                before_started_ms: int | None = Query(None, alias="beforeStartedMs"),
                before_id: str | None = Query(None, alias="beforeId")) -> dict:
     """§19 executions query: headers in the §7 canonical order (startedMs desc,
-    id asc on ties), status filter over the §4.6 vocabulary + `finished`, and
-    the keyset cursor for paging. `total` counts every match, not the page;
-    `limit` omitted means every match (§20 reference resolution reads that)."""
-    if status is not None and status != "finished" and status not in EXECUTION_STATUSES:
-        raise HTTPException(422, "unknown status — one of: "
-                            + ", ".join(EXECUTION_STATUSES) + ", finished")
+    id asc on ties), the AND of every filter — `automation` (repeatable: any of
+    the ids), `status` (repeatable: any of the §4.6 values, `finished` standing
+    for every terminal status), the inclusive
+    `startedFromMs`/`startedToMs` range — and the keyset cursor for paging.
+    `total` counts every match, not the page; `limit` omitted means every
+    match (§20 reference resolution reads that)."""
+    for value in status or []:
+        if value != "finished" and value not in EXECUTION_STATUSES:
+            raise HTTPException(422, "unknown status — one of: "
+                                + ", ".join(EXECUTION_STATUSES) + ", finished")
+    if (started_from_ms is not None and started_to_ms is not None
+            and started_from_ms > started_to_ms):
+        raise HTTPException(422, "startedFromMs must not exceed startedToMs")
     if (before_started_ms is None) != (not before_id):
         # An empty beforeId would degrade the keyset to a bare timestamp
         # filter (every id compares > ""), duplicating tie rows across pages —
@@ -1595,16 +1604,24 @@ def list_execs(automation: str | None = None, status: str | None = None,
     with store.lock:
         hs = list(store.execs.values())
         if automation:
-            hs = [h for h in hs if h["automation_id"] == automation]
-        if status == "finished":
-            hs = [h for h in hs if h["status"] not in LIVE_STATUSES]
-        elif status:
-            hs = [h for h in hs if h["status"] == status]
+            # A create-mode test row has no automation id (§4.5) and never
+            # matches a non-empty selection.
+            wanted = set(automation)
+            hs = [h for h in hs if h["automation_id"] in wanted]
+        if status:
+            wanted_status = {s for s in status if s != "finished"}
+            if "finished" in status:
+                wanted_status |= set(EXECUTION_STATUSES) - set(LIVE_STATUSES)
+            hs = [h for h in hs if h["status"] in wanted_status]
         # Sort headers on the shared canonical key and serialize only the page
         # actually returned (exec_json for every match on every keyset fetch
         # is the §7 unbounded-history cost the paging exists to avoid).
         keyed = sorted(((exec_started_ms(h), h) for h in hs),
                        key=lambda p: (-p[0], p[1]["id"]))
+        if started_from_ms is not None:
+            keyed = [(ms, h) for ms, h in keyed if ms >= started_from_ms]
+        if started_to_ms is not None:
+            keyed = [(ms, h) for ms, h in keyed if ms <= started_to_ms]
         total = len(keyed)
         if before_started_ms is not None:
             # Strictly after the cursor position in sort order — stable while
