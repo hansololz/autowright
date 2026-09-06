@@ -6,6 +6,7 @@
 // a selector, never a home for reference data); the modal adds its toolbar
 // controls to the pane (`toolbarRight`) and a rail header of its own.
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import { LOG_TAIL, logKey, useStore } from './store'
@@ -76,9 +77,7 @@ export function StepRow({ step, selected, onSelect }: {
         {step.name}
       </span>
       {latestN(step) > 1 && (
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-faint)', flex: 'none' }}>
-          ×{latestN(step)}
-        </span>
+        <MetaChip style={{ flex: 'none' }}>×{latestN(step)}</MetaChip>
       )}
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)', flex: 'none' }}>{step.duration}</span>
     </RailRow>
@@ -267,16 +266,17 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
     if (closing) return
     const onKey = (e: KeyboardEvent) => {
       // §7 ⌘F / Ctrl+F opens the find bar (an open one refocuses); the page
-      // yields to any open modal, exactly as the flip keys do.
+      // yields to any open modal and to the §9.3 developer-log overlay,
+      // exactly as the flip keys do.
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
-        if (layout === 'page' && anyModalOpen()) return
+        if (layout === 'page' && (anyModalOpen() || devlogOverlayOpen())) return
         e.preventDefault()
         showFind.current()
         return
       }
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
-      if (layout === 'page' && anyModalOpen()) return
+      if (layout === 'page' && (anyModalOpen() || devlogOverlayOpen())) return
       if (!flipRef.current(e.key === 'ArrowLeft' ? -1 : 1)) return
       e.preventDefault()
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur()

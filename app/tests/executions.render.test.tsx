@@ -25,16 +25,22 @@ let storeMod: typeof import('../src/store')
 let mockedApi: Record<string, ReturnType<typeof vi.fn>>
 let ExecutionsList: typeof import('../src/pages/ExecutionsList').default
 let ExecutionPage: typeof import('../src/pages/ExecutionPage').default
+let DevLogOverlay: typeof import('../src/devlog').default
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
     onOpenTarget: () => {},
     trayAlert: () => Promise.resolve(),
+    // §9.3: the overlay tails the log files the moment it opens
+    tailLogs: () => Promise.resolve([]),
+    listRequestLogs: () => Promise.resolve([]),
+    readRequestLog: () => Promise.resolve(null),
   }
   storeMod = await import('../src/store')
   mockedApi = (await import('../src/api')).api as unknown as Record<string, ReturnType<typeof vi.fn>>
   ExecutionsList = (await import('../src/pages/ExecutionsList')).default
   ExecutionPage = (await import('../src/pages/ExecutionPage')).default
+  DevLogOverlay = (await import('../src/devlog')).default
 })
 
 const NOW = 1_700_000_000_000
@@ -583,6 +589,23 @@ describe('execution page LOGS rail keys and selection (§7)', () => {
     // a later store write while still live no longer re-follows the executing step
     storeMod.useStore.setState({ executionFull: { e1: { ...full } } })
     expect(selectedRow().textContent).toContain('Fetch page')
+  })
+
+  it('the page\'s rail yields to the §9.3 developer-log overlay', () => {
+    seedThree()
+    storeMod.useStore.setState({
+      settings: { developerMode: true } as unknown as import('../src/types').Settings,
+    })
+    render(<><ExecutionPage /><DevLogOverlay /></>)
+    expect(selectedRow().textContent).toContain('Send mail')
+    // §9.3 Backquote opens the overlay over the page
+    fireEvent.keyDown(window, { code: 'Backquote', key: '`' })
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Send mail')
+    // closing it hands the keys back
+    fireEvent.keyDown(window, { code: 'Backquote', key: '`' })
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Parse it')
   })
 
   it('the page\'s rail yields to an open modal', async () => {

@@ -40,6 +40,10 @@ let win = null
 // §9 never-paint-blank guard: true once the current main window's renderer has
 // loaded successfully — until then every show path stays hidden.
 let winLoaded = false
+// §9 deep link held for a renderer that hasn't loaded yet: the `open-target`
+// listener only exists once the renderer ran, so a target that arrives before
+// then is replayed on the first successful load instead of sent into nothing.
+let pendingTarget = null
 let panel = null
 let tray = null
 
@@ -126,8 +130,10 @@ async function backendHealthy() {
 }
 
 // §3: an update install or backend restart must never land mid-execution.
-// Tri-state probe: true/false when the backend answered, null when it is
-// unreachable — callers decide what unknown means for them.
+// Four-state probe: true/false when the backend answered the question,
+// 'unknown' when it answered but refused to (a non-OK status — it is up, so
+// something may well be running on it), null when it is unreachable at all.
+// Callers decide what each of the two unknowns means for them.
 async function executionsLiveProbe() {
   const info = backendInfo()
   if (!info) return null
@@ -136,7 +142,7 @@ async function executionsLiveProbe() {
       headers: { Authorization: `Bearer ${info.token}` },
       signal: AbortSignal.timeout(5000),
     })
-    if (!res.ok) return null
+    if (!res.ok) return 'unknown'
     // §19 envelope: GET /executions answers { executions, total } — never a
     // bare array. Reading .length off the envelope would answer "not busy"
     // forever and neuter every §3 mid-execution gate below.
@@ -147,9 +153,12 @@ async function executionsLiveProbe() {
 }
 
 // §3 update-install rule: an unreachable backend counts as idle — nothing can
-// be executing on it.
+// be executing on it. A backend that is up but won't answer counts as busy:
+// the gate must never let an install or a stop land on top of a running
+// execution because the question came back a 500.
 async function executionsLive() {
-  return (await executionsLiveProbe()) === true
+  const live = await executionsLiveProbe()
+  return live === true || live === 'unknown'
 }
 
 // One authenticated call against the live backend — the same shape the probes
@@ -185,11 +194,23 @@ let ensureStatus = { state: 'idle', detail: '' }
 let quittingAll = false
 let serviceInstallDone = Promise.resolve()
 
+// §3: a service child that never returns must never hang the flow behind it —
+// launchctl/sc can block indefinitely on a wedged domain, and an unbounded
+// execFile left quit-all and reset waiting for the life of the app. Every
+// spawn is bounded (the child is killed on expiry and the callback carries
+// `killed`), its output capped, and every wait on one is bounded too.
+// §2 spawn policy: never show a console window for a shell child.
+const SERVICE_CHILD_TIMEOUT_MS = 120_000
+const SERVICE_CHILD_OPTIONS = {
+  windowsHide: true,
+  timeout: SERVICE_CHILD_TIMEOUT_MS,
+  maxBuffer: 4 * 1024 * 1024,
+}
+
 function runServiceInstall(py, cb) {
   if (quittingAll) return
   serviceInstallDone = serviceInstallDone.then(() => new Promise((resolve) => {
-    // §2 spawn policy: never show a console window for a shell child.
-    execFile(py, ['-m', 'autowright.service', 'install'], { windowsHide: true }, (err, stdout, stderr) => {
+    execFile(py, ['-m', 'autowright.service', 'install'], SERVICE_CHILD_OPTIONS, (err, stdout, stderr) => {
       try { cb(err, stdout, stderr) } finally { resolve() }
     })
   }))
@@ -219,15 +240,15 @@ async function syncBackendVersion(py, running) {
   appLog(`ensure-backend: backend ${running} != app ${app.getVersion()} — `
     + 'restarting service once live executions finish')
   // This backend answered /health moments ago, so a transient probe failure
-  // (5 s timeout while its thread pool is busy mid-execution) must NOT read
-  // as idle — §3: the service is never restarted mid-execution. Only a
-  // backend that stays unreachable AND fails /health is treated as down
-  // (nothing can be executing on it) so the install still proceeds.
+  // (a 5 s timeout while its thread pool is busy mid-execution, or a non-OK
+  // answer) must NOT read as idle — §3: the service is never restarted
+  // mid-execution. Only a backend that stays unanswering AND fails /health is
+  // treated as down (nothing can be executing on it) so the install proceeds.
   let unknown = 0
   while (true) {
     const live = await executionsLiveProbe()
     if (live === false) break
-    if (live === null) {
+    if (live === null || live === 'unknown') {
       if (++unknown >= 4 && !(await backendHealthy())) break
     } else {
       unknown = 0
@@ -424,6 +445,7 @@ function createWindow(hash) {
     setTimeout(() => { if (win === w && !w.isDestroyed()) load(w, hash || '/app') }, 1000)
   })
   win.webContents.on('did-finish-load', () => {
+    if (win !== w || w.isDestroyed()) return
     if (failed) return
     if (failStreak) {
       appLog(`window: renderer loaded after ${failStreak} failed attempt(s)`)
@@ -432,7 +454,15 @@ function createWindow(hash) {
     if (!winLoaded) {
       winLoaded = true
       clearWatchdog()
-      if (win) { win.show(); win.focus() }
+      w.show()
+      w.focus()
+    }
+    // §9: a deep link that arrived while the renderer was still coming up has
+    // been held since — its `open-target` listener exists only now, so replay
+    // it here, exactly once.
+    if (pendingTarget) {
+      w.webContents.send('open-target', pendingTarget)
+      pendingTarget = null
     }
   })
   // §9: the renderer can die before it ever loads (out of memory, a crash in
@@ -441,10 +471,11 @@ function createWindow(hash) {
   // trying; a second death has nothing left to paint, so say so and quit
   // rather than staying resident and invisible.
   win.webContents.on('render-process-gone', (_e, details) => {
+    if (win !== w || w.isDestroyed()) return
     rendererDeaths += 1
     appLog(`window: renderer process gone (${details?.reason || 'unknown'}) — death ${rendererDeaths}`)
     if (rendererDeaths === 1) {
-      if (win) load(win, hash || '/app')
+      load(w, hash || '/app')
       return
     }
     clearWatchdog()
@@ -472,22 +503,22 @@ function createWindow(hash) {
     win.focus()
   }, WINDOW_WATCHDOG_MS)
   attachContextMenu(win)
-  win.on('closed', () => { clearWatchdog(); win = null })
+  win.on('closed', () => { clearWatchdog(); win = null; pendingTarget = null })
   hardenWindow(win)
 }
 
 function showApp(hash) {
   // Fresh window: load straight at the target. Existing window: hand the
   // target over IPC — a reload would drop the WS and all renderer state. A
-  // still-loading window hasn't registered its listener yet, so the send is
-  // deferred to did-finish-load or it would be silently dropped.
+  // renderer that hasn't loaded yet has no `open-target` listener, so the
+  // target is held instead and replayed on the first successful load — the
+  // one flag that knows a load really succeeded (isLoading() reads false
+  // between a failed navigation and the 1 s retry, and the deep link used to
+  // be sent into that gap and lost).
   if (!win) createWindow(hash)
   else if (hash) {
-    if (win.webContents.isLoading()) {
-      win.webContents.once('did-finish-load', () => { if (win) win.webContents.send('open-target', hash) })
-    } else {
-      win.webContents.send('open-target', hash)
-    }
+    if (winLoaded) win.webContents.send('open-target', hash)
+    else pendingTarget = hash
   }
   // §9: an unloaded window stays hidden — it shows itself on the first
   // successful load (createWindow's guard), never as an empty frame.
@@ -562,12 +593,16 @@ let automaticUpdateTimer = null
 // apply-settings push never does). Feeds the reveal-path root check below.
 let dataRoot = null
 
-function applyShellSettings(s) {
+// `trusted` says where this shape came from: the backend's own /settings (the
+// startup + poll sync) may move the §5 data root, the renderer's
+// apply-settings push may not — a dataPath from there would let the renderer
+// pick the reveal-path roots for itself.
+function applyShellSettings(s, { trusted = false } = {}) {
   // Each effect is guarded on its own: one that throws (a tray that won't
   // create on this host, a login item the OS refuses) must never take the
   // ones after it with it — the §3 update-check timer is last in line.
   try {
-    if (typeof s?.dataPath === 'string' && s.dataPath) dataRoot = s.dataPath
+    if (trusted && typeof s?.dataPath === 'string' && s.dataPath) dataRoot = s.dataPath
   } catch (err) {
     appLog(`settings: applying the data path failed: ${String(err?.message || err)}`)
   }
@@ -584,9 +619,19 @@ function applyShellSettings(s) {
         createTray()
         void refreshTrayAlert()
       } else if (!s.menuBarIcon && tray) {
-        if (panel) panel.hide()
         tray.destroy()
         tray = null
+        // §9/§13: the panel is a window with no way left to reach it once the
+        // tray is gone — and a merely hidden window still suppresses
+        // window-all-closed, so the close rule below would never fire again.
+        // Destroy it; the next tray click builds a fresh one lazily.
+        if (panel && !panel.isDestroyed()) panel.destroy()
+        panel = null
+        // §9 close rule, re-evaluated here: on a platform with no dock the
+        // tray was the only thing keeping a windowless app reachable. With
+        // both gone there is nothing left to click, so quit rather than sit
+        // there running and invisible.
+        if (!caps.dockIcon && !win) app.quit()
       }
     }
   } catch (err) {
@@ -631,7 +676,7 @@ async function syncShellSettings() {
   } catch { /* backend down — keep the current state */ }
   if (!settings) return
   try {
-    applyShellSettings(settings)
+    applyShellSettings(settings, { trusted: true })
   } catch (err) {
     appLog(`settings: applying shell settings failed: ${String(err?.message || err)}`)
   }
@@ -735,6 +780,9 @@ async function cliStatus() {
   // next status read retries it.
   try {
     fs.writeFileSync(shim, shimText(python), { mode: 0o755 })
+    // `mode` only applies where writeFileSync *creates* the file, so a heal
+    // rewrite leaves whatever mode the old shim had — set it outright.
+    fs.chmodSync(shim, 0o755)
   } catch (e) {
     appLog(`cli-status: couldn't heal ${shim}: ${e?.message || e}`)
   }
@@ -746,6 +794,14 @@ function cliInstall() {
   if (!python) return { ok: false, error: 'The backend is not running yet — try again in a moment.' }
   // §3: plain writes into the user-owned dir — no dialog, no password.
   const shim = shimPaths()[0]
+  // Something else already owns that name (another tool's `autowright`, a
+  // hand-written script): a file we did not write is never overwritten — the
+  // §4.9 card says so and leaves the choice to the user.
+  try {
+    if (!fs.readFileSync(shim, 'utf-8').includes(SHIM_MARKER)) {
+      return { ok: false, error: `A different autowright command already exists at ${shim}. Remove it first.` }
+    }
+  } catch { /* nothing there yet — the write below creates it */ }
   try {
     fs.mkdirSync(path.dirname(shim), { recursive: true })
     fs.writeFileSync(shim, shimText(python), { mode: 0o755 })
@@ -839,15 +895,21 @@ ipcMain.handle('reveal-path', async (_e, p) => {
 })
 ipcMain.handle('pick-folder', async (_e, defaultPath) => {
   const opts = { properties: ['openDirectory', 'createDirectory'] }
-  if (defaultPath) opts.defaultPath = defaultPath
+  if (typeof defaultPath === 'string' && defaultPath) opts.defaultPath = defaultPath
   const r = await dialog.showOpenDialog(win, opts)
   return r.canceled ? null : r.filePaths[0]
 })
 // §5.1 transfer archives: native save/open dialogs live in main; the renderer
 // moves the bytes to/from the backend itself (§19).
 ipcMain.handle('save-file', async (_e, defaultName, data) => {
+  // Both arguments cross the trust boundary: the name only ever names a file
+  // inside the downloads dir (never a path of its own steering the dialog
+  // elsewhere), and the bytes have to really be bytes. Either one wrong is a
+  // no-op, never a throw.
+  if (typeof defaultName !== 'string' || !defaultName) return null
+  if (!(Buffer.isBuffer(data) || data instanceof Uint8Array || data instanceof ArrayBuffer)) return null
   const r = await dialog.showSaveDialog(win, {
-    defaultPath: path.join(app.getPath('downloads'), defaultName),
+    defaultPath: path.join(app.getPath('downloads'), path.basename(defaultName)),
   })
   if (r.canceled || !r.filePath) return null
   // Async IO: archives run to 64 MB (§5.1) and the target can be a network
@@ -1146,11 +1208,27 @@ async function runServiceVerb(verb, label) {
   const py = bundledPython() || backendInfo()?.python
   if (!py) return 'No backend interpreter found'
   quittingAll = true
-  await serviceInstallDone
+  // §3: the failure text both bounds answer with. The §4.9 QUIT/RESET cards
+  // render it like any other stop failure, so the app stays up and says so
+  // instead of waiting on a child that never comes back.
+  const timedOut = `service ${verb} timed out`
+  // The in-flight install child is bounded itself, but it may be queued behind
+  // an earlier one, so the wait for the chain carries its own deadline.
+  let waitTimer = null
+  const waitFailed = await Promise.race([
+    serviceInstallDone.then(() => null),
+    new Promise((resolve) => {
+      waitTimer = setTimeout(() => resolve(timedOut), SERVICE_CHILD_TIMEOUT_MS)
+    }),
+  ])
+  clearTimeout(waitTimer)
+  if (waitFailed) return waitFailed
   return new Promise((resolve) => {
-    // §2 spawn policy: never show a console window for a shell child.
-    execFile(py, ['-m', 'autowright.service', verb], { windowsHide: true }, (e, stdout, stderr) => {
+    execFile(py, ['-m', 'autowright.service', verb], SERVICE_CHILD_OPTIONS, (e, stdout, stderr) => {
       appLog(`${label}: ${String(stdout || stderr || '').trim()}`)
+      // A child killed on its deadline carries `killed`/`signal` instead of an
+      // exit status — report the plain line, never a signal name.
+      if (e && (e.killed || e.signal)) { resolve(timedOut); return }
       resolve(e ? String(stdout || stderr || e.message).trim() : null)
     })
   })
@@ -1301,8 +1379,12 @@ ipcMain.handle('reset-all', async () => {
     return { error: err }
   }
   stage('data')
+  // Announced *before* the deletion: appLog re-creates the logs root, so a
+  // line written after it left a fresh logs dir behind on every reset.
+  // Nothing may log past this point — deleteAllData's own failure lines are
+  // the one exception, since a delete that failed left files there anyway.
+  appLog('reset: erasing data, then quitting')
   await deleteAllData(dataPath, 'reset')
-  appLog('reset: data erased, quitting')
   // §3 step 6: the app quits and stays quit. The next launch finds no
   // backend.json and an empty data root: ensure-backend re-registers and §10
   // onboarding runs as on a fresh install.
@@ -1313,20 +1395,7 @@ ipcMain.handle('reset-all', async () => {
 
 app.whenReady().then(() => {
   if (!gotLock) return
-  // Dev launches via `electron .`, which ships the default Electron dock icon —
-  // replace it with the AW mark (§14 checked-in icon assets; a no-op on
-  // platforms without a dock).
-  if (caps.dockIcon) plat.setDockIcon(app, path.join(__dirname, 'icon', 'icon.png'))
-  // §3 Linux desktop integration: a packaged launch reconciles the launcher
-  // entry + hicolor icon under ~/.local/share that give the AppImage's window
-  // its icon and an app-grid entry (§2 applyDesktopEntry; a no-op unpackaged).
-  if (caps.desktopEntry) plat.applyDesktopEntry(app, path.join(__dirname, 'icon', 'icon.svg'))
-  // §9: a platform without an application menu (Linux — the native frame
-  // would draw Electron's stock File/Edit/View/Window bar) has it suppressed
-  // before any window exists; editing shortcuts are Chromium-native.
-  if (!caps.appMenu) Menu.setApplicationMenu(null)
-  void ensureBackend()
-  // The reopen handler is registered before anything that can throw — the first
+  // The reopen handler is registered before anything else at all — the first
   // createWindow included: whatever else fails at ready, the dock/tray must
   // always be able to bring the window back. The hidden tray panel is also a
   // BrowserWindow, so count only the main window — `getAllWindows().length`
@@ -1334,6 +1403,35 @@ app.whenReady().then(() => {
   // §9: a not-yet-loaded window stays hidden even on an explicit reopen — it
   // shows itself on the first successful load.
   app.on('activate', () => { if (win === null) createWindow(); else if (winLoaded) { win.show(); win.focus() } })
+  // Every OS-side step below is guarded on its own, the same way the tray is
+  // further down: one that throws is logged and the chain carries on — none of
+  // them is worth losing the window, the §6 app-start triggers or the §4.9
+  // settings reconcile over.
+  // Dev launches via `electron .`, which ships the default Electron dock icon —
+  // replace it with the AW mark (§14 checked-in icon assets; a no-op on
+  // platforms without a dock).
+  try {
+    if (caps.dockIcon) plat.setDockIcon(app, path.join(__dirname, 'icon', 'icon.png'))
+  } catch (err) {
+    appLog(`ready: setting the dock icon failed: ${String(err?.message || err)}`)
+  }
+  // §3 Linux desktop integration: a packaged launch reconciles the launcher
+  // entry + hicolor icon under ~/.local/share that give the AppImage's window
+  // its icon and an app-grid entry (§2 applyDesktopEntry; a no-op unpackaged).
+  try {
+    if (caps.desktopEntry) plat.applyDesktopEntry(app, path.join(__dirname, 'icon', 'icon.svg'))
+  } catch (err) {
+    appLog(`ready: applying the desktop entry failed: ${String(err?.message || err)}`)
+  }
+  // §9: a platform without an application menu (Linux — the native frame
+  // would draw Electron's stock File/Edit/View/Window bar) has it suppressed
+  // before any window exists; editing shortcuts are Chromium-native.
+  try {
+    if (!caps.appMenu) Menu.setApplicationMenu(null)
+  } catch (err) {
+    appLog(`ready: suppressing the application menu failed: ${String(err?.message || err)}`)
+  }
+  void ensureBackend()
   createWindow()
   // §13: a tray that fails to create (a broken package missing its icon asset)
   // is logged and skipped. It must never take the rest of the ready chain with

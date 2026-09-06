@@ -42,6 +42,9 @@ vi.mock('../src/api', () => ({
     getAutomation: vi.fn(async () => ({})),
     // §4.4/§19 delete an old version (editor version menu)
     deleteVersion: vi.fn(async () => ({ automation: {} })),
+    // §11 save paths — edit mode mints a version, create mode creates
+    saveVersion: vi.fn(async () => ({ version: 2 })),
+    createAutomation: vi.fn(async () => ({ id: 'a2' })),
     state: vi.fn(async () => ({})),
     // §19 trigger previews — labels echo enough shape for the chip/tab renders
     triggersPreview: vi.fn(async (triggers: Array<Record<string, unknown>>) => ({
@@ -387,6 +390,9 @@ describe('CreateFlow BUILD and TEST cards (§11)', () => {
     expect(within(card).getByText('Sync the steps before testing.')).toBeTruthy()
     expect(within(card).queryByText('Test succeeded.')).toBeNull()
     expect((within(card).getByText('Test draft').closest('button')!).disabled).toBe(true)
+    // §11: the card's own sync button is no entry point back into the flow
+    // while the chained sync is armed or running
+    expect((within(screen.getByTestId('build-card')).getByText('Sync spec').closest('button') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('a landed sync makes the outcome stale: Test the new changes, the setup phase on open (§11 state 3)', async () => {
@@ -2206,6 +2212,23 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
     expect(mockedApi.cancelDraftJob).not.toHaveBeenCalled()
   })
 
+  it('a POST resolving after the editor unmounts arms no poll and cancels nothing (§19)', async () => {
+    let landPost: (v: { jobId: string }) => void = () => {}
+    ;(mockedApi.postDraftJob as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { landPost = resolve }))
+    render(<CreateFlow />)
+    send('rename everything')
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
+    // leave mid-POST (sidebar nav, system back), then the POST lands
+    cleanup()
+    await act(async () => { landPost({ jobId: 'j9' }) })
+    // §19 background continuation: the job keeps building - the detached
+    // editor neither polls it nor kills it, and no interval is left ticking
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    expect(mockedApi.getDraftJob).not.toHaveBeenCalled()
+    expect(mockedApi.cancelDraftJob).not.toHaveBeenCalled()
+  })
+
   it('sending under an unsaved spec edit asks first; cancel keeps both texts, confirm proceeds', async () => {
     render(<CreateFlow />)
     fireEvent.click(screen.getByTestId('spec-edit'))
@@ -2427,6 +2450,55 @@ describe('§5.1/§11 imported unresolved references', () => {
   })
 })
 
+describe('CreateFlow settle paths: vanished automation + live test (§11)', () => {
+  beforeEach(armPendingPoll)
+  const liveTest = (over: Record<string, unknown> = {}) => ({
+    id: 't1', automationId: null, automationName: 'My auto', automationDeleted: false, versionLabel: 'Draft',
+    status: 'executing', trigger: 'Test', triggerSender: null, test: true, steps: [],
+    duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, note: null, error: null,
+    ...over,
+  })
+
+  it('edit mode on an id the store no longer holds leaves for Automations', async () => {
+    storeMod.useStore.setState({ automations: [] })
+    render(<CreateFlow />)
+    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
+    expect(storeMod.useStore.getState().surface).toBe('app')
+  })
+
+  it('an automation deleted mid-edit leaves the editor without saving anything', async () => {
+    render(<CreateFlow />)
+    expect(screen.getByText('Save as v2')).toBeTruthy()
+    act(() => { storeMod.useStore.setState({ automations: [] }) })
+    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
+    expect(storeMod.useStore.getState().surface).toBe('app')
+    // neither save path ran on the way out - a vanished automation has no
+    // version to mint, and it must never become a brand-new automation
+    expect(mockedApi.saveVersion).not.toHaveBeenCalled()
+    expect(mockedApi.createAutomation).not.toHaveBeenCalled()
+  })
+
+  it('Start over cancels a still-executing test of the discarded draft (create)', async () => {
+    storeMod.useStore.setState({
+      createFrom: 'app', automationId: null, executions: [liveTest()] as never,
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Start over'))
+    await waitFor(() => expect(mockedApi.cancelExecution).toHaveBeenCalledWith('t1'))
+    expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending')
+  })
+
+  it('Discard draft cancels the edited automation’s live test the same way', async () => {
+    storeMod.useStore.setState({
+      executions: [liveTest({ id: 't2', automationId: 'a1' })] as never,
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Discard draft'))
+    await waitFor(() => expect(mockedApi.cancelExecution).toHaveBeenCalledWith('t2'))
+    expect(mockedApi.deleteDraft).toHaveBeenCalledWith('a1')
+  })
+})
+
 describe('document-editor modal (§11)', () => {
   beforeEach(armPendingPoll)
 
@@ -2514,6 +2586,20 @@ describe('document-editor modal (§11)', () => {
     expect(screen.getByText('Out of sync — steps still match the old spec.')).toBeTruthy()
     expect(storeMod.useStore.getState().toast)
       .toBe('Spec saved — the workflow is out of sync. Sync the steps before saving.')
+  })
+
+  it('⌘S yields to the discard confirm stacked above the editor', () => {
+    render(<CreateFlow />)
+    openSpec()
+    fireEvent.change(screen.getByTestId('spec-editor'), { target: { value: '# My auto\nHand-tuned body.' } })
+    // Escape raises the confirm over the editor - the shortcut belongs to the
+    // top card of the stack, exactly like Escape itself
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(within(screen.getByRole('alertdialog')).getByText('Discard your spec edits?')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 's', metaKey: true })
+    expect(screen.getByTestId('doc-editor')).toBeTruthy()
+    expect(screen.queryByText('Hand-tuned body.')).toBeNull()
+    expect(storeMod.useStore.getState().toast).toBeNull()
   })
 
   it('the build-instructions editor carries Reset to default, which disables once applied', async () => {

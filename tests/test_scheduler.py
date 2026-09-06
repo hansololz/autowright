@@ -1261,3 +1261,45 @@ def test_record_drop_bails_for_automation_deleted_mid_tick(store):
     store.delete_automation(a)
     sched._record_drop(a, t)  # the mid-tick race, called directly
     assert _drop_records(store, a["id"]) == [] and store.execs == {}
+
+
+def test_fire_trigger_logs_a_start_bug_instead_of_a_missing_version(store, caplog):
+    """§6/§7: KeyError and IndexError are LookupErrors too — a bug inside
+    `start` is logged, never dressed up as the "version no longer exists"
+    record a genuinely unresolvable version leaves."""
+    import logging
+
+    from autowright.firing import fire_trigger
+
+    class Boom:
+        @staticmethod
+        def at_capacity(a):
+            return False
+
+        def start(self, a, trigger, version_label=None, payload=None, adopt=None):
+            raise KeyError("steps")
+
+    a = store.create_automation(make_version(), "StartBug", None)
+    with caplog.at_level(logging.ERROR):
+        assert fire_trigger(store, Boom(), a, {"id": "t1", "kind": "cron"}) is False
+    assert store.execs == {}  # no phantom "no longer exists" record
+    assert "firing cron" in caplog.text and "KeyError" in caplog.text
+
+
+def test_firing_in_the_delete_window_leaves_no_record(store):
+    """§6: a message firing or a manual queue request landing while the §19
+    DELETE cancels the automation's live executions is refused without a record
+    — the automation is gone a moment later, and the entry would outlive it."""
+    import pytest
+
+    from autowright.firing import fire_trigger, queue_manual
+
+    engine, sched = _mk(store)
+    a = store.create_automation(make_version(), "Deleting", None)
+    a["max_queued"] = 5        # queueing would otherwise admit the firing
+    a["_live"] = {"blocking"}  # at capacity: the branch that mints the records
+    a["_deleting"] = True
+    assert fire_trigger(store, engine, a, _discord_trig(), payload=_payload()) is False
+    with pytest.raises(RuntimeError, match="being deleted"):
+        queue_manual(store, engine, a, "manual")
+    assert store.execs == {}

@@ -93,7 +93,11 @@ Linux there is neither a dock nor a tray (§13 — Linux ships no tray surface),
 the last window always quits the UI; automations keep firing in the §3 systemd backend
 regardless. The
 discriminator is the shell capability `dockIcon`, never a platform sniff: a platform with a
-dock stays resident unconditionally; without one, residency requires a **live** tray
+dock stays resident unconditionally; without one, residency requires a **live** tray.
+Turning the tray off is the same rule at another moment: the tray-off transition destroys the
+tray **and its §13 panel window** (a hidden panel is still a window, and would keep
+`window-all-closed` from ever firing) and re-evaluates the rule right then — without a dock,
+no tray and no window quits the UI. "Live" means the tray
 reference (the stored setting is never consulted — a tray that failed to create must not
 strand an invisible app). The
 shell consults its own `plat.capabilities` (§2 shell half — `trayPanel`, `loginItem`,

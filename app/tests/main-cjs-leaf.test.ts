@@ -5,10 +5,10 @@
 // no admin prompt exists, and nothing ever writes to the legacy
 // /usr/local/bin (the pre-08-15 bug was a silent best-effort write there).
 // main.cjs has no importable module structure, so the guard reads the source.
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const ELECTRON_DIR = join(__dirname, '..', 'electron')
@@ -163,6 +163,19 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     expect(ready).toMatch(/\}\)\.catch\(\(err\) => appLog\(/)
   })
 
+  it('the reopen handler is registered before every step that can throw (§9)', () => {
+    const ready = src.slice(src.indexOf('app.whenReady()'))
+    const activate = ready.indexOf("app.on('activate'")
+    for (const step of ['plat.setDockIcon(', 'plat.applyDesktopEntry(',
+      'Menu.setApplicationMenu(null)', 'createWindow()']) {
+      expect(activate).toBeLessThan(ready.indexOf(step))
+    }
+    // …and each OS-side step carries its own try/catch, so one that fails on
+    // a given host never takes the ones after it with it.
+    const guarded = ready.match(/try \{\n\s*if \(!?caps\.\w+\)[\s\S]{0,220}?\} catch \(err\) \{\n\s*appLog\(/g) ?? []
+    expect(guarded).toHaveLength(3)
+  })
+
   it('syncShellSettings tells a down backend apart from a shell-side throw', () => {
     // One catch used to swallow both, so a throw out of applyShellSettings
     // (tray create, login item, update timer) read as "backend down" and left
@@ -170,7 +183,32 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     const fn = src.slice(src.indexOf('async function syncShellSettings()'))
       .slice(0, src.slice(src.indexOf('async function syncShellSettings()')).indexOf('\n}\n') + 3)
     expect(fn).toMatch(/catch \{ \/\* backend down/)
-    expect(fn).toMatch(/try \{\n\s*applyShellSettings\(settings\)\n\s*\} catch \(err\) \{\n\s*appLog\(/)
+    expect(fn).toMatch(/try \{\n\s*applyShellSettings\(settings, \{ trusted: true \}\)\n\s*\} catch \(err\) \{\n\s*appLog\(/)
+  })
+
+  it('every service child is bounded, and so is every wait on one (§3)', () => {
+    // launchctl/sc can block indefinitely on a wedged domain; an unbounded
+    // execFile left quit-all and reset waiting for the life of the app.
+    const bounds = src.match(/timeout: SERVICE_CHILD_TIMEOUT_MS/g) ?? []
+    expect(bounds).toHaveLength(1)
+    expect(src).toContain('const SERVICE_CHILD_TIMEOUT_MS = 120_000')
+    // Both spawn sites carry the same options object…
+    const spawns = src.match(/'autowright\.service', (?:'install'|verb)\], SERVICE_CHILD_OPTIONS/g) ?? []
+    expect(spawns).toHaveLength(2)
+    // …and the wait for an in-flight install child is raced against its own
+    // deadline rather than awaited outright.
+    expect(src).toMatch(/await Promise\.race\(\[\n\s*serviceInstallDone\.then\(\(\) => null\)/)
+    expect(src).not.toContain('await serviceInstallDone')
+  })
+
+  it('reset logs before it erases the logs root (§3)', () => {
+    const handler = src.slice(
+      src.indexOf("ipcMain.handle('reset-all'"), src.indexOf('app.whenReady()'))
+    // appLog re-creates the logs dir, so a line written after the deletion
+    // left a fresh logs root behind on every single reset.
+    expect(handler).toMatch(
+      /appLog\('reset: erasing data, then quitting'\)[\s\S]{0,400}await deleteAllData\(/)
+    expect(handler.slice(handler.indexOf('await deleteAllData('))).not.toContain('appLog(')
   })
 
   it('cli-uninstall deletes only marker-carrying shims, via its IPC handler (§3)', () => {
@@ -208,13 +246,16 @@ interface UpdaterRecord {
   listeners: Map<string, (arg: unknown) => void>
 }
 
-// Per-window record: show/focus/load counts plus a way to fire webContents
-// events at the real handlers main.cjs registered (§9 never-paint guard).
+// Per-window record: show/focus/load/destroy counts plus ways to fire the
+// webContents and window events at the real handlers main.cjs registered
+// (§9 never-paint guard, §13 panel lifetime).
 interface WinRecord {
   shows: number
   focuses: number
   loads: number
+  destroys: number
   fire: (event: string, ...args: unknown[]) => void
+  close: () => void
 }
 
 interface MainStub {
@@ -232,6 +273,12 @@ interface MainStub {
   updater: UpdaterRecord
   quits: number
   home: string
+  // §5.1 native dialogs: what main.cjs asked each one for, and the canned
+  // answer it gets back (a test arms it before invoking).
+  dialogs: [string, Record<string, unknown>][]
+  dialogAnswer: { canceled: boolean, filePaths: string[], filePath: string | null }
+  // §13: fire the tray's own click handler, the only way to the panel.
+  clickTray: () => void
   // §9 watchdog / renderer-death reporting: every dialog.showErrorBox the
   // shell put up, and the app.log lines behind them.
   errors: [string, string][]
@@ -241,7 +288,27 @@ interface MainStub {
 const realRequire = createRequire(join(ELECTRON_DIR, 'main.cjs'))
 const savedHome = process.env.AUTOWRIGHT_HOME
 
-function loadMain(): MainStub {
+// §3 service-child double: main.cjs's own `require` hands this to it instead
+// of child_process.execFile, so a test can hang a child or kill it on its
+// deadline without ever spawning anything.
+type ServiceChildOptions = { windowsHide: boolean, timeout: number, maxBuffer: number }
+type ServiceChildError = Error & { killed?: boolean, signal?: string }
+type ServiceChildStub = (
+  py: string, args: string[], options: ServiceChildOptions,
+  cb: (err: ServiceChildError | null, stdout: string, stderr: string) => void,
+) => void
+
+interface LoadOptions {
+  // Let the ready chain actually run. The default stub never resolves
+  // whenReady, so every other test drives main.cjs through its IPC handlers.
+  ready?: boolean
+  // §9: make the platform's dock-icon step throw, to prove the ready chain
+  // survives an OS-side step that fails.
+  dockIconThrows?: boolean
+  execFile?: ServiceChildStub
+}
+
+function loadMain(options: LoadOptions = {}): MainStub {
   const handlers = new Map<string, (e: unknown, ...args: unknown[]) => unknown>()
   const appEvents = new Map<string, () => void>()
   const opened: string[] = []
@@ -252,6 +319,11 @@ function loadMain(): MainStub {
   const aumids: string[] = []
   const sent: [string, unknown][] = []
   const errors: [string, string][] = []
+  const dialogs: [string, Record<string, unknown>][] = []
+  const dialogAnswer: { canceled: boolean, filePaths: string[], filePath: string | null } = {
+    canceled: true, filePaths: [], filePath: null,
+  }
+  const trayEvents = new Map<string, () => void>()
   let quits = 0
   const home = mkdtempSync(join(tmpdir(), 'aw-main-'))
   process.env.AUTOWRIGHT_HOME = home
@@ -298,9 +370,12 @@ function loadMain(): MainStub {
 
   class FakeWindow {
     wcListeners = new Map<string, (...a: unknown[]) => void>()
+    listeners = new Map<string, (...a: unknown[]) => void>()
+    destroyed = false
     record: WinRecord = {
-      shows: 0, focuses: 0, loads: 0,
+      shows: 0, focuses: 0, loads: 0, destroys: 0,
       fire: (event, ...args) => { this.wcListeners.get(event)?.({}, ...args) },
+      close: () => { this.listeners.get('closed')?.() },
     }
 
     webContents = {
@@ -313,9 +388,12 @@ function loadMain(): MainStub {
 
     constructor(opts: unknown) { windows.push(opts); wins.push(this.record) }
     loadFile() { this.record.loads += 1 } loadURL() { this.record.loads += 1 }
-    on() {} show() { this.record.shows += 1 } focus() { this.record.focuses += 1 } hide() {}
+    on(event: string, fn: (...a: unknown[]) => void) { this.listeners.set(event, fn) }
+    show() { this.record.shows += 1 } focus() { this.record.focuses += 1 } hide() {}
     setSize() {} setPosition() {} isVisible() { return false }
-    setVisibleOnAllWorkspaces() {} destroy() {} isDestroyed() { return false }
+    setVisibleOnAllWorkspaces() {}
+    destroy() { this.destroyed = true; this.record.destroys += 1 }
+    isDestroyed() { return this.destroyed }
   }
 
   const electron = {
@@ -328,24 +406,38 @@ function loadMain(): MainStub {
       on(event: string, fn: () => void) { appEvents.set(event, fn) },
       isReady: () => false,
       quit() { quits += 1 },
-      whenReady: () => new Promise(() => {}),
+      whenReady: () => (options.ready ? Promise.resolve() : new Promise(() => {})),
       // §4.9 dev-harness guard: registration happens only from a packaged
       // run, so the leaf harness models one.
       isPackaged: true,
       getLoginItemSettings: () => ({ openAtLogin: false }),
       setAppUserModelId: (id: string) => { aumids.push(id) },
       setLoginItemSettings(s: { openAtLogin: boolean }) { loginItem.push(s.openAtLogin) },
-      dock: { setIcon() {} },
+      dock: {
+        setIcon() {
+          if (options.dockIconThrows) throw new Error('no dock on this host')
+        },
+      },
     },
     autoUpdater: { on() {}, removeListener() {}, setFeedURL() {}, checkForUpdates() {}, quitAndInstall() {} },
     BrowserWindow: FakeWindow,
     Menu: { buildFromTemplate: () => ({ popup() {} }) },
     Tray: class {
       constructor(icon: unknown) { trays.push(icon) }
-      setToolTip() {} on() {} setImage() {} destroy() {}
+      setToolTip() {}
+      on(event: string, fn: () => void) { trayEvents.set(event, fn) }
+      setImage() {} destroy() {}
     },
     dialog: {
       showErrorBox: (title: string, body: string) => { errors.push([title, body]) },
+      showOpenDialog: async (_w: unknown, opts: Record<string, unknown>) => {
+        dialogs.push(['open', opts])
+        return { canceled: dialogAnswer.canceled, filePaths: dialogAnswer.filePaths }
+      },
+      showSaveDialog: async (_w: unknown, opts: Record<string, unknown>) => {
+        dialogs.push(['save', opts])
+        return { canceled: dialogAnswer.canceled, filePath: dialogAnswer.filePath }
+      },
     },
     nativeImage: { createFromPath: () => ({ setTemplateImage() {} }) },
     ipcMain: { handle: (name: string, fn: never) => { handlers.set(name, fn) } },
@@ -354,7 +446,15 @@ function loadMain(): MainStub {
       showItemInFolder: (p: string) => { revealed.push(p) },
       openExternal() {},
     },
-    screen: {},
+    // §13 panel placement: the platform module reads a cursor point and the
+    // display under it, so one fixed screen stands in for the real one.
+    screen: {
+      getCursorScreenPoint: () => ({ x: 400, y: 12 }),
+      getDisplayNearestPoint: () => ({
+        bounds: { x: 0, y: 0, width: 1440, height: 900 },
+        workArea: { x: 0, y: 0, width: 1440, height: 875 },
+      }),
+    },
   }
 
   const load = new Function('require', 'module', 'exports', '__dirname', '__filename', src)
@@ -364,6 +464,9 @@ function loadMain(): MainStub {
       // One fake under all three class names — main.cjs picks by the §2 marker.
       if (id === 'electron-updater') {
         return { MacUpdater: FakeUpdater, NsisUpdater: FakeUpdater, AppImageUpdater: FakeUpdater }
+      }
+      if (id === 'child_process' && options.execFile) {
+        return { ...realRequire('child_process') as object, execFile: options.execFile }
       }
       return realRequire(id)
     },
@@ -381,7 +484,13 @@ function loadMain(): MainStub {
       if (!fn) throw new Error(`no app listener for ${event}`)
       fn()
     },
+    clickTray: () => {
+      const fn = trayEvents.get('click')
+      if (!fn) throw new Error('no tray click handler')
+      fn()
+    },
     opened, revealed, windows, wins, trays, loginItem, aumids, sent, updater, home, errors,
+    dialogs, dialogAnswer,
     // AUTOWRIGHT_HOME points app.log at this test's own home (§15).
     log: () => {
       try { return readFileSync(join(home, 'logs', 'app.log'), 'utf-8') } catch { return '' }
@@ -429,6 +538,61 @@ describe('main.cjs IPC argument validation', () => {
     // …and a real deep link still opens the window.
     m.invoke('open-app', '/app?automation=abc')
     expect(m.windows).toHaveLength(1)
+  })
+
+  it('pick-folder only hands the dialog a real default path', async () => {
+    const m = loadMain()
+    await m.invoke('pick-folder', 42)
+    await m.invoke('pick-folder', '')
+    await m.invoke('pick-folder', undefined)
+    for (const [, opts] of m.dialogs) expect(opts).not.toHaveProperty('defaultPath')
+    await m.invoke('pick-folder', join(m.home, 'executions'))
+    expect(m.dialogs[3][1].defaultPath).toBe(join(m.home, 'executions'))
+  })
+
+  it('save-file refuses a bad name or bad bytes, and never lets the name steer the path', async () => {
+    const m = loadMain()
+    expect(await m.invoke('save-file', 42, Buffer.from('x'))).toBeNull()
+    expect(await m.invoke('save-file', '', Buffer.from('x'))).toBeNull()
+    expect(await m.invoke('save-file', 'demo.autowright', 'not bytes')).toBeNull()
+    expect(await m.invoke('save-file', 'demo.autowright', { length: 3 })).toBeNull()
+    // None of them even reached the native dialog.
+    expect(m.dialogs).toEqual([])
+    // A name only names a file inside the downloads dir — the `..` walk is
+    // collapsed to a basename before it can steer the dialog anywhere.
+    m.dialogAnswer.canceled = false
+    m.dialogAnswer.filePath = join(m.home, 'out.autowright')
+    expect(await m.invoke('save-file', join('..', '..', 'evil.autowright'), Buffer.from('hi')))
+      .toBe(join(m.home, 'out.autowright'))
+    expect(m.dialogs[0][1].defaultPath).toBe(join(m.home, 'evil.autowright'))
+    expect(readFileSync(join(m.home, 'out.autowright'), 'utf-8')).toBe('hi')
+  })
+
+  it('apply-settings never moves the §5 data root — only the backend sync does', async () => {
+    const m = loadMain()
+    const elsewhere = mkdtempSync(join(tmpdir(), 'aw-data-'))
+    const target = join(elsewhere, 'e-1')
+    try {
+      // The renderer claiming the executions dir moved would otherwise let it
+      // pick the reveal roots for itself.
+      m.invoke('apply-settings', { dataPath: elsewhere })
+      await m.invoke('reveal-path', target)
+      expect(m.revealed).toEqual([])
+      // The backend's own /settings is the one source that may move it: the
+      // reveal-path miss refreshes from there, and then the same path passes.
+      writeFileSync(join(m.home, 'backend.json'), JSON.stringify({ port: 65000, token: 't' }))
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, json: async () => ({ dataPath: elsewhere }),
+      } as Response)
+      try {
+        await m.invoke('reveal-path', target)
+        expect(m.revealed).toEqual([target])
+      } finally {
+        fetchSpy.mockRestore()
+      }
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true })
+    }
   })
 
   it('resize-panel ignores a non-numeric height instead of throwing', () => {
@@ -573,6 +737,48 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
     expect(w.shows).toBe(0)
   })
 
+  it('a deep link that arrives before the load is replayed once, never dropped', () => {
+    vi.useFakeTimers()
+    const m = loadMain()
+    m.invoke('open-app', '/app')
+    const w = m.wins[0]
+    m.invoke('open-app', '/app?automation=abc')
+    expect(m.sent).toEqual([])
+    // A failed navigation still fires did-finish-load, and isLoading() reads
+    // false in the gap before the 1 s retry — the target used to be sent into
+    // that gap, at a renderer that had never registered its listener.
+    w.fire('did-start-loading')
+    w.fire('did-fail-load', -102, 'ERR_CONNECTION_REFUSED', 'http://127.0.0.1:5173/', true)
+    w.fire('did-finish-load')
+    expect(m.sent).toEqual([])
+    // The first load that really succeeds replays it, exactly once.
+    vi.advanceTimersByTime(1000)
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    expect(m.sent).toEqual([['open-target', '/app?automation=abc']])
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    expect(m.sent).toEqual([['open-target', '/app?automation=abc']])
+  })
+
+  it('handlers deferred from a closed window never act on its successor (§9)', () => {
+    const m = loadMain()
+    m.invoke('open-app', '/app')
+    const first = m.wins[0]
+    first.close()
+    m.invoke('open-app', '/app')
+    expect(m.wins).toHaveLength(2)
+    const second = m.wins[1]
+    // Chromium still fires the dead window's own handlers; acting on the
+    // module-level `win` would show and reload the successor instead.
+    first.fire('did-start-loading')
+    first.fire('did-finish-load')
+    expect(second.shows).toBe(0)
+    first.fire('render-process-gone', { reason: 'oom' })
+    expect(second.loads).toBe(1)
+    expect(m.quits).toBe(0)
+  })
+
   it('showApp on an unloaded window stays hidden; after the load it shows again', () => {
     const m = loadMain()
     m.invoke('open-app', '/app')
@@ -600,6 +806,8 @@ const platMod = realRequire(join(PLATFORM_DIR, 'index.cjs')) as {
   capabilities: { trayPanel: boolean, loginItem: boolean, dockIcon: boolean, updates: boolean, appMenu: boolean, desktopEntry: boolean }
   UPDATER: string | null
   updateFeedUrl: (arch: string) => string | null
+  bundledPythonPath: (resourcesPath: string) => string
+  shimText: (python: string) => string
   applyLoginItem: (app: { isPackaged: boolean }, enabled: boolean, exec?: unknown) => void
 }
 const caps = platMod.capabilities
@@ -716,6 +924,35 @@ describe('main.cjs platform capability wiring (§2/§9)', () => {
     // reference, so this only changes after the tray actually exists.
     m.invoke('apply-settings', { menuBarIcon: true })
     m.emit('window-all-closed')
+    expect(m.quits).toBe(1)
+  })
+
+  it('turning the tray off destroys the panel and re-checks the close rule (§9/§13)', () => {
+    if (!caps.trayPanel) return
+    const m = loadMain()
+    m.invoke('apply-settings', { menuBarIcon: true })
+    expect(m.trays).toHaveLength(1)
+    // The panel is built lazily on the first tray click, and it is the only
+    // window in this process — no main window was ever opened.
+    m.clickTray()
+    expect(m.wins).toHaveLength(1)
+    const panel = m.wins[0]
+    m.invoke('apply-settings', { menuBarIcon: false })
+    // Left merely hidden it would be an unreachable window that also keeps
+    // window-all-closed from ever firing again.
+    expect(panel.destroys).toBe(1)
+    // …and the next tray click builds a fresh one rather than touching it.
+    m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    expect(m.wins).toHaveLength(2)
+    expect(m.wins[1].destroys).toBe(0)
+    if (caps.dockIcon) {
+      // macOS stays resident behind the dock whatever the tray does.
+      expect(m.quits).toBe(0)
+      return
+    }
+    // No dock, no tray, no main window: nothing left to click, so the app
+    // quits instead of running on invisibly.
     expect(m.quits).toBe(1)
   })
 
@@ -878,5 +1115,200 @@ describe('main.cjs Homebrew-managed updates (§3)', () => {
     expect(hits).toHaveLength(2)
     const darwinSrc = readFileSync(join(PLATFORM_DIR, 'darwin.cjs'), 'utf-8')
     expect(darwinSrc).toMatch(/function managedInstall\(\)[\s\S]{0,300}\/opt\/homebrew\/Caskroom\/autowright[\s\S]{0,120}\/usr\/local\/Caskroom\/autowright/)
+  })
+})
+
+// ---- §3 bounded service children -------------------------------------------
+// `service install` and `service stop` are the only children the app spawns,
+// and launchctl/sc can wedge on a broken domain. Every spawn and every wait on
+// one carries a 120 s bound, so quit-all and reset always settle — with the
+// plain timeout line when the child never came back.
+
+// Electron sets process.resourcesPath and §3's bundled-python probe joins onto
+// it; a plain node run has none, so these tests plant one.
+const nodeProcess = process as unknown as { resourcesPath?: string }
+const savedResourcesPath = nodeProcess.resourcesPath
+
+function restoreResourcesPath() {
+  if (savedResourcesPath === undefined) delete nodeProcess.resourcesPath
+  else nodeProcess.resourcesPath = savedResourcesPath
+}
+
+describe('main.cjs bounded service children (§3)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('a child killed on its own deadline answers the plain timeout line', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const options: ServiceChildOptions[] = []
+    // Model child_process' own `timeout`: kill the child at the deadline and
+    // call back with the killed error, exactly as the real one does.
+    const m = loadMain({
+      execFile: (_py, _args, o, cb) => {
+        options.push(o)
+        setTimeout(() => {
+          cb(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }), '', '')
+        }, o.timeout)
+      },
+    })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const result = m.invoke('quit-all', { force: true }) as Promise<unknown>
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(await result).toEqual({ error: 'service stop timed out' })
+    // A signal name is never reported as the failure — and the spawn carried
+    // the bound plus a capped buffer.
+    expect(options).toEqual([{ windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }])
+    // §3: the app stays up on any stop failure.
+    expect(m.quits).toBe(0)
+  })
+
+  it('a wedged install child cannot hang the stop that waits for it', async () => {
+    vi.useFakeTimers()
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = platMod.bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    try {
+      // No backend.json, so ensure-backend goes straight to `service install`
+      // — and that child never calls back. quit-all used to sit on
+      // `await serviceInstallDone` for the life of the app.
+      const m = loadMain({ ready: true, execFile: () => {} })
+      await vi.advanceTimersByTimeAsync(0)
+      const result = m.invoke('quit-all', { force: true }) as Promise<unknown>
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(await result).toEqual({ error: 'service stop timed out' })
+      expect(m.quits).toBe(0)
+    } finally {
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---- §3 live-execution gate ------------------------------------------------
+// The gate in front of every install, stop and reset asks the backend what is
+// running. Only a backend that cannot be reached at all counts as idle.
+
+describe('main.cjs live-execution gate (§3)', () => {
+  afterEach(() => {
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('a backend that will not answer counts as busy; an unreachable one as idle', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ execFile: (_py, _args, _o, cb) => { cb(null, 'stopped', '') } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue({ ok: false, status: 500 } as Response)
+    try {
+      // Up, but the question came back a 500: stopping it now could land on
+      // top of a running execution.
+      expect(await m.invoke('quit-all', {})).toEqual({ busy: true })
+      // Unreachable is the one idle answer — nothing can be executing on it.
+      fetchSpy.mockRejectedValue(new Error('offline in tests'))
+      expect(await m.invoke('quit-all', {})).toEqual({ ok: true })
+      expect(m.quits).toBe(1)
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('the version-sync drain treats a non-OK probe like an unreachable one (§3)', () => {
+    // Both unknowns keep the drain waiting; only the /health cross-check ends
+    // it, so a version-sync install still never lands mid-execution.
+    expect(src).toContain("if (live === null || live === 'unknown') {")
+    expect(src).toContain("return live === true || live === 'unknown'")
+  })
+})
+
+// ---- §3 CLI shim writes ----------------------------------------------------
+// AUTOWRIGHT_SHIM (§15) points the shim at a temp file, so these drive the
+// real cli-status / cli-install handlers without touching ~/.local/bin.
+
+describe('main.cjs CLI shim writes (§3)', () => {
+  const savedShim = process.env.AUTOWRIGHT_SHIM
+  let shimDir: string | null = null
+
+  afterEach(() => {
+    if (shimDir) rmSync(shimDir, { recursive: true, force: true })
+    shimDir = null
+    if (savedShim === undefined) delete process.env.AUTOWRIGHT_SHIM
+    else process.env.AUTOWRIGHT_SHIM = savedShim
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  // One loaded main with a temp shim location and a backend.json naming the
+  // interpreter the shim should run (§3 discovery fields).
+  function loadWithShim(): { m: MainStub, shim: string } {
+    shimDir = mkdtempSync(join(tmpdir(), 'aw-shim-'))
+    const shim = join(shimDir, 'autowright')
+    process.env.AUTOWRIGHT_SHIM = shim
+    const m = loadMain()
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    return { m, shim }
+  }
+
+  it('cli-install refuses to clobber a foreign autowright command', async () => {
+    const { m, shim } = loadWithShim()
+    writeFileSync(shim, '#!/bin/sh\necho someone elses tool\n')
+    expect(await m.invoke('cli-install')).toEqual({
+      ok: false,
+      error: `A different autowright command already exists at ${shim}. Remove it first.`,
+    })
+    // Untouched: a file we did not write is never overwritten.
+    expect(readFileSync(shim, 'utf-8')).toContain('someone elses tool')
+  })
+
+  it('cli-install writes the shim where there is nothing in the way', async () => {
+    const { m, shim } = loadWithShim()
+    expect(await m.invoke('cli-install')).toEqual({ ok: true })
+    expect(readFileSync(shim, 'utf-8')).toBe(platMod.shimText('/usr/bin/python3'))
+  })
+
+  it('a healed shim keeps its executable bit', async () => {
+    const { m, shim } = loadWithShim()
+    // Ours, but pointing at an interpreter that moved, and not executable —
+    // writeFileSync's `mode` only applies where it creates the file, so the
+    // heal used to leave the old mode in place.
+    writeFileSync(shim, platMod.shimText('/old/python'), { mode: 0o644 })
+    expect(await m.invoke('cli-status')).toMatchObject({ state: 'installed', path: shim })
+    expect(readFileSync(shim, 'utf-8')).toBe(platMod.shimText('/usr/bin/python3'))
+    // Windows has no executable bit to keep.
+    if (process.platform !== 'win32') expect(statSync(shim).mode & 0o777).toBe(0o755)
+  })
+})
+
+// ---- §9 ready chain --------------------------------------------------------
+// The reopen handler is registered first and every OS-side step is guarded on
+// its own, so the app always ends up with a window it can paint.
+
+describe('main.cjs ready chain (§9)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('an OS-side step that throws still leaves the app with a window', () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ ready: true, dockIconThrows: true })
+    return vi.advanceTimersByTimeAsync(0).then(() => {
+      expect(m.windows).toHaveLength(1)
+      // Where there is a dock, the throw really happened and was logged.
+      if (caps.dockIcon) expect(m.log()).toContain('setting the dock icon failed')
+    })
   })
 })

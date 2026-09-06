@@ -138,7 +138,11 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   and §4.6 reserves `skipped` for exactly that — with the note "cancelled before it ran", and
   tells its sender; cancelling a *running* execution does not drain the queue — it frees a slot,
   which is the point of having one. Turning the trigger off, turning the automation off, or deleting it
-  cancels every waiting entry: after any change to the trigger list (PATCH, or a version save
+  cancels every waiting entry — and a deletion in progress admits none: a message firing or a
+  manual queue request landing while the automation's live executions are still being
+  cancelled and awaited is refused without a record (the automation is gone a moment later,
+  and a queued record minted then would sit in the §7 Queued tab as a phantom until the next
+  restart's repair): after any change to the trigger list (PATCH, or a version save
   adopting the editor's list), a waiting entry whose payload no longer matches an enabled
   message trigger — same `secret` and `channel` for `discord`, sender matching `from`
   (case-insensitive) for `imessage` — is cancelled exactly like a user cancel
@@ -216,7 +220,11 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   own worker thread, single-flight, because a first sweep after a retention change can
   rmtree a huge backlog and a tick stalled past the grace window would make the
   missed-executions rule above misread scheduler lag as sleep and drop a
-  `runIfMissed: false` occurrence the Mac never slept through), the backend evaluates
+  `runIfMissed: false` occurrence the Mac never slept through; each delete renames the
+  execution directory aside under the store lock and removes the renamed tree outside it, so
+  no `rmtree` ever runs under the lock — deleting an automation does the same with its whole
+  tree — and an aside dir a crash left behind, `.ad-tmp-deleted-*`, is swept at the next
+  startup reconcile), the backend evaluates
   every automation's §4.1 `overdue` state. An automation
   observed overdue at **two consecutive sweeps** gets one macOS notification — title the
   automation's name, body "Scheduled executions are being missed." — and its
@@ -577,8 +585,12 @@ destructive moments recoverable.
   half-written file). Automatic reasons never race an execution: `pre-clear` rides the clear
   request, which is itself 409-gated the same way. `pre-version` runs before step 1 — and
   because two parallel first-executions of a new version would otherwise both see "no recorded
-  execution yet", the check and the snapshot happen **in the same lock span that admits the
-  execution**, so exactly one is taken and it is taken before either execution can touch memory.
+  execution yet", the *decision* is taken **in the lock span that admits the execution**, so exactly one is
+  ever taken, and the copy itself runs on the admitted execution's worker thread before its
+  step 1 — a memory dir can be gigabytes and no copy may run under the store lock. A sibling
+  first-execution admitted into another `maxParallel` slot meanwhile can already be writing
+  `memory/` while the copy runs: in that one case the pre-version image is best-effort; it is
+  exact whenever a version's first execution runs alone (the default `maxParallel` 1).
 - **Retention** — at each creation, unnamed snapshots beyond the newest 5 are pruned. Named
   snapshots are never auto-deleted — naming pins one until the user deletes it (or the
   automation is deleted). Renaming to empty returns a snapshot to the unnamed pool.

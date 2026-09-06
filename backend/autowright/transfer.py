@@ -115,6 +115,25 @@ class _ExportRefs:
         return AGENT_REF_RE.sub(
             lambda m: f'agents["{self.agent_ref_by_id[m.group(1)]}"]', code)
 
+    def check_subscripts(self, ver: dict) -> None:
+        """§5.1 export scan: every `secrets[...]`/`agents[...]` subscript key in
+        step code must be an id this export knows, so the archive can never
+        carry a key its own importer would reject - a leftover `<id>`
+        placeholder or a commented-out old reference is a 422 naming the step,
+        not bytes that would re-export identically."""
+        for s in ver.get("steps", []):
+            code = s.get("code", "")
+            for m in _ANY_SECRET_SUBSCRIPT_RE.finditer(code):
+                if m.group(1) not in self.secret_ref_by_id:
+                    raise TransferError(
+                        f"step {s['file']!r} subscripts secrets[{m.group(1)!r}], which is "
+                        "not a stored secret; fix the step and export again")
+            for m in _ANY_AGENT_SUBSCRIPT_RE.finditer(code):
+                if m.group(1) not in self.agent_ref_by_id:
+                    raise TransferError(
+                        f"step {s['file']!r} subscripts agents[{m.group(1)!r}], which is "
+                        "not a stored agent; fix the step and export again")
+
 
 def _referenced_secret_ids(refs: _ExportRefs, ver: dict,
                            triggers: list[dict] | None = None) -> list[str]:
@@ -164,6 +183,9 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
         secret_ids = _referenced_secret_ids(refs, ver, a["triggers"])
         agent_ids = _referenced_agent_ids(store, refs, a, ver)
         refs.assign(secret_ids, agent_ids)
+        # §5.1: the same subscript scan import runs, before anything is
+        # written — an archive the importer would reject is never produced.
+        refs.check_subscripts(ver)
         manifest: dict = {
             "format_version": FORMAT_VERSION,
             "exported_at": timefmt.now_iso(),
@@ -446,6 +468,11 @@ def _validate(z: zipfile.ZipFile) -> dict:
     for p in params:
         if not isinstance(p, dict) or not p.get("name") or p.get("kind") not in PARAM_KINDS:
             raise TransferError(f"invalid parameter definition: {p!r}")
+        # §4.2/§5.1: every definition carries a default — the rule the app's own
+        # save path enforces, so the first edit of an imported version can never
+        # 422 on a definition the user never wrote.
+        if "default" not in p:
+            raise TransferError(f"param {p['name']!r}: missing default")
     # §5.1: definitions only — an archive exported before the §4.2 save-side
     # strip can carry resolved values inside its definitions; they never land.
     params = strip_param_values(params)
@@ -1038,13 +1065,17 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
                                 # the os-mismatch problem, never rejects.
                                 origin_os=arch["os"],
                                 unresolved_references=unresolved or None)
-    if arch["param_values"]:
+    # §5.1: values naming no param of the imported version drop, never store
+    # (the §19 PATCH rule) — matched by name, like every other values path.
+    names = {p["name"] for p in ver["params"] or []}
+    values = {k: v for k, v in arch["param_values"].items() if k in names}
+    if values:
         # Values are the one manifest field creation can't seed. The
         # automation already landed — a failing values write degrades to an
         # import without them (the user re-enters values on the detail page)
         # rather than answering 500 for an automation that exists.
         try:
-            store.patch_automation(a, {"paramValues": arch["param_values"]})
+            store.patch_automation(a, {"paramValues": values})
         except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception(
                 "import of %r landed but its param values didn't apply", a.get("name"))

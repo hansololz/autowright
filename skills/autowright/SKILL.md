@@ -1,14 +1,14 @@
 ---
 name: autowright
 description: >
-  Drive Autowright — the macOS app for recurring personal automations — end-to-end from the
+  Drive Autowright — the desktop app for recurring personal automations — end-to-end from the
   command line: create and edit automations as real files (pull/push workdirs), execute and
   follow them, and manage executions, parameters, triggers, secrets, agents, and settings.
 ---
 
 # Autowright
 
-Autowright runs the user's personal automations on a schedule, entirely on this Mac. Each
+Autowright runs the user's personal automations on a schedule, entirely on this computer. Each
 automation is: a **spec** (plain-markdown description of what it does), ordered **step
 scripts** (Python, executed by Autowright's engine), **parameters** (user-editable values),
 **triggers** (cron / one-shot / on-app-start), per-automation **memory** (files kept between
@@ -45,9 +45,9 @@ operation the app's UI offers is available there.
    install or move files yourself. Tell them: open **Autowright → Settings → COMMAND LINE**
    and turn on "The `autowright` command" (installs to `~/.local/bin`, no password needed).
    If the toggle is already on, the card shows either a **Reinstall** button (the command
-   file is missing) or an **Add it to your PATH** row with a copyable command — that command
-   is `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile && source ~/.zprofile`,
-   which they can also run directly, then open a fresh shell and retry.
+   file is missing) or an **Add it to your PATH** row with a copyable command — the card
+   shows the exact command for this machine, so have the user copy it from there rather
+   than guessing one, then open a fresh shell and retry.
 
 ## Orientation
 

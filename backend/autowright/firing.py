@@ -75,12 +75,21 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
     queued/skipped record) happen under one lock, so a firing can never race a
     concurrent manual start into a slot that isn't there, or lose its record.
     `payload` is the §4.5 triggerPayload of a message-trigger firing."""
+    from .engine import VersionNotFound  # deferred: engine imports firing
+
     # §4.5: the record stores the trigger's machine kind — §4.3 kinds are the
     # §4.5 kinds verbatim; labels are derived at serialization.
     kind = t["kind"]
     skipped = False
     started = False
     with store.lock:
+        # §6: a firing landing in the §19 DELETE window is refused without a
+        # record of any kind — the automation is gone a moment later, and a
+        # queued or skipped record minted now would sit in the §7 lists as a
+        # phantom until the next restart's repair. (`start` refuses too, but
+        # the capacity branch below never reaches it.)
+        if a.get("_deleting"):
+            return False
         if engine.at_capacity(a):
             queued = store.queued_execs(a["id"]) if payload else []
             cap = clamp_max_queued(a.get("max_queued"))
@@ -116,12 +125,15 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
                 started = True
             except Exception as e:  # noqa: BLE001 - a disk error, a bad step folder, …
                 started = False
-                if isinstance(e, LookupError):
+                if isinstance(e, VersionNotFound):
                     # §7: the version this firing targets doesn't resolve
                     # (corrupt current_version) — a silent swallow would fire
                     # and vanish every tick forever, with §4.1 overdue never
                     # flagging it. Leave the skipped record every other
-                    # never-ran path leaves.
+                    # never-ran path leaves. The class is narrow on purpose:
+                    # KeyError and IndexError are LookupErrors too, and a bug
+                    # inside `start` must be logged, not dressed up as a
+                    # missing version.
                     try:
                         h = store.create_execution(
                             a, "version", a["current_version"], kind,
@@ -164,10 +176,17 @@ def queue_manual(store: Store, engine: Engine, a: dict, trigger: str,
     to notify and no TTL. A Draft is never queued (the draft could change under
     the waiting entry) and a full queue refuses with **no record** — the user is
     present to decide, unlike a message sender. Returns (record, queued).
-    Raises LookupError (unknown version → the API's 404) and RuntimeError
-    (Draft / full queue → 409). The capacity check and the start/admission
-    happen under one lock, exactly as in fire_trigger."""
+    Raises VersionNotFound (unknown version → the API's 404) and RuntimeError
+    (Draft / full queue / a deletion in progress → 409). The capacity check and
+    the start/admission happen under one lock, exactly as in fire_trigger."""
+    from .engine import VersionNotFound  # deferred: engine imports firing
+
     with store.lock:
+        # §6: same DELETE-window refusal as a message firing — an entry admitted
+        # while the automation's live executions are being cancelled and awaited
+        # would outlive the automation itself.
+        if a.get("_deleting"):
+            raise RuntimeError("this automation is being deleted")
         if not engine.at_capacity(a):
             return engine.start(a, trigger, version_label=version_label), False
         # Same label parse/resolve as engine.start — a queue admission must
@@ -177,7 +196,7 @@ def queue_manual(store: Store, engine: Engine, a: dict, trigger: str,
             raise RuntimeError("a Draft execution can't be queued — execute it "
                                "again when a slot frees up")
         if engine._resolve_version(a, kind, version) is None:
-            raise LookupError(f"version {version_label or f'v{version}'} not found")
+            raise VersionNotFound(f"version {version_label or f'v{version}'} not found")
         cap = clamp_max_queued(a.get("max_queued"))
         if len(store.queued_execs(a["id"])) >= cap:
             raise RuntimeError(f"the queue is full ({cap} waiting)")
@@ -228,6 +247,8 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
     question is noise. Called whenever a slot frees (an execution finishing or
     being cancelled) and on every scheduler tick, so a raised `maxParallel` or a
     missed wake-up still gets picked up."""
+    from .engine import VersionNotFound  # deferred: engine imports firing
+
     while True:
         with store.lock:
             a = store.autos.get(automation_id)
@@ -246,7 +267,7 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
                                  version_label=f"v{head['version']}",
                                  payload=head.get("trigger_payload"), adopt=head)
                     continue
-                except LookupError:
+                except VersionNotFound:
                     # The version this firing was admitted against is gone (§7
                     # restore/rollback). The entry can never execute — end it
                     # rather than blocking the queue behind it forever.

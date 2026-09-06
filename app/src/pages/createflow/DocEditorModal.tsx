@@ -8,7 +8,7 @@
 // unchanged and raise the discard confirm otherwise (the Modal's guardClose);
 // every path plays the §14 exit before the caller's state changes.
 import React, { useEffect, useRef, useState } from 'react'
-import { ConfirmModal, Eyebrow, Modal, useOverlayThumb } from '../../ui'
+import { ConfirmModal, Eyebrow, Modal, isTopModal, useOverlayThumb } from '../../ui'
 
 export type DocKind = 'spec' | 'notes' | 'instructions'
 
@@ -95,9 +95,12 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
     el.focus()
     el.setSelectionRange(el.value.length, el.value.length)
   }, [])
-  // ⌘S / Ctrl+S saves while the modal is open (swallowed while Save is disabled)
+  // ⌘S / Ctrl+S saves while the modal is open (swallowed while Save is
+  // disabled). It yields to a card stacked above this one — the discard
+  // confirm — the way the Modal's own Escape handler yields to the stack.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!isTopModal()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save() }
     }
     document.addEventListener('keydown', onKey)

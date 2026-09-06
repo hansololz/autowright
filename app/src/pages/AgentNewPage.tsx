@@ -301,6 +301,11 @@ export default function AgentNewPage() {
     api.ollamaPull(nm).catch((e: Error) => { setPulling(null); showToast(e.message) })
   }
 
+  // The reconnect flow's minimum-visible-progress timer, held so leaving the
+  // page cancels it — otherwise it lands its toast (and a setState) over
+  // whatever page came next.
+  const reconnectTimer = useRef<number | null>(null)
+  useEffect(() => () => { if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current) }, [])
   // §12 reconnect flow, started from the form banner when editing a signed-out
   // agent. Runs through the store check so the cached Agents-page badge updates too.
   const reconnect = () => {
@@ -309,7 +314,8 @@ export default function AgentNewPage() {
     const t0 = Date.now()
     void runAgentCheck(editAgent.id, 'connecting').then((st) => {
       const ok = st === 'ready'
-      window.setTimeout(() => {
+      reconnectTimer.current = window.setTimeout(() => {
+        reconnectTimer.current = null
         setFix(ok ? 'done' : 'needs')
         showToast(ok
           ? 'Connected. Signed in as you.'

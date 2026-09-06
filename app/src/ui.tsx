@@ -887,6 +887,11 @@ const topModal = () =>
  * Ask panel) must yield to the modal stack instead of closing underneath it. */
 export const anyModalOpen = () => modalStack.length > 0
 
+/** True while the top-most mounted Modal is the one at `zIndex` (the Modal
+ * default) — a modal-owned shortcut (the §11 doc editor's ⌘S) yields to a card
+ * stacked above it, exactly as the Modal's own Escape handler does. */
+export const isTopModal = (zIndex = 60) => topModal()?.z === zIndex
+
 export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog', ariaLabel, guardClose, children }: {
   onClose: () => void; width: number; zIndex?: number; cardStyle?: React.CSSProperties
   role?: 'dialog' | 'alertdialog'; ariaLabel?: string

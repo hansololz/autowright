@@ -211,17 +211,29 @@ def main() -> None:
     # captured SIGTERM once run() returns, so the `finally` below never
     # executes on a signal-driven stop (a launchd bootout, quit-all, reset).
     # Run-once: the finally still covers a run() that returns without a signal.
+    # Two halves, in the order §3 requires: quiesce (stop producing work) runs
+    # before the lifespan kills live executions and drafting harnesses, the
+    # rest after. Each half is guarded by its own Event so it runs exactly
+    # once whichever path reaches it.
+    quiesce_done = threading.Event()
     shutdown_done = threading.Event()
+
+    def quiesce() -> None:
+        if quiesce_done.is_set():
+            return
+        quiesce_done.set()
+        scheduler.stop()
+        listeners.stop()
 
     def shutdown() -> None:
         if shutdown_done.is_set():
             return
         shutdown_done.set()
+        quiesce()  # defensively: a run() that returned without ever running the lifespan
         stop_guard.set()  # before the unlink below — the guard must not resurrect the file
-        scheduler.stop()
-        listeners.stop()
         unlink_own_backend_json()
 
+    api.register_quiesce(quiesce)
     api.register_shutdown(shutdown)
     # §3/§4.9 permanent assertion, through the §2 platform layer.
     platform.current().power.reconcile(bool(store.settings.get("keepAwake")))

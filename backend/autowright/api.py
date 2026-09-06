@@ -22,7 +22,8 @@ from . import drafting, packages as pkglib, reqlog, timefmt, transfer, triggers 
 from .drafting import draft_jobs
 from .engine import Engine, kill_orphan_agent_group, kill_orphan_group
 from .events import OVERFLOW, hub
-from .firing import cancel_unmatched_queue, drain_queue, finish_never_ran, fire_trigger, queue_manual
+from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
+                     fire_trigger, queue_manual)
 from .storage import (LiveExecutionError, StoreUnwritableError, _kind_ok, is_test,
                       exec_started_ms, iter_file_stats, new_id, size_label, store,
                       strip_param_values)
@@ -52,11 +53,21 @@ def auth(cred: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
 # ever executes on a signal-driven stop. The lifespan below is the one place
 # shutdown code reliably runs.
 _shutdown_callbacks: list = []
+_quiesce_callbacks: list = []
 _startup_callbacks: list = []
 
 
 def register_shutdown(callback) -> None:
     _shutdown_callbacks.append(callback)
+
+
+def register_quiesce(callback) -> None:
+    """§3 shutdown order: run BEFORE anything is killed — main() registers the
+    scheduler and listener stops here. Stopping the work sources first is what
+    makes the kill sweep below final: a cron tick or an inbound message landing
+    after `kill_all_live` would start an execution with nobody left to collect
+    it, and the successor would find it stale."""
+    _quiesce_callbacks.append(callback)
 
 
 def register_startup(callback) -> None:
@@ -79,6 +90,14 @@ async def _lifespan(_: FastAPI):
         callback()
     hub.publish("automation.changed")
     yield
+    # §3: quiesce first — the work sources (scheduler, message listeners) stop
+    # before anything is killed, so nothing can start an execution the kill
+    # sweep below has already passed. Error-tolerant like the shutdown half.
+    for callback in _quiesce_callbacks:
+        try:
+            callback()
+        except Exception:  # noqa: BLE001
+            pass
     # §3: live step groups die with this backend — the successor's startup
     # recovery marks their records interrupted, and an orphan must not keep
     # writing memory/ beside the second copy the next cron tick starts.
@@ -86,9 +105,9 @@ async def _lifespan(_: FastAPI):
     # §3: drafting harnesses die with it too — a stopping backend must never
     # leave an agent harness session group running with nobody to collect it.
     draft_jobs.kill_all_building()
-    # §3: main()'s registered cleanup (guard thread, scheduler, listeners,
-    # backend.json unlink) — error-tolerant, a failing callback must not keep
-    # the next one from running.
+    # §3: main()'s registered cleanup (guard thread, backend.json unlink) —
+    # error-tolerant, a failing callback must not keep the next one from
+    # running.
     for callback in _shutdown_callbacks:
         try:
             callback()
@@ -157,9 +176,12 @@ class _RequestLogMiddleware:
         try:
             await self.app(scope, recv, snd)
         finally:
-            reqlog.write_http(ts, scope, bytes(req_body), totals[0], status[0],
-                              bytes(resp_body), totals[1],
-                              (time.monotonic() - t0) * 1000)
+            # Threadpool, not the loop: the write creates a file and dumps up
+            # to two BODY_CAPs into it, and paying that inline would stall
+            # every other request and the §19 WebSocket once per request.
+            await run_in_threadpool(
+                reqlog.write_http, ts, scope, bytes(req_body), totals[0], status[0],
+                bytes(resp_body), totals[1], (time.monotonic() - t0) * 1000)
 
 
 app.add_middleware(_RequestLogMiddleware)
@@ -550,7 +572,12 @@ def clear_queue(automation_id: str) -> dict:
     with store.lock:
         heads = list(store.queued_execs(automation_id))
     for h in heads:
-        if engine.cancel(h["id"]):
+        # §6: finish the queue entry directly, never through engine.cancel —
+        # that falls through to a LIVE cancel when the entry was promoted in
+        # the gap since the snapshot, and clearing the queue must never kill a
+        # running execution. A promoted entry is simply no longer queued, so
+        # finish_queued answers False and it isn't counted.
+        if finish_queued(store, h, "cancelled before it ran"):
             n += 1
     if n:
         _publish_auto_changed(a)
@@ -957,7 +984,14 @@ def _land_import(data: bytes) -> dict:
                 pkglib.ensure(pkgs)
             except Exception:  # noqa: BLE001 — §6.2: a failed install stays a problem entry
                 log.exception("post-import package ensure failed")
-            _publish_auto_changed(a)
+            # §19: a package install runs for minutes, and the user may have
+            # deleted the automation meanwhile — republishing its row would
+            # resurrect a deleted automation in every client's list. Identity,
+            # not id: a re-import reuses neither.
+            with store.lock:
+                still_stored = store.autos.get(a["id"]) is a
+            if still_stored:
+                _publish_auto_changed(a)
 
         threading.Thread(target=ensure_imported, daemon=True).start()
     return {"automation": _auto_json_locked(a), "summary": summary}
@@ -1303,6 +1337,16 @@ def get_memory_file(automation_id: str, name: str) -> dict:
         raise HTTPException(422, f"not a memory-relative file path: {name!r}")
     if not p.is_file():
         raise HTTPException(404, "no such memory file")
+    try:
+        size = p.stat().st_size
+    except OSError as e:
+        raise HTTPException(404, "no such memory file") from e
+    # §19: the whole file rides one JSON response, decoded in the renderer —
+    # a step that logged a gigabyte into memory/ must not pull it all through
+    # the backend and the UI. The cap answers with the directory instead.
+    if size > 8 * 1024 * 1024:
+        raise HTTPException(413, "file is larger than 8 MB; open it from the memory "
+                                 f"directory on disk instead: {store.memory_stats(a)['path']}")
     try:
         data = p.read_bytes()
     except OSError as e:
@@ -1934,7 +1978,12 @@ def _ollama_pull_http(model: str) -> None:
 
 
 def _ollama_pull_cli(model: str) -> None:
-    """CLI fallback for when the server isn't answering (§19)."""
+    """CLI fallback for when the server isn't answering (§19).
+
+    Whatever happens, the terminal `done` event is published: the §12 pull card
+    watches for it, so a spawn error escaping here would leave the UI pulling
+    forever."""
+    line, ok = "", False
     try:
         binpath = harness.ollama_bin()
         if not binpath:
@@ -1954,10 +2003,12 @@ def _ollama_pull_cli(model: str) -> None:
             hub.publish("ollama.pull", model=model, line=stripped, done=False, **extra)
         proc.wait()
         ok = proc.returncode == 0
-        hub.publish("ollama.pull", model=model, line="", done=True, ok=ok,
-                    **({"percent": 100} if ok else {}))
     except FileNotFoundError:
-        hub.publish("ollama.pull", model=model, line="Ollama isn't running", done=True, ok=False)
+        line = "Ollama isn't running"
+    except Exception as e:  # noqa: BLE001
+        line = f"pull failed: {e}"
+    hub.publish("ollama.pull", model=model, line=line, done=True, ok=ok,
+                **({"percent": 100} if ok else {}))
 
 
 @app.post("/ollama/pull", dependencies=[Depends(auth)])
@@ -1973,11 +2024,16 @@ def ollama_pull(body: models.OllamaPull) -> dict:
         # §19: /ollama/status reads installed/active from the server answering,
         # so the pull must work in exactly that state — ride the server's own
         # API and never require a resolvable CLI binary alongside it.
-        if harness._ollama_models() is not None:
-            _ollama_pull_http(model)
-        else:
-            _ollama_pull_cli(model)
-        hub.publish("agents.changed")
+        try:
+            if harness._ollama_models() is not None:
+                _ollama_pull_http(model)
+            else:
+                _ollama_pull_cli(model)
+        finally:
+            # §19: the agents list refreshes even when the pull path raised —
+            # a model that did land before the failure must not stay invisible
+            # until the next reload.
+            hub.publish("agents.changed")
 
     threading.Thread(target=pull, daemon=True).start()
     return {"ok": True}
@@ -2229,12 +2285,15 @@ async def ws(sock: WebSocket, token: str = Query("")) -> None:
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        # Unsubscribe BEFORE the await below: anything raised there would skip
+        # it and leak the queue, and the hub would keep publishing into a
+        # queue nobody drains for the rest of the process's life.
+        hub.unsubscribe(q)
         sender.cancel()
         try:
             await sender  # retrieve a send-side error so it never logs as unretrieved
-        except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-        hub.unsubscribe(q)
 
 
 def _repair_stale_executing() -> None:

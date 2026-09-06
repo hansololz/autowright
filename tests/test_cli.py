@@ -403,6 +403,27 @@ def test_workdir_pull_push_round_trip(tmp_path):
     assert cron["id"] == "t1" and cron["enabled"] is False  # matched: keeps id + enabled state
 
 
+def test_workdir_pull_prunes_managed_files_it_did_not_write(tmp_path):
+    """§20: pull owns the workdir's managed files — a step file the manifest no
+    longer lists and a notes.md the version no longer carries are removed, so a
+    re-pull never resurrects deleted content on the next push. Files pull
+    doesn't manage are left alone."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    d.mkdir()
+    (d / "03-old.py").write_text("print('dropped')\n")
+    (d / "notes.md").write_text("stale notes\n")
+    (d / "README.md").write_text("mine\n")
+
+    written = cli.write_workdir(d, FULL_AUTO)
+    assert "notes.md" not in written and "03-old.py" not in written
+    assert not (d / "03-old.py").exists()
+    assert not (d / "notes.md").exists()
+    assert (d / "README.md").read_text() == "mine\n"      # unmanaged, untouched
+    assert (d / "01-fetch.py").exists() and (d / "instructions.md").exists()
+
+
 def test_workdir_notes_round_trip(tmp_path):
     """§20: pull writes notes.md when the automation has notes; push reads it
     back and saves it verbatim into the draft."""
@@ -908,6 +929,31 @@ def test_client_exits_cleanly_when_backend_port_is_dead(home):
     with pytest.raises(SystemExit) as ei:
         c.req_raw("GET", "/automations/x/export")
     assert "backend isn't reachable" in str(ei.value.code)
+
+
+def test_client_exits_cleanly_when_the_backend_drops_the_connection(home, monkeypatch):
+    """§3/§20: a backend that dies mid-request — a half-closed socket
+    (RemoteDisconnected) or a reset one — is the same clean restart guidance as
+    an unreachable one, never a traceback out of http.client."""
+    import http.client
+
+    from autowright import cli, paths
+
+    paths.backend_json().write_text(json.dumps({"port": 5151, "token": "tok"}))
+    c = cli.Client()
+    for err in (http.client.RemoteDisconnected("Remote end closed connection"),
+                ConnectionResetError(54, "Connection reset by peer")):
+        def dies(*a, e=err, **k):
+            raise e
+
+        monkeypatch.setattr(cli._opener, "open", dies)
+        with pytest.raises(SystemExit) as ei:
+            c.req("GET", "/automations")
+        assert "backend isn't reachable" in str(ei.value.code)
+        assert "service restart" in str(ei.value.code)
+        with pytest.raises(SystemExit) as ei:
+            c.req_raw("GET", "/automations/x/export")
+        assert "backend isn't reachable" in str(ei.value.code)
 
 
 # ---------------------------------------------------------------- find_execution
@@ -1980,6 +2026,20 @@ def test_cmd_secret_commands(monkeypatch, capsys):
         _run(c, "secret", "delete", "NOPE")
     assert c.calls == []
     assert f"removed from your {paths.secret_store_name()}" in capsys.readouterr().out
+
+
+def test_cmd_secret_set_stdin_takes_the_whole_input(monkeypatch, capsys):
+    """§20: --stdin reads the WHOLE of stdin, so a multi-line value (a PEM key)
+    lands intact — only the trailing newline is trimmed."""
+    from autowright import cli
+
+    secrets = [{"id": "s-1", "name": "API_TOKEN", "set": True, "usedBy": []}]
+    pem = "-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\n"
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(pem))
+    c = _RouteClient({"/secrets": secrets})
+    _run(c, "secret", "set", "API_TOKEN", "--stdin")
+    assert c.calls == [("PUT", "/secrets/s-1", {"value": pem.rstrip("\n")})]
+    capsys.readouterr()
 
 
 def test_cmd_secret_delete_all(capsys):

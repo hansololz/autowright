@@ -1676,3 +1676,302 @@ def test_draft_test_summary_without_fingerprint_loads(store):
         "steps_fingerprint": "2:deadbeef",
     })
     assert store.draft_test_json(container)["stepsFingerprint"] == "2:deadbeef"
+
+
+# ---------- §5 hand-edited execution.yaml / delete-aside / data-path guards ----------
+
+def test_exec_yaml_with_unquoted_timestamps_loads(store, home):
+    """§5: an UNQUOTED timestamp in a hand-edited execution.yaml parses as a
+    YAML datetime, and one datetime among the string-typed timestamp fields
+    made `max` over started_at raise — bricking the automations list."""
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Hand Edited", None)
+    old = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(old)
+    hand = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(hand)
+    (store.exec_dir(hand["id"]) / "execution.yaml").write_text(
+        f"id: {hand['id']}\n"
+        f"automation_id: {a['id']}\n"
+        "automation_name: Hand Edited\n"
+        "kind: version\nversion: 1\nstatus: succeeded\ntrigger: manual\n"
+        "started_at: 2026-09-05T12:00:00+00:00\n"   # unquoted → a YAML datetime
+        "finished_at: 2026-09-05T12:00:05+00:00\n"
+        "duration_ms: 5000\n", encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    y = s2.read_exec_yaml(hand["id"])
+    assert isinstance(y["id"], str) and isinstance(y["automation_id"], str)
+    assert y["started_at"] == "2026-09-05 12:00:00+00:00"
+    assert y["finished_at"] == "2026-09-05 12:00:05+00:00"
+
+    # the crash path: the full record (yaml-merged) lands back in the index,
+    # and _latest_exec then compares it against the string-timestamped rows
+    s2.execs[hand["id"]] = s2.exec_full(hand["id"])
+    assert s2._latest_exec(a["id"])["id"] in (old["id"], hand["id"])
+
+
+def test_retention_skips_an_unreadable_settings_file(home):
+    """§5 read-only degradation: an unreadable settings.yaml loaded as the
+    DEFAULTS, and the default is a 90-day sweep — running it would delete
+    executions the user's real settings keep forever."""
+    from datetime import datetime, timedelta
+
+    from autowright import paths
+    from autowright.storage import Store
+
+    paths.settings_file().write_text("{{{:::\nnot: [valid", encoding="utf-8")
+    s = Store()
+    s.load_all()
+    assert str(paths.settings_file()) in s._unreadable
+
+    a = s.create_automation(make_version(), "Kept", None)
+    h = s.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    h["started_at"] = (datetime.now() - timedelta(days=400)).isoformat(timespec="seconds")
+    s.update_execution(h)
+
+    assert s.retention_cleanup() == 0
+    assert h["id"] in s.execs and s.exec_dir(h["id"]).is_dir()
+
+
+def test_delete_execution_leaves_no_aside_directory(store, home):
+    # §6 retention: the dir is renamed aside under the lock and rmtree'd after
+    # it — by the time the call returns nothing is left of either.
+    a = store.create_automation(make_version(), "Deleter", None)
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(h)
+    store.append_log_line(h["id"], store.EXEC_LOG,
+                          {"timestamp": "2026-09-05T10:00:00+00:00", "kind": "out",
+                           "sequence": 1, "text": "hi"})
+    assert (h["id"], store.EXEC_LOG) in store._log_counts
+
+    store.delete_execution(h["id"])
+    assert not store.exec_dir(h["id"]).exists()
+    assert list(store.executions_dir().glob(f"{store.DELETED_PREFIX}*")) == []
+    assert h["id"] not in store.execs
+    assert not any(k[0] == h["id"] for k in store._log_counts)
+
+
+def test_delete_automation_leaves_no_aside_directory(store, home):
+    a = store.create_automation(make_version(), "Goner", None)
+    d = store.auto_dir(a)
+    (d / "memory" / "seen.yaml").write_text("v: 1\n")
+
+    store.delete_automation(a)
+    assert not d.exists()
+    assert list(paths.automations_dir().glob(f"{store.DELETED_PREFIX}*")) == []
+    assert a["id"] not in store.autos
+
+
+def test_leftover_deleted_directories_are_swept_at_load(store, home):
+    """§5/§6: a crash between the aside-rename and the rmtree leaves the dir
+    behind — the next load finishes the delete instead of keeping dead bytes."""
+    from autowright.storage import Store
+
+    exec_leftover = store.executions_dir() / f"{store.DELETED_PREFIX}x"
+    exec_leftover.mkdir(parents=True)
+    (exec_leftover / "execution.yaml").write_text("id: x\n", encoding="utf-8")
+    auto_leftover = paths.automations_dir() / f"{store.DELETED_PREFIX}y"
+    auto_leftover.mkdir(parents=True)
+    (auto_leftover / "automation.yaml").write_text("id: y\n", encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    assert not exec_leftover.exists() and not auto_leftover.exists()
+    assert "y" not in s2.autos and "x" not in s2.execs
+
+
+def test_unreachable_relocated_data_path_is_never_created(home, tmp_path):
+    """§5: only the DEFAULT data path is created on first run. A relocated
+    dataPath whose executions dir isn't there is an unmounted volume — the
+    tree must not be recreated on the boot disk, hiding the real one."""
+    from autowright import paths
+    from autowright.storage import Store
+    from autowright.yamlio import save_yaml
+
+    gone = tmp_path / "unmounted" / "Autowright"
+    save_yaml(paths.settings_file(), {"dataPath": str(gone)})
+    s = Store()
+    s.load_all()
+
+    assert not gone.exists()
+    assert s.execs == {}
+    # the in-memory index still works for the session
+    a = s.create_automation(make_version(), "Homeless", None)
+    assert s.create_execution(a, "version", 1, "manual", [])["id"] in s.execs
+
+
+def test_default_data_path_is_still_created_on_first_run(home):
+    from autowright.storage import Store
+
+    shutil_rm = home / "executions"
+    if shutil_rm.exists():
+        import shutil as sh
+
+        sh.rmtree(shutil_rm)
+    s = Store()
+    s.load_all()
+    assert (home / "executions" / "executions.db").exists()
+
+
+# ---------- §6.3 memory swap recovery + §19 memory_stats memo ----------
+
+def test_memory_swap_aside_is_restored_at_load(store, home):
+    """§6.3: a restore that died between the two renames left memory/ absent
+    and the aside dir the sole surviving copy — the load puts it back."""
+    from autowright.storage import MEMORY_SWAP_OLD, Store
+
+    a = store.create_automation(make_version(), "Crashed Restore", None)
+    d = store.auto_dir(a)
+    import shutil as sh
+
+    sh.rmtree(d / "memory")
+    aside = d / MEMORY_SWAP_OLD
+    aside.mkdir()
+    (aside / "seen.yaml").write_text("v: survived\n", encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    assert (s2.auto_dir(b) / "memory" / "seen.yaml").read_text() == "v: survived\n"
+    assert not aside.exists()
+
+
+def test_clear_memory_repairs_a_half_finished_swap_first(store, home):
+    """§6.3: without the repair the clear recreates an empty memory/ beside a
+    live aside dir, and the NEXT restore's own recovery then rmtrees the only
+    copy of the pre-crash memory with nobody asking."""
+    from autowright.storage import MEMORY_SWAP_OLD
+
+    a = store.create_automation(make_version(), "Clear After Crash", None)
+    d = store.auto_dir(a)
+    import shutil as sh
+
+    sh.rmtree(d / "memory")
+    aside = d / MEMORY_SWAP_OLD
+    aside.mkdir()
+    (aside / "seen.yaml").write_text("v: old\n", encoding="utf-8")
+
+    store.clear_memory(a)
+    assert (d / "memory").is_dir() and not any((d / "memory").iterdir())
+    assert not aside.exists()  # the clear is explicit; nothing lingers to surprise a restore
+
+
+def test_memory_stats_memo_skips_the_walk_and_clear_invalidates(store, home, monkeypatch):
+    # §19 /state cost: the tree walk is memoized per automation with a short
+    # TTL, and every wholesale replacement of the dir drops the memo.
+    from autowright import storage as storage_mod
+
+    a = store.create_automation(make_version(), "Memoized", None)
+    (store.auto_dir(a) / "memory" / "seen.yaml").write_text("v: 1\n", newline="")
+
+    walks = []
+    real = storage_mod.iter_file_stats
+
+    def counting(d):
+        walks.append(str(d))
+        return real(d)
+
+    monkeypatch.setattr(storage_mod, "iter_file_stats", counting)
+    first = store.memory_stats(a)
+    assert len(walks) == 1 and first["size"] == "5 B"
+    assert store.memory_stats(a) == first
+    assert len(walks) == 1  # memo hit — no second walk
+
+    store.clear_memory(a)
+    assert store.memory_stats(a)["size"] == "empty"
+    assert len(walks) == 2
+
+    store.invalidate_memory_stats(a)
+    store.memory_stats(a)
+    assert len(walks) == 3
+
+
+def test_latest_result_memo_hit_skips_the_scan(store, home, monkeypatch):
+    # §19 /state cost: the memo key comes from one linear pass over the
+    # headers, so a hit costs neither the sort nor the per-execution
+    # result-dir walk — /state pays this per automation under store.lock.
+    a = store.create_automation(make_version(), "Results", None)
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    h["chip"] = "All good"
+    store.update_execution(h)
+
+    first = store.latest_result_json(a)
+    assert first["executionId"] == h["id"] and first["chip"] == "All good"
+
+    scanned = []
+    monkeypatch.setattr(store, "result_json", lambda x: scanned.append(x["id"]))
+    assert store.latest_result_json(a) == first
+    assert scanned == []  # memo hit — the walk never ran
+
+    # a newer terminal record moves the key, so the answer is recomputed
+    later = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(later)
+    store.latest_result_json(a)
+    assert scanned == [later["id"], h["id"]]
+
+
+# ---------- §21.4 stored-shape fixtures ----------
+
+def test_version_params_with_value_keys_load_stripped(store, home):
+    """§21.4 (2026-09-05): versions written by v0.6.0-v0.8.3 carry resolved
+    value keys inside their definitions — stripped at the read seam, and the
+    frozen file on disk is never rewritten."""
+    from autowright.storage import Store
+    from autowright.yamlio import load_yaml, save_yaml
+
+    a = store.create_automation(make_version(), "Old Shape", None)
+    vfile = store.auto_dir(a) / "versions" / "v1" / "automation.yaml"
+    meta = load_yaml(vfile)
+    meta["params"] = [
+        {"name": "greeting", "kind": "text", "label": "Greeting", "help": "",
+         "default": "hello", "value": "bonjour"},
+        {"name": "loud", "kind": "toggle", "label": "Loud", "help": "",
+         "default": False, "on": True},
+        {"name": "names", "kind": "list", "label": "Names", "help": "",
+         "default": [], "lines": ["ana"]},
+        {"name": "rows", "kind": "table", "label": "Rows", "help": "",
+         "default": [], "rows": [{"a": 1}]},
+    ]
+    save_yaml(vfile, meta)
+    before = vfile.read_text(encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    params = s2.autos[a["id"]]["versions"][1]["params"]
+    assert [p["name"] for p in params] == ["greeting", "loud", "names", "rows"]
+    for p in params:
+        assert not {"value", "on", "lines", "rows"} & set(p)
+        assert {"name", "kind", "label", "help", "default"} <= set(p)
+    # a read-seam strip, never a rewrite: the frozen version is untouched
+    assert vfile.read_text(encoding="utf-8") == before
+
+
+def test_exec_yaml_without_agent_pgids_loads(store, home):
+    """§21.4: records written before the §4.5 agentPgids key existed load with
+    an empty list, and the key stays sparse — absent whenever there are none."""
+    from autowright.yamlio import load_yaml
+
+    a = store.create_automation(make_version(), "No Pgids", None)
+    h = store.create_execution(a, "version", 1, "manual",
+                               [{"name": "Say hello", "file": "01-say.py",
+                                 "status": "succeeded", "attempts": []}])
+    store.update_execution(h)
+    yfile = store.exec_yaml_path(h["id"])
+    meta = load_yaml(yfile)
+    assert "agent_pgids" not in meta  # sparse from the start
+
+    meta.pop("agent_pgids", None)
+    from autowright.yamlio import save_yaml
+
+    save_yaml(yfile, meta)
+    assert store.read_exec_yaml(h["id"])["agent_pgids"] == []
+
+    # a later write with no live groups keeps the key absent
+    full = store.exec_full(h["id"])
+    full["agent_pgids"] = []
+    full["status"] = "succeeded"
+    store.update_execution(full)
+    assert "agent_pgids" not in load_yaml(yfile)

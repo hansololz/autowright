@@ -323,6 +323,51 @@ def test_export_rejects_dangling_reference_but_allows_odd_agent_names(store):
         transfer.export_automation(store, b)
 
 
+def test_export_rejects_subscripts_that_are_not_stored_ids(store):
+    """§5.1: export runs import's own subscript scan before it writes anything -
+    a key that is not a stored id (a leftover `<id>` placeholder, a
+    commented-out old reference) is rejected naming the step, so an archive
+    the importer would reject is never produced."""
+    ids = _put_secrets(store, ("API_KEY", ""))
+    coder = _agent("Coder")
+    _put_agents(store, [coder])
+    ver = {"description": "", "params": [], "packages": [],
+           "steps": [{"name": "Only", "description": "",
+                      "code": 'from autowright import secrets\n'
+                              f'x = secrets["{ids["API_KEY"]}"]  # API_KEY\n'
+                              '# was: y = secrets["<id>"]  # API_KEY\n'}],
+           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+    a = store.create_automation(ver, name="Placeholder", agent_id=None, triggers=[])
+    with pytest.raises(transfer.TransferError) as ei:
+        transfer.export_automation(store, a)
+    assert str(ei.value) == ("step '01-only.py' subscripts secrets['<id>'], which is not a "
+                             "stored secret; fix the step and export again")
+
+    ver2 = dict(ver, steps=[{"name": "Only", "description": "", "agent": True, "why": "w",
+                             "agents": [{"id": coder["id"]}],
+                             "code": '# was: agents["<id>"]  # Coder\n'}])
+    b = store.create_automation(ver2, name="Placeholder Agent", agent_id=coder["id"],
+                                triggers=[])
+    with pytest.raises(transfer.TransferError) as ei:
+        transfer.export_automation(store, b)
+    assert str(ei.value) == ("step '01-only.py' subscripts agents['<id>'], which is not a "
+                             "stored agent; fix the step and export again")
+
+
+def test_export_placeholder_subscript_answers_422(client):
+    """§19: the export scan's TransferError is a 422 naming the step, never a
+    500 - the same mapping the dangling-reference reject already uses."""
+    from autowright.storage import store
+
+    ver = make_version(steps=[{"file": "01-only.py", "name": "Only", "description": "",
+                               "code": '# was: x = secrets["<id>"]  # API_KEY\n'}])
+    a = store.create_automation(ver, "Leftover", "mock")
+    r = client.get(f"/automations/{a['id']}/export")
+    assert r.status_code == 422
+    assert r.json()["detail"] == ("step '01-only.py' subscripts secrets['<id>'], which is "
+                                  "not a stored secret; fix the step and export again")
+
+
 # ---------- archive validation ----------
 
 def test_import_rejects_format_1_with_reexport_guidance(store):
@@ -875,7 +920,7 @@ def test_preview_matches_what_the_import_lands(store):
         secrets=[_sec("1", "STRIPE_KEY"), _sec("2", "GHOST_KEY", "no match here")],
         agents=[_ag("1", "Alpha"), _ag("2", "Spooky", harness="Gemini CLI")],
         agent="1",
-        params=[{"name": "count", "kind": "number", "label": "Count"}],
+        params=[{"name": "count", "kind": "number", "label": "Count", "default": 0}],
         packages=[{"pip": "pandas", "import": "pandas"}],
         steps=[{"file": "01-a.py", "name": "A", "description": "d",
                 "code": 'x = secrets["1"]\ny = secrets["2"]\n'},
@@ -1222,6 +1267,11 @@ def test_manifest_and_meta_shape_rejects(store):
          _rezip_meta(data, lambda m: {**m, "params": {"name": "x"}})),
         ("invalid parameter definition",
          _rezip_meta(data, lambda m: {**m, "params": [{"name": "x", "kind": "nope"}]})),
+        # §4.2/§5.1: every definition carries a default, like the app's own
+        # save path - so the first edit of an imported version can't 422 on a
+        # definition the user never wrote.
+        ("param 'x': missing default",
+         _rezip_meta(data, lambda m: {**m, "params": [{"name": "x", "kind": "text"}]})),
         ("invalid packages declaration",
          _rezip_meta(data, lambda m: {**m, "packages": [{"pip": "pandas"}]})),
         ("the archive holds no steps", _rezip_meta(data, lambda m: {**m, "steps": []})),
@@ -1232,6 +1282,18 @@ def test_manifest_and_meta_shape_rejects(store):
         with pytest.raises(transfer.TransferError, match=match):
             transfer.import_automation(store, bad)
     assert len(store.autos) == before
+
+
+def test_import_drops_param_values_naming_no_param(store):
+    """§5.1: archive param_values naming no param of the imported version drop,
+    never store (the §19 PATCH rule) - only definitions the version carries can
+    hold a value."""
+    data = _archive(
+        name="Ghosted",
+        params=[{"name": "count", "kind": "number", "label": "Count", "default": 1}],
+        param_values={"count": 7, "ghost": 1})
+    b, _ = transfer.import_automation(store, data)
+    assert b["param_values"] == {"count": 7}
 
 
 # ---------- §4.1 originOs ----------

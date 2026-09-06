@@ -153,6 +153,7 @@ def reset_module_globals():
     packages.invalidate_scan()  # §6.2 installed-scan cache (keyed on the home dir)
     api._served_launches.clear()  # §19 app-start dedupe memory
     api._shutdown_callbacks.clear()  # §3 main()-registered cleanup from an earlier boot
+    api._quiesce_callbacks.clear()
     events.hub._loop = None  # a lifespan-running test binds a loop that closes with it
     for token in list(api._import_parked):  # §5.2 parked previews + their spool files
         api._drop_parked(token)

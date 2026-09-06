@@ -417,14 +417,21 @@ The in-memory table is rebuilt from the DB at every launch. An automation folder
 `versions/` is empty cannot resolve a current version and is skipped at startup with a
 warning in the app log. Every top-level YAML file is hand-editable, so an unreadable one —
 invalid YAML or invalid text encoding alike — loads as its default with a warning in the app
-log; a damaged file never bricks startup into a launchd crash loop. For the three top-level
+log; a damaged file never bricks startup into a launchd crash loop. The same backstop covers
+a hand-edited `execution.yaml`: every timestamp and id field is coerced to a string at the
+read seam (an unquoted ISO timestamp loads from YAML as a `datetime`, and one such record
+would otherwise make the latest-execution comparison raise at boot), and an unparsable one
+still skips the record with a warning. For the three top-level
 store files (`settings.yaml`, `agents.yaml`, `secrets.yaml`) the degradation is **read-only**:
 a file that failed to load (corrupt YAML, bad encoding, unreadable — a merely *absent* file is
 not a failure, it is a fresh install) is never saved back for the rest of the session. Any
 mutation that would rewrite it fails with an error naming the path ("`<path>` is unreadable
 on disk — fix or remove the file, then restart Autowright.", §19 409), so a damaged file is
 degraded, never destroyed — a corrupt `secrets.yaml` must never be overwritten by the empty
-default, which would orphan every Keychain value it referenced. The flags reset whenever the
+default, which would orphan every Keychain value it referenced. An unreadable `settings.yaml` also pauses the
+§6 retention sweep for the session: with the retention policy unknown, nothing is deleted —
+the default 90-day window must never purge executions a damaged file said to keep forever.
+The flags reset whenever the
 store reloads (startup, and the §4.9 data-location change). Per-automation files need no such
 guard: a corrupt `automation.yaml` skips the whole automation at load, so no save path can
 reach it.
@@ -553,7 +560,11 @@ automation id + directory, new trigger ids. Import rejects an archive that carri
 uuid-form or name-form references - step entries with `id` or `name` keys, or a
 `secrets[...]`/`agents[...]` subscript whose key is not a listed ref ("re-export the
 automation with the current version"). Inside an archive, refs ARE the reference format;
-on disk they never are (§4.1/§4.3/§4.8: ids only).
+on disk they never are (§4.1/§4.3/§4.8: ids only). Export runs the same scan before it
+writes anything: a step whose code subscripts `secrets[...]`/`agents[...]` with a key that
+is not a stored id (a leftover `<id>` placeholder, a commented-out old reference) answers
+422 naming the step — an archive the importer would reject is never produced, and the
+"re-export" guidance is never handed out for bytes that would re-export identically.
 
 **Matching - import never creates records.** No agent or secret record is ever created by
 import (no placeholders, no copies of the exporter's agents). Each archive ref instead
@@ -601,7 +612,10 @@ answers 422 and writes nothing):
 
 - Validate: `format_version`, every yaml's schema, step files matching the steps manifest
   (step `agents:`/`secrets:` entries in the archive's `{ ref, why? }` form — the §4.1 id
-  form and the old name form are rejected: local ids never travel), §4.2 param kinds,
+  form and the old name form are rejected: local ids never travel), §4.2 param kinds (each
+  definition carries `name`, `kind`, and `default` — the rule the app's own save path
+  enforces, so the first edit of an imported version can never 422 on a definition the user
+  never wrote),
   §4.7 agent configs
   (harness/mode/model rules), §4.8 secret names, trigger
   kinds with at most one `app_start`. Refs must be unique per kind. The manifest's optional `os` must be a non-empty
@@ -635,7 +649,8 @@ answers 422 and writes nothing):
   `osMismatch`.
 - Every trigger imports **off** — nothing fires unexpectedly on a new machine.
 - `param_values` from the manifest seed the top-level file (§5 name+kind matching applies at
-  execution time as usual); absent values fall back to definition defaults.
+  execution time as usual) — entries naming no param of the imported version are dropped,
+  never stored (the §19 PATCH rule); absent values fall back to definition defaults.
 - **Secrets and agents resolve through the §5.1 match ladders** - records are never
   created. A matched agent whose harness isn't installed or signed in surfaces through the
   ordinary §12/§19 install and sign-in flows (the summary's `ready` flag badges it).

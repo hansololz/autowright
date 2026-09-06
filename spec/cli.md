@@ -184,6 +184,12 @@ create take the workdir as a required positional; only pull's is optional. Files
 - `instructions.md` — the version's build instructions (`instructions`), when present.
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
 
+`pull` owns the workdir's managed files: it rewrites every file above and removes the
+managed files it did not write this time — a `notes.md` or `instructions.md` the version no
+longer carries, and any `NN-name.py` not in the manifest — so a re-pull into the same
+directory never resurrects deleted content on the next push. Files it doesn't manage (a
+README, a virtualenv) are left alone.
+
 Push/create run the **same §8 validators the drafting pipeline uses**
 (`drafting.validate_spec` + `validate_steps` — schema, param kinds/defaults, step-file 1:1 and
 ordering, `ast.parse`, the §6.2 import allowlist, timeout rules, trigger dialect). Validation
@@ -295,7 +301,8 @@ JSON array or comma-separated · kv → JSON object or `k=v,k=v`. An unknown nam
 value exits 1 naming the expected form.
 
 **Secret values never ride argv** — `secret set NAME` takes no value argument: it prompts
-(`getpass`, no echo), or reads the value from stdin with `--stdin` for scripted use. A value
+(`getpass`, no echo), or reads the **whole** of stdin with `--stdin` for scripted use (a multi-line value such as
+a PEM key lands intact; only the trailing newline is trimmed). A value
 passed as an argument would land in shell history and in every local process's view of the
 process list - the kind of secret-value exposure Autowright otherwise keeps out of scripts,
 logs, and argv (§1 core promise, §4.8).

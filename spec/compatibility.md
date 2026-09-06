@@ -68,6 +68,22 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-05 - version `params` narrowed to definitions only (read-side migration).** The
+  2026-09-01 save-side fix (`strip_param_values`) stopped new versions from storing resolved
+  value keys (`value`/`on`/`lines`/`rows`) inside `versions/vN/automation.yaml` `params`,
+  but versions written by v0.6.0–v0.8.3 keep the polluted shape on disk and served it over
+  §19 for old versions. Migration: `_load_version_folder` strips the value keys at the read
+  seam; nothing is rewritten on disk until that version's folder is next written (never, for
+  a frozen old version — the strip is repeatable). First version writing the narrow shape:
+  v0.9.0; oldest shape still read: v0.6.0. Fixture test:
+  `tests/test_storage.py::test_version_params_with_value_keys_load_stripped`.
+
+- **2026-09-05 - `agent_pgids` added to `execution.yaml` (recorded after the fact).** The
+  §4.5 in-flight agent-call groups, written sparse (absent when empty) since v0.9.0 for the
+  §3 orphan recovery. Additive: an absent key reads as `[]`. First version writing it:
+  v0.9.0; oldest shape still read: v0.6.0 (key absent). Fixture test:
+  `tests/test_storage.py::test_exec_yaml_without_agent_pgids_loads`.
+
 - **2026-09-03 - `steps_fingerprint` added to the draft `test.yaml` summary.** The §11
   last-test summary gains one optional key holding the opaque steps fingerprint the renderer
   sent with `POST /tests` (§19 `stepsFingerprint`), written only when the client sent one.

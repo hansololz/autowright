@@ -77,10 +77,30 @@ def start(provider_id: str, publish) -> bool:
         publish(line=line, percent=percent, done=False)
 
     def run() -> None:
-        try:
-            _INSTALLERS[provider_id](emit)
-        except Exception as e:  # noqa: BLE001 — becomes the §10 failure card
-            msg = (str(e).strip().splitlines() or ["install failed"])[0][:300]
+        # Wall-clock cap on the whole install, not just its phases: a phase
+        # that never returns at all (a wedged child the group kill couldn't
+        # reach, a hung filesystem call) would leave the job "running"
+        # forever, and the guard above would refuse every retry until a
+        # backend restart. The installer runs on an inner daemon thread joined
+        # with the cap; one still alive past it is ABANDONED — a Python thread
+        # can't be killed, so it keeps running until the process exits and its
+        # (late) result is ignored.
+        raised: list[BaseException] = []
+
+        def phase() -> None:
+            try:
+                _INSTALLERS[provider_id](emit)
+            except Exception as e:  # noqa: BLE001 — becomes the §10 failure card
+                raised.append(e)
+
+        worker = threading.Thread(target=phase, daemon=True)
+        worker.start()
+        worker.join(INSTALL_TIMEOUT_S)
+        error: BaseException | None = raised[0] if raised else None
+        if worker.is_alive():
+            error = RuntimeError(f"install timed out after {INSTALL_TIMEOUT_S // 60} minutes")
+        if error is not None:
+            msg = (str(error).strip().splitlines() or ["install failed"])[0][:300]
             with _lock:
                 _jobs[provider_id] = {"state": "failed", "error": msg}
             publish(done=True, ok=False, error=msg)
@@ -128,9 +148,16 @@ def login(provider_id: str) -> str:
     cmd = (f"cd {shlex.quote(harness._neutral_cwd(provider_id))} && "
            + " ".join(shlex.quote(p) for p in [binpath, *args]))
     osa = cmd.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(["osascript", "-e", 'tell application "Terminal" to activate',
-                    "-e", f'tell application "Terminal" to do script "{osa}"'],
-                   capture_output=True, timeout=10, check=False)
+    try:
+        subprocess.run(["osascript", "-e", 'tell application "Terminal" to activate',
+                        "-e", f'tell application "Terminal" to do script "{osa}"'],
+                       capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        # §19: "sign-in help couldn't start" is a 409 with the reason — a
+        # wedged Terminal (osascript blocks on its Apple event) or a missing
+        # osascript would 500 the endpoint instead.
+        raise RuntimeError("Terminal didn't respond; run the command in your own "
+                           "terminal to sign in.") from e
     return "terminal"
 
 
@@ -333,18 +360,40 @@ def _install_ollama_app(emit) -> str:
         zip_path = os.path.join(td, "Ollama-darwin.zip")
         _download(OLLAMA_APP_ZIP, zip_path, emit, "Downloading Ollama")
         emit(line="Installing the Ollama app…")
-        subprocess.run(["/usr/bin/ditto", "-x", "-k", zip_path, td],
-                       check=True, capture_output=True)
+        # Every phase carries a wall-clock cap: an unpack, a quit or a launch
+        # that never returns would otherwise hang the whole install with no
+        # line to show for it (see INSTALL_TIMEOUT_S).
+        try:
+            subprocess.run(["/usr/bin/ditto", "-x", "-k", zip_path, td],
+                           check=True, capture_output=True, timeout=600)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("unpacking the Ollama archive timed out") from e
         src = os.path.join(td, "Ollama.app")
         if not os.path.isdir(src):
             raise RuntimeError("no Ollama.app found in the downloaded archive")
         # Vendor-script parity: quit a running app, replace an existing install.
-        if subprocess.run(["pkill", "-x", "Ollama"], capture_output=True).returncode == 0:
+        try:
+            quit_rc = subprocess.run(["pkill", "-x", "Ollama"],
+                                     capture_output=True, timeout=15).returncode
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("quitting the running Ollama app timed out") from e
+        if quit_rc == 0:
             time.sleep(2)
         os.makedirs(apps, exist_ok=True)
-        if os.path.exists(dest):
-            shutil.rmtree(dest)
-        shutil.move(src, dest)
+        # Move the new bundle beside the target BEFORE removing the old one:
+        # rmtree-ing first and then failing the move (a full disk, a
+        # cross-device copy dying halfway) would leave no Ollama at all where
+        # a working one stood. Nothing but the final rename is destructive.
+        staged = dest + ".ad-new"
+        shutil.rmtree(staged, ignore_errors=True)
+        try:
+            shutil.move(src, staged)
+            if os.path.exists(dest):
+                shutil.rmtree(dest)
+            os.rename(staged, dest)
+        except BaseException:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
     # §19 install-location principle: the vendor script symlinks
     # /usr/local/bin/ollama (sudo'd) — use that exact location when it's
     # writable without sudo, so the CLI sits where a manual install puts it;
@@ -395,7 +444,11 @@ def _install_ollama(emit) -> None:
         emit(line="Starting the Ollama server…")
         # The app's menu-bar agent owns the server (and auto-updates) — launch
         # it hidden like the vendor script does.
-        subprocess.run(["open", app, "--args", "hidden"], capture_output=True, check=False)
+        try:
+            subprocess.run(["open", app, "--args", "hidden"],
+                           capture_output=True, check=False, timeout=30)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("starting the Ollama app timed out") from e
     for _ in range(30):
         if harness.ollama_status()["ready"]:
             return

@@ -396,7 +396,9 @@ export default function CreateFlow() {
   // and while steps AND spec are both
   // empty — a spec-only draft (a resumed spec-only
   // pending draft) must always be able to rebuild its steps here (§11).
-  const syncDisabled = !rev || busyRewrite || viewingOld || testLive
+  // §11 action chaining: an armed pending sync counts as a sync in flight —
+  // the BUILD card already reads it that way, so its buttons disable too.
+  const syncDisabled = !rev || busyRewrite || viewingOld || testLive || !!rev?.pendingSync
     || (rev.steps.length === 0 && rev.spec.length === 0)
   // §11 inputs-lock: while a sync or spec rewrite runs, every input disables —
   // buttons get `disabled`, non-button rows get this style. One shared look.
@@ -474,6 +476,17 @@ export default function CreateFlow() {
       .catch(() => { /* panel renders empty; next mount retries */ })
   }, [])
 
+  // Edit mode addressing an automation that no longer exists (deleted from
+  // another window, a stale history entry restored before the list loaded) —
+  // bail out to the list, like the §9.2 detail page's own vanished-record
+  // redirect. The save paths guard on it too: neither may fall into create.
+  useEffect(() => {
+    if (isEdit && !auto) {
+      setSurface('app')
+      go('automations')
+    }
+  }, [isEdit, auto, go, setSurface])
+
   useEffect(() => {
     if (!isEdit || seededRef.current || !auto || !auto.spec) return
     seededRef.current = true
@@ -487,6 +500,22 @@ export default function CreateFlow() {
   // return to the empty state with the description in the input. The thread
   // stays (§4.4 thread lifetime) behind the backend-appended "Draft
   // discarded." boundary marker — refetched so the marker shows.
+  // §11: Start over / Discard draft settles the whole draft — a test still
+  // executing on it is cancelled with it, so nothing keeps running against a
+  // draft that no longer exists and the TEST card can never re-attach to it.
+  const cancelDraftTest = async () => {
+    const ids = new Set<string>()
+    if (test && testLive) ids.add(test.executionId)
+    // the same live-test filter the TEST card re-attaches on (§4.5: a
+    // create-mode test record carries automationId null)
+    const live = executions.find((e) => e.test && e.status === 'executing'
+      && (isEdit ? e.automationId === auto?.id : !e.automationId))
+    if (live) ids.add(live.id)
+    for (const id of ids) {
+      try { await api.cancelExecution(id) } catch { /* already settled */ }
+    }
+  }
+
   const resetCreate = async () => {
     jobs.cancelJob()
     // §11 hold-and-flush: Start over discards the session's staging, so its
@@ -500,6 +529,7 @@ export default function CreateFlow() {
     chatGen.current++
     await flushChat(true) // a settle path: an in-flight job was cancelled above
     await putInFlight.current
+    await cancelDraftTest()
     try { await api.deleteDraft('pending') } catch { /* none kept */ }
     let chat: ChatEntry[] = []
     try { chat = (await api.getChat('pending')).chat } catch { /* backend restarting */ }
@@ -861,6 +891,9 @@ export default function CreateFlow() {
   }
 
   const startOver = async () => {
+    // an automation that vanished mid-edit has nothing to discard — and must
+    // never fall through to the create branch's reset
+    if (isEdit && !auto) return
     if (isEdit && auto) {
       // Discard draft → back to detail. Settle BEFORE the awaits — the 1 s
       // debounce timers check the flag at fire time, and a PUT landing after
@@ -875,6 +908,7 @@ export default function CreateFlow() {
       draftSettled.current = true
       await flushChat(true) // a settle path: an in-flight job was cancelled above
       await putInFlight.current
+      await cancelDraftTest()
       try { await api.deleteDraft(auto.id) } catch { /* none saved yet */ }
       draftSnap.current = null
       setSurface('app')
@@ -887,6 +921,9 @@ export default function CreateFlow() {
 
   const doSave = async () => {
     if (!rev || saveBlocked) return
+    // an automation that vanished mid-edit has nothing to save as a new
+    // version — and must never fall through to the create branch
+    if (isEdit && !auto) return
     try {
       draftSettled.current = true
       // §4.4 thread lifetime: every entry lands before the boundary marker

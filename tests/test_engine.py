@@ -2113,9 +2113,10 @@ def test_cancel_during_retry_pause_cuts_the_wait_short(store, monkeypatch):
     assert time.time() - t0 < 25, "cancel must cut the 30 s retry pause short"
     assert h["status"] == "cancelled"
     # §7: cancel wins over the pending retry exactly as over a running attempt —
-    # the paused step lands cancelled; its failed attempt keeps the error.
+    # the paused step lands cancelled, and §4.5 keeps its latest attempt in step
+    # with it; the attempt keeps the error that would have been retried.
     assert h["steps"][0]["status"] == "cancelled"
-    assert h["steps"][0]["attempts"][-1]["status"] == "failed"
+    assert h["steps"][0]["attempts"][-1]["status"] == "cancelled"
     assert h["steps"][0]["attempts"][-1]["error"]
     assert h["steps"][1]["status"] == "cancelled"  # never ran
     assert len(h["steps"][0]["attempts"]) == attempts  # nothing re-spawned
@@ -2147,7 +2148,9 @@ def test_cancel_during_retry_pause_on_last_step_lands_cancelled(store, monkeypat
     wait_done(engine, h["id"])
     assert h["status"] == "cancelled"  # never `succeeded` with a failed step
     assert h["steps"][0]["status"] == "cancelled"
-    assert h["steps"][0]["attempts"][-1]["status"] == "failed"  # keeps its error
+    # §4.5: the step's status is its latest attempt's — the error stays put
+    assert h["steps"][0]["attempts"][-1]["status"] == "cancelled"
+    assert h["steps"][0]["attempts"][-1]["error"]
     assert h["error"] is None  # cancelled, not failed — no execution error
 
 
@@ -2176,6 +2179,9 @@ def test_skip_during_retry_pause_skips_the_step(store, monkeypatch):
     assert time.time() - t0 < 25, "skip must cut the 30 s retry pause short"
     assert h["status"] == "succeeded"
     assert h["steps"][0]["status"] == "skipped"
+    # §4.5: the step's status is its latest attempt's — the error stays put
+    assert h["steps"][0]["attempts"][-1]["status"] == "skipped"
+    assert h["steps"][0]["attempts"][-1]["error"]
     assert h["steps"][1]["status"] == "succeeded"
     logs = read_all_logs(store, h["id"])
     assert any("after ran" in l["text"] for l in logs)
@@ -2201,6 +2207,12 @@ def test_engine_error_path_always_finalizes_the_record(store, monkeypatch):
     assert "engine error" in h["error"]["message"]
     assert not engine.is_live(h["id"])
     assert a["_live"] == set()  # the slot freed despite persistence failing
+    # §4.5: the interrupted step and its attempt are terminal too — left
+    # `executing` they would spin forever on a finished execution's page.
+    step = h["steps"][0]
+    assert step["status"] == "failed" and isinstance(step["duration_ms"], int)
+    attempt = step["attempts"][-1]
+    assert attempt["status"] == "failed" and isinstance(attempt["duration_ms"], int)
 
 
 def test_queue_drain_failure_never_breaks_finalize(store, monkeypatch):
@@ -2237,3 +2249,261 @@ def test_wait_finished_waits_for_a_test_execution(store, monkeypatch):
     assert engine.wait_finished([eid]) is True
     assert time.time() - t0 > 0.5  # it really waited for the step
     assert not engine.is_live(eid)
+
+
+def test_term_then_kill_arms_a_defusable_grace_timer(store):
+    """§7: the SIGTERM→SIGKILL grace timer lands on the state, so the step's own
+    teardown can defuse it — a step that dies inside the grace window must not
+    leave a timer armed to fire into whatever runs next."""
+    import subprocess
+    import sys
+
+    from autowright.engine import Engine
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                            start_new_session=True)
+    fired = []
+    state = {"proc": proc, "hard_kill": lambda: fired.append(True)}
+    try:
+        Engine._term_then_kill(proc, state)
+        timer = state["grace_timer"]
+        assert timer.is_alive()
+        proc.wait(timeout=10)  # the polite SIGTERM landed
+        timer.cancel()  # what run_step_process's finally does
+        timer.join(2)
+        assert fired == []  # the hard kill never ran
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_stale_grace_timer_never_kills_the_next_steps_agent_group(monkeypatch, tmp_path):
+    """§7: a cancel/skip grace timer that outlived its step must not reach the
+    NEXT step's in-flight §6.1 agent group — the hard kill only sweeps agent
+    groups while the state still holds the proc it was armed for."""
+    import subprocess
+    import sys
+
+    from autowright import engine as engmod
+
+    real = subprocess.Popen
+
+    def fake_popen(argv, **kw):
+        # stand-in for the executor: one line of output, then a clean exit
+        return real([sys.executable, "-c", "import sys; sys.stdin.read(); print('hi')"], **kw)
+
+    monkeypatch.setattr(engmod.subprocess, "Popen", fake_popen)
+    script = tmp_path / "01-any.py"
+    script.write_text("pass\n")
+    state = {"proc": None, "cancel": False}
+    captured = {}
+
+    def log(kind, text):
+        captured["hard_kill"] = state["hard_kill"]  # installed while the step is live
+
+    rc = engmod.run_step_process(script, {}, state, log,
+                                 {"status": "ok", "chip": None}, {}, None)
+    assert rc == 0 and state["proc"] is None
+
+    killed = []
+    real_procs = engmod._processes()
+
+    class _Recorder:
+        def kill_group(self, pgid):
+            killed.append(pgid)
+
+        def __getattr__(self, name):
+            return getattr(real_procs, name)
+
+    monkeypatch.setattr(engmod, "_processes", lambda: _Recorder())
+    # the next step of the same execution: its own proc, its own agent call
+    state["proc"] = object()
+    state["agent_pgids"] = {4242}
+    captured["hard_kill"]()  # the stale timer fires
+    assert killed == []
+
+
+def test_on_spawn_failure_reaps_the_step_group(monkeypatch, tmp_path):
+    """§3: the on_spawn persist runs against a live process — a disk error
+    there must take the step group with it and close both pipes, never orphan
+    the group with the only handle dropped."""
+    import subprocess
+    import sys
+    import time
+
+    import pytest
+
+    from autowright import engine as engmod
+
+    real = subprocess.Popen
+    spawned = {}
+
+    def fake_popen(argv, **kw):
+        p = real([sys.executable, "-c", "import time; time.sleep(60)"], **kw)
+        spawned["proc"] = p
+        return p
+
+    def boom(pgid):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(engmod.subprocess, "Popen", fake_popen)
+    script = tmp_path / "01-any.py"
+    script.write_text("pass\n")
+    state = {"proc": None, "cancel": False, "on_spawn": boom}
+    t0 = time.time()
+    with pytest.raises(OSError, match="disk went away"):
+        engmod.run_step_process(script, {}, state, lambda k, t: None,
+                                {"status": "ok", "chip": None}, {}, 10.0)
+    assert time.time() - t0 < 20, "the raise must not wait out the child's sleep"
+    assert spawned["proc"].poll() is not None  # the group is dead, not orphaned
+    assert spawned["proc"].stdout.closed and spawned["proc"].stdin.closed
+    assert state["proc"] is None and "hard_kill" not in state
+
+
+def test_control_line_behind_a_partial_line_is_still_read(monkeypatch, tmp_path):
+    """§6.1: a child that inherited fd 1 can leave a newline-free fragment in
+    front of the executor's control line — the fragment logs as ordinary
+    output and the op behind it is still handled, never dropped."""
+    import json
+    import subprocess
+    import sys
+
+    from autowright import engine as engmod
+    from autowright.executor import CTRL
+
+    op = json.dumps({"op": "log", "kind": "out", "text": "inner"})
+    line = "partial" + CTRL + op
+    real = subprocess.Popen
+
+    def fake_popen(argv, **kw):
+        return real([sys.executable, "-c",
+                     f"import sys; sys.stdin.read(); print({line!r})"], **kw)
+
+    monkeypatch.setattr(engmod.subprocess, "Popen", fake_popen)
+    script = tmp_path / "01-any.py"
+    script.write_text("pass\n")
+    state = {"proc": None, "cancel": False}
+    logged = []
+    rc = engmod.run_step_process(script, {}, state, lambda k, t: logged.append((k, t)),
+                                 {"status": "ok", "chip": None}, {}, None)
+    assert rc == 0
+    assert logged == [("out", "partial"), ("out", "inner")]
+
+
+def test_log_sequences_never_collide_under_concurrent_writers(store):
+    """§5: the per-file sequence is read-modify-written from the step read loop
+    AND the §6.1 reply delivery worker — unlocked, two lines share a sequence
+    and one hides the other in the pane."""
+    import sys
+    import threading
+
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "LogRace", None)
+    h = store.create_execution(a, "version", a["current_version"], "manual", steps=[])
+
+    def spam():
+        for i in range(50):
+            engine._log(h, "out", f"line {i}", {})
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # force the interleavings the GIL usually hides
+    try:
+        threads = [threading.Thread(target=spam) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(interval)
+    seqs = sorted(l["sequence"] for l in read_all_logs(store, h["id"]))
+    assert seqs == list(range(1, 201))
+
+
+def test_power_hold_failure_still_finalizes_the_execution(store, monkeypatch):
+    """§3/§7: the per-execution idle-sleep hold is acquired inside the try — a
+    platform call that raises must land the record terminal, not leave it
+    `executing` with no thread pinning a §6 slot until a restart."""
+    from autowright import engine as engmod
+    from autowright.engine import Engine
+
+    real_platform = engmod.platform.current()
+
+    class _Power:
+        def hold_execution(self):
+            raise OSError("no power assertions here")
+
+        def reconcile(self, enabled):
+            pass
+
+    class _Platform:
+        power = _Power()
+
+        def __getattr__(self, name):
+            return getattr(real_platform, name)
+
+    monkeypatch.setattr(engmod.platform, "current", lambda: _Platform())
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "PowerBoom", None)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "failed"
+    assert "engine error" in h["error"]["message"]
+    assert not engine.is_live(h["id"])
+    assert a["_live"] == set()
+
+
+def test_start_is_refused_after_the_shutdown_sweep(store):
+    """§3: the kill sweep flips the engine stopping — a tick already inside
+    `fire_trigger` must not start a step group the sweep will never kill."""
+    import pytest
+
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "Shutting Down", None)
+    engine.kill_all_live()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        engine.start(a, "manual")
+    assert store.execs == {}  # nothing was created before the refusal
+
+
+def test_test_execution_finish_publishes_no_automation_row(store, monkeypatch):
+    """§4.5: a test execution never changes display state — its finished event
+    carries no automation row, exactly as its started event."""
+    from autowright import engine as engmod, testexec as tr
+    from autowright.engine import Engine
+
+    monkeypatch.setattr(tr, "store", store)
+    events = []
+    monkeypatch.setattr(engmod.hub, "publish", lambda ev, **kw: events.append((ev, kw)))
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [{"file": "01-ok.py", "name": "Ok", "description": "",
+                     "code": 'from autowright import log\nlog("ok")\n'}]
+    a = store.create_automation(ver, "Test Rows", None)
+    store.save_draft(a, ver)
+
+    eid = tr.start(engine, ver, a, [], [], {})
+    assert engine.wait_finished([eid]) is True
+    finished = [kw for ev, kw in events
+                if ev == "execution.finished" and kw["executionId"] == eid]
+    assert finished and finished[-1]["automation"] is None
+
+
+def test_execution_finish_drops_the_memory_stats_memo(store):
+    """§19: the MEMORY card's stats memo is cleared when an execution of the
+    automation finishes — a detail-page fetch right after a step wrote
+    memory/ must never answer the pre-execution size."""
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "Memo Drop", None)
+    assert store.memory_stats(a)["size"] == "empty"
+    assert "_memory_stats" in a
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "succeeded"
+    assert "_memory_stats" not in a

@@ -98,11 +98,13 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
             commitSoon(v)
           }}
           onFocus={() => setFoc(true)}
+          // every kind clears the guard on blur — a list/kv row that left it
+          // set would freeze this row's resync for the rest of its life
           onBlur={p.kind === 'number'
             ? () => { setFoc(false); flush(); setNum(null) }
             : p.kind === 'text'
               ? () => { setFoc(false); flush(); setText(null) }
-              : flush}
+              : () => { setFoc(false); flush() }}
         />
       </div>
     </div>

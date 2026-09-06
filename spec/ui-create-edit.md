@@ -476,7 +476,9 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
   whose Cancel lives in the TEST card and the test-run modal), and it yields to surfaces that own Esc
   while open: the modal stack and the §9.3 developer log overlay. **Settles cancel;
   leaves don't:** Discard draft and Start over cancel an in-flight chat job (client-side,
-  beside the §19 owner cancel), but merely leaving the editor — navigation anywhere,
+  beside the §19 owner cancel) and cancel a still-executing test of the discarded draft (the
+  §19 execution cancel — a settled draft's test must never be re-attached by the next
+  session's TEST card as if it were its own), but merely leaving the editor — navigation anywhere,
   Keep draft, closing the window — never does: the job keeps building in the background
   (§19 background continuation; its lifetime is the draft's, the same rule as the draft
   test) and re-entering the editor re-attaches to it (Background continuation &

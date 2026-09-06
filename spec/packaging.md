@@ -285,10 +285,14 @@ the update bullets below).
   the connections and the lifespan shutdown still runs. Every piece of the backend's
   shutdown work lives in that lifespan: uvicorn re-raises the captured SIGTERM once its
   `run()` returns, killing the process before any code after `run()` (a `finally` in
-  `main()` included) can execute, so `main()` registers its cleanup (stopping the
-  discovery-guard thread, the scheduler, and the listeners, then unlinking its own
-  `backend.json`) with the api module via `api.register_shutdown`, and the lifespan runs
-  those callbacks, each once and error-tolerant, after the kill passes. Uvicorn owns
+  `main()` included) can execute, so `main()` registers its cleanup with the api module in two halves: `api.register_quiesce`
+  (stopping the scheduler and the listeners) runs **before** the kill passes — a cron tick or
+  a message firing landing during uvicorn's graceful drain must never start a step group
+  after the sweep that nothing will kill — and `api.register_shutdown` (stopping the
+  discovery-guard thread, then unlinking its own `backend.json`) runs after them; every
+  callback runs once and error-tolerant. The kill pass also flips the engine into a stopping
+  state in which every later `start` is refused ("the backend is shutting down"), closing the
+  window a tick already inside `fire_trigger` could otherwise slip through. Uvicorn owns
   SIGTERM/SIGINT only once `run()` installs its handlers, though — and `backend.json` is
   published before `run()` (bind → listen → publish, then the guard thread, scheduler,
   listeners, and power reconcile all start). A stop signal landing in that boot window
@@ -334,12 +338,21 @@ the update bullets below).
   which skips the gate; the backend's graceful shutdown (`kill_all_live`) plus the sweep end
   the running execution. If the stop fails, the app does **not** quit — the error is surfaced
   instead; the app must never quit its UI while the backend it promised to stop keeps running.
+  The shell's service children are time-boxed like `service.py`'s own `launchctl` calls: every
+  `python -m autowright.service <verb>` the Electron main process spawns (the ensure-backend
+  `install`, quit-all's and reset's `stop`) carries a 120 s `execFile` timeout, and the
+  quit-all/reset wait on a racing install is bounded the same way — a wedged interpreter
+  answers the IPC with a plain failure line ("service stop timed out") instead of leaving
+  the QUIT card or the reset overlay spinning forever with `quittingAll` latched.
   A stopped backend returns at next login (`RunAtLoad`) or next app launch (ensure-backend
   re-heals) — stopped, never uninstalled.
 - **Reset — delete all data and quit app (§4.9 RESET card, decided).** The renderer confirm
   fires a `reset-all` IPC; the Electron main process orchestrates, in order:
   1. The same live-execution gate as quit-all/update-install (busy → `{ busy: true }`,
-     nothing touched; an unreachable backend counts as idle).
+     nothing touched; an unreachable backend counts as idle — but a reachable backend that
+     answers the probe with anything but 200 (a stale token, a 500 mid-execution) is
+     **unknown**, and unknown gates like busy: the install, quit, or reset must never proceed
+     on a backend that may be executing).
   2. Capture `GET /settings`' `dataPath` while the backend is still up — the executions dir
      is user-movable (§4.9) and may live outside the data root.
   3. `DELETE /secrets` on the live backend (§19) — only the backend's keyring can reach the
@@ -348,7 +361,8 @@ the update bullets below).
      entry (§4.8), and an unreadable `secrets.yaml` means those ids were unreachable this
      session anyway.
   4. `service stop` through the same interpreter resolution and install-interlock as
-     quit-all. A stop failure aborts the reset with `{ error }` — the app stays up, and at
+     quit-all (the reset's last `app.log` line is written here, before step 5 deletes the
+     logs root — a line written after it would silently re-create the root). A stop failure aborts the reset with `{ error }` — the app stays up, and at
      that point nothing has been deleted beyond step 3's secrets. An absent registration
      with nothing running is **not** a failure (stop is idempotent, headless-mode stop
      bullet) — reset proceeds on a machine whose service was never registered.

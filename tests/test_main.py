@@ -195,3 +195,70 @@ def test_sigterm_stop_unlinks_backend_json(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_lifespan_quiesces_before_the_kill_sweep(home, monkeypatch):
+    # §3 shutdown order: the work sources (scheduler, listeners) stop BEFORE
+    # anything is killed — a tick landing after kill_all_live would start an
+    # execution with nobody left to collect it. The registered shutdown
+    # callbacks come last, after both kill sweeps.
+    from fastapi.testclient import TestClient
+
+    from autowright import api
+    from autowright.storage import store
+
+    store.load_all()
+    order = []
+    monkeypatch.setattr(api.engine, "kill_all_live", lambda: order.append("kill_live"))
+    monkeypatch.setattr(api.draft_jobs, "kill_all_building",
+                        lambda: order.append("kill_building"))
+
+    def broken():
+        raise RuntimeError("boom")
+
+    api.register_quiesce(broken)  # error-tolerant, like the shutdown half
+    api.register_quiesce(lambda: order.append("quiesce"))
+    api.register_shutdown(lambda: order.append("shutdown"))
+    with TestClient(api.app):
+        pass
+    assert order == ["quiesce", "kill_live", "kill_building", "shutdown"]
+
+
+def test_main_shutdown_halves_each_run_once(home, monkeypatch):
+    # §3: main() splits its cleanup into the quiesce half (scheduler +
+    # listeners, registered on the lifespan's pre-kill hook) and the shutdown
+    # half (stop flag + backend.json unlink). Both are run-once, and shutdown
+    # calls quiesce defensively for a run() that never reached the lifespan.
+    from autowright import api, main as main_mod
+
+    stopped = []
+
+    class FakeStopper:
+        def __init__(self, name):
+            self.name = name
+
+        def start(self):
+            pass
+
+        def stop(self):
+            stopped.append(self.name)
+
+    monkeypatch.setattr(main_mod, "Scheduler", lambda *a, **kw: FakeStopper("scheduler"))
+    monkeypatch.setattr(main_mod, "Listeners", lambda *a, **kw: FakeStopper("listeners"))
+    monkeypatch.setattr(main_mod.uvicorn, "Server",
+                        lambda config: type("S", (), {"run": lambda self, sockets=None: None})())
+    try:
+        main_mod.main()
+    finally:
+        # main() installs the §4.9 access-log filter on the root logger — drop
+        # it again so it can't gate later tests' logging.
+        for hnd in logging.getLogger().handlers:
+            for f in list(hnd.filters):
+                if isinstance(f, main_mod._DevModeFilter):
+                    hnd.removeFilter(f)
+    # the `finally` half ran both, in order, exactly once each
+    assert stopped == ["scheduler", "listeners"]
+    # ...and re-running the registered callbacks changes nothing
+    for callback in api._quiesce_callbacks + api._shutdown_callbacks:
+        callback()
+    assert stopped == ["scheduler", "listeners"]

@@ -4024,3 +4024,164 @@ def test_pending_summary_recovers_half_finished_swap(client):
     dd = paths.pending_draft_dir() / "automation"
     dd.rename(paths.pending_draft_dir() / ".ad-old-automation")
     assert client.get("/state").json()["pendingDraft"] is not None
+
+
+def test_queue_clear_never_kills_a_promoted_entry(client, monkeypatch):
+    # §19/§6: an entry promoted to `executing` in the gap between the snapshot
+    # and the cancel must be left alone — clearing the queue cancels waiting
+    # entries, it never kills a running execution.
+    from autowright import api as api_mod
+    from autowright import listeners as li_mod
+    from autowright.firing import fire_trigger
+    from autowright.storage import store
+
+    monkeypatch.setattr(li_mod, "notify_busy", lambda payload: None)
+    auto = client.post("/automations", json={"draft": _echo_draft()}).json()
+    aid = auto["id"]
+    a = store.autos[aid]
+    a["max_queued"] = 10
+    a["_live"] = {"blocking"}
+    trig = {"id": "t1", "kind": "discord", "enabled": True, "secret": "TOKEN", "channel": "42"}
+    for sender in ("Dave", "Ana"):
+        fire_trigger(store, api_mod.engine, a, trig,
+                     payload={"kind": "discord", "channel": "42", "secret": "TOKEN",
+                              "sender": sender})
+    heads = store.queued_execs(aid)
+    assert len(heads) == 2
+
+    # the promotion the drain would have done, landing after the snapshot
+    promoted = heads[0]
+    promoted["status"] = "executing"
+    store.update_execution(promoted)
+    cancelled = []
+    monkeypatch.setattr(api_mod.engine, "cancel", lambda eid: cancelled.append(eid) or True)
+
+    assert client.post(f"/automations/{aid}/queue/clear").json() == {"cancelled": 1}
+    assert cancelled == []  # no live cancel was ever attempted
+    assert store.execs[promoted["id"]]["status"] == "executing"
+    assert store.queued_execs(aid) == []
+
+
+def test_ollama_pull_publishes_done_on_a_spawn_error(client, monkeypatch):
+    # §19: the §12 pull card waits on the terminal `done` event — any spawn
+    # failure, not just a missing binary, must still close the stream (and
+    # still nudge the agents list).
+    from autowright import api, harness
+
+    events = _capture_events(monkeypatch)
+    monkeypatch.setattr(harness, "_ollama_models", lambda: None)
+    monkeypatch.setattr(harness, "ollama_bin", lambda: "/fake/ollama")
+
+    def boom(cmd, **kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(api.subprocess, "Popen", boom)
+    assert client.post("/ollama/pull", json={"model": "qwen3:8b"}).json() == {"ok": True}
+    pulls = _wait_pull_done(events)
+    assert pulls[-1]["done"] is True and pulls[-1]["ok"] is False
+    assert pulls[-1]["line"].startswith("pull failed: ")
+    assert "percent" not in pulls[-1]
+    _until(events, "agents.changed")
+
+
+def test_post_import_ensure_skips_a_deleted_automation(client, monkeypatch):
+    # §5.1/§19: the background package ensure runs for minutes, and the
+    # automation may be gone by the time it finishes — republishing its row
+    # would resurrect a deleted automation in every client's list.
+    from autowright import api as api_mod
+    from autowright.storage import store
+
+    import threading
+
+    a = store.create_automation(make_version(), "Imported", "mock")
+    gate = threading.Event()
+    monkeypatch.setattr(api_mod.transfer, "import_automation",
+                        lambda s, data: (a, {"packages": [{"name": "requests"}]}))
+    monkeypatch.setattr(api_mod.pkglib, "ensure", lambda pkgs: gate.wait(10))
+    threads = []
+    real_thread = api_mod.threading.Thread
+
+    def spy_thread(*args, **kw):
+        t = real_thread(*args, **kw)
+        threads.append(t)
+        return t
+
+    monkeypatch.setattr(api_mod.threading, "Thread", spy_thread)
+
+    events = _capture_events(monkeypatch)
+    api_mod._land_import(b"archive")
+    assert [e["event"] for e in events] == ["automation.changed"]  # the landing itself
+
+    events.clear()
+    store.delete_automation(a)
+    gate.set()  # the install finishes only after the automation is gone
+    threads[0].join(10)
+    assert not threads[0].is_alive()
+    assert events == []  # nothing republished the deleted row
+
+
+def test_memory_file_over_the_cap_answers_413(client):
+    # §19: the whole file rides one JSON response — past 8 MB the endpoint
+    # points at the on-disk memory directory instead of streaming it.
+    from autowright.storage import store
+
+    auto = client.post("/automations", json={"draft": _echo_draft()}).json()
+    a = store.autos[auto["id"]]
+    big = store.auto_dir(a) / "memory" / "huge.log"
+    big.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+
+    r = client.get(f"/automations/{auto['id']}/memory/files/huge.log")
+    assert r.status_code == 413
+    detail = r.json()["detail"]
+    assert detail.startswith("file is larger than 8 MB;")
+    assert str(store.auto_dir(a) / "memory") in detail
+
+    # exactly at the cap still reads
+    big.write_bytes(b"y" * (8 * 1024 * 1024))
+    r = client.get(f"/automations/{auto['id']}/memory/files/huge.log")
+    assert r.status_code == 200 and r.json()["size"] == 8 * 1024 * 1024
+
+
+def test_ws_unsubscribes_even_when_the_sender_task_raises(client, monkeypatch):
+    # §19: the hub subscription is released before the send-side task is
+    # awaited — an error raised there would otherwise skip the unsubscribe and
+    # leak a queue the hub keeps publishing into forever.
+    from fastapi.testclient import TestClient
+
+    from autowright import api
+
+    try:
+        with TestClient(api.app) as c:
+            before = len(api.hub._subs)
+            with c.websocket_connect(f"/ws?token={api.AUTH_TOKEN}"):
+                assert len(api.hub._subs) == before + 1
+                # a payload send_json can't serialize kills the sender task —
+                # its exception surfaces from the `await sender` below
+                api.hub.publish("test.unserializable", value={1, 2})
+                time.sleep(0.3)
+            assert len(api.hub._subs) == before
+    finally:
+        api.hub._loop = None
+
+
+def test_request_log_write_runs_off_the_event_loop(client, devmode, monkeypatch):
+    # §5: the request-log file write is sync IO — it must never run on the
+    # event loop, or every logged request stalls the loop and the §19 socket.
+    import asyncio
+
+    from autowright import api, reqlog
+
+    on_loop = []
+    real = reqlog.write_http
+
+    def spy(*args, **kw):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)  # a worker thread has no running loop
+        return real(*args, **kw)
+
+    monkeypatch.setattr(api.reqlog, "write_http", spy)
+    assert client.get("/state").status_code == 200
+    assert on_loop == [False]

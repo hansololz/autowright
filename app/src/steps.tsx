@@ -6,6 +6,7 @@
 // the five §4.2 value kinds (toggle/list/kv/number/text) for both the
 // editor's test-value card and the detail page's debounced ParamRow.
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
@@ -413,6 +414,8 @@ function StepKeys({ i, count, closing, onNav, onFind }: {
   useEffect(() => {
     if (closing) return
     const onKey = (e: KeyboardEvent) => {
+      // §9.3: both shortcuts yield to the developer-log overlay above the card
+      if (devlogOverlayOpen()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); onFind(); return }
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
       const flip = e.key === 'ArrowLeft' ? (i > 0 ? i - 1 : null) : e.key === 'ArrowRight' ? (i < count - 1 ? i + 1 : null) : null
@@ -710,7 +713,7 @@ export function ParamValueEditor({ p, variant, on, lines, rows, value, setOn, se
   setRows: (next: { key: string; value: string }[], removal?: boolean) => void
   setText: (v: string) => void
   setNumber: (digits: string) => void
-  onFocus?: () => void // detail: text/number focus tracking
+  onFocus?: () => void // detail: focus tracking, every kind — the resync guard
   onBlur?: () => void // draft: number clamp; detail: flush (list/kv) or flush+reset (text/number)
 }) {
   const detail = variant === 'detail'
@@ -764,6 +767,7 @@ export function ParamValueEditor({ p, variant, on, lines, rows, value, setOn, se
                 className={`ad-input compact mono${invalid ? ' invalid' : ''}`}
                 value={ln}
                 onChange={(e) => setLines(lines.map((z, j) => (j === li ? e.target.value : z)))}
+                onFocus={detail ? onFocus : undefined}
                 onBlur={detail ? onBlur : undefined}
                 style={{ ...inputStyle, ...(invalid ? { color: 'var(--red-text)' } : {}) }}
               />
@@ -804,6 +808,7 @@ export function ParamValueEditor({ p, variant, on, lines, rows, value, setOn, se
             className="ad-input compact mono"
             value={r.key} placeholder={detail ? undefined : 'Key'}
             onChange={(e) => setRows(rows.map((z, j) => (j === ri ? { ...z, key: e.target.value } : z)))}
+            onFocus={detail ? onFocus : undefined}
             onBlur={detail ? onBlur : undefined}
             style={detail
               ? { flex: 1.3, minWidth: 0 }
@@ -813,6 +818,7 @@ export function ParamValueEditor({ p, variant, on, lines, rows, value, setOn, se
             className="ad-input compact mono"
             value={r.value} placeholder={detail ? undefined : 'Value'}
             onChange={(e) => setRows(rows.map((z, j) => (j === ri ? { ...z, value: e.target.value } : z)))}
+            onFocus={detail ? onFocus : undefined}
             onBlur={detail ? onBlur : undefined}
             style={inputStyle}
           />

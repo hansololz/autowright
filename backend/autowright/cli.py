@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import json
 import shutil
 import sys
@@ -77,7 +78,8 @@ class Client:
                 return json.loads(resp.read().decode() or "{}")
         except urllib.error.HTTPError as e:
             _exit_http(e)
-        except (urllib.error.URLError, TimeoutError) as e:
+        except (urllib.error.URLError, http.client.HTTPException,
+                TimeoutError, OSError) as e:
             # §3: backend.json can be well-formed yet point at a dead backend
             # (SIGKILL leftovers) — same clean guidance as a stale file, no traceback.
             sys.exit(f"backend isn't reachable at {self.base} ({e}) — restart it with "
@@ -96,7 +98,8 @@ class Client:
                 return resp.read()
         except urllib.error.HTTPError as e:
             _exit_http(e)
-        except (urllib.error.URLError, TimeoutError) as e:
+        except (urllib.error.URLError, http.client.HTTPException,
+                TimeoutError, OSError) as e:
             sys.exit(f"backend isn't reachable at {self.base} ({e}) — restart it with "
                      "`autowright service restart` or `autowright-backend`")
 
@@ -357,6 +360,8 @@ def write_workdir(d: Path, auto: dict) -> list[str]:
 
 
 def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
+    from .drafting import STEP_FILE_RE
+
     d.mkdir(parents=True, exist_ok=True)
     written = ["spec.md", "manifest.yaml"]
     (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
@@ -385,6 +390,15 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     if (auto.get("notes") or "").strip():
         (d / "notes.md").write_text(auto["notes"].strip() + "\n", encoding="utf-8")
         written.append("notes.md")
+    # §20: pull owns the workdir's managed files — every managed file it did
+    # not write this time goes (a dropped step, a notes.md the version no
+    # longer carries), so a re-pull into the same directory never resurrects
+    # deleted content on the next push. Unmanaged files are left alone.
+    for f in d.iterdir():
+        if f.name in written or not f.is_file():
+            continue
+        if f.name in WORKDIR_META or STEP_FILE_RE.match(f.name):
+            f.unlink()
     return written
 
 
@@ -1157,7 +1171,9 @@ def _secret_by_name(c: Client, name: str) -> dict | None:
 def cmd_secret_set(c: Client, args) -> None:
     # §20: a secret value never rides argv — it would land in shell history and
     # in every local process's view of the process list.
-    value = sys.stdin.readline().rstrip("\n") if args.stdin \
+    # §20: --stdin takes the WHOLE of stdin, so a multi-line value (a PEM key)
+    # lands intact; only the trailing newline is trimmed.
+    value = sys.stdin.read().rstrip("\n") if args.stdin \
         else getpass.getpass(f"value for {args.name}: ")
     if not value:
         # §20: errors go to stderr through sys.exit, like every other exit-1 path.

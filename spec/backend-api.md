@@ -36,7 +36,11 @@ remain plain dicts (§2).
   true on macOS —
   and is the one surface clients gate platform features on (never by sniffing the platform
   at a call site)
-- `GET /state` → boot snapshot: automations (full), executions (the §7 window, not the full
+- `GET /state` → boot snapshot: automations (full — the §4.1 memory card's size/updated
+  stats are memoized per automation for 5 s, cleared by clear/restore and by every execution
+  finish of the automation, so a reconnect burst
+  never re-walks a gigabyte `memory/` under the store lock; the latest-result memo keys off
+  one linear pass over the headers, never a sort), executions (the §7 window, not the full
   list: every `queued`/`executing` header plus the 50 newest finished headers - exactly one
   §7 page - in the §7
   canonical order - `startedMs` desc, id asc on ties), `executionsTotal` (count of every
@@ -307,7 +311,9 @@ remain plain dicts (§2).
   `{ name, size, text }` (`name` may contain `/` — the route takes the rest of the path).
   422 when `name` escapes the memory directory (absolute, `..`, or otherwise resolving
   outside it) or the file is not UTF-8 text (the message says the file is binary and names
-  the memory path on disk); 404 when no such file. Same lock-free read rule as the list
+  the memory path on disk); 404 when no such file; 413 when the file is larger than 8 MB
+  (the message names the memory path on disk — the file is opened there, never served
+  whole into one JSON body). Same lock-free read rule as the list
 - `POST /automations/{id}/memory/clear` — 409 while **any** execution of the automation is
   live, the same guard (and the same lock span) as manual snapshot and restore — a
   mid-execution clear could delete files a step is reading; then §6.3 pre-clear snapshot,

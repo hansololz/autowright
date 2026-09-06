@@ -317,7 +317,7 @@ modal toolbar's 10 px so the cluster's glyphs sit on the 18 px content line, and
 26 px icon buttons overhang the header's 8 px padding (4 px each way) so the pane header keeps
 the rail header's 38 px height and the two hairlines stay aligned.
 **Find in log.** The find button, or ⌘F / Ctrl+F while the view is on screen (the page yields
-to any open modal, exactly as its flip keys do), opens the §9.2 **find bar** under the header —
+to any open modal and to the §9.3 developer-log overlay, exactly as its flip keys do), opens the §9.2 **find bar** under the header —
 the same 36 px bar, same field, counter, up / down match chevrons and close ✕, with the
 placeholder and label "Find in log" — and every §9.2 find rule applies unchanged: a
 case-insensitive substring search over the log lines' text (times are not searched), `<mark>`
@@ -445,7 +445,10 @@ keeps the pages seamless either way. The accumulated set also **absorbs** the wi
 finished rows on every window change: a `/state` refresh replaces the window wholesale, and
 new finishes push old rows out of it - a row that leaves the window mid-session must survive
 in the accumulated set, or the page the user is on silently loses it and every deeper page
-shifts against the readout. A terminal segment whose first page fetch is still in flight
+shifts against the readout. The store's own window is re-trimmed after every execution
+event merge to exactly what `/state` would answer — every live header plus the 50 newest
+finished — so a long-lived window never accumulates one header per run; the accumulated
+set is what keeps deeper rows. A terminal segment whose first page fetch is still in flight
 never shows the "No <status> executions" empty card - the card means the server answered
 empty, not that the answer hasn't arrived. Fetched pages and the page number are view state only,
 held by the page component: they reset when the page unmounts and whenever the filter

@@ -120,6 +120,24 @@ describe('applyEvent', () => {
     expect(store.useStore.getState().executions.map((e) => e.id)).toEqual(['e2', 'e3', 'e1'])
   })
 
+  it('re-trims the §19 window: live rows all stay, only the 50 newest finished do', () => {
+    // 60 finished rows in the window (the list arrives sorted newest first)
+    // plus two live ones far down the list by start time
+    const finished = Array.from({ length: 60 }, (_, i) => ex(`f${i}`, 1000 - i))
+    store.useStore.setState({
+      executions: [...finished, ex('q1', 5, { status: 'queued' }), ex('x1', 6, { status: 'executing' })],
+      executionsTotal: 62,
+    })
+    store.useStore.getState().applyEvent(execEv('execution.started', ex('new', 2000, { status: 'executing' })))
+    const got = store.useStore.getState().executions
+    expect(got.filter((e) => e.status === 'succeeded').map((e) => e.id))
+      .toEqual(finished.slice(0, 50).map((e) => e.id))
+    // every live row survives the trim, wherever it sorts
+    expect(got.filter((e) => e.status !== 'succeeded').map((e) => e.id)).toEqual(['new', 'x1', 'q1'])
+    // the pill's total counts the new id, not the trimmed window
+    expect(store.useStore.getState().executionsTotal).toBe(63)
+  })
+
   it('exec.finished header merge preserves an already-loaded full body', () => {
     const full: Execution = {
       ...ex('e1', 100, { status: 'executing' }),

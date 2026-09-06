@@ -5,7 +5,7 @@
 // the store seeded and the api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { Automation, Execution } from '../src/types'
+import type { Automation, Execution, ParamDef } from '../src/types'
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
@@ -16,12 +16,15 @@ vi.mock('../src/api', () => ({
     triggersPreview: vi.fn(async () => ({ triggers: [] })),
     listExecutions: vi.fn(async () => ({ executions: [], total: 0 })),
     executeNow: vi.fn(async () => ({ executionId: 'e-new', queued: false })),
+    // §9.2 PARAMETERS row: the debounced value write
+    patchAutomation: vi.fn(async () => ({})),
   },
 }))
 
 let storeMod: typeof import('../src/store')
 let mockedApi: Record<string, ReturnType<typeof vi.fn>>
 let AutomationDetail: typeof import('../src/pages/AutomationDetail').default
+let ParamRow: typeof import('../src/pages/detail/ParamRow').ParamRow
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -31,6 +34,7 @@ beforeAll(async () => {
   storeMod = await import('../src/store')
   mockedApi = (await import('../src/api')).api as unknown as Record<string, ReturnType<typeof vi.fn>>
   AutomationDetail = (await import('../src/pages/AutomationDetail')).default
+  ParamRow = (await import('../src/pages/detail/ParamRow')).ParamRow
 })
 
 const auto = (over: Partial<Automation> = {}): Automation => ({
@@ -204,5 +208,27 @@ describe('§9.2 needs-fixing banner', () => {
     // page header's own Edit is the only one on screen.
     expect(screen.getAllByText('Edit').length).toBe(1)
     expect(screen.queryByText('Open Secrets')).toBeNull()
+  })
+})
+
+describe('§9.2 PARAMETERS row', () => {
+  const listParam: ParamDef = {
+    name: 'sites', kind: 'list', label: 'Sites', help: 'One link per line', lines: ['a.io'],
+  }
+
+  it('a resync while a list row is focused keeps what was typed; blur re-arms it', async () => {
+    const { rerender } = render(<ParamRow automationId="a1" p={listParam} last />)
+    const input = screen.getByDisplayValue('a.io')
+    fireEvent.focus(input)
+    fireEvent.change(input, { target: { value: 'typed.io' } })
+    // the debounced PATCH lands, which drops the pending-write guard…
+    await waitFor(() => expect(mockedApi.patchAutomation).toHaveBeenCalledTimes(1))
+    // …and the focus guard alone has to hold the server value off the row
+    rerender(<ParamRow automationId="a1" p={{ ...listParam, lines: ['b.io'] }} last />)
+    expect(screen.getByDisplayValue('typed.io')).toBeTruthy()
+    // blurring clears it, so the next server value lands as it always did
+    fireEvent.blur(screen.getByDisplayValue('typed.io'))
+    rerender(<ParamRow automationId="a1" p={{ ...listParam, lines: ['c.io'] }} last />)
+    expect(screen.getByDisplayValue('c.io')).toBeTruthy()
   })
 })

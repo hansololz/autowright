@@ -21,10 +21,18 @@ from .events import hub
 from .executor import CTRL
 from .firing import finish_queued
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
-                      clamp_max_parallel, exec_version_label, new_id,
+                      clamp_max_parallel, exec_version_label, is_test, new_id,
                       resolve_param_value, trigger_label)
 
 log = logging.getLogger("autowright.engine")
+
+
+class VersionNotFound(LookupError):
+    """§7: the version an execution targets no longer resolves. A LookupError
+    subclass, so the §19 404 mapping still catches it — but a class of its own,
+    because KeyError and IndexError are LookupErrors too: §6 firing leaves the
+    "no longer exists" record for this one, and logs a bug inside `start`."""
+
 
 STEP_TIMEOUT = 15 * 60  # per-step hard cap (seconds); override via AUTOWRIGHT_STEP_TIMEOUT
 
@@ -245,63 +253,71 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         **_processes().session_kwargs(),
     )
     state["proc"] = proc
-    # §3 orphan recovery: hand the new group id (own session → pgid == pid) to
-    # the engine so it lands on the persisted execution record.
-    if state.get("on_spawn"):
-        state["on_spawn"](proc.pid)
     # Watchdog enforces the per-step timeout even when the step produces no
     # output at all (a bare read loop would block forever on a silent hang).
     # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
     timed_out = threading.Event()
     pipe_closed = threading.Event()
-
-    def _hard_kill() -> None:
-        """SIGKILL the group and defuse our read end — §7 kill semantics:
-        children can never hold the log pipe open past the kill. Shared by the
-        timeout watchdog and the cancel/skip escalation (a step that ignores
-        SIGTERM must not strand the execution \"executing\" forever). The read
-        end is dup2'd over, never `.close()`d cross-thread: close() takes the
-        buffer lock a blocked readline holds and would wedge this thread."""
-        pipe_closed.set()
-        if proc.poll() is None:
-            kill_step_group(proc)
-        # §7: any in-flight agent call's own-session group dies with the step —
-        # its watchdog lived in the executor this kill just took down.
-        procs = _processes()
-        for g in list(state.get("agent_pgids") or ()):
-            try:
-                procs.kill_group(g)
-            except Exception:  # noqa: BLE001 — an already-gone group is fine
-                pass
-        harness.defuse_read_end(proc.stdout)
-
-    state["hard_kill"] = _hard_kill
-
-    # Cancel/skip racing the spawn (mirrors harness._invoke): one that landed
-    # after the caller's loop-top check but before this Popen existed killed
-    # nothing — with no_timeout the freshly spawned step would then run
-    # unbounded while the record shows "executing". Re-check now that the
-    # proc is visible. Index-compared like every other skip check: a stale
-    # flag armed in the previous step's teardown window (after its pop,
-    # before `_cur` cleared) must not kill THIS step and report it failed.
-    if state.get("cancel") or (state.get("skip") is not None and state.get("skip") == step_i):
-        _hard_kill()
-
-    def _on_timeout() -> None:
-        timed_out.set()
-        _hard_kill()
-
-    # §6: armed BEFORE the ctx handoff below — the deadline runs from process
-    # spawn, so a child that wedges before ever reading its stdin (interpreter
-    # hung on startup, pipe never drained) still hits its limit. If the timer
-    # fires while we're blocked in stdin.write, _hard_kill SIGKILLs the group
-    # and the write surfaces as BrokenPipeError, caught below.
     watchdog = None
-    if timeout_s is not None:
-        watchdog = threading.Timer(timeout_s, _on_timeout)
-        watchdog.daemon = True
-        watchdog.start()
+    # Everything past the spawn runs inside the try: the §3 on_spawn persist (a
+    # disk error) or the watchdog start (thread exhaustion) raising out here
+    # would leave the step group alive with its handle dropped and nothing left
+    # to kill it by — the finally below reaps it on every path.
     try:
+        # §3 orphan recovery: hand the new group id (own session → pgid == pid)
+        # to the engine so it lands on the persisted execution record.
+        if state.get("on_spawn"):
+            state["on_spawn"](proc.pid)
+
+        def _hard_kill() -> None:
+            """SIGKILL the group and defuse our read end — §7 kill semantics:
+            children can never hold the log pipe open past the kill. Shared by the
+            timeout watchdog and the cancel/skip escalation (a step that ignores
+            SIGTERM must not strand the execution \"executing\" forever). The read
+            end is dup2'd over, never `.close()`d cross-thread: close() takes the
+            buffer lock a blocked readline holds and would wedge this thread."""
+            pipe_closed.set()
+            if proc.poll() is None:
+                kill_step_group(proc)
+            # §7: any in-flight agent call's own-session group dies with the step —
+            # its watchdog lived in the executor this kill just took down. Only
+            # while this step still owns the state, though: a cancel/skip grace
+            # timer that fired after its step ended must never reach the NEXT
+            # step's in-flight groups.
+            if state.get("proc") is proc:
+                procs = _processes()
+                for g in list(state.get("agent_pgids") or ()):
+                    try:
+                        procs.kill_group(g)
+                    except Exception:  # noqa: BLE001 — an already-gone group is fine
+                        pass
+            harness.defuse_read_end(proc.stdout)
+
+        state["hard_kill"] = _hard_kill
+
+        # Cancel/skip racing the spawn (mirrors harness._invoke): one that landed
+        # after the caller's loop-top check but before this Popen existed killed
+        # nothing — with no_timeout the freshly spawned step would then run
+        # unbounded while the record shows "executing". Re-check now that the
+        # proc is visible. Index-compared like every other skip check: a stale
+        # flag armed in the previous step's teardown window (after its pop,
+        # before `_cur` cleared) must not kill THIS step and report it failed.
+        if state.get("cancel") or (state.get("skip") is not None and state.get("skip") == step_i):
+            _hard_kill()
+
+        def _on_timeout() -> None:
+            timed_out.set()
+            _hard_kill()
+
+        # §6: armed BEFORE the ctx handoff below — the deadline runs from process
+        # spawn, so a child that wedges before ever reading its stdin (interpreter
+        # hung on startup, pipe never drained) still hits its limit. If the timer
+        # fires while we're blocked in stdin.write, _hard_kill SIGKILLs the group
+        # and the write surfaces as BrokenPipeError, caught below.
+        if timeout_s is not None:
+            watchdog = threading.Timer(timeout_s, _on_timeout)
+            watchdog.daemon = True
+            watchdog.start()
         try:
             proc.stdin.write(json.dumps(ctx))
         except OSError:  # BrokenPipeError: the group died before it read ctx
@@ -320,7 +336,18 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                 if timed_out.is_set():
                     break
                 line = raw.rstrip("\n")
-                if line.startswith(CTRL):
+                # §6.1: a child that inherited fd 1 can leave a newline-free
+                # fragment in front of the executor's control line — the op
+                # still has to be read (dropping it loses a log line, a
+                # result field, or an agent group id). The fragment ahead of
+                # it is ordinary output.
+                idx = line.find(CTRL)
+                if idx > 0:
+                    if line[:idx].strip():
+                        log("out", line[:idx])
+                    line = line[idx:]
+                    idx = 0
+                if idx == 0:
                     try:
                         msg = json.loads(line[len(CTRL):])
                     except ValueError:
@@ -376,10 +403,15 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                 raise
         proc.wait()
     finally:
-        # Always cancel the timer and drop the proc handle — even if the read
-        # loop raises — so the watchdog can't later kill an unrelated process.
+        # Always cancel the timers and drop the proc handle — even if the read
+        # loop raises — so neither can later kill an unrelated process. §7: a
+        # cancel/skip grace timer outliving the step it was armed for would
+        # hard-kill the NEXT step's agent group in the middle of its call.
         if watchdog is not None:
             watchdog.cancel()
+        grace = state.pop("grace_timer", None)
+        if grace is not None:
+            grace.cancel()
         if proc.poll() is None:
             # The read loop died mid-stream (e.g. a disk-full error while
             # persisting a log line) — never leave the group alive with no
@@ -413,11 +445,22 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
     return proc.returncode or 0
 
 
+# §5 `_log` sentinel: read the execution's current attempt at call time. A
+# caller that captured one earlier (the §6.1 reply worker) passes it instead.
+_CUR_NOW: dict = {}
+
+
 class Engine:
     def __init__(self, store: Store):
         self.store = store
         self._live: dict[str, dict] = {}  # execution_id → {proc, cancel, thread}
         self._lock = threading.Lock()
+        # §5: the per-file log sequence is bumped from the step read loop AND
+        # the §6.1 reply delivery worker — the read-modify-write needs a lock
+        # of its own, or two lines share a sequence and one hides the other.
+        self._log_lock = threading.Lock()
+        # §3 shutdown: flipped by the kill sweep — every later start is refused.
+        self._stopping = False
         self.drain_queue = None  # set by the scheduler (§6 firing queue)
 
     # ---------- public ----------
@@ -439,6 +482,12 @@ class Engine:
         the worker thread, before step 1, because a memory dir can be gigabytes
         and no copytree may run under store.lock."""
         with self.store.lock:
+            # §3 shutdown: past the kill sweep nothing new may start — a tick
+            # already inside `fire_trigger` when uvicorn began its graceful
+            # drain would otherwise spawn a step group after the sweep, with
+            # nothing left to kill it.
+            if self._stopping:
+                raise RuntimeError("the backend is shutting down")
             # §19 delete: an admission racing the DELETE window (the automation
             # is still registered while its live executions are cancelled and
             # awaited) must not start — it would escape the delete's wait set
@@ -452,7 +501,7 @@ class Engine:
             kind, version = self._parse_version_label(auto, version_label)
             ver = self._resolve_version(auto, kind, version)
             if ver is None:
-                raise LookupError(f"version {version_label or f'v{version}'} not found")
+                raise VersionNotFound(f"version {version_label or f'v{version}'} not found")
             if self.at_capacity(auto):
                 raise RuntimeError("already executing")
             pre_snapshot = self._needs_pre_version(auto, kind, version)
@@ -654,18 +703,23 @@ class Engine:
     KILL_GRACE = 5.0  # seconds between the polite SIGTERM and the group SIGKILL
 
     @classmethod
-    def _term_then_kill(cls, proc: subprocess.Popen, hard_kill) -> None:
+    def _term_then_kill(cls, proc: subprocess.Popen, state: dict) -> None:
         """§7 kill semantics for cancel/skip: SIGTERM first (steps get a chance
         to clean up), then the step's own hard-kill after a grace period — a
         step that traps SIGTERM must not strand the execution \"executing\"
         forever (`hard_kill` also closes the log pipe, so even an escaped
-        child can't hold the read loop open)."""
+        child can't hold the read loop open). The timer lands on the state so
+        the step's own teardown can defuse it: a step that dies inside the
+        grace window would otherwise leave it armed to fire into the NEXT
+        step's §6.1 agent groups."""
         kill_step_group(proc, signal.SIGTERM)
+        hard_kill = state.get("hard_kill")
         if hard_kill is None:
             return
         t = threading.Timer(cls.KILL_GRACE, hard_kill)
         t.daemon = True
         t.start()
+        state["grace_timer"] = t
 
     def cancel(self, execution_id: str) -> bool:
         """§7 cancel for a running execution; §6 queue-leave for a waiting one.
@@ -693,7 +747,7 @@ class Engine:
         state["cancel"] = True
         proc = state.get("proc")
         if proc and proc.poll() is None:
-            self._term_then_kill(proc, state.get("hard_kill"))
+            self._term_then_kill(proc, state)
         return True
 
     def skip_step(self, execution_id: str, index: int) -> bool:
@@ -709,9 +763,8 @@ class Engine:
                 return False
             state["skip"] = index
             proc = state.get("proc")
-            hard = state.get("hard_kill")
         if proc and proc.poll() is None:
-            self._term_then_kill(proc, hard)
+            self._term_then_kill(proc, state)
         return True
 
     def is_live(self, execution_id: str) -> bool:
@@ -738,7 +791,10 @@ class Engine:
         """§3 backend shutdown: hard-kill every live step group. The records
         get marked interrupted by the next startup's recovery either way — but
         their step processes must die with this backend, or an orphan keeps
-        writing `memory/` while the successor starts a second copy."""
+        writing `memory/` while the successor starts a second copy. The sweep
+        also flips the engine stopping: a firing already inside `fire_trigger`
+        must not start a group after the pass that would have killed it."""
+        self._stopping = True
         with self._lock:
             states = list(self._live.values())
         for state in states:
@@ -774,21 +830,32 @@ class Engine:
                     h["redacted_secrets"].append(name)
         return text
 
-    def _log(self, h: dict, kind: str, text: str, redactions: dict[str, str]) -> None:
+    def _log(self, h: dict, kind: str, text: str, redactions: dict[str, str],
+             cur: dict | None = _CUR_NOW) -> None:
+        """§5: one log line. `cur` is the step attempt the line belongs to —
+        left at the sentinel it is the execution's current one, which is what
+        every caller on the step thread wants; an off-thread caller (the §6.1
+        reply worker) passes the attempt that was current when it was queued,
+        so its line can never land in the next attempt's file."""
         text = self._redact(h, text, redactions)
-        cur = h.get("_cur")
+        if cur is _CUR_NOW:
+            cur = h.get("_cur")
         name = cur["log"] if cur else self.store.EXEC_LOG
         # Per-file monotonic seq (§5) — resumed by counting existing lines, so a
-        # retried execution's execution.ndjson keeps a gapless sequence.
-        seqs = h.setdefault("_log_seq", {})
-        if name not in seqs:
-            p = self.store.log_file(h["id"], name)
-            seqs[name] = sum(1 for _ in p.open(encoding="utf-8")) if p.exists() else 0
-        seqs[name] += 1
+        # retried execution's execution.ndjson keeps a gapless sequence. Under
+        # one lock: the reply worker logs off-thread, and two read-modify-writes
+        # racing would hand the same sequence to two lines.
+        with self._log_lock:
+            seqs = h.setdefault("_log_seq", {})
+            if name not in seqs:
+                p = self.store.log_file(h["id"], name)
+                seqs[name] = sum(1 for _ in p.open(encoding="utf-8")) if p.exists() else 0
+            seqs[name] += 1
+            sequence = seqs[name]
         # On-disk shape (§5): {timestamp, kind, sequence, text} — the owning step/attempt is
         # implicit in the filename. The serialized/UI shape adds the derived
         # local clock label `time` (read_log for files, here for the live event).
-        line = {"timestamp": timefmt.now_iso(), "kind": kind, "sequence": seqs[name], "text": text}
+        line = {"timestamp": timefmt.now_iso(), "kind": kind, "sequence": sequence, "text": text}
         # Publish only lines the store accepted — past the §5 cap the live
         # pane must match the stored log, and a runaway step must not keep
         # queuing loop callbacks for lines that exist nowhere.
@@ -842,26 +909,30 @@ class Engine:
                           "attempts": self.store.step_attempts_json(s)})
 
     def _execute(self, auto: dict, ver: dict, h: dict, state: dict) -> None:
-        # §4.4: a draft carries its own grant selections — a Draft execution
-        # honors them instead of the automation's live grants. Shadow copy only;
-        # the stored automation is never touched.
-        if ver.get("step_agents") is not None or ver.get("allowed_secrets") is not None:
-            auto = {**auto,
-                    "enabled_agents": ver["step_agents"] if ver.get("step_agents") is not None
-                    else auto["enabled_agents"],
-                    "allowed_secrets": ver["allowed_secrets"] if ver.get("allowed_secrets") is not None
-                    else auto["allowed_secrets"]}
-        state["pass_start"] = time.time()  # §7: duration_ms accumulates across retry passes
-        result: dict[str, Any] = {"status": "ok", "chip": None}
-        result_touched = False
-        notify_text: str | None = None
-        # §3 per-execution idle-sleep hold, through the §2 platform layer —
-        # the release is called in the finally below. Never raises; a platform
-        # with no mechanism holds nothing.
-        release_power = platform.current().power.hold_execution()
+        # Nothing above the try: every line of the prologue can raise (a shadow
+        # copy of a damaged version, a platform call), and outside it the record
+        # would stay "executing" with no thread and pin its §6 slot forever.
+        release_power = lambda: None  # noqa: E731 — replaced by the real hold below
         redactions: dict[str, str] = {}
         failed = False
         try:
+            # §4.4: a draft carries its own grant selections — a Draft execution
+            # honors them instead of the automation's live grants. Shadow copy only;
+            # the stored automation is never touched.
+            if ver.get("step_agents") is not None or ver.get("allowed_secrets") is not None:
+                auto = {**auto,
+                        "enabled_agents": ver["step_agents"] if ver.get("step_agents") is not None
+                        else auto["enabled_agents"],
+                        "allowed_secrets": ver["allowed_secrets"] if ver.get("allowed_secrets") is not None
+                        else auto["allowed_secrets"]}
+            state["pass_start"] = time.time()  # §7: duration_ms accumulates across retry passes
+            result: dict[str, Any] = {"status": "ok", "chip": None}
+            result_touched = False
+            notify_text: str | None = None
+            # §3 per-execution idle-sleep hold, through the §2 platform layer —
+            # the release is called in the finally below. Never raises; a platform
+            # with no mechanism holds nothing.
+            release_power = platform.current().power.hold_execution()
             # §6.3: the pre-version snapshot `start` decided on stands before
             # anything else this execution does.
             self._take_pre_version(auto, h)
@@ -1034,11 +1105,14 @@ class Engine:
                             if state["cancel"]:
                                 # §7: cancel wins over the pending retry exactly
                                 # as over a running attempt — the step lands
-                                # cancelled (the failed attempt keeps its error).
+                                # cancelled, and its latest attempt with it (§4.5:
+                                # the step's status is the latest attempt's; the
+                                # attempt keeps its error either way).
                                 # Left `failed`, a last-step cancel would slip
                                 # past finalize's cancelled-detection and the
                                 # record would finish `succeeded`.
                                 step["status"] = "cancelled"
+                                attempt["status"] = "cancelled"
                                 self._log(h, "sys",
                                           "execution cancelled by you — nothing else will happen",
                                           redactions)
@@ -1046,8 +1120,11 @@ class Engine:
                                 break
                             if skip == i:
                                 # §7: skip wins over a pending retry — the step is
-                                # skipped, spending nothing further.
+                                # skipped, spending nothing further, and its latest
+                                # attempt goes with it (§4.5: the step's status is
+                                # the latest attempt's; the attempt keeps its error).
                                 step["status"] = "skipped"
+                                attempt["status"] = "skipped"
                                 self._log(h, "sys",
                                           "step skipped by you — continuing with the next step",
                                           redactions)
@@ -1113,6 +1190,23 @@ class Engine:
             h["finished_at"] = timefmt.now_iso()
             h["pgid"] = None
             h["agent_pgids"] = []
+            # §4.5: the step the exception interrupted — and its latest attempt —
+            # would stay `executing` on a finished record, spinning forever on
+            # the §7 page. Both land failed with the pass's elapsed time, the
+            # only clock this path still has.
+            pass_start = state.get("pass_start")
+            elapsed = int((time.time() - pass_start) * 1000) if pass_start else 0
+            for s in h["steps"]:
+                if s["status"] != "executing":
+                    continue
+                s["status"] = "failed"
+                if s.get("duration_ms") is None:
+                    s["duration_ms"] = elapsed
+                attempts = s.get("attempts") or []
+                if attempts and attempts[-1]["status"] == "executing":
+                    attempts[-1]["status"] = "failed"
+                    if attempts[-1].get("duration_ms") is None:
+                        attempts[-1]["duration_ms"] = elapsed
             h["_cur"] = None
             try:
                 self._log(h, "err", f"engine error: {e}", redactions)
@@ -1146,9 +1240,14 @@ class Engine:
                 a = self.store.autos.get(h["automation_id"])
                 if a:
                     a["_live"].discard(h["id"])
+                    # §19: the steps just wrote memory/ — the §9.2 MEMORY card
+                    # must not show the pre-execution size from the memo.
+                    self.store.invalidate_memory_stats(a)
+                # §4.5: a test execution never changes display state — it
+                # publishes no automation row, exactly as its started event.
+                row = None if a is None or is_test(h) else self.store.auto_json(a, full=False)
                 hub.publish("execution.finished", executionId=h["id"], automationId=h["automation_id"],
-                            execution=self.store.exec_json(h),
-                            automation=self.store.auto_json(a, full=False) if a else None)
+                            execution=self.store.exec_json(h), automation=row)
             # §6: a slot just freed — hand it to the longest-waiting firing.
             if self.drain_queue:
                 try:
@@ -1230,14 +1329,19 @@ class Engine:
             # Discord, 30 s osascript) would stall log streaming while the
             # step's own stdout pipe fills behind it. The shared §6 delivery
             # worker keeps replies and busy notices in one ordered FIFO.
+            # §5: the send's own log lines belong to the attempt that called
+            # reply() — the worker may deliver after the step moved on, and
+            # `h["_cur"]` would then name a later attempt's file (or none).
+            cur = h.get("_cur")
+
             def deliver() -> None:
                 err = listeners.send_reply(payload, text)
                 if err:
-                    self._log(h, "err", f"reply failed — {err}", redactions)
+                    self._log(h, "err", f"reply failed — {err}", redactions, cur)
                 else:
                     where = (f"iMessage ({payload.get('chat')})" if payload.get("kind") == "imessage"
                              else f"Discord ({payload.get('channel')})")
-                    self._log(h, "sys", f"reply sent to {where}", redactions)
+                    self._log(h, "sys", f"reply sent to {where}", redactions, cur)
 
             listeners.submit_send(deliver)
 

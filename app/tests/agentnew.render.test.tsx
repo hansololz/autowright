@@ -394,4 +394,24 @@ describe('AgentNewPage (§12)', () => {
     await waitFor(() => expect(mockedApi.loginHarness).toHaveBeenCalledWith('codex'))
     expect(await screen.findByText(/Finish signing in\. Autowright opened your browser/)).toBeTruthy()
   })
+
+  it('leaving before the reconnect toast lands cancels its timer (§12)', async () => {
+    storeMod.useStore.setState({
+      agents: [{ id: 'g1', name: 'Writer', harness: 'Claude Code', mode: 'default', model: null }],
+      agentEditId: 'g1', agentChecks: { g1: 'needs' },
+    })
+    vi.useFakeTimers()
+    try {
+      render(<AgentNewPage />)
+      fireEvent.click(screen.getByText('Reconnect'))
+      // the check answers; the minimum-visible-progress timer arms behind it
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mockedApi.checkAgent).toHaveBeenCalledWith('g1')
+      cleanup() // navigate away well inside the 1.7 s window
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(storeMod.useStore.getState().toast).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

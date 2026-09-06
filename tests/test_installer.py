@@ -740,3 +740,107 @@ def test_install_ollama_tarball_extracts_into_user_local(monkeypatch, fake_home)
     assert (fake_home / ".local" / "lib" / "ollama" / "libggml.so").exists()
     assert not stale.exists()  # the old lib tree is replaced, not merged
     assert ensured == [True]
+
+
+def test_login_terminal_timeout_becomes_the_409_reason(monkeypatch):
+    # §19: a wedged Terminal (osascript blocks on its Apple event) must answer
+    # the endpoint's defined 409 line, not crash it into a 500.
+    monkeypatch.setattr(installer.paths, "current_os", lambda: "macos")
+    monkeypatch.setattr(harness, "resolve_bin", lambda b: f"/fake/{b}")
+
+    def timeout(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 10)
+
+    monkeypatch.setattr(installer.subprocess, "run", timeout)
+    with pytest.raises(RuntimeError, match="Terminal didn't respond"):
+        installer.login("claude")
+
+    monkeypatch.setattr(installer.subprocess, "run",
+                        lambda cmd, **kw: (_ for _ in ()).throw(OSError("no osascript")))
+    with pytest.raises(RuntimeError, match="Terminal didn't respond"):
+        installer.login("claude")
+
+
+def test_start_caps_an_installer_that_never_returns(monkeypatch):
+    # §19: every phase is time-boxed, but a phase that never returns at all
+    # would leave the job "running" forever and the running guard would refuse
+    # every retry. The job thread joins the installer with the cap and fails
+    # the job past it; the abandoned thread dies with the process.
+    monkeypatch.setattr(installer, "INSTALL_TIMEOUT_S", 0.2)
+    release = threading.Event()
+    monkeypatch.setitem(installer._INSTALLERS, "claude",
+                        lambda emit: release.wait(10))
+    pubs = []
+    try:
+        assert installer.start("claude", lambda **kw: pubs.append(kw)) is True
+        snap = _wait_state("claude", "failed")
+        assert snap["error"].startswith("install timed out after ")
+        assert pubs[-1]["ok"] is False and pubs[-1]["done"] is True
+        # the guard released with the job: a retry is allowed straight away
+        monkeypatch.setitem(installer._INSTALLERS, "claude", lambda emit: None)
+        assert installer.start("claude", lambda **kw: None) is True
+        _wait_state("claude", "done")
+    finally:
+        release.set()
+
+
+@macos_install_surface
+def test_ollama_phase_timeouts_name_the_phase(tmp_path, local_bin, monkeypatch):
+    # §19: every bare subprocess in the Ollama install carries a wall-clock
+    # cap, and a phase that blows it fails the install with a line naming it.
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    monkeypatch.setattr(installer, "APPLICATIONS", str(apps))
+    monkeypatch.setattr(installer, "_download",
+                        lambda url, dest, emit, label: open(dest, "wb").close())
+    real_run = subprocess.run  # captured before the patches below replace it
+
+    def timeout(cmd, **kw):
+        assert kw.get("timeout"), f"{cmd[0]} has no wall-clock cap"
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(installer.subprocess, "run", timeout)
+    with pytest.raises(RuntimeError, match="unpacking the Ollama archive timed out"):
+        installer._install_ollama_app(Recorder())
+
+    # the quit phase, past a ditto that succeeded
+    zip_src = tmp_path / "Ollama-darwin.zip"
+    _make_app_zip(zip_src)
+
+    def ditto_then_timeout(cmd, **kw):
+        assert kw.get("timeout"), f"{cmd[0]} has no wall-clock cap"
+        if cmd[0] == "/usr/bin/ditto":
+            return real_run(cmd, **kw)
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(installer, "_download",
+                        lambda url, dest, emit, label: shutil.copy(zip_src, dest))
+    monkeypatch.setattr(installer.subprocess, "run", ditto_then_timeout)
+    with pytest.raises(RuntimeError, match="quitting the running Ollama app timed out"):
+        installer._install_ollama_app(Recorder())
+
+
+@macos_install_surface
+def test_install_ollama_app_keeps_the_old_bundle_when_the_move_fails(
+        tmp_path, local_bin, monkeypatch, _passthrough_ditto):
+    # §19: the replace stages the new bundle beside the target and only then
+    # removes the old one — a move that dies must never leave the machine with
+    # no Ollama at all, and no `.ad-new` leftover either.
+    zip_src = tmp_path / "Ollama-darwin.zip"
+    _make_app_zip(zip_src)
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    installed = apps / "Ollama.app" / "Contents"
+    installed.mkdir(parents=True)
+    (installed / "working-marker").write_text("still here")
+    monkeypatch.setattr(installer, "APPLICATIONS", str(apps))
+    monkeypatch.setattr(installer, "_download",
+                        lambda url, dest, emit, label: shutil.copy(zip_src, dest))
+    monkeypatch.setattr(installer.shutil, "move",
+                        lambda src, dst: (_ for _ in ()).throw(OSError("no space left")))
+
+    with pytest.raises(OSError, match="no space left"):
+        installer._install_ollama_app(Recorder())
+
+    assert (apps / "Ollama.app" / "Contents" / "working-marker").read_text() == "still here"
+    assert not (apps / "Ollama.app.ad-new").exists()

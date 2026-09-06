@@ -54,6 +54,11 @@ export function useDraftJob(d: DraftJobDeps) {
   // flight, the flow cancels the freshly created job instead of arming the
   // poll — otherwise a cancel that lands mid-POST is silently ignored.
   const cancelGenRef = useRef(0)
+  // Detached: set by the unmount cleanup below. A POST still in flight then
+  // resolves into nothing — §19 background continuation keeps the job
+  // building (nothing cancels it) and re-entering re-attaches, so arming a
+  // poll here would leave an interval ticking for an editor that is gone.
+  const deadRef = useRef(false)
   // §11: the request that started the fresh draft's first chat turn — Start
   // over returns it to the input.
   const firstRequestRef = useRef('')
@@ -296,6 +301,9 @@ export function useDraftJob(d: DraftJobDeps) {
   const startJob = async (body: Parameters<typeof api.postDraftJob>[0], handlers: PollHandlers) => {
     const gen = cancelGenRef.current
     const { jobId } = await api.postDraftJob(body)
+    // §19: the editor left while the POST was in flight — the job keeps
+    // building and the re-attach picks it up; nothing to poll or cancel here.
+    if (deadRef.current) return
     if (cancelGenRef.current !== gen) { void api.cancelDraftJob(jobId).catch(() => { /* already gone */ }); return }
     startPoll(jobId, handlers)
   }
@@ -316,6 +324,7 @@ export function useDraftJob(d: DraftJobDeps) {
     // system back) detaches the UI and nothing more — the job keeps building
     // in the background and re-entering re-attaches (§11). Only the settle
     // paths (Discard draft, Start over) cancel; here just the poll stops.
+    deadRef.current = true
     stopPoll()
     jobIdRef.current = null
     // §11: a live test keeps executing — it's a real record, visible and

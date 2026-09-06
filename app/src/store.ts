@@ -10,6 +10,14 @@ export type Page =
 
 type CreateFrom = 'app' | 'edit' | null
 
+// §7/§19 store window: the executions list keeps every live header plus this
+// many finished rows — the /state snapshot's own shape, which the event path
+// re-trims to after every merge so a long session never grows it without end.
+const FINISHED_WINDOW = 50
+// §7 live rows: never trimmed out of the window — the §9 Executing / Queued
+// sections read them straight out of it.
+const isLive = (status: string) => status === 'queued' || status === 'executing'
+
 // §12 agent status badge — cached for the app session so the Agents page
 // doesn't re-check on every visit.
 export type AgentCheck = 'checking' | 'connecting' | 'ready' | 'needs'
@@ -407,8 +415,14 @@ export const useStore = create<Model>((set, get) => ({
       // pill's total. A retry of a beyond-the-window record overcounts by one
       // until the next /state refresh trues it up — the §7 accepted drift.
       const isNew = rest.length === m.executions.length
+      // §7/§19 window: re-trim after every merge — live rows all stay, finished
+      // ones only while they are among the newest FINISHED_WINDOW (the
+      // Executions page fetches deeper pages itself).
+      let finished = 0
+      const merged = [ej, ...rest].sort((a, b) => b.startedMs - a.startedMs)
+        .filter((e) => isLive(e.status) || ++finished <= FINISHED_WINDOW)
       set({
-        executions: [ej, ...rest].sort((a, b) => b.startedMs - a.startedMs),
+        executions: merged,
         ...(isNew ? { executionsTotal: m.executionsTotal + 1 } : {}),
       })
       // §19: the event carries the owning automation's row (live/lastStatus/
@@ -564,10 +578,9 @@ export const useStore = create<Model>((set, get) => ({
       // to update, and a stale body written into the empty full slot would
       // out-rank it (readers go full-first). (§7 in-place retry re-enters
       // 'executing' via execution.started, never through here.)
-      const nonTerminal = (s: string) => s === 'queued' || s === 'executing'
       const cur = get().executionFull[executionId]
         ?? get().executions.find((x) => x.id === executionId)
-      if (cur && !nonTerminal(cur.status) && nonTerminal(e.status)) {
+      if (cur && !isLive(cur.status) && isLive(e.status)) {
         // §19: dropping is right, losing the body is not. With nothing in the
         // full slot the drop leaves the header alone — a page opened mid-run
         // whose finished event outraced its first GET would render zero steps

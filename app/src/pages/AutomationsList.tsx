@@ -350,8 +350,10 @@ function AutoCard({ a }: { a: Automation }) {
   const go = useStore((s) => s.go)
   const showToast = useStore((s) => s.showToast)
   // §9.1/§19: a building or held drafting job on this automation's draft
-  // container surfaces as the faint drafting note below.
-  const draftJob = useStore((s) => s.draftJobs.find((j) => j.owner === a.id))
+  // container surfaces as the faint drafting note below. Selected as the
+  // status alone — a row selector returning the job object would hand back a
+  // fresh reference on every /state refresh and re-render every card.
+  const draftJobStatus = useStore((s) => s.draftJobs.find((j) => j.owner === a.id)?.status)
   const executing = a.live.length > 0
 
   const execute = (e: React.MouseEvent) => {
@@ -437,9 +439,9 @@ function AutoCard({ a }: { a: Automation }) {
           </MetaChip>
         )}
       </div>
-      {draftJob && (
+      {draftJobStatus && (
         <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-faint)' }}>
-          {draftJobNote(draftJob.status)}
+          {draftJobNote(draftJobStatus)}
         </div>
       )}
     </div>
@@ -453,7 +455,7 @@ export default function AutomationsList() {
   // §9.1/§19: the pending slot's building or held drafting job — the Resume
   // draft button shows for it too (a first message still in flight has landed
   // no draft yet, but the session is resumable all the same).
-  const slotJob = useStore((s) => s.draftJobs.find((j) => j.owner === 'pending'))
+  const hasSlotJob = useStore((s) => s.draftJobs.some((j) => j.owner === 'pending'))
   const refresh = useStore((s) => s.refresh)
   const [confirmFresh, setConfirmFresh] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -486,7 +488,7 @@ export default function AutomationsList() {
             <BtnGhost onClick={() => setImportOpen(true)}>
               Import
             </BtnGhost>
-            {(pendingDraft || slotJob) && (
+            {(pendingDraft || hasSlotJob) && (
               <BtnGhost onClick={() => setSurface('create', 'app')}>
                 Resume draft
               </BtnGhost>

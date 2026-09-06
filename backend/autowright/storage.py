@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import stat
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -369,6 +370,11 @@ class Store:
                 log.error("can't list %s (%s) — loading no automations", paths.automations_dir(), e)
                 auto_dirs = []
             for d in auto_dirs:
+                if d.name.startswith(self.DELETED_PREFIX):
+                    # The twin of the execution sweep: a crash between
+                    # delete_automation's aside-rename and its rmtree.
+                    shutil.rmtree(d, ignore_errors=True)
+                    continue
                 if not d.is_dir() or not (d / "automation.yaml").exists():
                     continue
                 try:
@@ -414,6 +420,15 @@ class Store:
         in-memory index for the session instead of bricking startup into a
         launchd crash loop."""
         path = self.executions_dir() / "executions.db"
+        # §5: only the DEFAULT data path is created on first run. A RELOCATED
+        # dataPath whose executions dir isn't there is an unmounted volume (or
+        # a typo) — and ExecDB's mkdir would silently recreate the whole tree
+        # on the boot disk instead, so the user's real executions would look
+        # deleted and new ones would land where they'll never be found again.
+        if not self.executions_dir().is_dir() and self.data_path() != paths.default_data_path():
+            log.warning("the configured data path %s isn't reachable — using an in-memory "
+                        "index this session", self.data_path())
+            return ExecDB(None), {}
         try:
             db = ExecDB(path)
             return db, db.load_all()
@@ -439,6 +454,12 @@ class Store:
         if not d.exists():
             return
         for ed in d.iterdir():
+            if ed.name.startswith(self.DELETED_PREFIX):
+                # A crash between delete_execution's aside-rename and its
+                # rmtree — the record is already gone from the index, so
+                # finish the delete here rather than leaving dead bytes.
+                shutil.rmtree(ed, ignore_errors=True)
+                continue
             if not ed.is_dir() or ed.name in self.execs:
                 continue
             try:
@@ -640,7 +661,10 @@ class Store:
         return {
             "when": meta.get("when"),
             "note": meta.get("note"),
-            "params": meta.get("params", []) or [],
+            # §21.4 (2026-09-05): versions written by v0.6.0–v0.8.3 carry resolved
+            # value keys inside the definitions — strip at the read seam, never
+            # rewrite on disk (a frozen old version is never written again).
+            "params": strip_param_values(meta.get("params")),
             "packages": meta.get("packages", []) or [],
             "steps": steps,
             "spec": md_to_blocks(spec_md),
@@ -1240,10 +1264,21 @@ class Store:
         return out
 
     def delete_automation(self, a: dict) -> None:
+        # Same aside-rename as delete_execution (§6 retention paragraph): an
+        # automation dir carries memory/, every version folder and every
+        # snapshot — gigabytes — and rmtree-ing it under store.lock stalls
+        # every request for the whole walk.
         with self.lock:
-            shutil.rmtree(self.auto_dir(a), ignore_errors=True)
+            aside = paths.automations_dir() / f"{self.DELETED_PREFIX}{a['id']}"
+            shutil.rmtree(aside, ignore_errors=True)
+            try:
+                self.auto_dir(a).rename(aside)
+            except OSError:
+                aside = None  # nothing on disk to move
             self.autos.pop(a["id"], None)
-            self.delete_test_execs(a["id"])  # §11 — real records stay (automationDeleted)
+        if aside is not None:
+            shutil.rmtree(aside, ignore_errors=True)
+        self.delete_test_execs(a["id"])  # §11 — real records stay (automationDeleted)
 
     # ---------- executions ----------
     # §5 header projection — the fields the DB index carries per execution and
@@ -1396,6 +1431,15 @@ class Store:
         y = load_yaml(self.exec_yaml_path(execution_id))
         if not y or not isinstance(y, dict):
             return None
+        # §5 lenient read: an UNQUOTED timestamp in a hand-edited
+        # execution.yaml parses as a YAML datetime, and one datetime among the
+        # string-typed id/timestamp fields makes every comparison downstream
+        # raise (_latest_exec's `max` over started_at is the first, and it runs
+        # at load — bricking startup). Coerce to the string shape the writer
+        # produces; a stringified datetime still parses back the same way.
+        for k in ("id", "automation_id", "started_at", "queued_at", "finished_at"):
+            if y.get(k) is not None and not isinstance(y[k], str):
+                y[k] = str(y[k])
         return {
             "id": y.get("id", execution_id), "automation_id": y.get("automation_id"),
             "automation_name": y.get("automation_name"),
@@ -1535,13 +1579,31 @@ class Store:
             out["chipStatus"] = h.get("chip_status") or "ok"
         return out
 
+    # §5/§6 retention: prefix of a directory renamed aside by a delete, waiting
+    # for its rmtree. A crash between the rename and the rmtree leaves one
+    # behind; the load sweeps them (see _reconcile_exec_index and load_all).
+    DELETED_PREFIX = ".ad-tmp-deleted-"
+
     def delete_execution(self, execution_id: str) -> None:
+        # §6 retention paragraph: the rmtree runs OUTSIDE store.lock. An
+        # execution dir holds a log file per step attempt plus its result
+        # files, and walking it under the lock stalls every firing and every
+        # live log append for the whole delete. Under the lock the dir is
+        # renamed aside — instant, and the record is gone from disk the moment
+        # the lock is released, which is all any reader can observe.
         with self.lock:
+            aside = self.executions_dir() / f"{self.DELETED_PREFIX}{execution_id}"
+            shutil.rmtree(aside, ignore_errors=True)
+            try:
+                self.exec_dir(execution_id).rename(aside)
+            except OSError:
+                aside = None  # no directory on disk (a header-only row)
             h = self.execs.pop(execution_id, None)
-            shutil.rmtree(self.exec_dir(execution_id), ignore_errors=True)
             self.execdb.delete(execution_id)
-            for k in [k for k in self._log_counts if k[0] == execution_id]:
-                del self._log_counts[k]
+            # list(): append_log_line inserts into _log_counts without the
+            # lock, so iterating the live mapping can raise mid-filter.
+            for k in [k for k in list(self._log_counts) if k[0] == execution_id]:
+                self._log_counts.pop(k, None)
             # Keep `_latest` honest inside the mutator — no caller should have
             # to remember to recompute after deleting.
             if h:
@@ -1551,6 +1613,8 @@ class Store:
                     a["_latest"] = latest
                     a["_last_status"] = latest["status"] if latest else "none"
                     a["_last_exec_at"] = latest["started_at"] if latest else None
+        if aside is not None:
+            shutil.rmtree(aside, ignore_errors=True)
 
     def delete_test_execs(self, automation_id: str | None) -> None:
         """§11: test executions live only as long as their draft container —
@@ -1559,12 +1623,23 @@ class Store:
         records (§4.5 null automationId). Live records are skipped (the §19 409
         keeps one from existing at draft-settle time in practice)."""
         with self.lock:
-            for h in list(self.execs.values()):
-                if is_test(h) and h["automation_id"] == automation_id and h["status"] != "executing":
-                    self.delete_execution(h["id"])
+            doomed = [h["id"] for h in self.execs.values()
+                      if is_test(h) and h["automation_id"] == automation_id
+                      and h["status"] != "executing"]
+        # Outside the hold: store.lock is an RLock, so deleting from inside one
+        # would put delete_execution's rmtree back under the lock — the very
+        # thing its aside-rename exists to avoid.
+        for eid in doomed:
+            self.delete_execution(eid)
 
     def retention_cleanup(self) -> int:
         with self.lock:
+            # §5 read-only degradation: an unreadable settings.yaml loaded as
+            # the DEFAULTS, and the default is a 90-day sweep — running it
+            # would delete executions the user's real settings keep forever,
+            # unrecoverably, because one file went unreadable for a session.
+            if str(paths.settings_file()) in self._unreadable:
+                return 0
             if self.settings.get("keepForever"):
                 return 0
             days = max(1, int(self.settings.get("days", 90)))
@@ -1592,8 +1667,11 @@ class Store:
                 h = self.execs.get(eid)
                 if h is None or h["status"] in ("executing", "queued"):
                     continue
-                self.delete_execution(eid)  # maintains each automation's `_latest`
-                removed += 1
+            # The delete takes its own short hold and rmtrees after releasing
+            # it — calling it from inside the re-check hold above would nest
+            # the two (RLock) and put the rmtree back under the lock.
+            self.delete_execution(eid)  # maintains each automation's `_latest`
+            removed += 1
         return removed
 
     # ---------- agents / secrets / settings ----------
@@ -1631,7 +1709,17 @@ class Store:
         return used
 
     # ---------- API serialization (§4 shapes) ----------
+    # §19 /state cost: memory_stats walks the whole memory tree, and /state
+    # pays that walk per automation under store.lock. The answer is memoized on
+    # the in-memory record for this long — a live execution writing memory/
+    # shows a size at most this stale, and every operation that replaces the
+    # dir wholesale drops the memo outright.
+    MEMORY_STATS_TTL_S = 5
+
     def memory_stats(self, a: dict) -> dict:
+        memo = a.get("_memory_stats")
+        if memo is not None and time.monotonic() - memo[0] < self.MEMORY_STATS_TTL_S:
+            return memo[1]
         d = self.auto_dir(a) / "memory"
         size = 0
         newest: float | None = None
@@ -1640,13 +1728,28 @@ class Store:
             newest = max(newest or 0, st.st_mtime)
         label = size_label(size) if size else "empty"
         updated = timefmt.date_label(datetime.fromtimestamp(newest)) if newest else "never written"
-        return {"size": label, "updated": updated, "path": str(d)}
+        stats = {"size": label, "updated": updated, "path": str(d)}
+        a["_memory_stats"] = (time.monotonic(), stats)
+        return stats
+
+    def invalidate_memory_stats(self, a: dict) -> None:
+        """Drop the memory_stats memo (in-memory `_` key, never persisted) —
+        every operation that replaces the memory dir wholesale calls it, so the
+        §9.2 MEMORY card never shows the pre-operation size afterwards."""
+        a.pop("_memory_stats", None)
 
     def clear_memory(self, a: dict) -> None:
+        # §6.3: a crash mid-restore can leave memory/ absent with the aside dir
+        # the sole surviving copy. Put it back first — otherwise the mkdir
+        # below recreates an empty memory/ while the aside dir lives on, and
+        # the next restore's own recovery (seeing memory/ present) rmtrees the
+        # only copy of the pre-crash memory without anyone asking.
+        self._recover_memory_swap(self.auto_dir(a))
         d = self.auto_dir(a) / "memory"
         if d.exists():
             shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
+        self.invalidate_memory_stats(a)
 
     def memory_files(self, a: dict) -> list[dict]:
         """§19 read-only memory listing: memory-relative posix path, size in
@@ -1876,6 +1979,7 @@ class Store:
                 mem.rename(old)
             tmp.rename(mem)
             shutil.rmtree(old, ignore_errors=True)
+            self.invalidate_memory_stats(a)
             return meta
 
     def snapshot_json(self, m: dict) -> dict:
@@ -1973,10 +2077,9 @@ class Store:
                 "stepsFingerprint": fp if isinstance(fp, str) and fp else None}
 
     def latest_result_json(self, a: dict) -> dict | None:
-        hs = sorted((h for h in self.execs.values()
-                     if h["automation_id"] == a["id"] and h["status"] != "executing"
-                     and not is_test(h)),
-                    key=lambda x: x["started_at"] or "", reverse=True)
+        hs = [h for h in self.execs.values()
+              if h["automation_id"] == a["id"] and h["status"] != "executing"
+              and not is_test(h)]
         # Memoized per automation (in-memory `_` key, never persisted): the
         # walk below costs one result-dir listing per no-result execution,
         # and /state pays it per automation under store.lock. Terminal
@@ -1984,10 +2087,16 @@ class Store:
         # the newest terminal record (or the record count — retention can
         # delete the result-carrying one) changes. A user hand-deleting
         # result files on disk shows stale until the next finish — accepted.
-        key = (hs[0]["id"] if hs else None, len(hs))
+        # The key comes from one linear pass, BEFORE any sort: on a memo hit
+        # (the common /state case) the sort is never paid at all. `max` and a
+        # reverse sort pick the same record among equal timestamps — both keep
+        # the first one encountered.
+        newest = max(hs, key=lambda x: x["started_at"] or "", default=None)
+        key = (newest["id"] if newest else None, len(hs))
         memo = a.get("_latest_result")
         if memo is not None and memo[0] == key:
             return memo[1]
+        hs.sort(key=lambda x: x["started_at"] or "", reverse=True)
         result = None
         for h in hs:
             r = self.result_json(h)
