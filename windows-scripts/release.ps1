@@ -11,7 +11,7 @@
 #   .\windows-scripts\release.ps1
 #
 # What it does, in order:
-#   1. read the repo-root VERSION and require the GitHub release v<version> to
+#   1. read release\VERSION and require the GitHub release v<version> to
 #      exist already (created by scripts/release.sh); a clean working tree on main
 #      (the feed it pushes is served from the /main/ raw URL, §3 - a feed committed
 #      anywhere else is never the file installed apps read);
@@ -48,8 +48,8 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 gh auth status *> $null
 if ($LASTEXITCODE -ne 0) { Fail 'gh CLI not authenticated - run: gh auth login' }
 
-$VERSION = (Get-Content (Join-Path $ROOT 'VERSION') -Raw).Trim()
-if (-not $VERSION) { Fail "empty $ROOT\VERSION" }
+$VERSION = (Get-Content (Join-Path $ROOT 'release\VERSION') -Raw).Trim()
+if (-not $VERSION) { Fail "empty $ROOT\release\VERSION" }
 $TAG = "v$VERSION"
 
 # ---- the release must already exist: this leg only appends to it -----------

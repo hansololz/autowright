@@ -31,7 +31,7 @@ please reach out" with no details, and the maintainer will contact you.
 Please include, as far as you can:
 
 - The Autowright version (shown in the footer of the menu bar panel, or the
-  `VERSION` file for source builds) and your operating system.
+  `release/VERSION` file for source builds) and your operating system.
 - Steps to reproduce, or a proof of concept.
 - The impact you believe it has (for example: secret exposure, code execution
   outside an automation, bypass of a permission prompt).

@@ -39,8 +39,8 @@ function Invoke-Native([string]$what, [scriptblock]$block) {
 # ---- version gate: refuse to build a distributable on version mismatch ------
 # The same rule prod.sh gets from `release.sh --check`. Rewriting the sites is
 # release.sh's job (bash + BSD sed, run from macOS, §17) — this only verifies.
-$VERSION = (Get-Content (Join-Path $ROOT 'VERSION') -Raw).Trim()
-if (-not $VERSION) { Fail "empty $ROOT\VERSION" }
+$VERSION = (Get-Content (Join-Path $ROOT 'release\VERSION') -Raw).Trim()
+if (-not $VERSION) { Fail "empty $ROOT\release\VERSION" }
 
 $sites = @(
     @{ Path = 'app\package.json';                Pattern = '^  "version": "([^"]+)",$' },

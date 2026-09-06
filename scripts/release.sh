@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single version source (SPEC §17/§18): the repo-root VERSION file, synced into
+# Single version source (SPEC §17/§18): the release/VERSION file, synced into
 # the three version sites - app/package.json, backend/pyproject.toml, and
 # backend/autowright/__init__.py. A release is three steps:
 #
@@ -52,7 +52,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION_FILE="$ROOT/VERSION"
+VERSION_FILE="$ROOT/release/VERSION"
 CHANGELOG="$ROOT/docs/CHANGELOG.md"
 
 PKG_JSON="$ROOT/app/package.json"

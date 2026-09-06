@@ -3,7 +3,7 @@ hand-maintained file, where nothing else would catch the two copies diverging.
 
 Three guards, all deliberately dumb (read the file, pull the fact out, compare):
 
-1. the app version: `VERSION` is the single source (§17), synced into three
+1. the app version: `release/VERSION` is the single source (§17), synced into three
    other files by `release.sh`; a hand-edit to any one of them must fail here.
 2. the §6.2 curated package list: four homes, two of which name *import*
    modules and two of which name *distributions*, so the mapping between them
@@ -58,9 +58,9 @@ def _backticked(text: str) -> list[str]:
 # ---------------------------------------------------------------- version
 
 def test_version_agrees_across_every_site():
-    """§17: `VERSION` is the single source; `release.sh --sync` writes the other
-    three. A mismatch means someone hand-edited one of them."""
-    version = _read("VERSION").strip()
+    """§17: `release/VERSION` is the single source; `release.sh --sync` writes the
+    other three. A mismatch means someone hand-edited one of them."""
+    version = _read("release/VERSION").strip()
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].+)?", version), \
         f"VERSION is not semver: {version!r}"
 
@@ -225,7 +225,7 @@ def test_update_feeds_never_run_ahead_of_the_version_file():
     reverse is legitimate and deliberately not flagged: each OS leg rewrites
     only its own feed, so a release cut without the Windows or Linux leg leaves
     that feed at the newest version which actually carries that OS's artifact."""
-    version = _read("VERSION").strip()
+    version = _read("release/VERSION").strip()
     for key, (rel, feed_version, _urls) in _present_feeds().items():
         assert _semver_tuple(feed_version) <= _semver_tuple(version), (
             f"{rel} is at {feed_version}, ahead of VERSION ({version}) - it names "
@@ -278,8 +278,8 @@ def _committed_version() -> str:
     (the feed is written only once it is live), so between the bump and the
     release it legitimately runs ahead of every feed. Falls back to the file
     outside a git checkout."""
-    committed = _git("show", "HEAD:VERSION")
-    return committed if committed is not None else _read("VERSION").strip()
+    committed = _git("show", "HEAD:release/VERSION")
+    return committed if committed is not None else _read("release/VERSION").strip()
 
 
 def _published_versions() -> set[str]:
@@ -403,7 +403,7 @@ def test_changelog_has_an_entry_for_the_current_version():
     both together). Deliberately "an entry exists", not "the top entry
     matches": notes for the *next* version are written and committed ahead of
     the release, so a newer entry sitting above the current one is legitimate."""
-    version = _read("VERSION").strip()
+    version = _read("release/VERSION").strip()
     versions = _changelog_versions()
     assert version in versions, (
         f"docs/CHANGELOG.md has no `## v{version}` section, but VERSION says "

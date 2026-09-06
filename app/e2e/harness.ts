@@ -257,7 +257,7 @@ export async function launchApp(home: string, onboarded: boolean): Promise<AppHa
   await page.waitForLoadState('domcontentloaded')
   // §9.4: the renderer silently pins ad-last-seen-version at boot; seed it to
   // the app's own version so the tracked localStorage state is deterministic.
-  const version = (await readFile(path.join(REPO, 'VERSION'), 'utf-8')).trim()
+  const version = (await readFile(path.join(REPO, 'release', 'VERSION'), 'utf-8')).trim()
   await page.evaluate(({ flag, version: v }: { flag: boolean; version: string }) => {
     localStorage.clear()
     if (flag) {

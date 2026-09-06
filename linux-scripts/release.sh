@@ -11,7 +11,7 @@
 #   ./linux-scripts/release.sh
 #
 # What it does, in order:
-#   1. read the repo-root VERSION and require the GitHub release v<version> to
+#   1. read release/VERSION and require the GitHub release v<version> to
 #      exist already (created by scripts/release.sh); a clean working tree on main
 #      (the feed it pushes is served from the /main/ raw URL, §3 - a feed committed
 #      anywhere else is never the file installed apps read);
@@ -41,8 +41,8 @@ command -v gh > /dev/null \
 gh auth status > /dev/null 2>&1 \
   || { echo "gh CLI not authenticated - run: gh auth login"; exit 1; }
 
-VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-[ -n "$VERSION" ] || { echo "empty $ROOT/VERSION"; exit 1; }
+VERSION="$(tr -d '[:space:]' < "$ROOT/release/VERSION")"
+[ -n "$VERSION" ] || { echo "empty $ROOT/release/VERSION"; exit 1; }
 TAG="v$VERSION"
 
 # ---- the release must already exist: this leg only appends to it ------------

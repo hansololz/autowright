@@ -23,14 +23,14 @@
 #     often still sit uncommitted, so a dirty tree is fine here) via Claude (Opus 5),
 #     inserted above the previous newest section. A section that already exists for
 #     <version> is kept as it is, so a re-run never overwrites curated notes.
-#   - only then writes VERSION and syncs the three version sites (release.sh --sync):
+#   - only then writes release/VERSION and syncs the three version sites (release.sh --sync):
 #     the draft is the failure-prone step, so a failed run leaves the version alone.
 #
 # Developer-only: agents must never run this script.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION_FILE="$ROOT/VERSION"
+VERSION_FILE="$ROOT/release/VERSION"
 CHANGELOG="$ROOT/docs/CHANGELOG.md"
 
 usage() {

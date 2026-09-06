@@ -18,8 +18,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # The same three-site check `release.sh --check` performs, reimplemented here
 # the way prod.ps1 does (release.sh itself stays bash/BSD-sed on macOS, §17 —
 # rewriting the sites is its job; this only verifies).
-VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
-[ -n "$VERSION" ] || { echo "empty $ROOT/VERSION"; exit 1; }
+VERSION="$(tr -d '[:space:]' < "$ROOT/release/VERSION")"
+[ -n "$VERSION" ] || { echo "empty $ROOT/release/VERSION"; exit 1; }
 mismatch=0
 check_site() { # <repo-relative path> <sed -E pattern with one capture>
   local sitepath="$1" pattern="$2" found

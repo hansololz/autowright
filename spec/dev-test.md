@@ -135,7 +135,7 @@ only the `node` types those need. Neither the renderer's settings nor its file s
 the second config exists so untypechecked TypeScript cannot accumulate outside `src`.
 
 **Drift guards.** `tests/test_drift_guards.py` holds the cheap textual guards over facts
-that live in more than one hand-maintained file: the app version agrees across `VERSION`,
+that live in more than one hand-maintained file: the app version agrees across `release/VERSION`,
 `backend/pyproject.toml`, `backend/autowright/__init__.py`, and `app/package.json`; the
 §6.2 curated-package list agrees across its four homes: `imports_check.ALLOWED_IMPORTS`
 (import names), the `backend/pyproject.toml` dependencies (distribution names),
@@ -165,7 +165,7 @@ unflagged, since each leg rewrites only its own feed); at least one `darwin-<arc
 equals the newest *published* release (`release.sh` cuts the release `VERSION` names and
 rewrites the mac feed in one run, so a lagging mac feed means a lost feed write or push -
 recover with `release.sh --feed`). Published is decided by the release tag, not by `VERSION` alone:
-the last committed `VERSION` (`git show HEAD:VERSION`, falling back to the file outside a
+the last committed `VERSION` (`git show HEAD:release/VERSION`, falling back to the file outside a
 git checkout) counts as published once its `v<version>` tag exists in the local checkout,
 and the feed must then equal it; while that tag is absent the release has not been cut
 yet - `release-start.sh` bumps `VERSION` and the developer commits it ahead of the
@@ -415,7 +415,7 @@ Dev workflow:
   printed, unless every remaining line is a `- ` bullet; on success the section is
   inserted directly above the previous newest section and printed. A section that
   already exists for `<version>` is kept untouched (so a re-run never overwrites curated
-  notes). Only then writes `<version>` to the repo-root `VERSION` file (the single
+  notes). Only then writes `<version>` to the §17 `release/VERSION` file (the single
   version source, §17) and syncs it into the three version sites via `release.sh --sync`
   - the draft is the failure-prone step, so a failed run leaves the version untouched.
   Nothing is committed: the script ends by printing the next steps (curate the section,
@@ -549,7 +549,7 @@ Dev workflow:
   `release-start.sh` and the release cut by `release.sh`, both on macOS; this leg only
   adds the Linux artifact to the release those produced. Steps,
   in order: requires an authenticated `gh`, an existing GitHub release `v<VERSION>` for
-  the repo-root `VERSION` (fails with the cut-it-from-macOS hint otherwise), a clean
+  `release/VERSION` (fails with the cut-it-from-macOS hint otherwise), a clean
   working tree, and the checkout on `main` (the feed it pushes is fetched from the
   `/main/` raw URL, §3 - a feed committed elsewhere is never the file installed apps
   read); runs the full test

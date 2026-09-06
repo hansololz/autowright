@@ -321,7 +321,7 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `release-start.sh <version>` prepares the repo for a release: requires the version to
   order semver-higher than the released one, drafts the next `docs/CHANGELOG.md` section
   from the git history since the last released tag via `claude --model claude-opus-5 -p`,
-  then writes the repo-root `VERSION` file and syncs the three version sites - nothing
+  then writes the §17 `release/VERSION` file and syncs the three version sites - nothing
   committed, §18;
   `release.sh` cuts the release the committed `VERSION` names: invokes
   `prod.sh` to build the release distributable, creates the GitHub release via `gh` with
@@ -577,18 +577,19 @@ migrate-on-load migration so data written by released versions keeps loading (§
   the `docs/` Pages site: installed apps fetch the feeds raw from GitHub at
   `https://raw.githubusercontent.com/hansololz/autowright/main/release/…` (§3). Each feed
   is rewritten only by its own OS's release leg, so every feed names the newest release
-  that actually carries that OS's artifact.
+  that actually carries that OS's artifact. Beside the feeds sits `release/VERSION` —
+  the single source of truth for the app version (one line, semver), kept in `release/`
+  so everything the release pipeline reads and writes lives in one directory. Bumped
+  only by `scripts/release-start.sh` (§18), never by hand; synced into
+  `app/package.json`, `backend/pyproject.toml`, and `backend/autowright/__init__.py` by
+  `scripts/release.sh --sync` (§18); `build.sh` re-syncs on every build and `prod.sh`
+  refuses to build on mismatch.
 - `pypi/` — standalone placeholder package reserving the `autowright` name on PyPI
   (`pyproject.toml` hatchling build, version 0.0.1, `Development Status :: 1 - Planning`,
   `src/autowright/__init__.py` with only `__version__`, README stating the real project is in
   development). Not part of the app build and not used by anything in the repo — the real backend
   package is `backend/`; never install `autowright` from PyPI. Uploaded by the developer via
   `scripts/pip-release.sh` (§18).
-- `VERSION` — single source of truth for the app version (one line, semver). Bumped only
-  by `scripts/release-start.sh` (§18), never by hand; synced into `app/package.json`,
-  `backend/pyproject.toml`, and `backend/autowright/__init__.py` by
-  `scripts/release.sh --sync` (§18); `build.sh` re-syncs on every build and `prod.sh`
-  refuses to build on mismatch.
 - `README.md` — the top-level readme; §2's component list follows it.
 - `pytest.ini` — pytest configuration for the `tests/` suite.
 - `.design-sync/` — DesignSync workspace for UI component iteration: `config.json`,

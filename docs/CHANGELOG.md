@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.9.1 - 2026-09-05
+
+- The execution page's step rail is now a LOGS rail: each row opens one step's log, the pane header shows "LOG k OF n" with the step name, and the arrow keys flip between logs without leaving the page.
+- Logs get the same find bar as the step viewer, with a line count and previous/next chevrons to step through matches, plus a "Show logs in Finder" button that opens the run's logs folder.
+- Parameters and the workspace path move out of the rail into cards of their own on the execution page, collapsed by default along with the result FILES list since they hold reference material you open on demand.
+- A step that prints nothing now leaves an empty log instead of a one-line placeholder, so it is clear at a glance which steps actually produced output.
+- The BUILD card no longer claims it is in sync with the spec while a sync is still running; it shows a quiet "Syncing the steps with the spec…" line instead, with the live progress still in the thread.
+- Drafting agents are now called authoring agents throughout the app, and the Agents page says plainly that agents both author automations and run the non-trivial steps inside them. The new-agent page describes each harness's local Ollama-backed models and links out to the Ollama library.
+- Copy across the Agents, Secrets, Settings and About pages, the secret modal and the report modal is rewritten as plain sentences, and outbound links on the About page and report modal now carry the same external-link icon.
+- Linux is now offered as an experimental AppImage download, and the download page detects your operating system and promotes the matching installer. Windows is no longer labeled experimental, though it keeps the unsigned-installer note.
+
 ## v0.9.0 - 2026-09-02
 
 - Step scripts now open in a full-page viewer: a step navigator on the left, a line-numbered script pane on the right, and prev/next stepping through the whole automation without leaving the modal.
