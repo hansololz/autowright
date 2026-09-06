@@ -408,12 +408,20 @@ Dev workflow:
   drafted while the release's changes often still sit uncommitted, and a dirty tree is
   allowed here for exactly that reason), each block size-capped, and asks Claude (Opus 5,
   `claude --model claude-opus-5 -p`, prompt on stdin) for the user-facing bullet list:
-  the two newest changelog sections ride along as voice examples, and the prompt demands
-  `- ` bullet lines only, written for users (never a commit dump, internal-only changes
-  skipped, plain hyphens, no em dash). The reply is cleaned (code-fence and blank lines
-  dropped, any em dash replaced with a plain hyphen) and rejected, with the raw output
-  printed, unless every remaining line is a `- ` bullet; on success the section is
-  inserted directly above the previous newest section and printed. A section that
+  the two newest changelog sections ride along as voice examples (voice only - the
+  prompt says not to copy their length), and the prompt demands `- ` bullet lines only,
+  written for users and kept concise: at most eight bullets, one sentence each, features
+  and visible changes first, then fixes to problems a user would actually have hit.
+  Each bullet says what the user gets or what stopped going wrong, never the mechanism
+  behind it. Internal-only changes (tests, refactors, spec or docs edits, build tooling,
+  hardening against edge cases a user would rarely meet) are left out entirely rather
+  than summarised, related changes merge into one bullet, and a release with few
+  user-facing changes gets few bullets (plain hyphens, no em dash). The reply is cleaned
+  (code-fence and blank lines dropped, any em dash replaced with a plain hyphen) and
+  rejected, with the raw output printed, unless every remaining line is a `- ` bullet; a
+  draft longer than eight bullets is kept but flagged with a warning, since the developer
+  curates it anyway; on success the section is inserted directly above the previous
+  newest section and printed. A section that
   already exists for `<version>` is kept untouched (so a re-run never overwrites curated
   notes). Only then writes `<version>` to the §17 `release/VERSION` file (the single
   version source, §17) and syncs it into the three version sites via `release.sh --sync`

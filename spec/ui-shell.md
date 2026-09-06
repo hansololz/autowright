@@ -716,8 +716,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   value can lose one of the updates." No modal and no block — the caution is inline, specific,
   and stays visible while the setting is above 1. An automation whose steps never touch memory
   gets no caution.
-- **RECENT EXECUTIONS** — execution history rows (status badge, then the execution id's
-  first 8 chars in faint mono — same short id the Executions page rows show — then
+- **RECENT EXECUTIONS** — the automation's 5 newest execution history rows (status badge,
+  then the execution id's first 8 chars in faint mono — same short id the Executions page rows show — then
   trigger·version — a message-triggered row puts the §4.5 `triggerSender` between them,
   "Discord · Dave · v3" — time, duration, note text when present), linking to execution
   pages. The rows' source - shared with the failure notice's latest-execution lookup above -

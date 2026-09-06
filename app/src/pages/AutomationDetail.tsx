@@ -187,7 +187,8 @@ export default function AutomationDetail() {
     [auto.version, auto.steps, auto.versions], // eslint-disable-line react-hooks/exhaustive-deps
   )
   // §11 test executions are draft-scoped — never listed among real executions
-  const recentExecs = autoExecs.filter((e) => !e.test).slice(0, 6)
+  // §9.2: the card shows the 5 newest rows
+  const recentExecs = autoExecs.filter((e) => !e.test).slice(0, 5)
 
   return (
     <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 30px 70px' }}>

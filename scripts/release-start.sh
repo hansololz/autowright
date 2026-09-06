@@ -105,12 +105,29 @@ else
 Write the release-notes bullets for Autowright v$NEW from the changes below.
 
 Output ONLY bullet lines, each starting with "- ". No heading, no code fences,
-no blank lines, no commentary before or after. Write for end users of the app:
-features, UI changes, and fixes in plain language, never a commit dump. Skip
-purely internal changes (tests, refactors, spec or docs edits, build tooling)
-unless they change what users see. Merge related changes into one bullet. Use
-plain hyphens; never use an em dash. Match the voice and level of detail of
-these recent sections:
+no blank lines, no commentary before or after.
+
+Write for end users of the app, and keep it short. The reader is someone who
+uses Autowright and wants to know, in under a minute, what is new and what got
+fixed. Rules:
+
+- At most 8 bullets. A release with few user-facing changes gets fewer bullets;
+  never pad. Prefer 4 to 6.
+- One sentence per bullet, at most about 25 words. Say what the user gets or
+  what stopped going wrong. Never explain the mechanism, the internal ordering,
+  or why the old behaviour happened.
+- Include only what a user would care to know: new features, changes to what
+  they see or do, and fixes for problems they would plausibly have hit.
+- Leave out entirely, do not summarise: tests, refactors, spec or docs edits,
+  build and release tooling, and hardening against edge cases a user would
+  rarely meet (shutdown ordering, timeouts, hand-edited files, crash recovery,
+  caching, and the like) unless the visible symptom was common.
+- Order: features first, then visible changes, then fixes. Merge closely
+  related fixes into one bullet.
+- Use plain hyphens; never use an em dash.
+
+Match the voice of these recent sections, not their length - they may be
+longer and more detailed than the notes you write:
 
 $EXAMPLES
 
@@ -139,6 +156,11 @@ EOF
     echo "unexpected model output (every line must be a '- ' bullet):"
     printf '%s\n' "$BULLETS"
     exit 1
+  fi
+  # Over-length drafts are kept (the developer curates them anyway) but flagged.
+  COUNT="$(printf '%s\n' "$BULLETS" | grep -c '^- ' || true)"
+  if [ "$COUNT" -gt 8 ]; then
+    echo "· warning: the draft has $COUNT bullets; release notes should have at most 8 - trim while curating"
   fi
 
   BULLETS="$BULLETS" VERSION="$NEW" DATE="$DATE" CHANGELOG="$CHANGELOG" python3 - << 'PY'

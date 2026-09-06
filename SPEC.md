@@ -606,7 +606,8 @@ migrate-on-load migration so data written by released versions keeps loading (§
 - `docs/CHANGELOG.md` — the release notes, canonical copy: an `# Changelog` H1, then one
   `## v<version> - <YYYY-MM-DD>` section per released version, newest first, each a short
   curated list of user-facing changes (features, UI, fixes — written for users, never a
-  commit dump; plain hyphens, no em dash). Rendered in-app in the §9.4 What's-new modal
+  commit dump; one sentence per bullet, at most eight bullets, only what a user would
+  care to know; plain hyphens, no em dash). Rendered in-app in the §9.4 What's-new modal
   (raw import into the renderer bundle, same mechanism as `PRIVACY.md`), read by GitHub
   visitors in place, and published verbatim as the body of each version's GitHub release
   (`release.sh` passes the section to `gh release create --notes-file`, §18). Written by
