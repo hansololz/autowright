@@ -1,8 +1,8 @@
-version: 0.9.0
+version: 0.10.0
 files:
-  - url: https://github.com/hansololz/autowright/releases/download/v0.9.0/Autowright-0.9.0-win32-x86_64.exe
-    sha512: nnUz5PC0PiupYvE2KAT8mVZgA4nBHoEuwbl909+R475u2Hrn/zyyhUq59ShGAsPmRaUgwqUzWFLJ9iTBRe8stw==
-    size: 160024027
-path: https://github.com/hansololz/autowright/releases/download/v0.9.0/Autowright-0.9.0-win32-x86_64.exe
-sha512: nnUz5PC0PiupYvE2KAT8mVZgA4nBHoEuwbl909+R475u2Hrn/zyyhUq59ShGAsPmRaUgwqUzWFLJ9iTBRe8stw==
-releaseDate: '2026-09-03T04:48:43.904Z'
+  - url: https://github.com/hansololz/autowright/releases/download/v0.10.0/Autowright-0.10.0-win32-x86_64.exe
+    sha512: 2f/EHqBZgiN6kVUFwu9uMrfru5ssUc4Asqhq/83q2EcxjwYJXYiexSjD3Qyk1eM8J7A/ppy3VY63YmT+RmbPpQ==
+    size: 160039634
+path: https://github.com/hansololz/autowright/releases/download/v0.10.0/Autowright-0.10.0-win32-x86_64.exe
+sha512: 2f/EHqBZgiN6kVUFwu9uMrfru5ssUc4Asqhq/83q2EcxjwYJXYiexSjD3Qyk1eM8J7A/ppy3VY63YmT+RmbPpQ==
+releaseDate: '2026-09-06T15:49:19.259Z'
