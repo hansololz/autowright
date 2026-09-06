@@ -342,7 +342,7 @@ describe('CreateFlow BUILD and TEST cards (§11)', () => {
   const settledRun = (over: Record<string, unknown> = {}) => ({
     id: 'e1', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'Test',
     status: 'succeeded', trigger: 'Test', triggerSender: null, test: true,
-    duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, note: null, error: null,
+    duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null, error: null,
     steps: [{ name: 'Fetch pages', status: 'succeeded', duration: '1s', attempts: [{ number: 1, status: 'succeeded', duration: '1s', startedMs: 1 }] }],
     ...over,
   })
@@ -531,7 +531,7 @@ describe('CreateFlow test-run modal (§11)', () => {
   const testRun = (over: Record<string, unknown> = {}) => ({
     id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'Test',
     status: 'executing', trigger: 'Test', triggerSender: null, test: true,
-    duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, note: null, error: null,
+    duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null, error: null,
     steps: [
       { name: 'Fetch pages', status: 'succeeded', duration: '1s', attempts: [{ number: 1, status: 'succeeded', duration: '1s', startedMs: 1 }] },
       { name: 'Send mail', status: 'executing', duration: '', attempts: [{ number: 1, status: 'executing', duration: '', startedMs: 2 }] },
@@ -1811,7 +1811,7 @@ describe('CreateFlow thread progress entry + input lock (§11)', () => {
       executions: [{
         id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
         status: 'executing', trigger: 'Test', triggerSender: null, test: true,
-        duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, note: null, error: null,
+        duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null, error: null,
       }] as never,
     })
     render(<CreateFlow />)
@@ -1915,7 +1915,7 @@ describe('CreateFlow left-column cards + test-failure repair (§11)', () => {
     const failed = {
       id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
       status: 'failed', trigger: 'Test', triggerSender: null, test: true,
-      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, note: null,
+      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
       error: { step: 'Fetch pages', message: 'boom', reason: null }, steps: [],
     }
     storeMod.useStore.setState({
@@ -2112,7 +2112,7 @@ describe('CreateFlow old-version view: thread survival + test gating (§11)', ()
     id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'Test',
     status, trigger: 'Test', triggerSender: null, test: true, steps: [],
     duration: '', started: '', startedMs: 1, endedMs: status === 'executing' ? 0 : 2,
-    queuedMs: 0, note: null, error: null,
+    queuedMs: 0, durationMs: null, passStartedMs: 0, note: null, error: null,
   })
 
   it('a test chip landed while viewing v1 survives Back to draft (shown blocks never removed)', async () => {
@@ -2276,7 +2276,7 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
     const failed = {
       id: 'e7', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
       status: 'failed', trigger: 'Manual', triggerSender: null, test: false, steps: [],
-      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, note: null,
+      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
       error: { step: 'Fetch pages', message: 'boom', reason: null },
     }
     storeMod.useStore.setState({ fixExec: 'e7', executions: [failed] as never, executionFull: { e7: failed } as never })
@@ -2455,7 +2455,7 @@ describe('CreateFlow settle paths: vanished automation + live test (§11)', () =
   const liveTest = (over: Record<string, unknown> = {}) => ({
     id: 't1', automationId: null, automationName: 'My auto', automationDeleted: false, versionLabel: 'Draft',
     status: 'executing', trigger: 'Test', triggerSender: null, test: true, steps: [],
-    duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, note: null, error: null,
+    duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null, error: null,
     ...over,
   })
 

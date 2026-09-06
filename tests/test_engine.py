@@ -2507,3 +2507,39 @@ def test_execution_finish_drops_the_memory_stats_memo(store):
     wait_done(engine, h["id"])
     assert h["status"] == "succeeded"
     assert "_memory_stats" not in a
+
+
+def test_started_event_and_live_row_carry_the_pass_clock(store):
+    """§4.5 passStartedMs: the launch stamps the pass before the started event
+    serializes the row, the live row keeps it, and the settled row drops it —
+    the §7 total timer has its clock from the first frame."""
+    from autowright import events
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [{"file": "01-slow.py", "name": "Slow", "description": "",
+                     "code": "import time\ntime.sleep(0.6)\n"}]
+    a = store.create_automation(ver, "Clocked", None)
+    seen = []
+    orig = events.hub.publish
+
+    def spy(event, **ctx):
+        if event == "execution.started":
+            seen.append(ctx["execution"])
+        return orig(event, **ctx)
+
+    events.hub.publish = spy
+    try:
+        before = time.time()
+        h = engine.start(a, "manual")
+        assert seen and seen[0]["passStartedMs"] >= int(before * 1000) - 1
+        assert seen[0]["durationMs"] is None
+        live = store.exec_json(h)
+        assert live["status"] == "executing" and live["passStartedMs"] == seen[0]["passStartedMs"]
+        wait_done(engine, h["id"])
+    finally:
+        events.hub.publish = orig
+    done = store.exec_json(h)
+    assert done["passStartedMs"] == 0
+    assert done["durationMs"] == h["duration_ms"] >= 500

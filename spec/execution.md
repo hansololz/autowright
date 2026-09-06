@@ -244,11 +244,28 @@ retries, and deleted with the execution." The card sits at the page's bottom, cl
 purpose — the scratch dir is for inspecting what a run left behind, and its reveal button
 must never compete with the RESULT card's Show in Finder, which is the user-facing output.
 The LOGS rail heads with a `LOGS` eyebrow (each row opens one log, so the rail is named
-for what it holds, on the page and in the §11 modal alike). Its rows are **selectable**: each
+for what it holds, on the page and in the §11 modal alike). On the page the header's right
+end carries the execution's **total timer** (`data-testid="execution-total-timer"`) in the
+modal rail header's count treatment (`500 11px` mono, `--text-faint`, tabular numerals so
+the digits never shift the text): while the execution is executing it ticks once a second,
+whole seconds in the `waitedLabel` shape ("12s", "1m 5s" — the QUEUED FOR idiom: a ticking
+value never shows tenths), counting the §4.5 `durationMs` (the finished passes) plus the
+elapsed since `passStartedMs` (falling back to `startedMs` when the pass stamp is 0), so an
+in-place retry resumes the count where the failed pass left it instead of counting the idle
+gap — the same accumulation the record's `duration` makes. Once the execution settles it
+reads the record's `duration` ("12.4s", the backend label, tenths and all — the hand-off the
+queued page's waiting counter makes to a started one), and it is absent while the record
+has no duration (`duration` "—": a record that never finished a pass) — the "—" never
+renders in the header. The §11 modal's rail header keeps its step count; the timer is the
+page's. Its rows are **selectable**: each
 row shows the status dot (pulsing while executing), name, a right-aligned attempt-count
 `MetaChip` ("×2" — only when the step has more than one attempt; the count is the latest
 attempt's `number`, which survives the §4.5 prune) and the latest attempt's duration — rows
-carry no actions;
+carry no actions. The executing step's row carries a **step timer** in that duration slot
+(in both homes, since the rows are shared): whole seconds ticking once a second from the
+latest attempt's `startedMs`, the total timer's exact idiom, handing off to the backend's
+duration label when the attempt settles; each attempt ticks its own elapsed, so a retried
+step's row reads the new attempt's time, exactly what its settled label will show;
 skipping lives in the header's Skip-step button. Above step 1 sits a **"Setup log"**
 pseudo-row (terminal icon in place of a status dot) selecting the execution-scoped log.
 Selecting any row changes which log the LOGS pane shows. The **← / → arrow keys** move the
@@ -290,7 +307,9 @@ pins both to its 44 px toolbar instead). The header also
 carries the redaction note "secrets redacted: `<name>`"; when the selected step has
 more than one attempt, a segmented **attempt control** sits in the header — one status-tinted
 pill per retained attempt ("Attempt 2 · Failed · 3s", pills labeled by attempt `number` — after the
-§4.5 prune the earliest pills are simply gone), latest selected by default. The pane is the
+§4.5 prune the earliest pills are simply gone), latest selected by default; the executing
+attempt's pill ticks the same step timer in its duration slot ("Attempt 2 · Executing · 5s"),
+so the two readouts stay in step. The pane is the
 color-coded log view (kinds sys/out/wrn/err); logs load lazily per selected step/attempt
 (§19) and live lines stream in over WS (deduped by `sequence`), with live auto-scroll and the
 blinking cursor on the live attempt. Empty states: "No logs — this execution never

@@ -1975,3 +1975,24 @@ def test_exec_yaml_without_agent_pgids_loads(store, home):
     full["status"] = "succeeded"
     store.update_execution(full)
     assert "agent_pgids" not in load_yaml(yfile)
+
+
+def test_exec_json_carries_duration_ms_and_pass_start(store):
+    """§4.5 durationMs / passStartedMs: the raw ms behind `duration` and the live
+    pass's clock — what the §7 LOGS-rail total timer ticks from. The pass
+    marker is in-memory only and reads 0 on anything not executing."""
+    import yaml
+    a = store.create_automation(make_version(), "Timed", None)
+    h = store.create_execution(a, "version", a["current_version"], "manual",
+                               steps=[{"name": "One"}], status="executing")
+    j = store.exec_json(h)
+    assert (j["durationMs"], j["passStartedMs"]) == (None, 0)  # no pass stamped yet
+    h["_pass_start"] = 1_700_000_000.25
+    h["duration_ms"] = 60_000  # a failed first pass, being retried
+    j = store.exec_json(h)
+    assert (j["durationMs"], j["passStartedMs"]) == (60_000, 1_700_000_000_250)
+    # the stamp never reaches disk, and a settled record has no live pass
+    store.write_exec_yaml(h)
+    assert "_pass_start" not in yaml.safe_load(store.exec_yaml_path(h["id"]).read_text())
+    h["status"] = "succeeded"
+    assert store.exec_json(h, full=True)["passStartedMs"] == 0

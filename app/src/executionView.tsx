@@ -10,8 +10,8 @@ import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import { LOG_TAIL, logKey, useStore } from './store'
-import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea } from './ui'
-import type { Execution, ExecutionStep, LogLine } from './types'
+import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea, waitedLabel } from './ui'
+import type { Attempt, Execution, ExecutionStep, LogLine } from './types'
 
 // null = the execution-scoped log (§5 execution.ndjson)
 export type LogSel = { step: number | null; attempt: number | null }
@@ -58,11 +58,31 @@ export function ExecLogRow({ selected, onSelect }: { selected: boolean; onSelect
 
 /** Selectable step row (§7): status dot + name + attempt chip + duration —
  * no row actions; skipping lives in the header's Skip-step button. */
+/** §7 one-second re-render while `active` — the total and step timers'
+ * shared clock; nothing ticks once the thing timed has settled. */
+function useSecondTick(active: boolean) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const t = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [active])
+}
+
+/** §7 step timer: an executing attempt's whole-second elapsed from its own
+ * `startedMs` (each attempt ticks its own time, so a retried step reads the
+ * new attempt's — exactly what its settled label will show). */
+const attemptElapsed = (a: Attempt) =>
+  waitedLabel(a.startedMs ? Math.max(0, Date.now() - a.startedMs) : 0)
+
 export function StepRow({ step, selected, onSelect }: {
   step: ExecutionStep; selected: boolean; onSelect: () => void
 }) {
   const executing = step.status === 'executing'
   const dot = step.status === 'queued' ? 'var(--text-deco)' : badgeOf(step.status).c
+  // §7 step timer: the live attempt's elapsed ticks in the duration slot
+  const live = executing ? step.attempts[step.attempts.length - 1] : undefined
+  useSecondTick(!!live)
   return (
     <RailRow selected={selected} current="step" onSelect={onSelect}>
       <span style={{
@@ -79,7 +99,9 @@ export function StepRow({ step, selected, onSelect }: {
       {latestN(step) > 1 && (
         <MetaChip style={{ flex: 'none' }}>×{latestN(step)}</MetaChip>
       )}
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)', flex: 'none' }}>{step.duration}</span>
+      <span data-testid="step-duration" style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)', flex: 'none', fontVariantNumeric: 'tabular-nums' }}>
+        {live ? attemptElapsed(live) : step.duration}
+      </span>
     </RailRow>
   )
 }
@@ -113,14 +135,43 @@ function AttemptPill({ a, active, onSelect }: {
   a: ExecutionStep['attempts'][number]; active: boolean; onSelect: () => void
 }) {
   const b = badgeOf(a.status)
+  const live = a.status === 'executing'
+  useSecondTick(live) // §7: the executing attempt's pill ticks the step timer
+  const time = live ? attemptElapsed(a) : a.duration
   return (
     <button
       className="ad-btn-bare ad-attempt-pill"
       onClick={onSelect}
       style={active ? { color: b.c, background: b.bg } : undefined}
     >
-      Attempt {a.number} · {b.label}{a.duration ? ` · ${a.duration}` : ''}
+      Attempt {a.number} · {b.label}{time ? ` · ${time}` : ''}
     </button>
+  )
+}
+
+/** §7 the page rail header's total timer. Executing: ticks once a second in
+ * whole seconds — the finished passes' `durationMs` plus the elapsed since
+ * `passStartedMs` — so an in-place retry resumes where the failed pass left
+ * off instead of counting the idle gap. Settled: the backend's `duration`
+ * label, tenths and all (the hand-off the queued page's waiting counter makes
+ * to a started one). Absent while the record has no duration — "—" never
+ * renders in the header. */
+export function TotalTimer({ e }: { e: Execution | undefined }) {
+  const executing = e?.status === 'executing'
+  useSecondTick(executing)
+  if (!e) return null
+  let label: string | null = null
+  if (executing) {
+    const since = e.passStartedMs || e.startedMs
+    label = waitedLabel((e.durationMs ?? 0) + (since ? Math.max(0, Date.now() - since) : 0))
+  } else if (e.duration && e.duration !== '—') {
+    label = e.duration
+  }
+  if (label === null) return null
+  return (
+    <span data-testid="execution-total-timer" style={{ font: '500 11px var(--mono)', color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums', flex: 'none' }}>
+      {label}
+    </span>
   )
 }
 
@@ -305,8 +356,10 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
       {modal ? (
         <RailHeader count={steps.length} />
       ) : (
-        <div style={{ minHeight: PAGE_HEADER, display: 'flex', alignItems: 'center', padding: '8px 18px', borderBottom: '1px solid var(--hairline)' }}>
-          <Eyebrow>LOGS</Eyebrow>
+        <div style={{ minHeight: PAGE_HEADER, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '8px 18px', borderBottom: '1px solid var(--hairline)' }}>
+          <Eyebrow style={{ flex: 'none' }}>LOGS</Eyebrow>
+          {/* §7 total timer: the execution's running total at the header's right end */}
+          <TotalTimer e={e} />
         </div>
       )}
       {(() => {

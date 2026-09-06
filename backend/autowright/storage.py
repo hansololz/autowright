@@ -2328,6 +2328,13 @@ class Store:
             "triggerSender": h.get("trigger_sender"),
             "test": is_test(h),
             "duration": timefmt.dur_label(h["duration_ms"]),
+            # §4.5 durationMs / passStartedMs: the raw ms behind `duration` and
+            # the live pass's start — what the §7 LOGS-rail total timer ticks
+            # from. `_pass_start` is in-memory only (like `_cur`); a record that
+            # is not executing has no live pass, whatever the marker still holds.
+            "durationMs": h["duration_ms"] if isinstance(h["duration_ms"], int) else None,
+            "passStartedMs": (int(h["_pass_start"] * 1000)
+                              if h["status"] == "executing" and h.get("_pass_start") else 0),
             "started": timefmt.started_label(dt) if dt else "",
             "startedMs": int(dt.timestamp() * 1000) if dt else 0,
             "endedMs": int(fin.timestamp() * 1000) if fin else 0,

@@ -42,7 +42,7 @@ beforeAll(async () => {
 const ex = (id: string, startedMs: number, over: Partial<Execution> = {}): Execution => ({
   id, automationId: 'a1', automationName: 'Automation', automationDeleted: false, versionLabel: 'v1',
   status: 'succeeded', trigger: 'Manual', triggerSender: null, test: false, duration: '1s',
-  started: 'now', startedMs, endedMs: 0, queuedMs: 0, note: null, error: null, ...over,
+  started: 'now', startedMs, endedMs: 0, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null, error: null, ...over,
 })
 // Fully-typed execution event — the backend always sends executionId/automationId
 // alongside the record; automation stubs stay partial (`as never`) where the

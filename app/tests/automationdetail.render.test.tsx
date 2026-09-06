@@ -52,7 +52,7 @@ const NOW = 1_700_000_000_000
 const queuedRow = (id: string): Execution => ({
   id, automationId: 'a1', automationName: 'Job', automationDeleted: false, versionLabel: 'v1',
   status: 'queued', trigger: 'Manual', triggerSender: null, test: false, duration: '',
-  started: 'Today, 8:00 AM', startedMs: NOW, endedMs: 0, queuedMs: NOW - 5_000,
+  started: 'Today, 8:00 AM', startedMs: NOW, endedMs: 0, queuedMs: NOW - 5_000, durationMs: null, passStartedMs: 0,
   note: null, error: null,
 })
 

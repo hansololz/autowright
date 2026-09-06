@@ -267,6 +267,8 @@ export interface Execution {
   startedMs: number
   endedMs: number  // 0 while live or when finished_at was never set (§3 interrupted)
   queuedMs: number  // §6 admission time; 0 on every execution that never waited
+  durationMs: number | null  // §4.5 raw ms behind `duration` (finished passes); null until a pass finished
+  passStartedMs: number  // §4.5 the live pass's start; 0 whenever not executing — the §7 total timer's clock
   note: string | null
   // §4.5 failure diagnostics — failed executions only
   error: { step: string | null; message: string; reason: string | null } | null

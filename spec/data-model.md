@@ -769,6 +769,13 @@ triggerSender: string | null — the payload's `sender`, lifted onto every execu
 duration, started ("Today, 8:00 AM"), startedMs, endedMs (0 while live and on rows whose
   `finished_at` was never set, e.g. §3 interrupted) — duration accumulates across in-place retry
   passes (§7); started never changes on retry
+durationMs: number | null — the raw `duration_ms` behind `duration`: the total of every
+  finished pass, null until the first pass finishes (`duration` reads "—" then). With
+  `passStartedMs` it is what the §7 LOGS-rail total timer ticks from
+passStartedMs: epoch ms when the pass now executing began (the first pass's launch, or the
+  §7 in-place retry's), 0 whenever the execution is not executing. In-memory only, like the
+  engine's `_cur` step marker — never written to `execution.yaml` (the writer whitelists its
+  keys) and never needed after a restart, since §3 recovery leaves no record executing
 queuedMs: epoch ms of `queuedAt`, 0 on every execution that never waited — what the §7
   executions list ticks its QUEUED FOR column from
 steps: [{ name, file, status, duration, attempts: [{ number, status, duration, startedMs }] }] — file is the

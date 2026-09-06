@@ -661,8 +661,12 @@ class Engine:
                 h["agent_pgids"] = groups
                 self.store.update_execution(h)
 
+        # §4.5 passStartedMs: stamp the pass before the started event serializes
+        # the row, so the §7 total timer has its clock from the first frame.
+        # In-memory only — `write_exec_yaml` whitelists its keys.
+        h["_pass_start"] = time.time()
         state = {"proc": None, "cancel": False, "on_spawn": _on_spawn,
-                 "on_agent_groups": _on_agent_groups}
+                 "on_agent_groups": _on_agent_groups, "pass_start": h["_pass_start"]}
         t = threading.Thread(target=self._execute, args=(auto, ver, h, state), daemon=True)
         state["thread"] = t
         with self._lock:
@@ -925,7 +929,9 @@ class Engine:
                         else auto["enabled_agents"],
                         "allowed_secrets": ver["allowed_secrets"] if ver.get("allowed_secrets") is not None
                         else auto["allowed_secrets"]}
-            state["pass_start"] = time.time()  # §7: duration_ms accumulates across retry passes
+            # §7: duration_ms accumulates across retry passes — the pass clock is
+            # the one _launch stamped (a direct _execute call stamps its own)
+            state["pass_start"] = h["_pass_start"] = state.get("pass_start") or time.time()
             result: dict[str, Any] = {"status": "ok", "chip": None}
             result_touched = False
             notify_text: str | None = None
@@ -1143,6 +1149,7 @@ class Engine:
             h["_cur_step"] = None
             h["_cur"] = None
             h["duration_ms"] = (h["duration_ms"] or 0) + int((time.time() - state["pass_start"]) * 1000)
+            h["_pass_start"] = None  # the pass is over; §4.5 passStartedMs reads 0 from here
             # §7: the cancel flag marks the record cancelled only when it
             # actually reached a step — at least one cancelled or left
             # non-terminal. A cancel landing after the last step already

@@ -7,8 +7,8 @@
 // ExecutionsList renders for real (happy-dom) with the store seeded and the
 // api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { Execution } from '../src/types'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { Attempt, Execution } from '../src/types'
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
@@ -48,7 +48,7 @@ const NOW = 1_700_000_000_000
 const ex = (id: string, over: Partial<Execution> = {}): Execution => ({
   id, automationId: 'a1', automationName: 'Automation', automationDeleted: false, versionLabel: 'v1',
   status: 'succeeded', trigger: 'Manual', triggerSender: null, test: false, duration: '1.0s',
-  started: 'Today, 8:00 AM', startedMs: NOW, endedMs: NOW, queuedMs: 0,
+  started: 'Today, 8:00 AM', startedMs: NOW, endedMs: NOW, queuedMs: 0, durationMs: null, passStartedMs: 0,
   note: null, error: null, ...over,
 })
 
@@ -76,7 +76,7 @@ describe('executions list sections (§7)', () => {
   it('splits queued firings out of Executing into their own Queued section', () => {
     seed([
       ex('e-run', { status: 'executing', duration: '', endedMs: 0 }),
-      ex('e-wait', { status: 'queued', duration: '', endedMs: 0, queuedMs: NOW - 5_000, trigger: 'Discord' }),
+      ex('e-wait', { status: 'queued', duration: '', endedMs: 0, queuedMs: NOW - 5_000, durationMs: null, passStartedMs: 0, trigger: 'Discord' }),
       ex('e-done'),
     ])
     const { container } = render(<ExecutionsList />)
@@ -721,5 +721,105 @@ describe('execution page LOGS pane header controls + find in log (§7)', () => {
     render(<ExecutionPage />)
     fireEvent.keyDown(document, { key: 'f', metaKey: true })
     expect(screen.getByTestId('find-bar')).toBeTruthy()
+  })
+})
+
+// §7 the LOGS rail header's total timer: whole seconds ticking while executing
+// (finished passes + the live pass), the backend's duration label once settled.
+describe('execution page LOGS rail total timer (§7)', () => {
+  const attempt = { number: 1, status: 'succeeded' as const, duration: '1s', startedMs: NOW }
+  const seedOne = (over: Partial<Execution>) => {
+    const row = ex('e1', over)
+    const full: Execution = {
+      ...row,
+      steps: [{ name: 'Fetch page', status: 'succeeded', duration: '1s', attempts: [attempt] }],
+      result: null,
+    }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row],
+      executionFull: { e1: full }, execLogs: {},
+    })
+  }
+  const timer = () => screen.queryByTestId('execution-total-timer')
+
+  it('a settled execution shows the backend duration label, tenths and all', () => {
+    seedOne({ status: 'succeeded', duration: '12.4s', durationMs: 12_400 })
+    render(<ExecutionPage />)
+    expect(timer()!.textContent).toBe('12.4s')
+  })
+
+  it('a record with no duration renders no timer — never a "—" in the header', () => {
+    seedOne({ status: 'failed', duration: '—', durationMs: null })
+    render(<ExecutionPage />)
+    expect(timer()).toBeNull()
+  })
+
+  it('an executing record ticks whole seconds from the pass start, and a retry pass adds the finished passes', () => {
+    vi.useFakeTimers()
+    try {
+      // first pass: 12 s in, nothing finished yet
+      seedOne({ status: 'executing', duration: '—', durationMs: null, passStartedMs: NOW - 12_000 })
+      const view = render(<ExecutionPage />)
+      expect(timer()!.textContent).toBe('12s')
+      vi.spyOn(Date, 'now').mockReturnValue(NOW + 1_000)
+      act(() => { vi.advanceTimersByTime(1_000) })
+      expect(timer()!.textContent).toBe('13s')
+      view.unmount()
+      // retry pass: the failed pass took 60 s, the new one has run 5 s — the
+      // idle gap between them never counts
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      seedOne({ status: 'executing', duration: '1m 0s', durationMs: 60_000, passStartedMs: NOW - 5_000 })
+      render(<ExecutionPage />)
+      expect(timer()!.textContent).toBe('1m 5s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// §7 step timer: the executing step's rail row (and its live attempt pill)
+// tick whole seconds from the attempt's own start; settled rows keep the label.
+describe('execution page step timer (§7)', () => {
+  const done = { number: 1, status: 'succeeded' as const, duration: '1.0s', startedMs: NOW - 30_000 }
+  const seedLive = (attempts: Attempt[]) => {
+    const row = ex('e1', { status: 'executing', duration: '—', durationMs: null, passStartedMs: NOW - 40_000 })
+    const full: Execution = {
+      ...row,
+      steps: [
+        { name: 'Fetch page', status: 'succeeded', duration: '1.0s', attempts: [done] },
+        { name: 'Parse it', status: 'executing', duration: '', attempts },
+      ],
+      result: null,
+    }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row],
+      executionFull: { e1: full }, execLogs: {},
+    })
+  }
+  const durations = () => screen.getAllByTestId('step-duration').map((el) => el.textContent)
+
+  it('the executing row ticks from its attempt start; the settled row keeps its label', () => {
+    vi.useFakeTimers()
+    try {
+      seedLive([{ number: 1, status: 'executing', duration: '', startedMs: NOW - 7_000 }])
+      render(<ExecutionPage />)
+      expect(durations()).toEqual(['1.0s', '7s'])
+      vi.spyOn(Date, 'now').mockReturnValue(NOW + 1_000)
+      act(() => { vi.advanceTimersByTime(1_000) })
+      expect(durations()).toEqual(['1.0s', '8s'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a retried step ticks the new attempt alone, in its row and its live pill', () => {
+    seedLive([
+      { number: 1, status: 'failed', duration: '3.0s', startedMs: NOW - 20_000 },
+      { number: 2, status: 'executing', duration: '', startedMs: NOW - 5_000 },
+    ])
+    render(<ExecutionPage />)
+    expect(durations()).toEqual(['1.0s', '5s'])
+    expect(screen.getByText('Attempt 1 · Failed · 3.0s')).toBeTruthy()
+    expect(screen.getByText('Attempt 2 · Executing · 5s')).toBeTruthy()
   })
 })
