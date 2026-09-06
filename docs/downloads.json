@@ -4,8 +4,8 @@
     "version": "0.10.0"
   },
   "linux-x86_64": {
-    "url": "https://github.com/hansololz/autowright/releases/download/v0.9.0/Autowright-0.9.0-linux-x86_64.AppImage",
-    "version": "0.9.0"
+    "url": "https://github.com/hansololz/autowright/releases/download/v0.10.0/Autowright-0.10.0-linux-x86_64.AppImage",
+    "version": "0.10.0"
   },
   "win32-x86_64": {
     "url": "https://github.com/hansololz/autowright/releases/download/v0.10.0/Autowright-0.10.0-win32-x86_64.exe",
