@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.1 - 2026-09-06
+
+- The Executions page now filters through a single Filter modal, where you set status, automations, and a started-time range together and apply them at once.
+- The execution page now ticks live timers: a running total in the header, and elapsed time on each executing step and attempt.
+- `autowright execution list` takes repeatable `--automation` and `--status` filters plus `--since` and `--until` to narrow by start time.
+- An automation's RECENT EXECUTIONS card now stops at 5 rows, so a busy automation no longer stretches the page.
+
 ## v0.10.0 - 2026-09-06
 
 - Quitting the app, resetting all data, or restarting the backend can no longer hang: every service step is time-boxed, so a wedged machine gets a plain "service stop timed out" line instead of a QUIT card or reset overlay that spins forever. An install, quit, or reset that asks the backend whether anything is running and gets an error back now treats that as busy rather than idle, so none of them land on top of a running automation.
