@@ -1,6 +1,6 @@
 [project]
 name = "autowright"
-version = "0.9.1"
+version = "0.10.0"
 description = "Autowright backend — local automation service, engine, and CLI"
 requires-python = ">=3.14"
 dependencies = [

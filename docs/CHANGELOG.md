@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.10.0 - 2026-09-06
+
+- Quitting the app, resetting all data, or restarting the backend can no longer hang: every service step is time-boxed, so a wedged machine gets a plain "service stop timed out" line instead of a QUIT card or reset overlay that spins forever. An install, quit, or reset that asks the backend whether anything is running and gets an error back now treats that as busy rather than idle, so none of them land on top of a running automation.
+- Shutting down now stops the scheduler and the message listeners before anything is killed, so a cron tick or an incoming message arriving mid-quit can't start a run that is left half finished.
+- Deleting an execution or an automation no longer stalls the rest of the app while a large run folder is removed: the record goes immediately and the files are cleared behind it, and anything a crash left half-deleted is swept at the next launch.
+- Turning the menu bar icon off now closes its panel with it, and on Linux, where there is no dock and no tray, the app quits at that point instead of staying resident with nothing left to click.
+- Discarding a draft or starting over now also cancels a test still running against that draft, and editing an automation that was deleted in another window returns you to the list instead of saving a stray new copy.
+- Fixed parameter editing on the automation page: a list or key/value row you had typed in stopped picking up later changes for the rest of the session.
+- Opening Autowright from a link while the window is still coming up now lands on the right page instead of nowhere.
+- Find and the arrow-key shortcuts on the execution page and the step viewer now yield to the developer log overlay, and ⌘S in the spec, notes, and build-instructions editor yields to the discard confirm stacked above it.
+- The memory card's size figures are cached briefly, so a large memory folder no longer slows every reconnect, and opening a memory file bigger than 8 MB now points you at the folder on disk instead of pulling the whole file into the window.
+- Export now stops and names the step when step code references a secret or agent that no longer exists, instead of writing an archive that import would turn away. Import drops parameter values that match no parameter in the imported version, and rejects archives whose parameter definitions are incomplete.
+- `autowright pull` now removes the managed files it no longer writes, so re-pulling into a folder can't resurrect a deleted step or note on the next push, and `autowright secret set --stdin` reads all of standard input, so a multi-line value such as a PEM key lands intact. Installing the `autowright` command leaves a different command of the same name alone and tells you where it sits instead of overwriting it.
+- Ollama setup is bounded end to end: a stuck download or unpack now fails with a message and can be retried, replacing an existing Ollama app can no longer leave you with none, a failed model pull stops the card spinning, and the sign-in helper tells you to run the command yourself when Terminal doesn't answer.
+- A damaged settings file now pauses history cleanup for the session, so the default 90-day window can't delete runs your settings said to keep, and a hand-edited execution record with an unquoted timestamp no longer keeps the app from starting.
+- Clearing an automation's queue no longer cancels a queued run that had just started executing.
+
 ## v0.9.1 - 2026-09-05
 
 - The execution page's step rail is now a LOGS rail: each row opens one step's log, the pane header shows "LOG k OF n" with the step name, and the arrow keys flip between logs without leaving the page.
