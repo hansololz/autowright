@@ -2441,6 +2441,164 @@ describe('CreateFlow background continuation & re-attach (§11/§19)', () => {
   })
 })
 
+describe('CreateFlow sync re-attach, backend cancel, identity PATCH (§11/§19)', () => {
+  beforeEach(() => {
+    armPendingPoll()
+    storeMod.useStore.setState({ draftJobs: [] })
+  })
+
+  const done = (draft: Record<string, unknown>) => ({
+    id: 'j1', status: 'done', stage: null, detail: null, error: null, mode: 'chat', draft,
+  })
+  const send = (text: string) => {
+    fireEvent.change(screen.getByPlaceholderText('Change something, or ask a question…'),
+      { target: { value: text } })
+    fireEvent.click(screen.getByText('Send'))
+  }
+
+  it('re-attaches a held sync outcome on entry and applies it like a live settle', async () => {
+    storeMod.useStore.setState({ draftJobs: [{ owner: 'a1', jobId: 'j9', status: 'done', mode: 'sync' }] })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'j9', status: 'done', stage: 'Syncing the workflow', detail: null, error: null,
+      mode: 'sync', events: [],
+      draft: {
+        steps: [{ file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("b")' }],
+        params: [],
+      },
+    })
+    render(<CreateFlow />)
+    await waitFor(() => expect(mockedApi.getDraftJob).toHaveBeenCalledWith('j9'))
+    await waitFor(() => expect(screen.getByText('Steps synced with the spec.')).toBeTruthy(), { timeout: 5000 })
+    // §11 background continuation: a re-attached job is consumed, never killed
+    expect(mockedApi.cancelDraftJob).not.toHaveBeenCalled()
+    expect(storeMod.useStore.getState().toast)
+      .toBe('Steps synced with the spec — review them, then save.')
+  })
+
+  it('a backend-side cancel clears the composer with no error entry and no chip', async () => {
+    // a stored thread that does not end on a user entry: the re-attach
+    // reconciliation then adds nothing, so the assertions below read the
+    // cancel alone (§11)
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [
+      { id: 'c0', at: '2026-08-20T08:00:00', kind: 'answer', text: 'Earlier reply.' },
+    ] })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'j1', status: 'cancelled', stage: null, detail: null, error: null,
+      mode: 'chat', draft: null, events: [],
+    })
+    render(<CreateFlow />)
+    await screen.findByText('Earlier reply.')
+    send('Also weekends')
+    // sending swapped Send for the running job's Cancel (§11 in-flight rules)
+    expect(screen.getByText('Cancel')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('Send')).toBeTruthy(), { timeout: 5000 })
+    // §11: a cancelled job settles nothing: no outcome entry, no glyph, and
+    // no stopped chip (that one belongs to the composer's own Cancel)
+    expect(screen.queryByText('Something went wrong')).toBeNull()
+    expect(screen.queryByText('Edit stopped — the spec is unchanged.')).toBeNull()
+    const thread = screen.getByTestId('chat-thread')
+    expect(thread.querySelector('.fa-check')).toBeNull()
+    expect(thread.querySelector('.fa-xmark')).toBeNull()
+    expect(storeMod.useStore.getState().toast).toBeNull()
+  })
+
+  it('a chat response naming a free name PATCHes name and description in one call', async () => {
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue(done({
+      answer: 'Renaming it.', actions: { name: 'Renamed', description: 'New lede' },
+    }))
+    render(<CreateFlow />)
+    send('rename it and give it a lede')
+    await waitFor(() => expect(screen.getByText('Renamed to “Renamed”.')).toBeTruthy(), { timeout: 4000 })
+    expect(screen.getByText('Description updated.')).toBeTruthy()
+    // §4.1: name and description are user-owned identity. Edit mode applies
+    // them right away through one PATCH, exactly like the pencil edits
+    await waitFor(() => expect(mockedApi.patchAutomation).toHaveBeenCalledTimes(1))
+    expect(mockedApi.patchAutomation).toHaveBeenCalledWith('a1', { name: 'Renamed', description: 'New lede' })
+  })
+
+  it('a chained sync drops a staged value the rebuilt parameters no longer hold', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        params: [{ name: 'days', kind: 'number', label: 'Days', help: '', value: 7 }],
+      } as unknown as Automation],
+    })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(done({ actions: { paramValues: { days: 3 }, sync: true } }))
+      .mockResolvedValue({
+        id: 'j2', status: 'done', stage: null, detail: null, error: null, mode: 'sync',
+        draft: {
+          steps: [{ file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("b")' }],
+          params: [],
+        },
+      })
+    render(<CreateFlow />)
+    send('set days to 3 and sync')
+    await waitFor(() => expect(screen.getByText('Steps synced with the spec.')).toBeTruthy(), { timeout: 6000 })
+    // §11: the staged chip rode the chained sync (hold-and-flush) and the
+    // rebuild's re-check dropped the value, so its chip lands after the trail
+    const synced = screen.getByText('Steps synced with the spec.')
+    const dropped = screen.getByText('Value for “days” dropped — no such parameter after the rebuild.')
+    expect(synced.compareDocumentPosition(dropped) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+describe('CreateFlow test guards: blank From + failed-test entry (§11)', () => {
+  beforeEach(armPendingPoll)
+
+  it('a typed test message with a blanked From never starts the run', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        triggers: [{ kind: 'discord', channel: '#general', secret: 'DISCORD_TOKEN', enabled: true }],
+      } as unknown as Automation],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(within(screen.getByTestId('test-card')).getByText('Test draft'))
+    const modal = screen.getByTestId('test-modal')
+    expect(within(modal).getByText('TRIGGER MESSAGE · THIS TEST ONLY')).toBeTruthy()
+    fireEvent.change(within(modal).getByPlaceholderText('The message that starts this test'),
+      { target: { value: 'ping' } })
+    // the FROM field carries no placeholder of its own, so reach it through
+    // the eyebrow that labels its row
+    const from = within(modal).getByText('FROM').parentElement!.querySelector('input')!
+    fireEvent.change(from, { target: { value: '' } })
+    fireEvent.click(within(modal).getByText('Run test'))
+    // §11: a message the user believes was delivered must never run unmocked
+    await waitFor(() => expect(storeMod.useStore.getState().toast)
+      .toBe('Add a From name for the test message — or clear the message to run without it.'))
+    expect(mockedApi.postTest).not.toHaveBeenCalled()
+  })
+
+  it('a tracked test failing lands the run-settled entry naming the step', async () => {
+    const run = (over: Record<string, unknown>) => ({
+      id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false,
+      versionLabel: 'Test', status: 'executing', trigger: 'Test', triggerSender: null, test: true,
+      steps: [], duration: '', started: '', startedMs: 1, endedMs: 0, queuedMs: 0,
+      durationMs: null, passStartedMs: 0, note: null, error: null, ...over,
+    })
+    render(<CreateFlow />)
+    // the tracked test is seeded after the mount: useDraftJob's cleanup clears
+    // it during the StrictMode remount (tests/setup.ts)
+    act(() => {
+      const live = run({})
+      storeMod.useStore.setState({
+        test: { executionId: 'e9' }, executions: [live] as never, executionFull: { e9: live } as never,
+      })
+    })
+    expect(within(screen.getByTestId('test-card')).getByText('Open test')).toBeTruthy()
+    act(() => {
+      const failed = run({
+        status: 'failed', duration: '2s', endedMs: 3,
+        error: { step: 'Send mail', message: 'boom', reason: null },
+      })
+      storeMod.useStore.setState({ executions: [failed] as never, executionFull: { e9: failed } as never })
+    })
+    // §11 test-settled thread anchor: follow-up chat has the run in context
+    await waitFor(() => expect(screen.getByText('Test failed at step Send mail — boom.')).toBeTruthy())
+  })
+})
+
 // §5.1/§11: an imported automation whose agent / secret references matched
 // nothing on this Mac. The §4.1 unresolvedReferences map names the archive
 // records, so the editor's warnings and red rows read as names, not short ids.

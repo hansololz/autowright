@@ -156,6 +156,26 @@ def test_notify_busy_reply_failure_never_raises(monkeypatch, caplog):
                for r in caplog.records)
 
 
+def test_busy_worker_survives_a_raising_job(caplog):
+    """§6: the delivery worker is the only one there is - an unexpected error
+    in one job must be logged and stepped over, never end the thread and
+    silence every send queued behind it."""
+    from autowright import listeners as li_mod
+
+    ran = []
+
+    def raiser():
+        raise RuntimeError("send blew up")
+
+    with caplog.at_level(logging.ERROR, logger="autowright.listeners"):
+        li_mod._busy_q.put(raiser)
+        li_mod._busy_q.put(lambda: ran.append(True))
+        li_mod._start_busy_worker()
+        _drain_busy()
+    assert ran == [True]
+    assert sum("outbound send failed" in r.getMessage() for r in caplog.records) == 1
+
+
 def test_send_reply_posts_with_bot_token(monkeypatch):
     import requests
 
@@ -539,6 +559,28 @@ def test_conn_missing_token_parks_with_plain_status(monkeypatch):
     assert "secret NO_VALUE… has no value yet" in error
 
 
+def test_conn_unreadable_secret_store_parks_and_retries(monkeypatch):
+    """§6: a locked or unavailable OS secret store (routine on a launchd start
+    before first unlock) parks at the backoff cap and comes back - it must
+    never escape the reconnect loop and leave the listener dead until a
+    restart."""
+    from autowright import listeners as li_mod
+
+    def unavailable(sid):
+        raise RuntimeError("the keychain is locked")
+
+    monkeypatch.setattr(li_mod.keychain, "get_secret", unavailable)
+    mgr = _FakeMgr()
+    conn = li_mod._Conn("LOCKED", mgr)
+    waits = _stub_stop_wait(monkeypatch, conn)
+    conn.run()
+    # parked at the cap and continued: never a hot loop, never a dead thread
+    assert waits == [li_mod.BACKOFF_MAX]
+    assert mgr.statuses == [("LOCKED", "error",
+                             "couldn't read secret LOCKED… from the OS secret store "
+                             "yet — retrying")]
+
+
 # ---------- §6 _Conn._session: one scripted gateway session, no network ----------
 
 class _GwMgr(_FakeMgr):
@@ -666,6 +708,38 @@ def test_session_heartbeats_on_interval_and_on_request(monkeypatch):
     assert [b["d"] for b in beats] == [5, 6]  # latest seq echoed each time
 
 
+def test_session_reconnects_when_a_heartbeat_is_never_acknowledged(monkeypatch):
+    """§6: a half-dead TCP path (sleep/wake, a network switch) answers no op 11
+    - the session must end at the next beat rather than sit "connected" while
+    dropping every message."""
+    clock = {"t": 100.0}
+    conn, _, fake = _session_over(monkeypatch, [
+        _HELLO,                     # interval 45s → next beat at t=145
+        {"op": 0, "t": "READY", "s": 5, "d": {"user": {"id": "B1"}}},
+        ("tick", 50),               # quiet past the deadline → first heartbeat
+        ("tick", 50),               # still no ack by the next deadline
+    ], clock=clock)
+    with pytest.raises(RuntimeError, match="gateway heartbeat not acknowledged"):
+        conn._session("tok")
+    assert len([f for f in fake.sent if f["op"] == 1]) == 1  # never a second beat
+
+
+def test_session_keeps_running_while_heartbeats_are_acknowledged(monkeypatch):
+    """§6: the twin of the reject above - an op 11 clears the wait, so the next
+    deadline beats again instead of tearing the session down."""
+    clock = {"t": 100.0}
+    conn, _, fake = _session_over(monkeypatch, [
+        _HELLO,
+        {"op": 0, "t": "READY", "s": 5, "d": {"user": {"id": "B1"}}},
+        ("tick", 50),               # first heartbeat
+        {"op": 11},                 # acknowledged
+        ("tick", 50),               # second heartbeat, no reconnect
+        {"op": 7},
+    ], clock=clock)
+    assert conn._session("tok") is True
+    assert len([f for f in fake.sent if f["op"] == 1]) == 2
+
+
 def test_run_generic_connect_failure_reports_connecting(monkeypatch):
     from autowright import listeners as li_mod
 
@@ -751,6 +825,58 @@ def test_imsg_batch_survives_one_bad_row(store, monkeypatch):
     li.dispatch_imessage = dispatch
     li_mod._ImsgWatcher(li).tick({"dave@example.com"})
     assert seen == ["g1", "g2", "g3"]
+
+
+def test_imsg_watcher_reports_a_chat_db_yanked_mid_tick(store, monkeypatch):
+    """§6: a db rotated or revoked under the watcher closes the handle and
+    parks in the `connection` error state, so the next tick re-probes and a
+    restored database heals without a restart."""
+    from autowright import imessage
+    from autowright import listeners as li_mod
+
+    closed = []
+
+    class _Db:
+        def close(self):
+            closed.append(True)
+
+    def gone(db, cursor, top, senders):
+        raise OSError("database disk image is malformed")
+
+    monkeypatch.setattr(imessage, "open_db", lambda: _Db())
+    monkeypatch.setattr(imessage, "max_rowid", lambda db: 99)
+    monkeypatch.setattr(imessage, "messages_after", gone)
+
+    watcher = li_mod._ImsgWatcher(li_mod.Listeners(store, None))
+    watcher.tick({"dave@example.com"})
+    assert closed == [True] and watcher._db is None
+    assert store.listener_status[li_mod.IMSG_KEY] == {
+        "state": "error",
+        "error": "couldn't read the Messages database — database disk image is malformed"}
+
+
+def test_dispatch_survives_one_failing_firing(store, monkeypatch, caplog):
+    """§6: one automation's firing must never drop the others' - the Discord
+    twin of the iMessage per-hit guard."""
+    from autowright import listeners as li_mod
+
+    fired = []
+
+    def boom(store, engine, a, t, payload=None):
+        if a["name"] == "Bad":
+            raise OSError("disk on fire")
+        fired.append(a["name"])
+        return True
+
+    monkeypatch.setattr(li_mod, "fire_trigger", boom)
+    for name in ("Bad", "Good"):
+        a = store.create_automation(make_version(), name, None)
+        a["triggers"] = [_trig()]
+    with caplog.at_level(logging.ERROR, logger="autowright.listeners"):
+        li_mod.Listeners(store, None).dispatch("TOKEN", _msg(), bot_id="bot9")
+    assert fired == ["Good"]
+    assert any("discord firing on 'Bad' failed" in r.getMessage()
+               for r in caplog.records)
 
 
 def test_dispatch_imessage_survives_one_failing_firing(store, monkeypatch):

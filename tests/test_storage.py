@@ -1996,3 +1996,206 @@ def test_exec_json_carries_duration_ms_and_pass_start(store):
     assert "_pass_start" not in yaml.safe_load(store.exec_yaml_path(h["id"]).read_text())
     h["status"] = "succeeded"
     assert store.exec_json(h, full=True)["passStartedMs"] == 0
+
+
+# ---------- §5 index rebuild, load-skip guards, writer prune, param defaults ----------
+
+
+def test_corrupt_executions_db_is_rebuilt_from_the_yaml(store, caplog):
+    """§5: the DB is a disposable index. Garbage bytes over executions.db are
+    deleted (the -wal/-shm siblings with them) and the yaml reconcile brings
+    every row back at the next load."""
+    import logging
+
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Corrupt", None)
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(h)
+    store.close_exec_db()
+
+    db = store.executions_dir() / "executions.db"
+    db.write_bytes(b"this is not a database")
+    for suffix in ("-wal", "-shm"):
+        db.with_name(db.name + suffix).write_bytes(b"stale journal")
+
+    with caplog.at_level(logging.WARNING, logger="autowright.storage"):
+        s2 = Store()
+        s2.load_all()
+    assert any("executions.db is unusable" in r.getMessage() for r in caplog.records)
+    assert h["id"] in s2.execs and s2.execs[h["id"]]["status"] == "succeeded"
+    # The rebuilt DB is a real one again, so a clean close takes its WAL pair
+    # with it and nothing of the stale siblings survives.
+    s2.close_exec_db()
+    for suffix in ("-wal", "-shm"):
+        assert not db.with_name(db.name + suffix).exists()
+
+
+def test_unopenable_exec_db_degrades_to_an_in_memory_index(store, monkeypatch, caplog):
+    """§5: when even the rebuild can't open a DB on disk, the store keeps the
+    index in memory for the session instead of bricking startup. The yaml
+    files stay authoritative, so the rows are all still there."""
+    import logging
+    import sqlite3
+
+    from autowright import storage as storagemod
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "NoDb", None)
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(h)
+    store.close_exec_db()
+
+    real = storagemod.ExecDB
+
+    def only_in_memory(path):
+        if path is not None:
+            raise sqlite3.DatabaseError("file is not a database")
+        return real(path)
+
+    monkeypatch.setattr(storagemod, "ExecDB", only_in_memory)
+    with caplog.at_level(logging.WARNING, logger="autowright.storage"):
+        s2 = Store()
+        s2.load_all()  # must not raise
+    logged = " | ".join(r.getMessage() for r in caplog.records)
+    assert "rebuilding executions.db failed" in logged
+    assert "using an in-memory index this session" in logged
+    assert s2.execdb is not None
+    assert h["id"] in s2.execs  # restored from execution.yaml into the memory index
+    assert isinstance(s2.auto_json(s2.autos[a["id"]]), dict)
+
+
+def test_ghost_index_row_is_dropped_when_its_directory_is_gone(store, caplog):
+    """§5: the yaml is authoritative. A directory deleted by hand (Show in
+    Finder is one click away) leaves an index row that would list forever, so
+    the reconcile drops it with a warning."""
+    import logging
+    import shutil
+
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Ghosty", None)
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(h)
+    store.close_exec_db()
+    shutil.rmtree(store.exec_dir(h["id"]))
+
+    with caplog.at_level(logging.WARNING, logger="autowright.storage"):
+        s2 = Store()
+        s2.load_all()
+    assert h["id"] not in s2.execs
+    assert any("no directory on disk" in r.getMessage() for r in caplog.records)
+
+
+def test_load_skips_malformed_automation_dirs(store, caplog):
+    """§5 hand-edited disk: a directory with no manifest, one whose manifest
+    has no id, one whose name doesn't match its id, one with no version
+    folders, and one whose load raises are each skipped. The good automation
+    beside them still loads, and the three diagnosable cases warn."""
+    import logging
+    import shutil
+
+    from autowright.storage import Store
+    from autowright.yamlio import load_yaml, save_yaml
+
+    good = store.create_automation(make_version(), "Good", None)
+    root = paths.automations_dir()
+    src = store.auto_dir(good)
+
+    (root / "no-manifest").mkdir()  # nothing to load: skipped without a word
+    (root / "no-id").mkdir()
+    save_yaml(root / "no-id" / "automation.yaml", {"name": "Nameless"})
+    shutil.copytree(src, root / "mismatched-dir")  # manifest still holds the real id
+    for name, patch in (("no-versions", {}),
+                        ("raiser", {"current_version": "not a number"})):
+        d = root / name
+        shutil.copytree(src, d)
+        save_yaml(d / "automation.yaml", {**load_yaml(d / "automation.yaml"),
+                                          "id": name, **patch})
+    shutil.rmtree(root / "no-versions" / "versions")
+
+    with caplog.at_level(logging.WARNING, logger="autowright.storage"):
+        s2 = Store()
+        s2.load_all()
+    assert set(s2.autos) == {good["id"]}
+    logged = " | ".join(r.getMessage() for r in caplog.records)
+    assert "doesn't match its id" in logged
+    assert "has no version folders" in logged
+    assert "failed to load automation at" in logged
+    assert "no-manifest" not in logged and "no-id" not in logged
+
+
+def test_version_writer_clears_what_the_new_version_no_longer_carries(store):
+    """§5: rewriting a version folder prunes instructions.md, notes.md and any
+    file the new manifest doesn't name. Driven through the writer itself,
+    because every public save path writes a fresh directory: the prune is only
+    reachable on a folder that already holds a previous write."""
+    a = store.create_automation(
+        make_version(notes="working thoughts", instructions="build it this way"),
+        "Prune", None)
+    vd = store.auto_dir(a) / "versions" / "v1"
+    assert (vd / "instructions.md").exists() and (vd / "notes.md").exists()
+    (vd / "leftover.py").write_text("a step the new version dropped\n", encoding="utf-8")
+
+    store._write_version_folder(vd, make_version(notes="   \n", instructions=None))
+    assert not (vd / "instructions.md").exists()
+    assert not (vd / "notes.md").exists()
+    assert not (vd / "leftover.py").exists()
+    # The kept set survives: manifest, spec, and the steps the manifest names.
+    assert (vd / "automation.yaml").exists() and (vd / "spec.md").exists()
+    assert (vd / "01-say.py").exists() and (vd / "02-finish.py").exists()
+
+
+def test_param_default_per_kind_and_kind_mismatch():
+    """§5 param defaults: each kind has its own fallback, `number` takes its
+    declared `min`, and a declared default that doesn't match its own kind is
+    ignored (agent output is only presence-validated)."""
+    from autowright.storage import param_default
+
+    table = [
+        ({"kind": "toggle"}, False),
+        ({"kind": "toggle", "default": True}, True),
+        ({"kind": "number"}, 0),
+        ({"kind": "number", "min": 5}, 5),
+        ({"kind": "number", "default": 3}, 3),
+        ({"kind": "list"}, []),
+        ({"kind": "list", "default": ["a", "b"]}, ["a", "b"]),
+        ({"kind": "kv"}, []),
+        ({"kind": "kv", "default": [{"key": "k", "value": "v"}]}, [{"key": "k", "value": "v"}]),
+        ({"kind": "text"}, ""),
+        ({"kind": "text", "default": "hi"}, "hi"),
+        ({"kind": "text", "default": None}, ""),
+        # A kind mismatch falls through to the kind default.
+        ({"kind": "list", "default": "abc"}, []),
+        ({"kind": "kv", "default": ["k=v"]}, []),
+        ({"kind": "number", "default": "3", "min": 1}, 1),
+        ({"kind": "toggle", "default": "yes"}, False),
+        ({"kind": "text", "default": 7}, ""),
+        ({"kind": "number", "default": True}, 0),  # a bool is never a number
+    ]
+    for d, expected in table:
+        got = param_default(d)
+        assert got == expected and type(got) is type(expected), d
+
+
+def test_damaged_created_at_drops_the_overdue_audit(store):
+    """§4.1/§5 lenient: an unparsable created_at leaves the overdue audit with
+    no baseline, so the entry is dropped rather than raising out of every
+    /state."""
+    from autowright.storage import Store
+    from autowright.yamlio import load_yaml, save_yaml
+
+    trig = {"id": "t1", "kind": "cron", "enabled": True,
+            "expression": "0 8 * * *", "source": "user"}
+    a = store.create_automation(make_version(), "Undated", None, triggers=[trig])
+    y = store.auto_dir(a) / "automation.yaml"
+    save_yaml(y, {**load_yaml(y), "created_at": "not a date"})
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    assert b["created_at"] == "not a date"
+    assert s2.overdue(b) is False
+    cur = b["versions"][b["current_version"]]
+    assert all(p["kind"] != "overdue" for p in s2.problems_json(b, cur))
+    assert isinstance(s2.auto_json(b), dict)  # nothing raises downstream either

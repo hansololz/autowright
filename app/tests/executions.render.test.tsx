@@ -8,7 +8,7 @@
 // api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { Attempt, Automation, Execution } from '../src/types'
+import type { Attempt, Automation, Execution, TriggerPayload } from '../src/types'
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
@@ -1125,5 +1125,160 @@ describe('execution page step timer (§7)', () => {
     expect(durations()).toEqual(['1.0s', '5s'])
     expect(screen.getByText('Attempt 1 · Failed · 3.0s')).toBeTruthy()
     expect(screen.getByText('Attempt 2 · Executing · 5s')).toBeTruthy()
+  })
+})
+
+// §7 queued execution page: a queued record has no steps, no logs and no
+// duration, so the waiting state stands in for the whole ordinary body.
+describe('execution page queued body (§7)', () => {
+  const queued = (id: string, queuedMs: number): Execution =>
+    ex(id, { status: 'queued', duration: '', endedMs: 0, queuedMs, trigger: 'Discord' })
+
+  it('reads the waiting state with its place in the queue, and offers Cancel alone', () => {
+    // §6 drain order: the queue is the automation's queued records, oldest
+    // first. The page is opened on the middle one.
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'q2', executionFull: {}, execLogs: {},
+      executions: [queued('q1', NOW - 30_000), queued('q2', NOW - 20_000), queued('q3', NOW - 10_000)],
+    })
+    render(<ExecutionPage />)
+
+    expect(screen.getByText('Waiting for a free slot')).toBeTruthy()
+    expect(screen.getByText('2nd of 3 waiting')).toBeTruthy()
+    expect(screen.getByText('Every slot is busy. This runs as soon as one frees up.')).toBeTruthy()
+    // §6: one endpoint leaves the queue; nothing has run, so neither retry
+    // action belongs here
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Execute again' })).toBeNull()
+    // the waiting body replaces the machinery, so no ExecutionView rail
+    expect(screen.queryByText('LOGS')).toBeNull()
+  })
+})
+
+// §7 retention-purged deep link: loadExecution swallows the 404, so the page
+// itself has to decide that nothing landed.
+describe('execution page retention-purged deep link (§7)', () => {
+  it('settles on the gone-execution notice instead of spinning forever', async () => {
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e-gone', executions: [], executionFull: {}, execLogs: {},
+    })
+    const { container } = render(<ExecutionPage />)
+
+    expect(screen.queryByText('This execution no longer exists')).toBeNull()
+    expect(await screen.findByText('This execution no longer exists')).toBeTruthy()
+    expect(screen.getByText('It was removed — most likely by retention cleanup.')).toBeTruthy()
+    // the loading shell is gone with it: never a notice above a spinner
+    expect(container.querySelector('[style*="adSpin"]')).toBeNull()
+  })
+})
+
+// §7 "No result" card: the reason line reads off the record's own status, so
+// the empty outcome is never unexplained.
+describe('execution page no-result reasons (§7)', () => {
+  const seedFull = (over: Partial<Execution>, full: Partial<Execution> = {}) => {
+    const row = ex('e1', over)
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row], execLogs: {},
+      executionFull: { e1: { ...row, steps: [], result: null, ...full } },
+    })
+  }
+
+  it('a failed execution says the result was never built', () => {
+    seedFull({ status: 'failed', error: null })
+    render(<ExecutionPage />)
+    expect(screen.getByText('No result')).toBeTruthy()
+    expect(screen.getByText(
+      'The execution failed before a result was built. The logs show what happened.')).toBeTruthy()
+  })
+
+  it('a cancelled execution with no steps names the note that cancelled it', () => {
+    seedFull({ status: 'cancelled', note: 'the queue was cleared' })
+    render(<ExecutionPage />)
+    expect(screen.getByText(
+      'The execution was cancelled before it started — the queue was cleared.')).toBeTruthy()
+  })
+
+  it('a succeeded execution with no result says so plainly', () => {
+    seedFull({ status: 'succeeded' })
+    render(<ExecutionPage />)
+    expect(screen.getByText('This execution didn’t produce a result.')).toBeTruthy()
+  })
+})
+
+// §7 TRIGGER MESSAGE: the input a message-triggered execution fired on. Origin
+// is Discord-only and best-effort (§6 name cache).
+describe('execution page trigger message (§7)', () => {
+  const seedPayload = (payload: TriggerPayload) => {
+    const row = ex('e1', { trigger: 'Discord' })
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row], execLogs: {},
+      executionFull: { e1: { ...row, steps: [], result: null, triggerPayload: payload } },
+    })
+  }
+  const discord = (over: Partial<Extract<TriggerPayload, { kind: 'discord' }>> = {}) => ({
+    kind: 'discord' as const, text: 'ship it', sender: 'Dave', messageId: '99',
+    at: '2026-09-07T08:00:00Z', channel: '42', channelName: 'ops', guildName: 'Acme',
+    guildId: '7', secret: 's1', ...over,
+  })
+
+  it('names the sender, the channel and the guild, and links back to the message', () => {
+    seedPayload(discord())
+    render(<ExecutionPage />)
+
+    expect(screen.getByText('TRIGGER MESSAGE')).toBeTruthy()
+    const header = screen.getByText('in #ops · Acme').parentElement!
+    expect(header.textContent).toContain('Dave in #ops · Acme')
+    expect(screen.getByRole('link', { name: /Open in Discord/ }).getAttribute('href'))
+      .toBe('https://discord.com/channels/7/42/99')
+    expect(screen.getByText('ship it')).toBeTruthy()
+  })
+
+  it('falls back to the raw channel id when the name was never cached', () => {
+    seedPayload(discord({ channelName: null }))
+    render(<ExecutionPage />)
+    expect(screen.getByText('in 42')).toBeTruthy()
+  })
+
+  it('an iMessage payload shows the sender alone, with no link back', () => {
+    seedPayload({
+      kind: 'imessage', text: 'ship it', sender: 'Dave', messageId: '99',
+      at: '2026-09-07T08:00:00Z', chat: null,
+    })
+    render(<ExecutionPage />)
+    expect(screen.getByText('Dave')).toBeTruthy()
+    expect(screen.queryByText(/Open in Discord/)).toBeNull()
+  })
+})
+
+// §7/§11 header action gating: a draft test iterates from the editor, and a
+// deleted automation has nothing left to open or re-execute.
+describe('execution page header action gating (§7)', () => {
+  const seedRow = (over: Partial<Execution>) => {
+    const row = ex('e1', over)
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row], execLogs: {},
+      executionFull: { e1: { ...row, steps: [], result: null } },
+      automations: [],
+    })
+  }
+
+  it('a failed draft test carries its chip and neither retry action', () => {
+    seedRow({ status: 'failed', test: true, error: null, versionLabel: 'Test', trigger: 'Test' })
+    render(<ExecutionPage />)
+
+    expect(screen.getByText('Draft test')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Execute again' })).toBeNull()
+  })
+
+  it('a deleted automation marks the title, unlinks it, and drops Execute again', () => {
+    seedRow({ status: 'succeeded', automationDeleted: true })
+    render(<ExecutionPage />)
+
+    expect(screen.getByText('(deleted)')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Execute again' })).toBeNull()
+    const title = screen.getByRole('heading', { level: 1 })
+    expect(title.className).not.toContain('ad-link-title')
   })
 })

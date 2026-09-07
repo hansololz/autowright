@@ -395,6 +395,91 @@ describe('AgentNewPage (§12)', () => {
     expect(await screen.findByText(/Finish signing in\. Autowright opened your browser/)).toBeTruthy()
   })
 
+  it('edit mode: Save changes patches the edited fields and returns to Agents', async () => {
+    storeMod.useStore.setState({
+      agents: [{
+        id: 'g1', name: 'Writer', description: 'Cloud drafting',
+        harness: 'Claude Code', mode: 'custom', model: 'claude-opus-4-8',
+      }] as never,
+      agentEditId: 'g1',
+    })
+    render(<AgentNewPage />)
+    fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'Writer 2' } })
+    fireEvent.change(screen.getByPlaceholderText('e.g. claude-opus-4-8'),
+      { target: { value: 'claude-opus-4-9' } })
+    fireEvent.click(screen.getByText('Save changes'))
+    await waitFor(() => expect(mockedApi.patchAgent).toHaveBeenCalledTimes(1))
+    expect((mockedApi.patchAgent as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['g1', {
+      harness: 'Claude Code', mode: 'custom', model: 'claude-opus-4-9',
+      name: 'Writer 2', description: 'Cloud drafting',
+    }])
+    expect(storeMod.useStore.getState().page).toBe('agents')
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('Changes saved. Writer 2 is ready.'))
+  })
+
+  it('a failed harness install shows the reason and Try again re-posts it (§12)', async () => {
+    storeMod.useStore.setState({ agentEditId: null })
+    detect({ claude: false })
+    render(<AgentNewPage />)
+    expect(await screen.findByText('NOT INSTALLED')).toBeTruthy()
+    fireEvent.click(screen.getByText('Claude Code'))
+    fireEvent.click(await screen.findByText('Download & set up'))
+    await waitFor(() => expect(mockedApi.installHarness).toHaveBeenCalledWith('claude'))
+
+    storeMod.useStore.getState().applyEvent({
+      event: 'harness.install', id: 'claude', done: true, ok: false, error: '404',
+    })
+    expect(await screen.findByText('Install failed: 404')).toBeTruthy()
+    fireEvent.click(screen.getByText('Try again'))
+    await waitFor(() => expect(mockedApi.installHarness).toHaveBeenCalledTimes(2))
+    expect(screen.getByText(/Installing Claude Code…/)).toBeTruthy()
+  })
+
+  it('the remove confirm names the one automation using the agent (§12)', async () => {
+    storeMod.useStore.setState({
+      agents: [{
+        id: 'g1', name: 'Writer', harness: 'Claude Code', mode: 'default', model: null,
+        usedBy: [{ id: 'a1', name: 'Nightly report' }],
+      }] as never,
+      agentEditId: 'g1',
+    })
+    render(<AgentNewPage />)
+    fireEvent.click(screen.getByLabelText('Agent actions'))
+    fireEvent.click(await screen.findByText('Remove agent…'))
+    expect(await screen.findByText(
+      '“Nightly report” uses this agent. It still executes on schedule. You’ll just need another agent to edit it.',
+    )).toBeTruthy()
+  })
+
+  it('the remove confirm counts several automations using the agent (§12)', async () => {
+    storeMod.useStore.setState({
+      agents: [{
+        id: 'g1', name: 'Writer', harness: 'Claude Code', mode: 'default', model: null,
+        usedBy: [{ id: 'a1', name: 'One' }, { id: 'a2', name: 'Two' }, { id: 'a3', name: 'Three' }],
+      }] as never,
+      agentEditId: 'g1',
+    })
+    render(<AgentNewPage />)
+    fireEvent.click(screen.getByLabelText('Agent actions'))
+    fireEvent.click(await screen.findByText('Remove agent…'))
+    expect(await screen.findByText(
+      '3 automations use this agent. They still execute on schedule, but you’ll need another agent to edit them.',
+    )).toBeTruthy()
+  })
+
+  it('a backend already-exists 422 surfaces as the inline taken error (§4.7/§19)', async () => {
+    storeMod.useStore.setState({ agentEditId: null })
+    ;(mockedApi.addAgent as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error('An agent named Writer already exists.'), { status: 422 }))
+    render(<AgentNewPage />)
+    fireEvent.click(screen.getByText('Claude Code'))
+    fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'Writer' } })
+    fireEvent.click(screen.getByText('Add agent'))
+    await waitFor(() => expect(mockedApi.addAgent).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('An agent named Writer already exists. Pick a different name.')).toBeTruthy()
+    expect(storeMod.useStore.getState().page).toBe('agentNew')
+  })
+
   it('leaving before the reconnect toast lands cancels its timer (§12)', async () => {
     storeMod.useStore.setState({
       agents: [{ id: 'g1', name: 'Writer', harness: 'Claude Code', mode: 'default', model: null }],

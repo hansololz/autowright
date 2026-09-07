@@ -155,6 +155,10 @@ def reset_module_globals():
     api._shutdown_callbacks.clear()  # §3 main()-registered cleanup from an earlier boot
     api._quiesce_callbacks.clear()
     events.hub._loop = None  # a lifespan-running test binds a loop that closes with it
+    # A lifespan-running test's shutdown flips the process-wide engine into its
+    # §3 "shutting down" refusal (start -> 409); a fresh backend process never
+    # inherits that flag, so neither may the next test in this worker.
+    api.engine._stopping = False
     for token in list(api._import_parked):  # §5.2 parked previews + their spool files
         api._drop_parked(token)
 

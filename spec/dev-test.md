@@ -115,7 +115,17 @@ never click them), queued/waiting execution rows (timing-hard to stage live), an
 grant-checkbox → draft-request payloads — and editor branch behavior uneconomical to stage
 live: blocker-entry states and action gating, chat-response application branches, thread
 progress-entry stage labels, collapsed-card defaults, and analyze/agent-picker request
-payloads. Full
+payloads. The 2026-09-07 coverage audit widened it to the same rule's other instances:
+machine-mutating settings toggles and the data-path picker (each patches exactly its own
+key), the memory card's destructive confirms (clear/restore copy follows the automatic-
+snapshot settings) and snapshot rename/delete, the concurrency card's clamp and clear-queue
+confirm, the one-time trigger editor's time parts and the Discord editor's payload,
+the queued and retention-purged execution page states, the agents page's connection
+checks and gone-automation chips, the list's start-fresh discard and execute-from-card
+409, the detail page's trigger status text and delete confirm, the editor's sync-mode
+re-attach, backend-side cancel, identity PATCH from chat, and packages card, the test
+modal's blank-From guard and failed-test chip, onboarding's local-piece install queue,
+skip-for-now, and prior-data paths, and the menu-bar attention count. Full
 journeys stay e2e; all other component rendering is exercised by the playwright-driven
 Electron path, never by DOM unit tests.
 Both suites carry guards for the §2 CLI-leaf invariant: a pytest scan asserts no backend
@@ -135,6 +145,15 @@ The §5 per-OS root table is drift-guarded on both sides: `tests/test_platform.p
 `paths.py`'s roots per platform token and `app/tests/platform-roots.test.ts` pins
 `electron/platform/roots.cjs` — both against the same §5 table, so the two implementations
 can never disagree silently.
+
+**Line coverage.** Both unit tiers can report coverage on demand, never as a gate: the
+renderer through Vitest's v8 provider (`@vitest/coverage-v8`, a dev dependency — `cd app &&
+npx vitest run --coverage`; `vitest.config.ts` pins the include list to `src/**/*.{ts,tsx}`,
+since `src/` also holds raw-imported Markdown the provider would abort on) and the backend through pytest-cov
+(`.venv/bin/python -m pytest tests/ --cov=autowright --cov-report=term-missing`). The
+reports are a periodic audit input (which modules or branches no test reaches), not a
+threshold — a number would invite tests written for the number, and the e2e tier's
+real-Electron coverage is deliberately outside the unit report.
 
 **Typecheck coverage.** `tsc --noEmit` runs twice, over two configs, because a single
 `include` cannot hold both: `app/tsconfig.json` covers `src` under the strict app settings,

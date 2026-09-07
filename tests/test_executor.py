@@ -721,6 +721,56 @@ def test_main_site_packages_joins_sys_path(run_main, tmp_path):
     assert any(l.get("text") == "got 42" for l in lines)
 
 
+def test_main_memory_load_returns_the_default_for_a_missing_key(run_main):
+    # §6.1: memory.load on a key that was never saved answers the default,
+    # never an error: a first execution reads its own empty memory.
+    rc, lines = run_main("from autowright import log, memory\n"
+                         "log(memory.load('never-written', 'fallback'))\n")
+    assert rc == 0
+    assert [l["text"] for l in lines if l["op"] == "log"] == ["fallback"]
+
+
+def test_main_log_helpers_carry_their_kinds(run_main):
+    # §6.1: the bare call and .info are ordinary output, .warn and .error are
+    # the §5 `wrn` / `err` kinds the execution page colors.
+    rc, lines = run_main("from autowright import log\n"
+                         "log('plain')\n"
+                         "log.info('noted')\n"
+                         "log.warn('careful')\n"
+                         "log.error('broken')\n")
+    assert rc == 0
+    assert [(l["kind"], l["text"]) for l in lines if l["op"] == "log"] == [
+        ("out", "plain"), ("out", "noted"), ("wrn", "careful"), ("err", "broken")]
+
+
+def test_main_result_and_memory_handles_are_path_like(run_main, tmp_path):
+    # §6.1: both handles join with / and answer os.fspath, so a step can hand
+    # them to any stdlib call. Everything written lands in the execution's
+    # own result dir and the automation's memory dir.
+    rc, _ = run_main(
+        "import os\n"
+        "from autowright import memory, result\n"
+        "(result / 'a.md').write_text('first', encoding='utf-8')\n"
+        "open(os.path.join(os.fspath(result), 'b.md'), 'w').write('second')\n"
+        "open(os.path.join(os.fspath(memory), 'c.txt'), 'w').write('kept')\n")
+    assert rc == 0
+    assert (tmp_path / "result" / "a.md").read_text(encoding="utf-8") == "first"
+    assert (tmp_path / "result" / "b.md").read_text(encoding="utf-8") == "second"
+    assert (tmp_path / "memory" / "c.txt").read_text(encoding="utf-8") == "kept"
+
+
+def test_main_reply_caps_text_at_200k(run_main):
+    # §6.1 twin of the agent reply cap: an oversize control line would blow the
+    # engine's size-capped readline and the reply would be lost mid-pipe, so
+    # the step is told with a hard raise instead.
+    rc, lines = run_main("from autowright import reply\nreply('x' * 200_001)\n",
+                         can_reply=True)
+    assert rc == 1
+    err = next(l for l in lines if l["op"] == "error")
+    assert err["message"] == "RuntimeError: reply too large (200k char cap)"
+    assert not any(l["op"] == "reply" for l in lines)
+
+
 # ---------- §6.1 containment: outbound secrets, scan map, memory keys ----------
 
 
@@ -737,6 +787,14 @@ def test_reply_and_prompt_refuse_secret_values():
         with pytest.raises(RuntimeError, match="PEM"):
             scan_outbound("line-two", what, scan)
     scan_outbound("nothing sensitive here", "reply", scan)  # clean text passes
+
+
+def test_scan_outbound_skips_empty_secret_values():
+    """§6: a §4.8 placeholder secret carries no value, so an empty entry in the
+    scan map must be skipped, not matched against every text."""
+    from autowright.executor import scan_outbound
+
+    scan_outbound("hello", "reply", {"S": ""})  # nothing to match, nothing raised
 
 
 def test_scan_map_is_not_reachable_from_the_step_sdk():

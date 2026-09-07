@@ -185,6 +185,10 @@ def test_install_ollama_app_places_bundle_and_user_symlink(tmp_path, local_bin,
     stale.mkdir(parents=True)
     (stale / "stale-marker").write_text("old")
     monkeypatch.setattr(installer, "APPLICATIONS", str(apps))
+    # a previous install's symlink must be relinked, not hit FileExistsError
+    local_bin.mkdir(parents=True)
+    stale_link = local_bin / "ollama"
+    stale_link.symlink_to(tmp_path / "gone" / "ollama")
     urls = []
 
     def fake_download(url, dest, emit, label):
@@ -495,6 +499,29 @@ def test_login_shell_path_empty_on_probe_failure(monkeypatch):
     assert installer._login_shell_path() == []
 
 
+def test_login_shell_path_splits_what_the_login_shell_printed(monkeypatch):
+    """§19: the backend's own env never sees shell profiles, so the login shell
+    is asked for its PATH - the answer splits on the platform separator, and a
+    shell that can't be spawned at all degrades to no entries."""
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    cmds = []
+
+    def fake_run(cmd, **kw):
+        cmds.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout=os.pathsep.join(["/a", "/b"]),
+                                           stderr="")
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+    assert installer._login_shell_path() == ["/a", "/b"]
+    assert cmds == [["/bin/zsh", "-l", "-c", 'printf %s "$PATH"']]
+
+    def raising(cmd, **kw):
+        raise OSError("no such shell")
+
+    monkeypatch.setattr(installer.subprocess, "run", raising)
+    assert installer._login_shell_path() == []
+
+
 # ---------------------------------------------------------------- _require
 
 def test_require_passes_when_binary_present_in_redirected_dir(tmp_path,
@@ -571,6 +598,16 @@ def test_login_requires_installed_binary(monkeypatch):
     monkeypatch.setattr(harness, "resolve_bin", lambda b: None)
     with pytest.raises(RuntimeError, match="isn't installed"):
         installer.login("claude")
+
+
+def test_login_ollama_has_nothing_to_sign_into(monkeypatch):
+    """§4.7: a local model has no account - the sign-in call rejects cleanly
+    instead of resolving a binary and crashing into a 500 below."""
+    resolved = []
+    monkeypatch.setattr(harness, "resolve_bin", lambda b: resolved.append(b))
+    with pytest.raises(RuntimeError, match="no sign-in"):
+        installer.login("ollama")
+    assert resolved == []
 
 
 @pytest.mark.parametrize("pid,expected", [

@@ -5,7 +5,7 @@
 // the store seeded and the api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { Automation, Execution, ParamDef } from '../src/types'
+import type { Automation, Execution, ParamDef, Trigger } from '../src/types'
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
@@ -18,6 +18,8 @@ vi.mock('../src/api', () => ({
     executeNow: vi.fn(async () => ({ executionId: 'e-new', queued: false })),
     // §9.2 PARAMETERS row: the debounced value write
     patchAutomation: vi.fn(async () => ({})),
+    deleteAutomation: vi.fn(async () => ({})),
+    deleteDraft: vi.fn(async () => ({})),
   },
 }))
 
@@ -62,8 +64,18 @@ const seed = (a: Automation, executions: Execution[] = []) =>
 beforeEach(() => {
   vi.spyOn(Date, 'now').mockReturnValue(NOW)
   mockedApi.executeNow.mockClear()
+  mockedApi.patchAutomation.mockClear()
+  mockedApi.deleteAutomation.mockClear()
+  mockedApi.deleteDraft.mockClear()
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+// ConfirmModal acts on onClose, which fires only after the overlay's exit
+// animation. happy-dom runs no animations, so end it by hand.
+const finishModalAnim = (name: string) => {
+  const dlg = screen.getByRole('alertdialog', { name })
+  fireEvent.animationEnd(dlg.parentElement!)
+}
 
 const clickExecuteNow = () => {
   // The header's accent primary — reads "Executing…" while anything is live.
@@ -230,5 +242,160 @@ describe('§9.2 PARAMETERS row', () => {
     fireEvent.blur(screen.getByDisplayValue('typed.io'))
     rerender(<ParamRow automationId="a1" p={{ ...listParam, lines: ['c.io'] }} last />)
     expect(screen.getByDisplayValue('c.io')).toBeTruthy()
+  })
+})
+
+// §4.3 trigger status text: enabled app_start and message triggers have no
+// computable next occurrence, so the line says what the automation is waiting
+// for instead of a countdown.
+describe('§9.2 trigger status text', () => {
+  const discord: Trigger = {
+    id: 't-discord', kind: 'discord', channel: '42', secret: 's1', enabled: true,
+    label: 'On Discord message in #ops', short: 'Discord',
+  }
+  const imessage: Trigger = {
+    id: 't-imessage', kind: 'imessage', from: 'Dave', enabled: true,
+    label: 'On iMessage from Dave', short: 'iMessage',
+  }
+  const appStart: Trigger = {
+    id: 't-app', kind: 'app_start', enabled: true, label: 'On app start', short: 'app start',
+  }
+  const cron: Trigger = {
+    id: 't-cron', kind: 'cron', expression: '0 8 * * *', source: 'spec', enabled: true,
+    label: 'Every day at 8:00 AM', short: 'daily 8:00 AM',
+  }
+
+  it('a Discord trigger alone reads as listening for Discord messages', () => {
+    seed(auto({ triggers: [discord], triggerChip: 'On Discord message', nextAtMs: null }))
+    render(<AutomationDetail />)
+    expect(screen.getByText(
+      'Listening for Discord messages — executes when a matching message arrives. '
+      + 'Execute now and the menu bar still work.')).toBeTruthy()
+    // no computable next occurrence, so the chip never carries a countdown
+    expect(screen.queryByText(/next in/)).toBeNull()
+  })
+
+  it('both message kinds collapse to plain "messages"', () => {
+    seed(auto({ triggers: [discord, imessage], triggerChip: '2 triggers', nextAtMs: null }))
+    render(<AutomationDetail />)
+    expect(screen.getByText(
+      'Listening for messages — executes when a matching message arrives. '
+      + 'Execute now and the menu bar still work.')).toBeTruthy()
+  })
+
+  it('an app_start trigger alone names the next app launch', () => {
+    seed(auto({ triggers: [appStart], triggerChip: 'On app start', nextAtMs: null }))
+    render(<AutomationDetail />)
+    expect(screen.getByText(
+      'Executes when this app next starts — Execute now and the menu bar still work.')).toBeTruthy()
+  })
+
+  it('an enabled schedule with no computable next never leaves a dangling countdown', () => {
+    seed(auto({ triggers: [cron], triggerChip: 'Every day at 8:00 AM', nextAtMs: null }))
+    render(<AutomationDetail />)
+    expect(screen.getByText(
+      'No upcoming occurrence — Execute now and the menu bar still work.')).toBeTruthy()
+    expect(screen.queryByText(/next in/)).toBeNull()
+  })
+})
+
+// §9.2 delete: the destructive action states its consequences, and warns when
+// a live execution is about to be cancelled by it.
+describe('§9.2 delete automation', () => {
+  const openDelete = () => {
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    fireEvent.click(screen.getByText('Delete automation…'))
+  }
+
+  it('spells out what goes and what stays, then deletes on confirm', async () => {
+    seed(auto())
+    render(<AutomationDetail />)
+    openDelete()
+
+    expect(screen.getByText('Delete this automation?')).toBeTruthy()
+    // the body names the automation, then what goes and what stays
+    expect(screen.getByRole('alertdialog', { name: 'Delete this automation?' }).textContent)
+      .toContain('Job will be deleted — its triggers stop, and its versions and memory go with it.'
+        + ' Past results stay in Executions.')
+    // nothing live, so no cancellation warning
+    expect(screen.queryByText('An execution is in progress — deleting cancels it.')).toBeNull()
+
+    fireEvent.click(screen.getByText('Delete automation'))
+    finishModalAnim('Delete this automation?')
+    await waitFor(() => expect(mockedApi.deleteAutomation).toHaveBeenCalledWith('a1'))
+    expect(storeMod.useStore.getState().page).toBe('automations')
+  })
+
+  it('warns in amber when an execution is in progress', () => {
+    seed(auto({ live: ['e1'] }))
+    render(<AutomationDetail />)
+    openDelete()
+    expect(screen.getByText('An execution is in progress — deleting cancels it.')).toBeTruthy()
+  })
+})
+
+// §4.4 draft banner: a kept edit session announces itself on the detail page,
+// and Discard is the one that throws it away.
+describe('§9.2 draft banner', () => {
+  it('names the version the draft was based on', () => {
+    seed(auto({ version: 1, draft: { spec: null } }))
+    render(<AutomationDetail />)
+    expect(screen.getByText(
+      'Unsaved edit based on v1 — kept from your last edit session. '
+      + 'Resume editing to keep working on it.')).toBeTruthy()
+  })
+
+  it('Discard deletes the draft and says the version is unchanged', async () => {
+    seed(auto({ version: 1, draft: { spec: null } }))
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByText('Discard'))
+    await waitFor(() => expect(mockedApi.deleteDraft).toHaveBeenCalledWith('a1'))
+    await waitFor(() => expect(storeMod.useStore.getState().toast)
+      .toBe('Draft discarded — v1 is unchanged.'))
+  })
+
+  it('is absent without a kept draft', () => {
+    seed(auto())
+    render(<AutomationDetail />)
+    expect(screen.queryByText(/Unsaved edit based on/)).toBeNull()
+  })
+})
+
+// §9.2 PARAMETERS row plumbing: the debounce must never swallow the last
+// keystroke, and an optimistic toggle must not outlive a failed PATCH.
+describe('§9.2 PARAMETERS row writes', () => {
+  const textParam: ParamDef = {
+    name: 'subject', kind: 'text', label: 'Subject', help: 'Email subject', value: '',
+  }
+  const toggleParam: ParamDef = {
+    name: 'notify', kind: 'toggle', label: 'Notify', help: 'Send a summary', on: false,
+  }
+
+  it('unmounting before the debounce fires still saves what was typed', () => {
+    vi.useFakeTimers()
+    try {
+      const { unmount } = render(<ParamRow automationId="a1" p={textParam} last />)
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Daily digest' } })
+      expect(mockedApi.patchAutomation).not.toHaveBeenCalled()
+
+      unmount()
+      expect(mockedApi.patchAutomation).toHaveBeenCalledTimes(1)
+      expect(mockedApi.patchAutomation).toHaveBeenCalledWith(
+        'a1', { paramValues: { subject: 'Daily digest' } })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a rejected toggle PATCH rolls the switch back and toasts the reason', async () => {
+    mockedApi.patchAutomation.mockRejectedValueOnce(new Error('backend is restarting'))
+    storeMod.useStore.setState({ toast: null })
+    render(<ParamRow automationId="a1" p={toggleParam} last />)
+
+    const sw = screen.getByRole('switch')
+    fireEvent.click(sw)
+    expect(sw.getAttribute('aria-checked')).toBe('true')  // optimistic
+    await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('false'))
+    expect(storeMod.useStore.getState().toast).toBe('backend is restarting')
   })
 })

@@ -21,6 +21,7 @@ venv/
 .coverage.*
 htmlcov/
 coverage.xml
+app/coverage/
 .ruff_cache/
 *.egg-info/
 build/

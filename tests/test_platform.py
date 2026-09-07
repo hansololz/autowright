@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1186,3 +1187,133 @@ def test_health_serves_os_and_capabilities(client):
     # …and what it serves is this host's real table, not an empty echo.
     assert body["capabilities"] == EXPECTED_CAPABILITIES[plat.os_token]
     assert body["app"] == "Autowright" and body["version"]
+
+
+# ----------------------------- appended coverage: restart, stop, wedged, power
+
+def test_linux_restart_of_an_installed_unit(systemd):
+    """§3: restart is the unit verb plus the state read that proves it. A
+    systemctl that accepts the verb and leaves the unit dead is a failure."""
+    systemd.service.install()
+    out = systemd.service.restart()
+    assert out == "restarted" and service.result_code(out) == 0
+    assert _systemd_verbs(systemd.calls)[-2:] == ["restart", "is-active"]
+
+    systemd.canned["restart"] = (1, "", "Unit not found\n")
+    out = systemd.service.restart()
+    assert out == "restart failed: Unit not found"
+    assert service.result_code(out) == 1
+
+    del systemd.canned["restart"]
+    systemd.canned["is-active"] = (3, "failed\n", "")
+    out = systemd.service.restart()
+    assert out == "restart failed: the unit is enabled but did not start (state failed)"
+    assert service.result_code(out) == 1
+
+
+def test_linux_stop_reports_a_failed_verb_and_a_unit_still_running(systemd):
+    """§3: the app must not quit its UI while the backend it promised to stop
+    lives on: both the verb and the state afterwards have to agree."""
+    systemd.service.install()
+    systemd.canned["stop"] = (1, "", "Interactive authentication required\n")
+    out = systemd.service.stop()
+    assert out == "stop failed: Interactive authentication required"
+    assert service.result_code(out) == 1
+
+    del systemd.canned["stop"]
+    systemd.canned["is-active"] = (0, "active\n", "")
+    out = systemd.service.stop()
+    assert out == "stop failed: the unit is still running"
+    assert service.result_code(out) == 1
+
+
+def test_linux_status_reports_a_wedged_systemctl(systemd):
+    """§3: the state read behind `status` is time-boxed like every other call:
+    a wedged systemctl reads as a plain-word failure, never a hang."""
+    systemd.service.install()
+    systemd.canned["is-active"] = linux._TimedOut()
+    out = systemd.service.status()
+    assert out == "status failed: systemctl timed out"
+    assert service.result_code(out) == 1
+
+
+def test_linux_power_survives_a_missing_systemd_inhibit(monkeypatch):
+    """§3: a host with no `systemd-inhibit` holds nothing and says nothing:
+    the assertions are best-effort, so neither verb may raise."""
+    def missing(cmd, **kw):
+        raise FileNotFoundError("systemd-inhibit")
+
+    monkeypatch.setattr(linux.subprocess, "Popen", missing)
+    power = linux.SystemdInhibitPower()
+    power.reconcile(True)
+    assert power._proc is None
+    release = power.hold_execution()
+    release()
+    release()  # a hold that spawned nothing is still safe to release twice
+
+
+def test_windows_restart_of_a_registered_task(win_service):
+    """§3: restart stops and starts the registered task, proving each half by
+    the state Task Scheduler reports; either cmdlet failing is the failure."""
+    win_service.service.install()
+    out = win_service.service.restart()
+    assert out == "restarted" and service.result_code(out) == 0
+    assert win_service.task["state"] == "Running"
+
+    win_service.canned["Stop-ScheduledTask"] = (1, "", "Access is denied.\n")
+    out = win_service.service.restart()
+    assert out == "restart failed: Access is denied."
+    assert service.result_code(out) == 1
+
+    del win_service.canned["Stop-ScheduledTask"]
+    win_service.canned["Start-ScheduledTask"] = (1, "", "The system cannot find the file.\n")
+    out = win_service.service.restart()
+    assert out == "restart failed: The system cannot find the file."
+    assert service.result_code(out) == 1
+
+
+def test_windows_install_reports_a_failed_start(win_service):
+    win_service.canned["Start-ScheduledTask"] = (1, "", "Access is denied")
+    out = win_service.service.install()
+    assert out == "install failed: Access is denied"
+    assert service.result_code(out) == 1
+
+
+def test_windows_install_reports_a_task_that_vanished(win_service):
+    """§3: the state read can answer that no such task is registered at all.
+    A registration that silently went away is its own message, not "did not
+    start"."""
+    win_service.canned["Get-ScheduledTask"] = (
+        0, f"{windows._STATE_PREFIX}{windows._ABSENT}\n", "")
+    out = win_service.service.install()
+    assert out == "install failed: the task is gone from Task Scheduler"
+    assert service.result_code(out) == 1
+
+
+class _NoThreads:
+    """`threading` whose Thread constructor always fails; everything else is
+    the real module (conftest's `_SubprocessProxy` shape)."""
+
+    @staticmethod
+    def Thread(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+def test_windows_power_applies_inline_when_no_worker_can_start(monkeypatch):
+    """§3: with no thread to be had the assertion is applied inline rather than
+    silently dropped: the same flags, on the calling thread."""
+    calls: list[int] = []
+    monkeypatch.setattr(windows, "_set_thread_execution_state",
+                        lambda flags: (calls.append(flags), True)[1])
+    monkeypatch.setattr(windows, "threading", _NoThreads())
+    power = windows.WindowsPower()
+    power.reconcile(True)
+    assert calls == [SET_AWAKE]
+    release = power.hold_execution()
+    release()
+    assert calls == [SET_AWAKE]  # the permanent hold still stands
+    power.reconcile(False)
+    assert calls == [SET_AWAKE, CLEAR]

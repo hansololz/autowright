@@ -599,7 +599,8 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `settings.json`, `hooks/` (the guard hooks), and `skills/` (project skills, including the
   verify skill).
 - `.gitignore` — untracked-file rules (the generated `knowledge.md` / `knowledge-audit.md`
-  among them).
+  among them, and the §15 on-demand coverage output: `.coverage*` / `htmlcov/` for
+  pytest-cov and `app/coverage/` for Vitest).
 - `.gitattributes` — `*.cmd text eol=crlf`: batch files (the §15 `tests/bin/*.cmd` doubles)
   must reach a Windows checkout CRLF regardless of the clone's autocrlf setting.
 - `LICENSE` — MIT, copyright David Zhang (also `"license": "MIT"` in `app/package.json`).

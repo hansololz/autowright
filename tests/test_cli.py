@@ -6,6 +6,7 @@ No real server anywhere — the Client's request layer is faked/stubbed.
 import copy
 import io
 import json
+import os
 import re
 
 import pytest
@@ -2260,3 +2261,153 @@ def test_cmd_service_exits_nonzero_when_not_installed(monkeypatch, capsys):
         _run(None, "service", "status")
     assert ei.value.code == 1
     assert "not installed" in capsys.readouterr().out
+
+
+# ------------------------------------------- appended coverage: --json, errors
+
+JSON_SETTINGS = {"login": True, "days": 30, "keepAwake": False}
+JSON_SECRETS = [{"id": "s-1", "name": "API_TOKEN", "set": True, "usedBy": []}]
+MEMORY_FILES = [{"name": "seen.yaml", "size": 7, "updated": "Today"}]
+
+
+@pytest.mark.parametrize("argv, gets, expected", [
+    pytest.param(("automation", "param", "list", "Daily Report"), _auto_gets(),
+                 FULL_AUTO["params"], id="param-list"),
+    pytest.param(("automation", "trigger", "list", "Daily Report"), _auto_gets(),
+                 FULL_AUTO["triggers"], id="trigger-list"),
+    pytest.param(("automation", "snapshot", "list", "Daily Report"),
+                 _auto_gets(dict(FULL_AUTO, snapshots=SNAPS)), SNAPS, id="snapshot-list"),
+    pytest.param(("automation", "memory", "show", "Daily Report"),
+                 {**_auto_gets(),
+                  f"/automations/{AUTO_ID}/memory/files": {"files": MEMORY_FILES}},
+                 MEMORY_FILES, id="memory-show"),
+    pytest.param(("execution", "show"),
+                 {"/executions": {"executions": [FULL_EXEC], "total": 1},
+                  f"/executions/{FULL_EXEC['id']}": FULL_EXEC},
+                 FULL_EXEC, id="execution-show"),
+    pytest.param(("secret", "list"), {"/secrets": JSON_SECRETS},
+                 JSON_SECRETS, id="secret-list"),
+    pytest.param(("agent", "list"), {"/agents": AGENTS}, AGENTS, id="agent-list"),
+    pytest.param(("settings", "show"), {"/settings": JSON_SETTINGS},
+                 JSON_SETTINGS, id="settings-show"),
+])
+def test_read_verbs_print_only_json_with_the_flag(argv, gets, expected, capsys):
+    """§20 `--json`: a read verb prints the backend's own JSON and nothing
+    else: the whole of stdout parses, so a human row after it would fail here."""
+    _run(_RouteClient(gets), *argv, "--json")
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_cmd_automation_push_unknown_grant_agent_names_the_candidates(tmp_path):
+    """§20 grant model: --grant-agent takes a configured agent's name. An
+    unknown one exits with the list of names that would work."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, FULL_AUTO)
+    with pytest.raises(SystemExit) as ei:
+        _run(_WorkdirClient(), "automation", "push", "Daily Report", str(d),
+             "--grant-agent", "Bogus")
+    assert str(ei.value.code) == "no agent named 'Bogus' — have: Fast local"
+
+
+def test_read_workdir_missing_directory_exits(tmp_path):
+    """§20 exit-code rule: an unusable workdir is a message on stderr, never a
+    traceback."""
+    from autowright import cli
+
+    missing = tmp_path / "nope"
+    with pytest.raises(SystemExit) as ei:
+        cli.read_workdir(missing)
+    assert str(ei.value.code) == f"{missing} is not a directory"
+
+
+def test_read_workdir_non_utf8_file_exits(tmp_path):
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    d.mkdir()
+    (d / "spec.md").write_bytes(b"# Daily\n\n\xff\xfe not text\n")
+    with pytest.raises(SystemExit) as ei:
+        cli.read_workdir(d)
+    assert str(ei.value.code) == f"can't read {d / 'spec.md'}: not UTF-8 text"
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0,
+                    reason="file permissions don't block reads for this user")
+def test_read_workdir_unreadable_file_exits(tmp_path):
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    d.mkdir()
+    step = d / "01-fetch.py"
+    step.write_text("print('hi')\n")
+    step.chmod(0o000)
+    try:
+        with pytest.raises(SystemExit) as ei:
+            cli.read_workdir(d)
+    finally:
+        step.chmod(0o644)
+    assert str(ei.value.code).startswith(f"can't read {step}: ")
+
+
+def test_parse_param_value_reports_malformed_json(capsys):
+    """§20: a JSON-shaped value that doesn't parse names the shape it tried.
+    The sibling table above covers a well-formed payload of the wrong type."""
+    from autowright import cli
+
+    with pytest.raises(SystemExit) as ei:
+        cli.parse_param_value({"name": "sources", "kind": "list"}, "[1,2")
+    assert str(ei.value.code).startswith("param sources: bad JSON array — ")
+    with pytest.raises(SystemExit) as ei:
+        cli.parse_param_value({"name": "headers", "kind": "kv"}, "{")
+    assert str(ei.value.code).startswith("param headers: bad JSON object — ")
+    with pytest.raises(SystemExit) as ei:
+        cli.parse_param_value({"name": "sources", "kind": "list"}, "[1, 2]")
+    assert str(ei.value.code) == "param sources: expected a JSON array of strings"
+
+
+def test_cmd_settings_set_rejects_a_valueless_item_and_a_bad_bool():
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(), "settings", "set", "foo")
+    assert str(ei.value.code) == "expected KEY=VALUE, got 'foo'"
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(), "settings", "set", "cliEnabled=maybe")
+    assert str(ei.value.code) == "cliEnabled takes on|off, got 'maybe'"
+
+
+def test_settings_set_menu_bar_help_is_per_os(monkeypatch):
+    """§9 per-OS copy rule: the `settings set` epilog names the §13 surface the
+    way this OS does, and says the key is ignored where there is none."""
+    from autowright import cli
+
+    monkeypatch.setattr(paths, "current_os", lambda: "macos")
+    assert cli._menu_bar_icon_help() == "show the menu bar icon"
+    monkeypatch.setattr(paths, "current_os", lambda: "windows")
+    assert cli._menu_bar_icon_help() == "show the tray icon"
+    monkeypatch.setattr(paths, "current_os", lambda: "linux")
+    assert cli._menu_bar_icon_help() == \
+        "show the tray icon (Linux has no tray, so this is ignored)"
+
+
+def test_req_and_req_raw_exit_on_an_http_error(home, monkeypatch):
+    """§20: both request layers route an HTTP error through the same exit:
+    the API's detail message, no traceback."""
+    import urllib.error
+
+    from autowright import cli, paths
+
+    paths.backend_json().write_text(json.dumps({"port": 5151, "token": "tok"}))
+    c = cli.Client()
+
+    def raise_http(*_a, **_kw):
+        raise urllib.error.HTTPError(
+            "http://x", 409, "Conflict", {}, io.BytesIO(b'{"detail":"already running"}'))
+
+    monkeypatch.setattr(cli._opener, "open", raise_http)
+    with pytest.raises(SystemExit) as ei:
+        c.req("POST", "/automations/x/execute")
+    assert str(ei.value.code) == "409: already running"
+    with pytest.raises(SystemExit) as ei:
+        c.req_raw("GET", "/automations/x/export")
+    assert str(ei.value.code) == "409: already running"

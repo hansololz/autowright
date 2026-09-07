@@ -3070,3 +3070,135 @@ def test_tool_event_url_query_reads_as_a_read():
         "Reading https://news.ycombinator.com/…",
         "Searching the web for “hacker news front page html”…",
     ]
+
+
+# ---------- appended coverage: manifest error table, crash settle, job map ----------
+
+_ERROR_TABLE_STEP_FILES = {"01-a.py": 'from autowright import log\nlog("a")\n',
+                           "02-b.py": 'from autowright import log\nlog("b")\n'}
+
+_TWO_STEPS = ("steps:\n"
+              "  - { file: 01-a.py, name: A, description: d }\n"
+              "  - { file: 02-b.py, name: B, description: d }\n")
+
+
+@pytest.mark.parametrize("manifest, expected", [
+    # the yaml parser's own text follows the prefix, so only the prefix is pinned
+    ("steps: [unclosed\n", "manifest.yaml doesn't parse: "),
+    ("- a\n- b\n", "manifest.yaml must be a mapping"),
+    ("params:\n  - just a string\n" + _TWO_STEPS,
+     "param entry malformed: 'just a string'"),
+    ("packages: 3\n" + _TWO_STEPS,
+     "packages must be a list of { pip, import, why } entries"),
+    ("packages:\n  - { pip: requests }\n" + _TWO_STEPS,
+     "packages entry malformed: {'pip': 'requests'} — need "
+     "{ pip: name, import: module, why: purpose }"),
+    ("packages:\n  - { pip: pillow, import: not-a-module, why: images }\n" + _TWO_STEPS,
+     "packages: import 'not-a-module' isn't a valid module name"),
+    ("steps: []\n", "steps must be nonempty"),
+    ("steps:\n  - { file: 01-a.py, name: A, description: d, no_timeout: yes please }\n"
+     "  - { file: 02-b.py, name: B, description: d }\n",
+     "step A: no_timeout must be true"),
+    ("steps:\n  - { file: 01-a.py, name: A, description: d, infinite_retries: 3 }\n"
+     "  - { file: 02-b.py, name: B, description: d }\n",
+     "step A: infinite_retries must be true"),
+    ("triggers: 5\n" + _TWO_STEPS,
+     "triggers must be a list of trigger entries (see the Triggers section)"),
+])
+def test_manifest_validation_error_table(manifest, expected):
+    # §8 sync-call validation: every malformed manifest shape answers with its
+    # own user-visible message: the text the repair round and the §8 build
+    # diagnosis both read back.
+    _, errors = validate_steps({"manifest.yaml": manifest, **_ERROR_TABLE_STEP_FILES})
+    assert any(e.startswith(expected) for e in errors), errors
+
+
+def test_pipeline_crash_settles_the_job_failed(monkeypatch):
+    # §8/§19: a pipeline that raises anything at all still ends the job: a
+    # thread dying here would leave it building forever and the UI spinning.
+    from autowright import harness
+    from autowright.drafting import DraftJobs
+
+    def boom(agent, prompt, **kw):
+        raise RuntimeError("the harness exploded")
+
+    monkeypatch.setattr(harness, "invoke", boom)
+    j = _run_job(DraftJobs(), "chat", {"harness": "Claude Code"}, "tweak it",
+                 {"spec": "# T\n\nbody"}, GRANTS)
+    assert j["status"] == "failed", j
+    assert j["error"] == "drafting failed unexpectedly: the harness exploded"
+
+
+def test_validate_actions_yaml_and_op_shape_errors():
+    # §8 actions.yaml: the branches the shape table above doesn't reach: an
+    # unparseable block, a multi-key op entry, an edit whose trigger fields are
+    # invalid, and a remove that isn't a mapping.
+    _, errs = validate_actions("sync: [unclosed\n")
+    assert len(errs) == 1 and errs[0].startswith("actions.yaml doesn't parse as yaml: ")
+    _, errs = validate_actions(
+        "triggers:\n  - { add: { cron: '0 9 * * *' }, remove: { index: 1 } }\n", None, 2)
+    assert errs == ["actions.yaml: triggers entry "
+                    "{'add': {'cron': '0 9 * * *'}, 'remove': {'index': 1}} must be "
+                    "exactly one of add: {…}, edit: {…}, enable: {…}, remove: {…}"]
+    _, errs = validate_actions("triggers:\n  - edit: { index: 1, cron: 'not cron' }\n",
+                               None, 2)
+    assert errs == ["actions.yaml: triggers: a cron expression needs 5 fields "
+                    "(minute hour day month weekday)"]
+    _, errs = validate_actions("triggers:\n  - remove: 1\n", None, 2)
+    assert errs == ["actions.yaml: triggers remove 1 must be { index: N }"]
+
+
+def test_blocker_envelope_extra_block_and_bad_yaml_rejected():
+    # §8: a file block beside the envelope must itself be a well-formed
+    # envelope (the sibling above covers a well-formed but forbidden one), and
+    # the yaml body must parse.
+    with pytest.raises(ValueError, match="only one notes.md block"):
+        parse_blockers(BLOCKED + "===FILE: notes.md===\n- a note\n")
+    with pytest.raises(ValueError, match="doesn't parse as yaml"):
+        parse_blockers("===BLOCKED===\nblockers:\n  - reason: [unclosed\n===END===\n")
+
+
+def test_envelope_without_file_blocks_is_invalid():
+    # §8: a closed response carrying no blocks at all is not an envelope. The
+    # sync call surfaces the parse error as its round's single validation error
+    # (a chat call would read the same text as a prose answer).
+    from autowright.drafting import DraftJobs
+
+    closed = "Here is what I found.\n===END===\n"
+    with pytest.raises(ValueError, match="no ===FILE: blocks in the response"):
+        parse_envelope(closed)
+    result, errors, blockers, notes = DraftJobs._parse_validate(
+        closed, lambda files: ({}, []))
+    assert (result, blockers, notes) == ({}, None, None)
+    assert errors == ["no ===FILE: blocks in the response"]
+
+
+def test_chat_classify_malformed_blocker_envelope_is_invalid():
+    # §8: a blocker envelope that doesn't parse feeds the normal repair round
+    # like any other invalid response. The parse error is the round's error.
+    from autowright.drafting import DraftJobs
+
+    outcome, errors, kept, answer, failed = DraftJobs._chat_classify(
+        "===BLOCKED===\nblockers: [unclosed\n===END===\n")
+    assert outcome == "invalid"
+    assert len(errors) == 1
+    assert errors[0].startswith("blocker envelope doesn't parse as yaml: ")
+    assert (kept, answer, failed) == ({}, "", [])
+
+
+def test_draft_jobs_get_unknown_and_terminal_tail_trim(monkeypatch):
+    # §19: an unknown job id polls as None; terminal jobs hold full draft
+    # payloads, so start() keeps only a recent tail of them (the backstop for
+    # clients that never ack).
+    from autowright import drafting as d
+
+    jobs = d.DraftJobs()
+    assert jobs.get("never-existed") is None
+    for i in range(25):
+        jobs.jobs[f"t{i}"] = {"id": f"t{i}", "status": "done", "_cancel": False,
+                              "_proc": {}, "_owner": f"auto-{i}", "mode": "chat"}
+    monkeypatch.setattr(d.threading.Thread, "start", lambda self: None)
+    jid = jobs.start("chat", {"harness": "claude"}, "hi", None, {},
+                     owner_id="auto-new")
+    assert [k for k in jobs.jobs if k != jid] == [f"t{i}" for i in range(5, 25)]
+    assert jobs.get(jid)["status"] == "building"

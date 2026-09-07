@@ -2543,3 +2543,167 @@ def test_started_event_and_live_row_carry_the_pass_clock(store):
     done = store.exec_json(h)
     assert done["passStartedMs"] == 0
     assert done["durationMs"] == h["duration_ms"] >= 500
+
+
+def test_thread_exhaustion_fails_the_record(store, monkeypatch):
+    """§6: a launch whose engine thread can't start must not strand the record
+    `executing` with no thread. It finishes `failed` naming the thread error
+    and gives its §6 slot straight back, instead of 409ing every later firing
+    until a backend restart."""
+    import pytest
+
+    from autowright import engine as engmod
+
+    engine = engmod.Engine(store)
+    a = store.create_automation(make_version(), "Threadless", None)
+
+    class _DeadThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    real_threading = engmod.threading
+
+    class _ThreadingProxy:
+        """`threading` with Thread swapped; everything else is the real module
+        (the conftest `_SubprocessProxy` shape). The real module is captured
+        first: reading it back off `engmod` would resolve to this proxy."""
+
+        Thread = _DeadThread
+
+        def __getattr__(self, name):
+            return getattr(real_threading, name)
+
+    monkeypatch.setattr(engmod, "threading", _ThreadingProxy())
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        engine.start(a, "manual")
+    monkeypatch.setattr(engmod, "threading", real_threading)
+    h = next(iter(store.execs.values()))
+    assert h["status"] == "failed"
+    assert h["error"]["message"] == \
+        "the execution thread couldn't start: can't start new thread"
+    assert h["finished_at"]
+    assert engine.is_live(h["id"]) is False  # no live slot is held
+    assert a["_live"] == set()
+
+
+def test_start_refused_while_the_automation_is_being_deleted(store):
+    """§19 delete: an admission racing the DELETE window (the automation is
+    still registered while its live executions are cancelled and awaited) must
+    not start, or it would escape the delete's wait set and re-create the tree
+    after the rmtree."""
+    import pytest
+
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "Doomed", None)
+    a["_deleting"] = True
+    with pytest.raises(RuntimeError, match="this automation is being deleted"):
+        engine.start(a, "manual")
+    assert store.execs == {}  # nothing was even admitted
+
+
+def test_unparsable_version_label_resolves_to_no_version(store):
+    """§19: a `version` body field that is neither "draft", empty, nor v<n>
+    parses to a version no automation has, so the caller's `_resolve_version`
+    miss answers the 404."""
+    from autowright.engine import Engine
+
+    a = store.create_automation(make_version(), "Labeller", None)
+    assert Engine._parse_version_label(a, "vbanana") == ("version", -1)
+
+
+def test_retry_refused_while_the_execution_is_live(store):
+    """§7: a retry of an execution that is still running is refused. With a
+    free §6 slot (maxParallel 2) it is the live check alone that answers, not
+    the capacity one."""
+    import pytest
+
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [{"file": "01-slow.py", "name": "Slow", "description": "",
+                     "code": "import time\ntime.sleep(30)\n"}]
+    a = store.create_automation(ver, "LiveRetry", None)
+    a["max_parallel"] = 2
+    h = engine.start(a, "manual")
+    try:
+        assert engine.at_capacity(a) is False
+        with pytest.raises(RuntimeError, match="already executing"):
+            engine.retry(a, h)
+    finally:
+        engine.cancel(h["id"])
+        wait_done(engine, h["id"])
+
+
+def test_retry_refused_when_the_full_record_is_gone(store):
+    """§7: a retry whose record no longer exists (a retention sweep between the
+    header read and the retry) surfaces a LookupError, which the §19 layer turns
+    that into a 404."""
+    import pytest
+
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"][0]["code"] = 'raise RuntimeError("boom")\n'
+    a = store.create_automation(ver, "GoneRecord", None)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "failed"
+    store.execs.pop(h["id"])
+    with pytest.raises(LookupError, match="execution not found"):
+        engine.retry(a, h)
+
+
+def test_param_kind_mismatch_warns_in_the_execution_logs(store):
+    """§5 param matching: a stored value that doesn't match its param's kind
+    falls back to the default, and the execution logs carry the `wrn` line
+    saying so."""
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "Mismatched", None)
+    a["param_values"] = {"count": "three"}  # `count` is a number param
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "succeeded"
+    logs = read_all_logs(store, h["id"])
+    assert any(l["kind"] == "wrn" and l["text"] ==
+               'parameter "count": stored value doesn\'t match kind number '
+               "— using the default"
+               for l in logs)
+    assert any(l["text"] == "hello x3" for l in logs)  # the declared default, not "three"
+
+
+def test_orphan_group_kill_signals_a_matching_group(monkeypatch):
+    """§3 startup recovery: a persisted pgid whose group still holds the marker
+    process IS killed: the step group by `autowright.executor`, a §4.5 agent
+    group by its harness binary."""
+    from autowright import engine as engmod
+
+    killed = []
+
+    class _Recorder:
+        def __init__(self):
+            self.asked = []
+
+        def group_has_command(self, pgid, marker):
+            self.asked.append((pgid, marker))
+            return True
+
+        def kill_group(self, pgid):
+            killed.append(pgid)
+
+    recorder = _Recorder()
+    monkeypatch.setattr(engmod, "_processes", lambda: recorder)
+    engmod.kill_orphan_group(4242)
+    assert killed == [4242]
+    assert recorder.asked == [(4242, "autowright.executor")]
+    engmod.kill_orphan_agent_group(777)
+    assert killed == [4242, 777]
+    assert recorder.asked[-1] == (777, "claude")  # the first harness marker matched

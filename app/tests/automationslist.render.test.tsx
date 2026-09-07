@@ -16,12 +16,17 @@ vi.mock('../src/api', () => ({
     triggersPreview: vi.fn(async () => ({ triggers: [] })),
     importFromUrl: vi.fn(() => Promise.reject(new Error('offline'))),
     importConfirm: vi.fn(() => Promise.reject(new Error('offline'))),
+    // §9.1 execute-from-card, and the §4.4 start-fresh discard pair
+    executeNow: vi.fn(async () => ({ executionId: 'e-new', queued: false })),
+    deleteDraft: vi.fn(async () => ({})),
+    putChat: vi.fn(async () => ({})),
   },
 }))
 
 let storeMod: typeof import('../src/store')
 let mockedApi: Record<string, ReturnType<typeof vi.fn>>
 let AutomationsList: typeof import('../src/pages/AutomationsList').default
+let executingToast: typeof import('../src/ui').executingToast
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -31,6 +36,7 @@ beforeAll(async () => {
   storeMod = await import('../src/store')
   mockedApi = (await import('../src/api')).api as unknown as Record<string, ReturnType<typeof vi.fn>>
   AutomationsList = (await import('../src/pages/AutomationsList')).default
+  executingToast = (await import('../src/ui')).executingToast
 })
 
 const auto = (over: Partial<Automation> = {}): Automation => ({
@@ -47,6 +53,13 @@ const seed = (autos: Automation[]) =>
   storeMod.useStore.setState({ page: 'automations', automations: autos, draftJobs: [], pendingDraft: null })
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+// ConfirmModal acts on onClose, which fires only after the overlay's exit
+// animation. happy-dom runs no animations, so end it by hand.
+const finishModalAnim = (name: string) => {
+  const dlg = screen.getByRole('alertdialog', { name })
+  fireEvent.animationEnd(dlg.parentElement!)
+}
 
 const preview = (over: Partial<ImportPreview> = {}): ImportPreview => ({
   name: 'Shared job', landsAs: 'Shared job', description: '', steps: [], params: [],
@@ -250,5 +263,103 @@ describe('§5.1/§9.1 import summary sections', () => {
     expect(screen.queryByText('NEEDS ATTENTION')).toBeNull()
     expect(screen.queryByText('Needs setup')).toBeNull()
     expect(screen.getByText('2 packages are installing in the background.')).toBeTruthy()
+  })
+})
+
+// §4.4/§9.1 start fresh: with a kept pending draft, New automation confirms
+// first, and the discard is the one that deletes the chat thread too.
+describe('§9.1 start fresh', () => {
+  it('names the kept draft, then deletes both the slot and its thread', async () => {
+    seed([])
+    storeMod.useStore.setState({ pendingDraft: { name: 'Weekly report', updatedAt: null } })
+    render(<AutomationsList />)
+
+    fireEvent.click(screen.getByText('New automation'))
+    expect(screen.getByText(
+      'Your unsaved draft “Weekly report” will be discarded. This can\'t be undone.')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('Discard and start new'))
+    finishModalAnim('Start a new automation?')
+    await waitFor(() => expect(mockedApi.putChat).toHaveBeenCalledWith('pending', []))
+    expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending')
+    expect(storeMod.useStore.getState().surface).toBe('create')
+  })
+
+  it('starts the create flow straight away when there is no kept draft', () => {
+    seed([])
+    render(<AutomationsList />)
+    fireEvent.click(screen.getByText('New automation'))
+    expect(screen.queryByText('Start a new automation?')).toBeNull()
+    expect(storeMod.useStore.getState().surface).toBe('create')
+  })
+})
+
+// §9.1/§19 drafting note: a building or held job on the card's own draft
+// container is never invisible: faint text, never a spinner.
+describe('§9.1 drafting note', () => {
+  it('a building job reads as work in flight', () => {
+    seed([auto()])
+    storeMod.useStore.setState({
+      draftJobs: [{ owner: 'a1', jobId: 'j1', status: 'building', mode: 'chat' }],
+    })
+    render(<AutomationsList />)
+    expect(screen.getByText('Your AI is drafting…')).toBeTruthy()
+  })
+
+  it('a held job invites the user back into the draft', () => {
+    seed([auto()])
+    storeMod.useStore.setState({
+      draftJobs: [{ owner: 'a1', jobId: 'j1', status: 'held', mode: 'chat' }],
+    })
+    render(<AutomationsList />)
+    expect(screen.getByText('Your AI finished — reopen the draft to review.')).toBeTruthy()
+  })
+
+  it('no job on this automation leaves the card without a note', () => {
+    seed([auto()])
+    storeMod.useStore.setState({
+      draftJobs: [{ owner: 'other', jobId: 'j1', status: 'building', mode: 'chat' }],
+    })
+    render(<AutomationsList />)
+    expect(screen.queryByText('Your AI is drafting…')).toBeNull()
+  })
+
+  it('the pending slot\'s own job offers Resume draft with no kept draft', () => {
+    seed([])
+    storeMod.useStore.setState({
+      pendingDraft: null,
+      draftJobs: [{ owner: 'pending', jobId: 'j1', status: 'building', mode: 'chat' }],
+    })
+    render(<AutomationsList />)
+    expect(screen.getByText('Resume draft')).toBeTruthy()
+  })
+})
+
+// §9.1 execute from the card: a §6 capacity refusal reads as the shared busy
+// toast, every other failure as its own message.
+describe('§9.1 execute from the card', () => {
+  const clickExecute = () => fireEvent.click(screen.getByRole('button', { name: 'Execute now' }))
+
+  it('a 409 reads as the §6 capacity toast for this automation', async () => {
+    mockedApi.executeNow.mockRejectedValueOnce(
+      Object.assign(new Error('busy'), { status: 409 }))
+    seed([auto({ maxParallel: 2, maxQueued: 3 })])
+    storeMod.useStore.setState({ toast: null })
+    render(<AutomationsList />)
+
+    clickExecute()
+    await waitFor(() =>
+      expect(storeMod.useStore.getState().toast).toBe(executingToast(2, 3)))
+  })
+
+  it('any other failure toasts its own message', async () => {
+    mockedApi.executeNow.mockRejectedValueOnce(new Error('backend is restarting'))
+    seed([auto()])
+    storeMod.useStore.setState({ toast: null })
+    render(<AutomationsList />)
+
+    clickExecute()
+    await waitFor(() =>
+      expect(storeMod.useStore.getState().toast).toBe('backend is restarting'))
   })
 })

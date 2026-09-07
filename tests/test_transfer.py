@@ -233,6 +233,35 @@ def test_export_layout_and_numeric_refs(store):
         assert gid not in raw
 
 
+def test_export_round_trips_packages_and_notes(store):
+    """§5.1: the §6.2 package declarations (version-level and per-step) and the
+    §4.1 notes doc travel - both ride the archive as their own members and come
+    back unchanged on a re-import."""
+    ver = {"description": "", "params": [],
+           "packages": [{"pip": "pandas", "import": "pandas", "why": "builds the table"}],
+           "steps": [{"name": "Only", "description": "", "code": "print('x')\n",
+                      "packages": [{"import": "pandas", "why": "the frame"}]}],
+           "spec": [{"kind": "h1", "text": "T"}], "instructions": "",
+           "notes": "The feed drops the last row on Sundays."}
+    a = store.create_automation(ver, name="Packaged", agent_id=None, triggers=[])
+    data = transfer.export_automation(store, a)
+    z = zipfile.ZipFile(io.BytesIO(data))
+    assert "automation/notes.md" in z.namelist()
+    assert z.read("automation/notes.md").decode() == \
+        "The feed drops the last row on Sundays.\n"
+    meta = yaml.safe_load(z.read("automation/automation.yaml"))
+    assert meta["packages"] == [{"pip": "pandas", "import": "pandas",
+                                 "why": "builds the table"}]
+    assert meta["steps"][0]["packages"] == [{"import": "pandas", "why": "the frame"}]
+
+    b, _ = transfer.import_automation(store, data)
+    landed = b["versions"][1]
+    assert landed["packages"] == [{"pip": "pandas", "import": "pandas",
+                                   "why": "builds the table"}]
+    assert landed["steps"][0]["packages"] == [{"import": "pandas", "why": "the frame"}]
+    assert landed["notes"] == "The feed drops the last row on Sundays."
+
+
 def test_export_without_values(store):
     a = _build(store)
     z = zipfile.ZipFile(io.BytesIO(transfer.export_automation(store, a, include_values=False)))
@@ -321,6 +350,26 @@ def test_export_rejects_dangling_reference_but_allows_odd_agent_names(store):
     b = store.create_automation(ver2, name="Dangler", agent_id=None, triggers=[])
     with pytest.raises(transfer.TransferError, match="references a secret that no longer exists"):
         transfer.export_automation(store, b)
+
+
+def test_export_rejects_a_dangling_agent_reference(store):
+    """§5.1: the agent twin of the dangling-secret reject - a step grant naming
+    an id no stored record holds has nothing to carry, so it must be repaired
+    before the automation can travel."""
+    coder = _agent("Coder")
+    _put_agents(store, [coder])
+    gone = new_id()
+    ver = {"description": "", "params": [], "packages": [],
+           "steps": [{"name": "Only", "description": "", "code": "print('x')\n",
+                      "agent": True, "why": "w",
+                      "agents": [{"id": coder["id"]}, {"id": gone}]}],
+           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+    a = store.create_automation(ver, name="Dangling Agent", agent_id=coder["id"],
+                                triggers=[])
+    with pytest.raises(transfer.TransferError) as ei:
+        transfer.export_automation(store, a)
+    assert str(ei.value) == (f"step 'Only' references an agent that no longer exists "
+                             f"({gone[:8]}…) — repair it before exporting")
 
 
 def test_export_rejects_subscripts_that_are_not_stored_ids(store):
@@ -475,6 +524,35 @@ def test_import_rejects_duplicate_refs_per_kind(store):
         transfer.import_automation(store, _archive(agents=[{"name": "Coder",
                                                             "harness": "Claude Code"}]))
     assert store.autos == {}
+
+
+def test_import_reads_yaml_integer_refs_as_their_string_form(store):
+    """§5.1: a ref is a decimal string, and a hand-written archive's unquoted
+    YAML integer reads as exactly that string - the manifest's authoring agent,
+    a step grant's `ref`, and a Discord trigger's `secret` all bind what the
+    quoted form binds. A boolean is not a number: it stays malformed."""
+    sids = _put_secrets(store, ("BOT_TOKEN", "discord bot"))
+    gids = _put_agents(store, [_agent("Coder")])
+
+    def data(agent_ref, grant_ref, trigger_secret):
+        return _archive(
+            name="Numeric", agent=agent_ref,
+            agents=[_ag("1", "Coder")], secrets=[_sec("1", "BOT_TOKEN")],
+            triggers=[{"kind": "discord", "channel": "42", "secret": trigger_secret}],
+            steps=[{"file": "01-a.py", "name": "A", "description": "", "agent": True,
+                    "why": "w", "agents": [{"ref": grant_ref}], "code": "print('a')\n"}])
+
+    def bound(a):
+        return (a["agent_id"], a["versions"][1]["steps"][0]["agents"],
+                [t["secret"] for t in a["triggers"] if t["kind"] == "discord"])
+
+    quoted, _ = transfer.import_automation(store, data("1", "1", "1"))
+    numeric, _ = transfer.import_automation(store, data(1, 1, 1))
+    assert bound(numeric) == bound(quoted) == (
+        gids["Coder"], [{"id": gids["Coder"]}], [sids["BOT_TOKEN"]])
+
+    with pytest.raises(transfer.TransferError, match="every entry needs a numbered ref"):
+        transfer.import_automation(store, _archive(agents=[_ag(True, "Coder")]))
 
 
 def test_import_accepts_duplicate_archive_agent_names(store):
@@ -1016,6 +1094,40 @@ def test_step_limits_retry_pair_and_handle_normalization(store, monkeypatch, tmp
     assert b["triggers"][0]["from"] == "+15551234567"
 
 
+@pytest.mark.parametrize("match,step", [
+    (r"step '01-a\.py' isn't valid Python \(line 2\): invalid syntax",
+     {"file": "01-a.py", "name": "A", "description": "", "code": "x = 1\ndef (\n"}),
+    (r"step '01-a\.py' secrets must be a list",
+     {"file": "01-a.py", "name": "A", "description": "", "secrets": "x",
+      "code": "print('a')\n"}),
+    ("invalid step timeout: 0",
+     {"file": "01-a.py", "name": "A", "description": "", "timeout": 0,
+      "code": "print('a')\n"}),
+])
+def test_import_rejects_malformed_step_shapes(store, match, step):
+    """§5.1: every malformed step shape is rejected before anything is written -
+    broken code names the line the app's own save path would name, a scalar
+    where a list belongs answers 422 instead of iterating into a TypeError 500,
+    and a step limit outside the §8 bounds never lands."""
+    with pytest.raises(transfer.TransferError, match=match):
+        transfer.import_automation(store, _archive(steps=[step]))
+    assert store.autos == {}
+    assert list(paths.automations_dir().iterdir()) == []
+
+
+def test_import_rejects_malformed_agents_and_secrets_members(store):
+    """§5.1: agents.yaml / secrets.yaml shapes validate up front - a scalar
+    where the entry list belongs, and a mode no agent record can hold."""
+    base = _archive()
+    with pytest.raises(transfer.TransferError, match="agents.yaml agents must be a list"):
+        transfer.import_automation(store, _rezip(
+            base, lambda nm, b: (yaml.safe_dump({"agents": "x"}).encode()
+                                 if nm == "agents.yaml" else None)))
+    with pytest.raises(transfer.TransferError, match="invalid agent mode 'wizard'"):
+        transfer.import_automation(store, _archive(agents=[_ag("1", "Coder", mode="wizard")]))
+    assert store.autos == {}
+
+
 def test_import_rejects_out_of_bounds_step_limits(store):
     """§5.1: imported steps obey the §8 bounds - retries 1-10, timeout never
     with no_timeout, retries never with infinite_retries. An archive can't land
@@ -1496,6 +1608,22 @@ def test_github_api_error_mapping(monkeypatch):
                         urlopen_for(urllib.error.URLError("no route to host")))
     with pytest.raises(transfer.TransferError, match="couldn't reach GitHub"):
         transfer._github_api("/repos/a/b/releases/latest")
+
+
+def test_github_unreadable_answer_and_release_without_an_asset(monkeypatch):
+    """§5.2: the two GitHub answers that are neither an error code nor a usable
+    archive - a captive portal serving HTML where the API's JSON belongs, and a
+    real release carrying no .autowright asset."""
+    monkeypatch.setattr(transfer.urllib.request, "urlopen",
+                        lambda req, timeout: _FakeResp(b"<html>sign in</html>"))
+    with pytest.raises(transfer.TransferError, match="GitHub's answer wasn't readable"):
+        transfer._github_api("/repos/alice/watcher/releases/latest")
+
+    monkeypatch.setattr(transfer, "_github_api", lambda path: {"assets": [
+        {"name": "notes.zip", "browser_download_url": "https://x/zip"}]})
+    with pytest.raises(transfer.TransferError,
+                       match=r"release 'v2' of alice/watcher has no \.autowright asset"):
+        transfer.resolve_url("https://github.com/alice/watcher/releases/tag/v2")
 
 
 def test_safe_filename_rules():

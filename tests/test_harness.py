@@ -992,6 +992,64 @@ def test_claude_stream_line_parse_table():
     assert parse(json.dumps({"type": "result", "result": {"nested": 1}})) == (None, None, [])
 
 
+def test_invoke_aborts_a_child_that_floods_stdout(monkeypatch, tmp_path, home):
+    # §8 stream cap: the idle window never fires on a call that keeps
+    # streaming, so a harness stuck in a tool loop is ended by the cap instead
+    # of pushing its whole output through backend memory and every log sink.
+    from autowright import harness
+
+    script = fake_cli(tmp_path,
+                       "for _ in range(50):\n"
+                       "    print('x' * 100, flush=True)\n")
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    monkeypatch.setattr(harness, "STDOUT_CAP_CHARS", 200)
+    with pytest.raises(harness.HarnessError) as ei:
+        harness.invoke({"harness": "Claude Code"}, PROMPT)
+    msg = str(ei.value)
+    assert msg.startswith("Claude Code produced over ")
+    assert msg.endswith(" MB of output — aborting")
+    assert ei.value.retryable is False
+
+
+def test_windows_prompt_is_piped_to_a_real_child(monkeypatch, tmp_path, home):
+    # §8 per-OS prompt delivery: on Windows the prompt never reaches argv: a
+    # writer thread pipes it to the child's stdin and closes the pipe at EOF.
+    # The fake CLI answers only after reading stdin, so a parsed reply is the
+    # proof that both halves happened.
+    from autowright import harness, paths
+    from autowright import platform as platmod
+
+    platmod.current()  # cache the HOST platform: the §2 spawn policy is the host's
+    monkeypatch.setattr(paths, "current_os", lambda: "windows")
+    real_popen = harness.subprocess.Popen
+    captured = {}
+
+    def spy_popen(cmd, **kw):
+        captured["cmd"] = cmd
+        return real_popen(cmd, **kw)
+
+    monkeypatch.setattr(harness.subprocess, "Popen", spy_popen)
+    assert harness.invoke({"harness": "Claude Code"}, PROMPT) == "Mock answer: nothing new."
+    assert PROMPT not in captured["cmd"], "Windows: the prompt must never reach argv (§8)"
+    assert "--" not in captured["cmd"], "the `--` separator goes with the positional prompt"
+    assert "-p" in captured["cmd"]
+
+
+def test_invoke_rejects_an_unknown_harness_and_a_missing_binary(monkeypatch, home):
+    # §8: both pre-spawn refusals name the problem exactly: an unrecognized
+    # harness by its name, a missing CLI by the §9 per-OS machine noun.
+    from autowright import harness, paths
+
+    with pytest.raises(harness.HarnessError) as ei:
+        harness.invoke({"harness": "Nope"}, PROMPT)
+    assert str(ei.value) == "unknown harness: Nope"
+
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: None)
+    with pytest.raises(harness.HarnessError) as ei:
+        harness.invoke({"harness": "Claude Code"}, PROMPT)
+    assert str(ei.value) == f"claude is not installed on this {paths.machine_noun()}"
+
+
 # ---------- §19 per-provider sign-in rules ----------
 
 def test_signed_in_gemini_rules(monkeypatch, tmp_path):
@@ -1182,6 +1240,38 @@ def test_ollama_bin_prefers_path_resolution(monkeypatch, tmp_path):
     fake.chmod(0o755)
     monkeypatch.setattr(harness, "resolve_bin", lambda b: str(fake))
     assert harness.ollama_bin() == str(fake)  # PATH hit wins; no bundle probe
+
+
+def test_status_check_kills_a_wedged_child_and_reads_signed_out(monkeypatch, tmp_path,
+                                                                home):
+    # §19: a sign-in probe whose CLI never answers is killed at the status
+    # timeout and reads signed out. The child has its own session, so the
+    # kill reaches a grandchild holding stdout too.
+    from autowright import harness
+
+    script = fake_cli(tmp_path, "import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    t0 = time.monotonic()
+    assert harness.signed_in("claude") is False
+    assert time.monotonic() - t0 < 40  # the group kill worked, no 60 s wait
+
+
+def test_signed_in_codex_asks_login_status_and_unknown_providers_are_signed_out(
+        monkeypatch, tmp_path, home):
+    # §19: the Codex probe shells out to `codex login status` and reads only
+    # the exit code; a provider the app has no rule for is always signed out.
+    from autowright import harness
+
+    argv_log = tmp_path / "argv.txt"
+    script = fake_cli(tmp_path,
+                       "import sys\n"
+                       f"open({str(argv_log)!r}, 'w', encoding='utf-8')"
+                       ".write(' '.join(sys.argv[1:]))\n",
+                       name="codex")
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    assert harness.signed_in("codex") is True
+    assert argv_log.read_text(encoding="utf-8") == "login status"
+    assert harness.signed_in("nope") is False
 
 
 # ---------- §8 per-harness handlers (Live progress) ----------
@@ -1470,6 +1560,23 @@ def test_scratch_dir_is_removed_when_the_call_fails(monkeypatch, tmp_path, home)
     with pytest.raises(harness.HarnessError, match="boom"):
         harness.invoke({"harness": "OpenCode"}, PROMPT, web=True)
     assert list(paths.harness_scratch("opencode").iterdir()) == []
+
+
+def test_scratch_dir_is_removed_when_the_spawn_fails(monkeypatch, home):
+    # §8: the main cleanup only starts after the spawn, so a Popen that raises
+    # must take the per-call scratch dir with it instead of leaving it for the
+    # next startup sweep.
+    from autowright import harness, paths
+
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: "/usr/local/bin/codex")
+
+    def boom(cmd, **kw):
+        raise OSError("no processes left")
+
+    monkeypatch.setattr(harness.subprocess, "Popen", boom)
+    with pytest.raises(OSError, match="no processes left"):
+        harness.invoke({"harness": "Codex"}, PROMPT, web=True)
+    assert list(paths.harness_scratch("codex").iterdir()) == []
 
 
 def test_runtime_call_writes_no_scratch_and_keeps_the_read_only_sandbox(

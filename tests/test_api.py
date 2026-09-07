@@ -4314,3 +4314,264 @@ def test_request_log_write_runs_off_the_event_loop(client, devmode, monkeypatch)
     monkeypatch.setattr(api.reqlog, "write_http", spy)
     assert client.get("/state").status_code == 200
     assert on_loop == [False]
+
+
+# ---------- §19 endpoint guards: readiness, data path, import spool, repair ----------
+
+def test_agent_check_endpoint(client, monkeypatch):
+    """§19 POST /agents/{id}/check: the §4.7 readiness probe for a stored agent
+    record. An id nothing is stored under is a 404."""
+    from autowright import harness
+
+    monkeypatch.setattr(harness, "check_ready",
+                        lambda name, model=None, mode="default": True)
+    assert client.post("/agents/mock/check").json() == {"status": "ready"}
+    monkeypatch.setattr(harness, "check_ready",
+                        lambda name, model=None, mode="default": False)
+    assert client.post("/agents/mock/check").json() == {"status": "needs-setup"}
+    r = client.post("/agents/nope/check")
+    assert r.status_code == 404 and r.json()["detail"] == "agent not found"
+
+
+def test_data_path_guards_refuse_before_creating_anything(client, tmp_path):
+    """§19 POST /settings/data-path: the refusals. A blank path, a live
+    execution (checked before any mkdir, so a refused request leaves no stray
+    executions/ dir in the folder the user picked), a target that can't be
+    created, and one that can't be listed."""
+    from pathlib import Path
+
+    from autowright.storage import store
+
+    r = client.post("/settings/data-path", json={"path": "   "})
+    assert r.status_code == 422 and r.json()["detail"] == "path required"
+
+    a = store.create_automation(make_version(), "Busy", "mock")
+    h = store.create_execution(a, "version", 1, "manual", [])  # status: executing
+    target = tmp_path / "while-live"
+    r = client.post("/settings/data-path", json={"path": str(target)})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "an execution is in progress — try again when it finishes"
+    assert not target.exists()  # nothing was created on the way to the refusal
+    h["status"] = "succeeded"
+    store.update_execution(h)
+    a["_live"].discard(h["id"])
+
+    a_file = tmp_path / "notadir"
+    a_file.write_text("a file, not a folder")
+    r = client.post("/settings/data-path", json={"path": str(a_file)})
+    assert r.status_code == 422
+    assert r.json()["detail"].startswith("can't create that directory: ")
+
+    def unlistable(self):
+        raise OSError(13, "Permission denied")
+
+    # Scoped, so the rest of the test reads a working filesystem again.
+    with pytest.MonkeyPatch.context() as scoped:
+        scoped.setattr(Path, "iterdir", unlistable)
+        r = client.post("/settings/data-path", json={"path": str(tmp_path / "unreadable")})
+    assert r.status_code == 422
+    assert r.json()["detail"].startswith("can't read that directory: ")
+    assert store.settings.get("dataPath") in (None, str(store.executions_dir()))
+
+
+def _exportable_archive(client):
+    """§5.1 bytes of a real export, the input every import route takes."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Spooled", "mock")
+    return client.get(f"/automations/{a['id']}/export").content
+
+
+_ARCHIVE_HEADERS = {"Content-Type": "application/octet-stream"}
+
+
+def test_import_preview_rejects_an_oversized_body(client, monkeypatch):
+    """§5.2: the cap is applied while the body streams in, so an oversized
+    upload can never balloon RAM before the importer sees it."""
+    from autowright import api, transfer
+
+    data = _exportable_archive(client)
+    monkeypatch.setattr(transfer, "MAX_ARCHIVE_BYTES", len(data) - 1)
+    r = client.post("/automations/import/preview", content=data, headers=_ARCHIVE_HEADERS)
+    assert r.status_code == 413
+    assert r.json()["detail"] == "the archive is larger than the 64 MB import limit"
+    assert not api._import_parked
+
+
+def test_import_preview_507_when_the_spool_write_fails(client):
+    """§5.2: a spool file that can't be written answers 507, and the
+    half-written file never survives."""
+    from pathlib import Path
+
+    from autowright import api, paths
+
+    data = _exportable_archive(client)
+    real_write = Path.write_bytes
+
+    def failing(self, payload):
+        if self.parent == paths.import_spool_dir():
+            raise OSError(28, "No space left on device")
+        return real_write(self, payload)
+
+    # Scoped, so the rest of the test reads a working filesystem again.
+    with pytest.MonkeyPatch.context() as scoped:
+        scoped.setattr(Path, "write_bytes", failing)
+        r = client.post("/automations/import/preview", content=data, headers=_ARCHIVE_HEADERS)
+    assert r.status_code == 507
+    assert r.json()["detail"] == "couldn't hold the archive for review: No space left on device"
+    assert not api._import_parked
+    assert not list(paths.import_spool_dir().glob("*"))
+
+
+def test_import_confirm_404_when_the_spool_file_vanished(client):
+    """§5.2: an outside cleanup can take the spool file out from under a live
+    token. The token can never land anything now, so confirm answers like an
+    expired one rather than 500ing on the read."""
+    from autowright import api
+
+    data = _exportable_archive(client)
+    token = client.post("/automations/import/preview", content=data,
+                        headers=_ARCHIVE_HEADERS).json()["token"]
+    api._import_parked[token][1].unlink()
+
+    r = client.post("/automations/import/confirm", json={"token": token})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "the import preview expired — fetch it again"
+    assert token not in api._import_parked  # spent either way
+
+
+def test_import_preview_evicts_the_oldest_parked_slot(client):
+    """§5.2: the parking lot is bounded. One preview past the slot limit drops
+    the oldest token and its spool file."""
+    from autowright import api
+
+    data = _exportable_archive(client)
+
+    def park():
+        r = client.post("/automations/import/preview", content=data,
+                        headers=_ARCHIVE_HEADERS)
+        assert r.status_code == 200
+        return r.json()["token"]
+
+    tokens = [park() for _ in range(api._IMPORT_SLOTS + 1)]
+    assert tokens[0] not in api._import_parked
+    assert set(api._import_parked) == set(tokens[1:])
+    assert client.post("/automations/import/confirm",
+                       json={"token": tokens[0]}).status_code == 404
+
+
+_ROUTE_GUARDS = [
+    ("post", "/automations", {"draft": {"steps": []}}, 422, "draft has no steps"),
+    ("post", "/automations/{automation}/versions", {"draft": {"steps": []}},
+     422, "draft has no steps"),
+    ("post", "/tests", {"draft": {"steps": []}}, 422, "draft with steps required"),
+    ("post", "/automations/import/url", {"url": "   "}, 422, "no URL given"),
+    ("post", "/automations/{automation}/execute", {"version": "v99"},
+     404, "version v99 not found"),
+    ("get", "/drafts/nope", None, 404, "job not found"),
+    ("get", "/executions/nope", None, 404, "execution not found"),
+    ("get", "/executions/nope/logs", None, 404, "execution not found"),
+    ("get", "/executions/nope/result/result.md", None, 404, "execution not found"),
+    ("get", "/executions/{execution}/logs?step=0", None,
+     422, "step and attempt go together — send both or neither"),
+]
+
+
+@pytest.mark.parametrize("method,path,body,status,detail", _ROUTE_GUARDS,
+                         ids=[f"{m}-{p}" for m, p, _, _, _ in _ROUTE_GUARDS])
+def test_route_guards_answer_their_own_line(client, method, path, body, status, detail):
+    """§19: each of these guards is the endpoint's own refusal, so a client
+    gets the status it branches on plus the line it shows."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Guarded", "mock")
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(h)
+    url = path.format(automation=a["id"], execution=h["id"])
+    r = client.get(url) if method == "get" else client.post(url, json=body)
+    assert r.status_code == status
+    assert r.json()["detail"] == detail
+
+
+def test_repair_skips_finished_and_engine_owned_records(client, monkeypatch):
+    """§3: the startup repair only reaches queued and executing records, and
+    an executing one an engine thread still owns is left alone. Only once the
+    thread is gone does the record become interrupted."""
+    from autowright import api
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Owned", "mock")
+    done = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(done)
+    live = store.create_execution(a, "version", 1, "manual", [])  # status: executing
+
+    monkeypatch.setattr(api.engine, "is_live", lambda execution_id: True)
+    api._repair_stale_executing()
+    assert store.execs[done["id"]]["status"] == "succeeded"
+    assert store.execs[live["id"]]["status"] == "executing"
+
+    monkeypatch.setattr(api.engine, "is_live", lambda execution_id: False)
+    api._repair_stale_executing()
+    assert store.execs[done["id"]]["status"] == "succeeded"
+    assert store.execs[live["id"]]["status"] == "interrupted"
+
+
+def test_memory_operations_409_when_the_automation_goes_live_mid_stage(client):
+    """§6.3: the copies stage outside store.lock, so every commit re-checks
+    `_live`. A stage that raced an execution is discarded, never committed,
+    and clear/snapshot/restore each answer the same 409."""
+    from autowright.storage import store
+
+    auto = client.post("/automations", json={"draft": _echo_draft()}).json()
+    a = store.autos[auto["id"]]
+    (store.auto_dir(a) / "memory" / "seen.yaml").write_text("v: 1\n")
+    base = f"/automations/{auto['id']}/memory/snapshots"
+    snap = client.post(base, json={}).json()["snapshot"]
+
+    real_stage = store.stage_snapshot
+
+    def racing(automation, reason):
+        staged = real_stage(automation, reason)
+        automation["_live"] = {"racer"}  # a trigger fired while the copy ran
+        return staged
+
+    # Scoped, so the empty-memory case below stages for real.
+    try:
+        with pytest.MonkeyPatch.context() as scoped:
+            scoped.setattr(store, "stage_snapshot", racing)
+            for url in (f"/automations/{auto['id']}/memory/clear", base,
+                        f"{base}/{snap['id']}/restore"):
+                a["_live"] = set()  # every call starts past the route's own pre-check
+                r = client.post(url, json={})
+                assert r.status_code == 409, url
+                assert r.json()["detail"] == "an execution is in progress"
+    finally:
+        a["_live"] = set()
+
+    assert [s["id"] for s in store.list_snapshots(a)] == [snap["id"]]  # nothing committed
+    assert not list(store.auto_dir(a).glob(f"{store.SNAPSHOT_STAGE_PREFIX}*"))
+    assert (store.auto_dir(a) / "memory" / "seen.yaml").exists()  # the clear never ran
+
+    store.clear_memory(a)
+    r = client.post(base, json={})
+    assert r.status_code == 422 and r.json()["detail"] == "memory is empty"
+
+
+def test_patch_agent_rejects_unknown_harness_and_modeless_custom(client):
+    """§4.7/§19: a PATCH can't create a shape POST rejects, and a refused
+    patch stores nothing."""
+    from autowright.storage import store
+
+    r = client.patch("/agents/mock", json={"harness": "GPT-5"})
+    assert r.status_code == 422 and r.json()["detail"] == "unknown harness"
+    r = client.patch("/agents/mock", json={"mode": "custom"})
+    assert r.status_code == 422 and r.json()["detail"] == "custom-model mode needs a model"
+    assert store.agents[0]["harness"] == "Claude Code"
+    assert store.agents[0]["mode"] == "default" and store.agents[0]["model"] is None
+
+
+def test_ollama_login_answers_409_because_it_needs_no_account(client):
+    """§19 sign-in help is only for account-backed providers. A local Ollama
+    has no account to sign in to."""
+    r = client.post("/agents/login", json={"id": "ollama"})
+    assert r.status_code == 409 and r.json()["detail"] == "Ollama needs no sign-in"
