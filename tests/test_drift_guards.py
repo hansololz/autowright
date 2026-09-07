@@ -470,3 +470,15 @@ def test_macos_interpreter_signs_with_the_library_validation_exception():
         "the Python-tree executable signing step must apply the interpreter entitlement")
     assert "ctypes.CDLL" in src and "codesign --force -s - \"$PROBE\"" in src, (
         "the post-sign ad-hoc probe is gone; a dropped entitlement would ship unnoticed")
+    # §3 native-wheel probe: the signed interpreter's pip installs a real numpy
+    # wheel outside the bundle, in packages.ensure's --only-binary/--target
+    # form, and imports it - the exact path a user's step takes. Both halves
+    # must sit after the signing step and run the bundled python3.
+    signed = src[src.index('echo "· signed interpreter loads ad-hoc extensions OK"'):]
+    assert "--only-binary ':all:'" in signed and '--target "$WHEEL_PROBE" numpy' in signed, (
+        "the post-sign native-wheel probe no longer pip-installs numpy under the signed interpreter")
+    assert 'PYTHONPATH="$WHEEL_PROBE"' in signed and "import numpy" in signed, (
+        "the post-sign native-wheel probe no longer imports the installed wheel")
+    assert signed.count('PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3"') >= 1 \
+        and 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$APP/Contents/Resources/python/bin/python3"' in signed, (
+        "the native-wheel probe must run the bundled interpreter without writing .pyc into the sealed tree")

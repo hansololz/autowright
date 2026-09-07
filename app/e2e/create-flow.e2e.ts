@@ -87,6 +87,55 @@ describe('create flow e2e', () => {
     await shot(page, 'create-execution-page.png')
   }, 120_000)
 
+  it('a build left mid-flight keeps building, and Resume draft re-attaches to it', async () => {
+    // §11 Background continuation & re-attach: leaving the editor while a §8
+    // job is building detaches the UI and nothing more — the job keeps
+    // building, and re-entering rebuilds the live progress entry and lands
+    // the settle (plus its chained sync) as if the editor had never been
+    // left. The fake CLI's stream is paced so the chat call is still running
+    // when the test navigates away (14 delta lines × 500 ms ≈ 7 s).
+    backend = await new Backend().start({ AUTOWRIGHT_TEST_STREAM_DELAY_MS: '500' })
+    await backend.createAgent('Draft Agent')
+    handle = await launchApp(backend.home, true)
+    const { page } = handle
+
+    await page.getByRole('heading', { name: 'Automations' }).waitFor({ timeout: 20_000 })
+    await page.getByRole('button', { name: 'Create your first automation' }).click()
+    await page.getByRole('heading', { name: 'What should Autowright do for you?' }).waitFor({ timeout: 10_000 })
+    await page.getByPlaceholder('Describe the job — one sentence is enough.').fill('Leave and return e2e')
+    await page.getByRole('button', { name: 'Send' }).click()
+
+    // The live progress entry is up and the job is still on its first stage.
+    const progress = page.getByTestId('chat-progress')
+    await progress.waitFor({ timeout: 10_000 })
+    await progress.getByText('Working on the request…').waitFor({ timeout: 10_000 })
+    await shot(page, 'create-left-mid-build.png')
+
+    // Leave through the sidebar while the stream is still running. The list
+    // header offers Resume draft for the slot's live job (§9.1).
+    await clickNav(page, 'Automations')
+    await page.getByRole('heading', { name: 'Automations' }).waitFor({ timeout: 10_000 })
+    const resume = page.getByRole('button', { name: 'Resume draft' })
+    await resume.waitFor({ timeout: 10_000 })
+    await resume.click()
+
+    // Re-entered: the request is back in the thread and the progress entry
+    // is rebuilt — the poll re-armed (the 0.10.2 regression left it dead, so
+    // the thread went quiet here forever).
+    await page.getByText('Leave and return e2e').waitFor({ timeout: 10_000 })
+    await progress.waitFor({ timeout: 10_000 })
+    await shot(page, 'create-resumed-mid-build.png')
+
+    // The chat settle lands the spec, and its chained sync delivers the steps
+    // — the same outcome the uninterrupted journey above sees.
+    await page.getByText('Every day at 8:00.').waitFor({ timeout: 60_000 })
+    await page.getByText('Check for changes').waitFor({ timeout: 60_000 })
+    await page.getByText('Steps synced with the spec.').waitFor({ timeout: 60_000 })
+    expect(await page.getByText('Edit stopped — the spec is unchanged.').count()).toBe(0)
+    expect(await progress.count()).toBe(0)
+    await shot(page, 'create-resumed-settled.png')
+  }, 120_000)
+
   it('a new automation always opens on the suggestion state — a settled session never replays', async () => {
     // §11/§4.4 fresh-entry clear: entering the create flow with no pending
     // draft to resume shows the create empty state and keeps showing it — the

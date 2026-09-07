@@ -65,9 +65,15 @@ export class Backend {
   token = ''
   private proc: ChildProcess | null = null
   private out = ''
+  private extraEnv: Record<string, string> = {}
 
-  /** Fresh tmp home + real `python -m autowright.main`, ready to answer. */
-  async start(): Promise<this> {
+  /** Fresh tmp home + real `python -m autowright.main`, ready to answer.
+   * `env` adds §15 knobs for this backend (configuration only — e.g. the
+   * fake CLI's AUTOWRIGHT_TEST_STREAM_DELAY_MS pacing, so a job is still
+   * building when a test leaves the editor); a restart keeps them. The home
+   * and the fake-CLI PATH are the harness's own and cannot be overridden. */
+  async start(env: Record<string, string> = {}): Promise<this> {
+    this.extraEnv = env
     this.home = await mkdtemp(path.join(os.tmpdir(), 'aw-e2e-'))
     return this.spawnAndWait()
   }
@@ -105,6 +111,7 @@ export class Backend {
     const proc = spawn(PYTHON, ['-m', 'autowright.main'], {
       env: {
         ...process.env,
+        ...this.extraEnv,
         AUTOWRIGHT_HOME: this.home,
         PATH: `${FAKE_BIN}${path.delimiter}${process.env.PATH ?? ''}`,
       },

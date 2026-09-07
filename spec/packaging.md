@@ -118,8 +118,16 @@ the update bullets below).
   (`codesign -s -`, the same signature a wheel carries), and `dlopen` it under the signed
   interpreter (`ctypes.CDLL`, run with `PYTHONDONTWRITEBYTECODE=1` so the probe writes nothing
   into the sealed tree). The build fails there the moment the entitlement drops off, instead of
-  shipping a DMG whose every native wheel is dead. A §15 drift guard pins the entitlement
-  text in `prod.sh`. The bundled-interpreter smoke test
+  shipping a DMG whose every native wheel is dead. **Native-wheel probe** (right after it): the
+  dlopen probe proves the entitlement, this proves the whole §6.2 path a user's step takes —
+  the signed interpreter's own pip installs a real wheel with a compiled extension (`numpy`,
+  the package the 0.10.2 report named) with the same `--only-binary :all:` / `--target` form
+  `packages.ensure` uses, into a directory outside the bundle (`build/wheel-probe`, deleted
+  afterwards), and then imports it from that directory under the signed interpreter (again
+  with `PYTHONDONTWRITEBYTECODE=1`). Network is already a build prerequisite (the CPython
+  download, notarization), and pip's own HTTP cache keeps repeat builds cheap. A wheel that
+  fails to install or import fails the build with the same words a user's step would show.
+  A §15 drift guard pins the entitlement text and both probes in `prod.sh`. The bundled-interpreter smoke test
   must run **before** signing (and with `PYTHONDONTWRITEBYTECODE=1`): importing packages writes
   `.pyc` files into `Resources/python`, and any write after signing breaks the bundle's resource
   seal — notarization then rejects the main binary even though the pre-write local verify passed.

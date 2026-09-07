@@ -78,8 +78,9 @@ stdin when no positional prompt is given — the §8 per-OS delivery rule exerci
 form on POSIX and the stdin form on Windows;
 `AUTOWRIGHT_TEST_CLAUDE_SIGNED_OUT=1` makes its `auth`-status invocation exit non-zero, so the
 signed-out detection path is testable; `AUTOWRIGHT_TEST_STREAM_DELAY_MS` — milliseconds pacing
-its stream-json output, for manual UI checks of live §8 progress; unset → instant, so the
-pytest suite stays fast), a fake
+its stream-json output, for manual UI checks of live §8 progress and for the e2e
+leave-and-return journey below, which needs a job still building when the editor is left;
+unset → instant, so the pytest suite stays fast), a fake
 `osascript` at `tests/bin/osascript` (records its argv to a file named by
 `AUTOWRIGHT_TEST_OSASCRIPT_LOG` and exits 0 — the §6 iMessage sender resolves `osascript`
 through PATH, so tests exercise the real send path; exit/stderr overridable via
@@ -152,8 +153,10 @@ distribution-name mapping written out in the guard; and every `*.ps1` in the §1
 directories still starts with a UTF-8 BOM (Windows PowerShell 5.1 misreads a BOM-less file
 as ANSI and fails to parse the scripts' non-ASCII result lines); the §3 interpreter
 entitlement (`disable-library-validation`) sits in `prod.sh`'s interpreter plist and not the
-Electron one, rides the Python-tree executable signing step, and the post-sign ad-hoc probe
-is still in place (a dropped entitlement kills every native §6.2 wheel on user Macs and shows
+Electron one, rides the Python-tree executable signing step, and both post-sign probes are
+still in place — the ad-hoc dlopen probe and the native-wheel probe that pip-installs and
+imports a real `numpy` wheel under the signed interpreter (a dropped entitlement kills every
+native §6.2 wheel on user Macs and shows
 up nowhere else before a DMG ships), and `tests/test_interpreter_entitlement.py` exercises
 that plist for real on macOS: a C host compiled in the test, signed ad-hoc with the hardened
 runtime plus the plist text lifted from `prod.sh`, must dlopen an ad-hoc-signed library,
@@ -246,7 +249,9 @@ whatever OS hosts it, so assertions on §9 per-OS copy read the renderer's own t
 (`platformCopy` from the store-free `platformCopyTable` module, exported through the harness
 as `COPY` keyed by the host platform) rather
 than hardcoding one OS's strings. Each test launches the real pieces exactly as release does: the backend subprocess
-over a tmp `AUTOWRIGHT_HOME` (fake `claude` from `tests/bin` on PATH), then the real Electron
+over a tmp `AUTOWRIGHT_HOME` (fake `claude` from `tests/bin` on PATH, plus any §15 knobs the
+test hands its backend through `Backend.start(env)` — configuration only, never a different
+code path), then the real Electron
 binary via playwright-core `_electron.launch` loading `app/dist` — real preload bridge, real
 `backend.json` discovery, real windows on screen. Teardown stops the backend **gracefully**
 (SIGTERM, a bounded wait, then SIGKILL only if it has not exited) so the backend's lifespan
@@ -264,6 +269,13 @@ everything finer-grained belongs to the unit/integration tiers:
 - list → detail → execute → result on a seeded-via-API home
 - the create-flow journey: request → AI draft via the fake CLI through the real §8 chat +
   chained-sync pipeline → Test draft run → Create → execute → execution page
+- the §11 background-continuation journey: a build left mid-flight (the backend runs with
+  `AUTOWRIGHT_TEST_STREAM_DELAY_MS` so the fake CLI's stream is still running when the test
+  navigates to the list) keeps building; the list's §9.1 Resume draft button re-enters the
+  editor, the live progress entry is rebuilt, and the settle plus its chained sync land
+  exactly as if the editor had never been left — the request stays in the thread and no
+  "Edit stopped" chip appears (the regression class of the 0.10.2 note: a detached poll
+  that never re-arms)
 - a new automation always opens on the create empty state: the suggestion headline shows
   and stays on fresh entry, and re-entering after a settled session (send → build →
   Start over → leave) shows the suggestions again — the §4.4 fresh-entry clear, never
@@ -550,9 +562,11 @@ Dev workflow:
   `ai.autowright.app`; ships only `electron/`, `dist/`, and `package.json` — the renderer is
   fully bundled and main/preload use Electron builtins only, so no `node_modules`), copies
   the interpreter to `Contents/Resources/python/`, smoke-checks that the bundled interpreter
-  imports `autowright` + every curated package from inside the bundle, codesigns and
-  notarizes per §3 (Developer ID + hardened runtime on every Mach-O, inside-out, stapled —
-  no ad-hoc fallback), and produces `build/Autowright-<version>-darwin-<arch>.dmg` (hdiutil UDZO),
+  imports `autowright` + every curated package from inside the bundle, codesigns per §3
+  (Developer ID + hardened runtime on every Mach-O, inside-out), runs the two §3 post-sign
+  probes (the ad-hoc dlopen probe and the native-wheel probe: pip-install and import a real
+  `numpy` wheel under the signed interpreter, outside the bundle), notarizes and staples
+  (no ad-hoc fallback), and produces `build/Autowright-<version>-darwin-<arch>.dmg` (hdiutil UDZO),
   the §3 install + update artifact `release.sh` uploads (no separate update zip: the app
   unpacks the DMG itself at update time, §3).
 - **`./linux-scripts/prod.sh`** — the Linux production distribution (bash; §17

@@ -235,6 +235,27 @@ PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -c \
 rm -f "$PROBE"
 echo "· signed interpreter loads ad-hoc extensions OK"
 
+# ---- post-sign native-wheel probe (SPEC §3): a real wheel, the whole §6.2 path ----
+# The ad-hoc probe proves dlopen; this proves what a user's step actually does:
+# the signed interpreter's own pip installs a wheel with a compiled extension
+# (numpy - the package the 0.10.2 report named) with the same --only-binary /
+# --target form packages.ensure uses, into a directory outside the bundle, and
+# then imports it from there. Network is already a build prerequisite (the
+# CPython download, notarization); pip's HTTP cache keeps repeat builds cheap.
+# PYTHONDONTWRITEBYTECODE=1 keeps pip's own imports from writing .pyc files
+# into the sealed tree (the seal is re-verified below regardless).
+WHEEL_PROBE="$BUILD/wheel-probe"
+rm -rf "$WHEEL_PROBE"
+PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m pip -q install \
+  --no-input --disable-pip-version-check --only-binary ':all:' \
+  --target "$WHEEL_PROBE" numpy \
+  || { echo "signed interpreter's pip could not install the numpy probe wheel (SPEC §3)"; exit 1; }
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$APP/Contents/Resources/python/bin/python3" -c \
+  'import numpy; numpy.zeros(1)' \
+  || { echo "signed interpreter cannot import a native wheel (numpy): interpreter entitlement missing (SPEC §3)"; exit 1; }
+rm -rf "$WHEEL_PROBE"
+echo "· signed interpreter imports a native wheel (numpy) OK"
+
 # ---- notarize the app (SPEC §3) ----
 # Submit a zip of the signed app, then staple the ticket onto the app itself so
 # the DMG below carries a stapled bundle (Gatekeeper passes offline).
