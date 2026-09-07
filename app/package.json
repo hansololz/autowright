@@ -79,7 +79,6 @@
           ]
         }
       ],
-      "artifactName": "Autowright-${version}-linux-x86_64.${ext}",
       "icon": "electron/icon/icon.png",
       "syncDesktopName": true,
       "category": "Utility",

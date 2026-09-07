@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the Linux production distribution (SPEC §3): the x86-64 AppImage
-# `Autowright-<version>-linux-x86_64.AppImage`, carrying the relocatable
+# `Autowright.AppImage` (the bare name — the version rides in the release-tag
+# path of the download URL, §3), carrying the relocatable
 # CPython (python-build-standalone) + the autowright backend and curated
 # packages in resources/python/ — under build/linux/.
 #
@@ -103,7 +104,8 @@ echo "· bundled Python imports OK"
 
 # ---- package (electron-builder, Linux AppImage only) ------------------------
 # The build config lives in app/package.json's `build` key: appId
-# ai.autowright.app, the AppImage/x64 target with the §3 Linux artifact name,
+# ai.autowright.app, the AppImage/x64 target (the top-level artifactName gives
+# the §3 bare `Autowright.AppImage` — no linux override),
 # the staged interpreter as extraResources → resources/python, and the
 # `linux.publish` generic entry (the §3 Linux feed base — it puts app-update.yml
 # in the AppImage and makes the build emit latest-linux.yml).
@@ -119,7 +121,7 @@ echo "· packaging (electron-builder --linux appimage --x64)"
 # the AppImage and rewrites the yml into the repo-root release/linux-x86_64/.
 # No separate .blockmap file: the AppImage target embeds the block map in the
 # AppImage itself (the yml's blockMapSize; AppImageUpdater range-reads the tail).
-APPIMAGE="$OUT/Autowright-$VERSION-linux-x86_64.AppImage"
+APPIMAGE="$OUT/Autowright.AppImage"
 for artifact in "$APPIMAGE" "$OUT/latest-linux.yml"; do
   [ -f "$artifact" ] || { echo "packaging failed: $artifact missing"; exit 1; }
 done

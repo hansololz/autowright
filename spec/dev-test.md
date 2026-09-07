@@ -196,10 +196,11 @@ version that ran ahead of the published release stays invisible until an install
 tries to update. Five checks, over whichever feeds exist on disk (a feed is absent until
 its OS's release leg first runs, and absence is never a failure): every download URL a
 feed hands the updater is a `github.com/hansololz/autowright/releases/download/…` URL,
-names that feed's own release tag (`/v<version>/`) — and, for the mac and Linux
+names that feed's own release tag (`/v<version>/`) — and, for the mac
 artifacts whose file names carry the version, that version in the file name too (the
-Windows installer is the bare `Autowright.exe` from v0.11.0, §3, so its name is not
-checked) — and carries the extension that OS's update flow can
+Windows installer is the bare `Autowright.exe` from v0.11.0 and the Linux AppImage the
+bare `Autowright.AppImage` from the first Linux release after v0.10.0, §3, so their
+names are not checked) — and carries the extension that OS's update flow can
 actually open (`.zip` for the mac electron-updater/Squirrel path, `.exe` for the NSIS
 updater, `.AppImage` for the AppImage updater); no feed is *newer* than `VERSION` (it
 would name a release that does not exist - the reverse is legitimate and deliberately
@@ -601,7 +602,8 @@ Dev workflow:
   `PYTHONDONTWRITEBYTECODE=1` smoke check (imports include `secretstorage`, the §17 Linux
   keyring backend), then electron-builder `--linux appimage --x64` with the output
   overridden to `build/linux/` — producing
-  `build/linux/Autowright-<version>-linux-x86_64.AppImage`, unsigned by design (§3),
+  `build/linux/Autowright.AppImage` (the §3 bare Linux artifact name; the version rides
+  in the release-tag path of the download URL), unsigned by design (§3),
   plus `latest-linux.yml` (the §3 Linux update feed; the script verifies both exist —
   the block map is embedded in the AppImage itself, §3, never a separate artifact).
 - **`./linux-scripts/release.sh`** - the Linux release half (bash; §17 `linux-scripts/`, §3

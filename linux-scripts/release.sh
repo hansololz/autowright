@@ -71,7 +71,9 @@ echo "· running tests"
 echo "· version: $VERSION - building the Linux release"
 "$ROOT/linux-scripts/prod.sh"
 
-APPIMAGE="$ROOT/build/linux/Autowright-$VERSION-linux-x86_64.AppImage"
+# §3: the bare artifact name — the version rides only in $TAG's path of the
+# download URL below (each GitHub release is its own asset namespace).
+APPIMAGE="$ROOT/build/linux/Autowright.AppImage"
 BUILT_YML="$ROOT/build/linux/latest-linux.yml"
 for artifact in "$APPIMAGE" "$BUILT_YML"; do
   [ -f "$artifact" ] || { echo "missing after build: $artifact"; exit 1; }

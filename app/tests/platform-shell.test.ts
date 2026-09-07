@@ -241,7 +241,7 @@ describe('§3 Windows packaging config (electron-builder)', () => {
     extraResources: { from: string, to: string }[]
     win: { target: { target: string, arch: string[] }[], icon: string }
     linux: {
-      target: { target: string, arch: string[] }[], artifactName: string,
+      target: { target: string, arch: string[] }[], artifactName?: string,
       icon: string, publish: { provider: string, url: string }[], syncDesktopName: boolean,
     }
     nsis: Record<string, unknown>
@@ -266,7 +266,12 @@ describe('§3 Windows packaging config (electron-builder)', () => {
   })
 
   it('pins the §3 Linux artifact name, icon, and the generic feed', () => {
-    expect(build.linux.artifactName).toBe('Autowright-${version}-linux-x86_64.${ext}')
+    // §3 Linux artifact name: the bare Autowright.AppImage — the top-level
+    // artifactName applies with no linux override. AppImageUpdater overwrites
+    // the running AppImage in place only when its name carries no version;
+    // a versioned name would rename the file (and break the launcher entry's
+    // Exec/TryExec path) on every update.
+    expect(build.linux.artifactName).toBeUndefined()
     // §3: linux.publish overrides the top-level (win32) entry, so the
     // app-update.yml electron-builder embeds in the AppImage points at the
     // Linux feed — the same base the §2 linux module serves — never the

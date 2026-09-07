@@ -777,8 +777,10 @@ and dropped (dormant project; the name-sharing Squirrel.Mac stays on macOS uncha
     `Autowright (1).exe` with no version in the name — the version is in the tag path
     of the URL the §17 download button and the feed hand out, and in Apps & features.
   - `prod.ps1` and `release.ps1` look for the bare name in `build\win`; the §15 drift
-    guards check the version of a Windows feed URL on its tag path only (the mac and
-    Linux artifact names keep the version and are still checked on the file name too).
+    guards check the version of a Windows feed URL on its tag path only (the mac
+    artifact names keep the version and are still checked on the file name too; the
+    Linux AppImage follows the Windows model from its next release — the Linux
+    Artifact bullet below).
 - **Updater:** `electron-updater` (NsisUpdater on win32; since v0.6.1 every OS runs
   electron-updater — darwin's `MacUpdater` flow is specified in the §3 mac update bullets
   above). main.cjs's update block is one shared code path; the §2 platform layer's
@@ -856,10 +858,38 @@ refuses, the package manager owns updates).
   `linux-scripts/release.sh`), and the script verifies both exist. Unlike NSIS there is
   no separate `.blockmap` artifact: for the AppImage target electron-builder **embeds**
   the block map in the AppImage itself and records its size as the yml's `blockMapSize`.
-- **Artifact:** `Autowright-<version>-linux-x86_64.AppImage` via the `linux.artifactName`
-  override (the top-level `artifactName` is the Windows form, the bare `Autowright.${ext}`
-  — the Linux name deliberately keeps the version, since an AppImage is the runnable
-  program itself and users keep several beside each other). The `build.linux` config
+- **Artifact (decided 2026-09-07, from the first Linux release after v0.10.0): the bare
+  `Autowright.AppImage`.** The top-level `artifactName` (`Autowright.${ext}`, the Windows
+  Artifact-name bullet) applies unchanged — there is no `linux.artifactName` override —
+  so the version rides only in the release-tag path of the download URL
+  (`github.com/…/releases/download/v<version>/Autowright.AppImage`); each GitHub release
+  is its own asset namespace, so same-named assets never collide. Releases through
+  v0.10.0 shipped `Autowright-<version>-linux-x86_64.AppImage`; those assets stay under
+  their old names, and nothing rewrites their feeds. Beyond the Windows reasons, the
+  bare name is load-bearing on Linux: electron-updater's `AppImageUpdater` overwrites
+  the running AppImage *in place* only when its file name carries no `x.y.z` version.
+  With a versioned name it moves the new build in beside the old one under the new
+  version's name (`Autowright-0.11.0-…` → `Autowright-0.12.0-…`), changing on every
+  update the path the Desktop-integration and §4.9 autostart entries pin in
+  `Exec`/`TryExec`. The bare name keeps that path stable across updates, so those
+  entries never go stale, and the Updater bullet's "swaps the AppImage file at its own
+  path" holds literally. Consequences, all accepted:
+  - A repeated download lands as `Autowright (1).AppImage` — still version-free, so
+    still overwritten in place; a copy the user renames to any version-free name is
+    preserved the same way (electron-updater's own rule).
+  - An existing versioned install (0.10.0) is moved to `Autowright.AppImage` in its own
+    directory by its first update across the rename — once — and the relaunch that
+    follows rewrites the launcher entry (the reconcile rule below); the path is stable
+    from then on.
+  - Differential download is unaffected, unlike the Windows rename: `AppImageUpdater`
+    reads the old block map from the local file and the new one from the remote file's
+    tail (the Updater bullet), never deriving a previous-version URL, so there is no
+    one-time full download.
+  - `prod.sh` and `release.sh` look for the bare name in `build/linux`; the §15 drift
+    guards check the version of a Linux feed URL on its tag path only, as for Windows
+    (the mac artifact names keep the version and are still checked on the file name).
+
+  The `build.linux` config
   pins the AppImage/x64 target, the checked-in `electron/icon/icon.png`, category
   `Utility`, and its own `publish` generic-provider entry — the Linux feed base URL,
   overriding the top-level win32 entry, so the `app-update.yml` electron-builder embeds

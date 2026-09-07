@@ -437,8 +437,9 @@ migrate-on-load migration so data written by released versions keeps loading (§
   (`darwin-arm64` → the DMG, `win32-x86_64` → the NSIS `.exe`, `linux-x86_64` → the
   AppImage) — the released
   artifact's `github.com/…/releases/download/…` URL, so the click downloads that
-  release's installer (the mac and Linux file names carry the version; the Windows
-  installer is the bare `Autowright.exe`, §3); an anchor whose entry is missing or
+  release's installer (the mac file names carry the version; the Windows installer is
+  the bare `Autowright.exe` and the Linux AppImage the bare `Autowright.AppImage`, §3);
+  an anchor whose entry is missing or
   malformed is left alone. The static fallback `href` (no JS, fetch failure) is the
   repo's latest-release GitHub page. Under the buttons
   a mono platform line "MIT licensed · Linux (Experimental)", where "Linux (Experimental)"

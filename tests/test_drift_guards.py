@@ -151,10 +151,12 @@ FEEDS = {
 }
 
 # Keys whose artifact file name carries the version (`Autowright-<version>-…`). The
-# §3 Windows installer is the bare `Autowright.exe` from v0.11.0 - its version rides
-# only in the release-tag path of the URL - so its file name is deliberately absent
-# here; the `/v<version>/` tag check below still pins every feed to its release.
-VERSIONED_ARTIFACT_NAMES = {"darwin-arm64", "darwin-x86_64", "linux-x86_64"}
+# §3 Windows installer is the bare `Autowright.exe` from v0.11.0 and the Linux
+# AppImage the bare `Autowright.AppImage` from the first Linux release after
+# v0.10.0 - their version rides only in the release-tag path of the URL - so their
+# file names are deliberately absent here; the `/v<version>/` tag check below still
+# pins every feed to its release.
+VERSIONED_ARTIFACT_NAMES = {"darwin-arm64", "darwin-x86_64"}
 
 
 def _assert_url_names_release(where: str, key: str, url: str, version: str) -> None:
