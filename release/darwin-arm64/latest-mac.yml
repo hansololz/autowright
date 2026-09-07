@@ -1,8 +1,8 @@
-version: 0.10.2
+version: 0.11.0
 files:
-  - url: https://github.com/hansololz/autowright/releases/download/v0.10.2/Autowright-0.10.2-darwin-arm64.zip
-    sha512: siojkaUOBpXC4ZYQqFTT5R7JcQB6pXxLefljbQCQodT3fPTVtFBfOxP4fQM469BooRSHsEmKZRfGgHm1hpxUDw==
-    size: 180324937
-path: https://github.com/hansololz/autowright/releases/download/v0.10.2/Autowright-0.10.2-darwin-arm64.zip
-sha512: siojkaUOBpXC4ZYQqFTT5R7JcQB6pXxLefljbQCQodT3fPTVtFBfOxP4fQM469BooRSHsEmKZRfGgHm1hpxUDw==
-releaseDate: '2026-09-07T07:11:08.000Z'
+  - url: https://github.com/hansololz/autowright/releases/download/v0.11.0/Autowright-0.11.0-darwin-arm64.zip
+    sha512: 1ey3TgzOWwlY3EJBOdNU3eK4qPS+X2+aZM2CNrmz0BB9T6k6KHkOuLJUoW4Wp4YtsdZ3j4wvUlyT+1gobcNreg==
+    size: 181164432
+path: https://github.com/hansololz/autowright/releases/download/v0.11.0/Autowright-0.11.0-darwin-arm64.zip
+sha512: 1ey3TgzOWwlY3EJBOdNU3eK4qPS+X2+aZM2CNrmz0BB9T6k6KHkOuLJUoW4Wp4YtsdZ3j4wvUlyT+1gobcNreg==
+releaseDate: '2026-09-07T18:23:05.000Z'

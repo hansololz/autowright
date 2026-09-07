@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.11.0 - 2026-09-07
+
+- Running the Windows installer for a version you already have now reopens Autowright instead of leaving you with nothing.
+
 ## v0.10.2 - 2026-09-06
 
 - Steps that use native Python packages such as numpy now work in the released app instead of failing the moment they import.
