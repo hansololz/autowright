@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.10.2 - 2026-09-06
+
+- Steps that use native Python packages such as numpy now work in the released app instead of failing the moment they import.
+- Building an automation keeps showing live progress after you leave the page and come back, instead of going quiet.
+
 ## v0.10.1 - 2026-09-06
 
 - The Executions page now filters through a single Filter modal, where you set status, automations, and a started-time range together and apply them at once.
