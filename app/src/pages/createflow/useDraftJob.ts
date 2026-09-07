@@ -319,17 +319,23 @@ export function useDraftJob(d: DraftJobDeps) {
     jobIdRef.current = null
   }
 
-  useEffect(() => () => {
-    // §19 background continuation: leaving the editor any way (sidebar nav,
-    // system back) detaches the UI and nothing more — the job keeps building
-    // in the background and re-entering re-attaches (§11). Only the settle
-    // paths (Discard draft, Start over) cancel; here just the poll stops.
-    deadRef.current = true
-    stopPoll()
-    jobIdRef.current = null
-    // §11: a live test keeps executing — it's a real record, visible and
-    // cancellable from its execution page; re-entering the editor re-attaches.
-    useStore.getState().clearTest()
+  useEffect(() => {
+    // Re-arm on every mount: StrictMode's dev remount runs the cleanup below
+    // once against the live editor, and a flag left true there would make
+    // every later POST resolve into nothing (no poll ever armed).
+    deadRef.current = false
+    return () => {
+      // §19 background continuation: leaving the editor any way (sidebar nav,
+      // system back) detaches the UI and nothing more — the job keeps building
+      // in the background and re-entering re-attaches (§11). Only the settle
+      // paths (Discard draft, Start over) cancel; here just the poll stops.
+      deadRef.current = true
+      stopPoll()
+      jobIdRef.current = null
+      // §11: a live test keeps executing — it's a real record, visible and
+      // cancellable from its execution page; re-entering the editor re-attaches.
+      useStore.getState().clearTest()
+    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // §11: the chat job's poll handlers, shared by sendChat and the §11

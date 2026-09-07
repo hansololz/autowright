@@ -86,14 +86,15 @@ describe('COMMAND LINE card (§4.9)', () => {
 
   it('off + missing: turning the toggle on patches cliEnabled and installs silently', async () => {
     setup(false)
-    cliStatus.mockResolvedValueOnce({ state: 'missing', path: USER, onPath: true })
+    cliStatus.mockResolvedValue({ state: 'missing', path: USER, onPath: true })
     cliInstall.mockResolvedValue({ ok: true })
-    cliStatus.mockResolvedValueOnce({ state: 'installed', path: USER, onPath: true })
     render(<SettingsPage />)
     await screen.findByText(/Turning this on installs to ~\/\.local\/bin\. No password needed\./)
     // No PATH row while off — it belongs to on+installed only.
     expect(screen.queryByText('Add it to your PATH')).toBeNull()
     const card = (await screen.findByText('COMMAND LINE')).parentElement as HTMLElement
+    // The install's re-probe sees the command on disk.
+    cliStatus.mockResolvedValue({ state: 'installed', path: USER, onPath: true })
     fireEvent.click(card.querySelector('[role="switch"]') as Element)
     await waitFor(() => expect(patchSettings).toHaveBeenCalledWith({ cliEnabled: true }))
     await waitFor(() => expect(cliInstall).toHaveBeenCalledTimes(1))
@@ -135,13 +136,15 @@ describe('COMMAND LINE card (§4.9)', () => {
 
   it('on + installed: confirming turns off AND deletes — patch false + cli-uninstall', async () => {
     setup(true)
-    cliStatus.mockResolvedValueOnce({ state: 'installed', path: USER, onPath: true })
+    cliStatus.mockResolvedValue({ state: 'installed', path: USER, onPath: true })
     cliUninstall.mockResolvedValue({ ok: true })
-    cliStatus.mockResolvedValueOnce({ state: 'missing', path: USER, onPath: true })
     render(<SettingsPage />)
     const card = (await screen.findByText('COMMAND LINE')).parentElement as HTMLElement
     fireEvent.click(card.querySelector('[role="switch"]') as Element)
-    fireEvent.click(await screen.findByRole('button', { name: 'Turn off and delete' }))
+    const confirm = await screen.findByRole('button', { name: 'Turn off and delete' })
+    // The delete's re-probe sees the command gone.
+    cliStatus.mockResolvedValue({ state: 'missing', path: USER, onPath: true })
+    fireEvent.click(confirm)
     await waitFor(() => expect(patchSettings).toHaveBeenCalledWith({ cliEnabled: false }))
     await waitFor(() => expect(cliUninstall).toHaveBeenCalledTimes(1))
     // Simulate the settings.changed refresh, then the card shows off+missing.
@@ -185,14 +188,16 @@ describe('COMMAND LINE card (§4.9)', () => {
 
   it('on + missing: amber warning row below the toggle with a Reinstall button', async () => {
     setup(true)
-    cliStatus.mockResolvedValueOnce({ state: 'missing', path: USER, onPath: true })
+    cliStatus.mockResolvedValue({ state: 'missing', path: USER, onPath: true })
     cliInstall.mockResolvedValue({ ok: true })
-    cliStatus.mockResolvedValueOnce({ state: 'installed', path: USER, onPath: true })
     render(<SettingsPage />)
     // §4.9 missing-warning row: own title + description, Reinstall action.
     await screen.findByText(/CLI is missing/)
     await screen.findByText(/autowright wasn’t found in ~\/\.local\/bin\. It may have been deleted or moved\. Reinstall it to keep using it from the Terminal\./)
-    fireEvent.click(await screen.findByRole('button', { name: 'Reinstall' }))
+    const reinstall = await screen.findByRole('button', { name: 'Reinstall' })
+    // The reinstall's re-probe sees the command back on disk.
+    cliStatus.mockResolvedValue({ state: 'installed', path: USER, onPath: true })
+    fireEvent.click(reinstall)
     await waitFor(() => expect(cliInstall).toHaveBeenCalledTimes(1))
     // §3: Reinstall is a settled card install — first-run marker set.
     await waitFor(() => expect(localStorage.getItem('ad-cli-installed')).toBe('1'))

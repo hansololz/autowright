@@ -96,6 +96,10 @@ const AUTO = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // vi.clearAllMocks clears calls, not implementations: a prior test's
+  // persistent thread/draft mock would otherwise leak into the next one.
+  ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ chat: [] }))
+  ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ draft: null, agentId: null }))
   storeMod.useStore.setState({
     surface: 'create', createFrom: 'edit', page: 'automations', automationId: 'a1',
     automations: [AUTO], agents: AGENTS, secrets: SECRETS,
@@ -353,10 +357,12 @@ describe('CreateFlow BUILD and TEST cards (§11)', () => {
     })
   }
 
-  it('a running sync gates the card over a settled outcome (§11 state 2)', () => {
+  it('a running sync gates the card over a settled outcome (§11 state 2)', async () => {
     armPendingPoll()
-    seedSettled()
     render(<CreateFlow />)
+    // the tracked test is seeded after the mount: useDraftJob's cleanup clears
+    // it during the StrictMode remount (tests/setup.ts)
+    act(() => seedSettled())
     const card = () => screen.getByTestId('test-card')
     expect(within(card()).getByText('Test succeeded.')).toBeTruthy()
     // §11: the sync is about to rewrite the steps — the outcome gives way to
@@ -570,19 +576,21 @@ describe('CreateFlow test-run modal (§11)', () => {
   })
 
   it('a settled failed run: Run again returns to the setup phase, View execution opens the run', async () => {
-    seedRun({
+    // the spy stands in for the store's go before the first render — the card
+    // reads it through a selector, so swapping it mid-test would need a flush
+    const go = vi.fn()
+    storeMod.useStore.setState({ go })
+    render(<CreateFlow />)
+    // the tracked test is seeded after the mount: useDraftJob's cleanup clears
+    // it during the StrictMode remount (tests/setup.ts)
+    act(() => seedRun({
       status: 'failed', duration: '2s', endedMs: 3,
       error: { step: 'Send mail', message: 'boom', reason: null },
       steps: [
         { name: 'Fetch pages', status: 'succeeded', duration: '1s', attempts: [{ number: 1, status: 'succeeded', duration: '1s', startedMs: 1 }] },
         { name: 'Send mail', status: 'failed', duration: '1s', attempts: [{ number: 1, status: 'failed', duration: '1s', startedMs: 2 }] },
       ],
-    })
-    // the spy stands in for the store's go before the first render — the card
-    // reads it through a selector, so swapping it mid-test would need a flush
-    const go = vi.fn()
-    storeMod.useStore.setState({ go })
-    render(<CreateFlow />)
+    }))
     // the settled card opens the modal on its run
     fireEvent.click(within(screen.getByTestId('test-card')).getByText('Test draft'))
     const modal = screen.getByTestId('test-modal')
@@ -763,6 +771,33 @@ describe('CreateFlow blockers thread entries (§11)', () => {
     // the chat rewrite landed the spec and the workflow is out of sync
     expect(screen.getByText('Watches things.')).toBeTruthy()
     expect(screen.getByText('Out of sync — steps still match the old spec.')).toBeTruthy()
+  })
+
+  it('under StrictMode a fresh draft’s first turn still polls and chains its sync (dev remount)', async () => {
+    // Regression: the hook's detached flag is set by the unmount cleanup and
+    // must re-arm on mount — the dev remount from the suite-wide StrictMode
+    // (tests/setup.ts) ran that cleanup once against the live editor, and
+    // every later POST then silently skipped
+    // arming the poll (the thread stuck at "Working on the request…").
+    storeMod.useStore.setState({ createFrom: 'app' })
+    const spec = [{ kind: 'h1', text: 'Sleep for ten seconds' }, { kind: 'p', text: 'Waits, then finishes.' }]
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        id: 'j1', status: 'done', stage: null, detail: null, error: null,
+        mode: 'chat', draft: { spec, actions: { sync: true, name: 'Sleep for ten seconds' } },
+      })
+      .mockImplementation(() => new Promise(() => { /* the sync poll never answers */ }))
+    render(<CreateFlow />)
+    fireEvent.change(screen.getByPlaceholderText('Describe the job — one sentence is enough.'),
+      { target: { value: 'create automation to sleep for 10 seconds' } })
+    fireEvent.click(screen.getByText('Send'))
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
+    // the poll armed: the chat settle was observed and applied
+    await waitFor(() => expect(mockedApi.getDraftJob).toHaveBeenCalled(), { timeout: 3000 })
+    await waitFor(() => expect(screen.getByText('Waits, then finishes.')).toBeTruthy(), { timeout: 3000 })
+    // …and the `sync: true` action chained the sync job
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    expect(draftBody(1).mode).toBe('sync')
   })
 
   it('a markdown link in a blocker renders as a clickable anchor', async () => {
@@ -1063,7 +1098,7 @@ describe('CreateFlow per-step durations (§8 stage timing / §11)', () => {
   })
 
   it('a stored activity entry renders its stamps; a pre-field one renders bare (§21.4)', async () => {
-    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ chat: [
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [
       { id: 'd1', kind: 'activity', title: 'Updating the documents…', outcome: 'done',
         text: 'Writing the answer\nWriting the spec\nWriting the notes',
         eventDurationsMs: [1400, null, 3400] },
@@ -1086,7 +1121,7 @@ describe('CreateFlow per-step durations (§8 stage timing / §11)', () => {
   it('the stamps pair with the raw text lines, so blank lines never shift them', async () => {
     // §4.4 eventDurationsMs is parallel to the entry's raw `text` lines; the
     // empty-line filter runs after the pairing, so index 2 stays index 2
-    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ chat: [
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [
       { id: 'd1', kind: 'activity', title: 'Syncing the workflow…', outcome: 'done',
         text: 'Writing the manifest\n\nWriting 01-check.py',
         eventDurationsMs: [1400, null, 3400] },
@@ -1918,10 +1953,11 @@ describe('CreateFlow left-column cards + test-failure repair (§11)', () => {
       duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
       error: { step: 'Fetch pages', message: 'boom', reason: null }, steps: [],
     }
-    storeMod.useStore.setState({
-      test: { executionId: 'e9' }, executions: [failed] as never, executionFull: { e9: failed } as never,
-    })
+    storeMod.useStore.setState({ executions: [failed] as never, executionFull: { e9: failed } as never })
     render(<CreateFlow />)
+    // the tracked test is seeded after the mount: useDraftJob's cleanup clears
+    // it during the StrictMode remount (tests/setup.ts)
+    act(() => storeMod.useStore.setState({ test: { executionId: 'e9' } }))
     expect(screen.getByText('Test failed.')).toBeTruthy()
     fireEvent.click(screen.getByText('Analyze failure'))
     await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
@@ -2011,7 +2047,7 @@ describe('CreateFlow boundary markers + history-inert thread (§4.4/§11)', () =
   const getChatMock = () => mockedApi.getChat as ReturnType<typeof vi.fn>
 
   it('renders the marker with the history explainer; a marker-terminated thread offers no actions', async () => {
-    getChatMock().mockResolvedValueOnce({ chat: [
+    getChatMock().mockResolvedValue({ chat: [
       { id: 'h1', kind: 'user', text: 'old request' },
       { id: 'h2', kind: 'blockers', source: 'sync', blockers: [{ reason: 'r', fix: 'f' }] },
       { id: 'm1', kind: 'system', icon: 'fa-flag-checkered', boundary: true, text: 'Draft saved as v2.' },
@@ -2036,7 +2072,7 @@ describe('CreateFlow boundary markers + history-inert thread (§4.4/§11)', () =
   })
 
   it('entries after the marker act normally — the turn action row returns with the new session', async () => {
-    getChatMock().mockResolvedValueOnce({ chat: [
+    getChatMock().mockResolvedValue({ chat: [
       { id: 'm1', kind: 'system', icon: 'fa-flag-checkered', boundary: true, text: 'Draft discarded.' },
       { id: 'n1', kind: 'system', icon: 'fa-vial', text: 'Draft execution succeeded.' },
     ] })
@@ -2055,11 +2091,11 @@ describe('CreateFlow boundary markers + history-inert thread (§4.4/§11)', () =
     // unified chat failures never do — legacy persisted entries render plain.
     // A pending draft resumes here, so the slot thread merges (§4.4).
     storeMod.useStore.setState({ createFrom: 'app', automationId: null })
-    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
       draft: { spec: [{ kind: 'h1', text: 'Kept' }, { kind: 'p', text: 'Body.' }], steps: [] },
       agentId: null,
     })
-    getChatMock().mockResolvedValueOnce({ chat: [
+    getChatMock().mockResolvedValue({ chat: [
       { id: 'e1', kind: 'error', source: 'spec', text: 'old failure' },
       { id: 'm1', kind: 'system', icon: 'fa-flag-checkered', boundary: true, text: 'Draft discarded.' },
       { id: 'e2', kind: 'error', source: 'spec', text: 'fresh failure' },
@@ -2075,7 +2111,7 @@ describe('CreateFlow boundary markers + history-inert thread (§4.4/§11)', () =
     // No pending draft to resume: the settled session's thread must never
     // replay over the create empty state — it is dropped and unlinked.
     storeMod.useStore.setState({ createFrom: 'app', automationId: null })
-    getChatMock().mockResolvedValueOnce({ chat: [
+    getChatMock().mockResolvedValue({ chat: [
       { id: 'a1', kind: 'activity', title: 'Working on the request…', text: 'Choosing what to do', outcome: 'done' },
       { id: 'm1', kind: 'system', icon: 'fa-flag-checkered', boundary: true, text: 'Draft discarded.' },
     ] })
@@ -2089,11 +2125,11 @@ describe('CreateFlow boundary markers + history-inert thread (§4.4/§11)', () =
 
   it('a resumed pending draft keeps its slot thread (§4.4 — the clear is entry-without-draft only)', async () => {
     storeMod.useStore.setState({ createFrom: 'app', automationId: null })
-    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
       draft: { spec: [{ kind: 'h1', text: 'Kept' }, { kind: 'p', text: 'Body.' }], steps: [] },
       agentId: null,
     })
-    getChatMock().mockResolvedValueOnce({ chat: [
+    getChatMock().mockResolvedValue({ chat: [
       { id: 'm1', kind: 'system', icon: 'fa-flag-checkered', boundary: true, text: 'Draft discarded.' },
     ] })
     render(<CreateFlow />)
@@ -2270,7 +2306,7 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
   })
 
   it('Fix with AI waits for the stored thread - the job carries the kept history and the seed', async () => {
-    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ chat: [
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [
       { id: 'c1', at: '2026-08-01T00:00:00Z', kind: 'user', text: 'Earlier question' },
     ] })
     const failed = {
@@ -2390,7 +2426,7 @@ describe('CreateFlow background continuation & re-attach (§11/§19)', () => {
       createFrom: 'new' as never, automationId: null,
       draftJobs: [{ owner: 'pending', jobId: 'jp', status: 'building', mode: 'chat' }],
     })
-    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
       draft: null, agentId: null, job: { jobId: 'jp', status: 'building', mode: 'chat' },
     })
     ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({

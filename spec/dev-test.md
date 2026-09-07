@@ -100,7 +100,15 @@ above — `VITE_DEV`/`npm run dev:app` themselves stay gone).
 pytest-xdist `-n auto`). Renderer unit tests are Vitest under
 `app/tests/` (run `npm test` in `app/`) — pure logic (label
 formatting, store reducers, spec/text round-trips) plus a small happy-dom component tier
-(`*.render.test.tsx`, @testing-library/react). It covers flows the e2e tier cannot reach
+(`*.render.test.tsx`, @testing-library/react). Every component render in that tier runs
+inside `React.StrictMode` (`app/tests/setup.ts` flips @testing-library's `reactStrictMode`
+on for the whole suite), mirroring the dev app's `src/main.tsx`: StrictMode runs each
+effect mount → cleanup → mount once, so a hook whose cleanup leaves a ref or store flag in
+its "gone" state without a mount-time re-arm fails here instead of hanging the dev app
+(the 2026-09-06 `useDraftJob` detached-flag regression). Fixtures therefore never rely on
+mount count — one-shot mocks (`mockResolvedValueOnce`) are consumed by the discarded first
+mount, and store state a page's own effects would seed is seeded after `render`, never
+before. It covers flows the e2e tier cannot reach
 under its safety rules — the original motivation: installer/set-up card flows (e2e must
 never click them), queued/waiting execution rows (timing-hard to stage live), and
 grant-checkbox → draft-request payloads — and editor branch behavior uneconomical to stage
@@ -146,7 +154,12 @@ as ANSI and fails to parse the scripts' non-ASCII result lines); the §3 interpr
 entitlement (`disable-library-validation`) sits in `prod.sh`'s interpreter plist and not the
 Electron one, rides the Python-tree executable signing step, and the post-sign ad-hoc probe
 is still in place (a dropped entitlement kills every native §6.2 wheel on user Macs and shows
-up nowhere else before a DMG ships); and the §17
+up nowhere else before a DMG ships), and `tests/test_interpreter_entitlement.py` exercises
+that plist for real on macOS: a C host compiled in the test, signed ad-hoc with the hardened
+runtime plus the plist text lifted from `prod.sh`, must dlopen an ad-hoc-signed library,
+while a control signed with the Electron plist must be refused with a code-signature error
+(library validation is a property of the hardened runtime, not of the signing identity, so
+the ad-hoc host reproduces the shipped behavior; skipped off macOS or without `cc`); and the §17
 `docs/CHANGELOG.md` carries a `## v<version> - <date>` entry for the current `VERSION` with its
 version headings in strictly descending semver order (newest first, no duplicates). The
 changelog guard deliberately checks "an entry exists", not "the top entry matches":

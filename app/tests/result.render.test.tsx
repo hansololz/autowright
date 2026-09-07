@@ -78,7 +78,8 @@ describe('ResultSection file-kind routing (§7)', () => {
     await waitFor(() => expect(document.querySelector('img[alt="chart.png"]')).toBeTruthy())
     expect(document.querySelector('img[alt="chart.png"]')!.getAttribute('src')).toBe('blob:test')
     // only the three open view cards fetched — collapsed rows cost no request
-    expect(vi.mocked(api.resultFile)).toHaveBeenCalledTimes(3)
+    expect(new Set(vi.mocked(api.resultFile).mock.calls.map((c) => c[1])))
+      .toEqual(new Set(['result.md', 'page.html', 'chart.png']))
     expect(vi.mocked(api.resultFile)).not.toHaveBeenCalledWith('e1', 'data.csv')
   })
 
