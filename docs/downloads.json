@@ -8,7 +8,7 @@
     "version": "0.10.0"
   },
   "win32-x86_64": {
-    "url": "https://github.com/hansololz/autowright/releases/download/v0.10.2/Autowright-0.10.2-win32-x86_64.exe",
-    "version": "0.10.2"
+    "url": "https://github.com/hansololz/autowright/releases/download/v0.11.0/Autowright.exe",
+    "version": "0.11.0"
   }
 }
