@@ -755,14 +755,23 @@ export default function CreateFlow() {
   // in full detail (§19 executionId). While another job is already in flight only
   // the seed lands; the user asks when it settles.
   const fixConsumed = useRef(false)
-  const [fixSend, setFixSend] = useState<string | null>(null)
+  const [fixSend, setFixSend] = useState<{ executionId: string | null; typical?: number } | null>(null)
   useEffect(() => {
     if (!rev || fixConsumed.current) return
     const fx = useStore.getState().fixExec
     if (!fx) return
     fixConsumed.current = true
     useStore.setState({ fixExec: null })
-    const ex = executionFull[fx] ?? executions.find((e) => e.id === fx)
+    if (fx.collapse) {
+      // §11 collapse variant: the §4.1 output-collapsed row — a succeeded run
+      // that returned nothing against a non-zero history.
+      appendEntry({ kind: 'system', icon: 'fa-circle-exclamation',
+        text: `The latest execution succeeded but returned nothing. Recent executions returned about ${fx.collapse.typical} items each.` })
+      setFixSend({ executionId: fx.executionId, typical: fx.collapse.typical })
+      return
+    }
+    const id = fx.executionId
+    const ex = id ? executionFull[id] ?? executions.find((e) => e.id === id) : undefined
     const failure = ex?.error
       ? `Execution failed at step ${ex.error.step ?? '?'} — ${ex.error.message}`
       : 'The execution failed.'
@@ -771,7 +780,7 @@ export default function CreateFlow() {
     // §11: the send is deferred until the stored thread merged (chatReady) -
     // the effect below fires it, so the job's §8 CONVERSATION context carries
     // the kept history and the seed entry above instead of a pre-merge thread.
-    setFixSend(fx)
+    setFixSend({ executionId: id })
   }, [rev != null]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!rev || !chatReady || !fixSend) return
@@ -779,8 +788,11 @@ export default function CreateFlow() {
     // While another §8 job is already in flight only the seed lands (§11);
     // the user asks when it settles.
     if (anyJobBusy || testLive) return
-    // The seed entry above already names the failing step — don't repeat it here.
-    void jobs.sendChat(`This execution failed — figure out why. If the automation is at fault, change it so it won’t happen again; if the fix is something I need to do on this ${copy.machine} (install or start an app, sign in), tell me what to do and how instead.`, fixSend)
+    const text = fixSend.typical !== undefined
+      ? `This execution succeeded but returned nothing, while recent executions returned about ${fixSend.typical} items each. Figure out why: the page, export, or API it reads has probably changed. If the automation is at fault, change it so it finds the real items again; if the fix is something I need to do on this ${copy.machine} (sign in, install or start an app), tell me what to do and how instead.`
+      // The seed entry above already names the failing step — don't repeat it here.
+      : `This execution failed — figure out why. If the automation is at fault, change it so it won’t happen again; if the fix is something I need to do on this ${copy.machine} (install or start an app, sign in), tell me what to do and how instead.`
+    void jobs.sendChat(text, fixSend.executionId ?? undefined)
   }, [rev != null, chatReady, fixSend]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // §11: settled runs seed the thread — entering the editor after the newest

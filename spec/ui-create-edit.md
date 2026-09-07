@@ -1539,6 +1539,16 @@ run in full detail however old it is. The send waits for the stored thread to lo
 and the seeded failure entry. The outcome lands like any chat outcome. While
 another §8 job is already in flight the message is not sent — only the system entry is
 appended, and the user asks when the job settles.
+**Collapse variant.** The §9.2 banner's `output-collapsed` row hands the editor the
+automation's latest finished execution (the zero run) plus the §4.1 `typical` count. The
+system entry reads "The latest execution succeeded but returned nothing. Recent executions
+returned about <typical> items each." (same icon), and the canned message is "This
+execution succeeded but returned nothing, while recent executions returned about
+<typical> items each. Figure out why: the page, export, or API it reads has probably
+changed. If the automation is at fault, change it so it finds the real items again; if
+the fix is something I need to do on this <machine> (sign in, install or start an app),
+tell me what to do and how instead." Everything else (the `executionId`, the wait for the
+stored thread, the in-flight suppression) is the failure entry's behavior.
 
 **Settled runs seed the thread.** Beyond the test entries above, entering the editor in
 edit mode appends a run-settled system entry ("Draft execution failed at step `<name>` —

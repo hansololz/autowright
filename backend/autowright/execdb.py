@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # §5: timestamps are stored as the canonical UTC ISO-8601 microsecond TEXT —
 # a fixed offset keeps lexicographic order equal to chronological order, so
@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS executions (
   note             TEXT,
   chip             TEXT,
   chip_status      TEXT,
+  count            INTEGER,
   error_step       TEXT,
   error_message    TEXT,
   error_reason     TEXT
@@ -76,8 +77,8 @@ class ExecDB:
             self.conn.execute(
                 'INSERT INTO executions (id, automation_id, automation_name, kind, version, status,'
                 ' "trigger", trigger_sender, queued_at, started_at, finished_at, duration_ms, note, chip, chip_status,'
-                " error_step, error_message, error_reason)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                " count, error_step, error_message, error_reason)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(id) DO UPDATE SET"
                 " automation_name=excluded.automation_name, status=excluded.status,"
                 # §6 queue promotion re-stamps started_at (the record stops
@@ -85,7 +86,7 @@ class ExecDB:
                 # index has to follow or the list sorts on a stale timestamp.
                 " started_at=excluded.started_at,"
                 " finished_at=excluded.finished_at, duration_ms=excluded.duration_ms, note=excluded.note,"
-                " chip=excluded.chip, chip_status=excluded.chip_status,"
+                " chip=excluded.chip, chip_status=excluded.chip_status, count=excluded.count,"
                 " error_step=excluded.error_step, error_message=excluded.error_message,"
                 " error_reason=excluded.error_reason",
                 (h["id"], h["automation_id"], h["automation_name"], h["kind"], h.get("version"), h["status"],
@@ -93,7 +94,7 @@ class ExecDB:
                  # every reader takes it from this field alone.
                  h["trigger"], h.get("trigger_sender"), h.get("queued_at"),
                  h["started_at"], h.get("finished_at"), h["duration_ms"], h["note"],
-                 h.get("chip"), h.get("chip_status"),
+                 h.get("chip"), h.get("chip_status"), h.get("count"),
                  err.get("step"), err.get("message"), err.get("reason")))
 
     def load_all(self) -> dict[str, dict]:
@@ -101,9 +102,9 @@ class ExecDB:
         for row in self.conn.execute(
                 'SELECT id, automation_id, automation_name, kind, version, status, "trigger",'
                 " trigger_sender, queued_at, started_at, finished_at, duration_ms, note, chip, chip_status,"
-                " error_step, error_message, error_reason FROM executions"):
+                " count, error_step, error_message, error_reason FROM executions"):
             (eid, automation_id, automation_name, kind, version, status, trigger, trigger_sender,
-             queued, started, finished, duration_ms, note, chip, chip_status,
+             queued, started, finished, duration_ms, note, chip, chip_status, count,
              err_step, err_message, err_reason) = row
             out[eid] = {
                 "id": eid, "automation_id": automation_id, "automation_name": automation_name,
@@ -112,7 +113,7 @@ class ExecDB:
                 "queued_at": queued,
                 "started_at": started, "finished_at": finished,
                 "duration_ms": duration_ms, "note": note,
-                "chip": chip, "chip_status": chip_status,
+                "chip": chip, "chip_status": chip_status, "count": count,
                 "error": {"step": err_step, "message": err_message, "reason": err_reason}
                          if err_message else None,
             }

@@ -1946,6 +1946,23 @@ def test_cmd_execution_show_prints_trigger_message_error_and_result(capsys):
     assert "file: report.md (2 KB)" in out
 
 
+
+def test_cmd_execution_show_prints_count_line(capsys):
+    """§20/§4.5: the item count prints on its own line, above the result chip,
+    and its noun agrees with the number."""
+    e = dict(FULL_EXEC, result={"count": 12, "chip": "0 new", "files": []})
+    gets = {"/executions": {"executions": [e], "total": 1}, f"/executions/{e['id']}": e}
+    _run(_RouteClient(gets), "execution", "show")
+    out = capsys.readouterr().out
+    assert "count: 12 items" in out
+    assert out.index("count: 12 items") < out.index("result: 0 new")
+
+    e = dict(FULL_EXEC, result={"count": 1, "chip": "0 new", "files": []})
+    gets = {"/executions": {"executions": [e], "total": 1}, f"/executions/{e['id']}": e}
+    _run(_RouteClient(gets), "execution", "show")
+    assert "count: 1 item\n" in capsys.readouterr().out
+
+
 def test_cmd_execution_show_payload_fallbacks(capsys):
     # iMessage payload has no channel — must print sender · time, no KeyError
     e = dict(FULL_EXEC, triggerPayload={

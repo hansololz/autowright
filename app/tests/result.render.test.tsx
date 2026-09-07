@@ -108,6 +108,26 @@ describe('ResultSection file-kind routing (§7)', () => {
   })
 })
 
+describe('§4.5 item count chip', () => {
+  it('renders beside the result chip, singular at one, and shows the zero', () => {
+    section([], { result: { chip: null, chipStatus: null, files: [], path: '/tmp/results', count: 12 } })
+    expect(screen.getByText('12 items')).toBeTruthy()
+    cleanup()
+    section([], { result: { chip: null, chipStatus: null, files: [], path: '/tmp/results', count: 1 } })
+    expect(screen.getByText('1 item')).toBeTruthy()
+    cleanup()
+    // §4.5: "0 items" is shown, the zero being the point
+    section([], { result: { chip: null, chipStatus: null, files: [], path: '/tmp/results', count: 0 } })
+    expect(screen.getByText('0 items')).toBeTruthy()
+  })
+
+  it('is absent when the execution never called result.count', () => {
+    section([])
+    expect(screen.queryByText(/items?$/)).toBeNull()
+  })
+})
+
+
 describe('FILES rows — text preview (§7 caps) and load failure', () => {
   it('a text row fetches on first open only and truncates past the line cap', async () => {
     const big = Array.from({ length: 2500 }, (_, i) => `row ${i}`).join('\n')

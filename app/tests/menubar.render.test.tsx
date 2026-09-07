@@ -1,6 +1,6 @@
 // Component test for the §13 menu-bar panel's attention count: the aggregate
 // line matches the tray dot exactly: failed automations plus the §4.1
-// `overdue` problem, and nothing else.
+// `overdue` and `output-collapsed` problems, and nothing else.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import type { Automation } from '../src/types'
@@ -50,6 +50,19 @@ describe('§13 menu-bar attention count', () => {
     })
     render(<MenuBarPanel />)
     expect(screen.getByText('2 need attention')).toBeTruthy()
+  })
+
+  it('an output-collapsed automation counts too', () => {
+    storeMod.useStore.setState({
+      automations: [
+        auto({ id: 'a1', name: 'Nightly digest' }),
+        auto({ id: 'a2', name: 'Price watch', problems: [
+          { kind: 'output-collapsed', typical: 40, label: 'The latest execution returned nothing. Recent executions returned about 40 items each.' },
+        ] }),
+      ],
+    })
+    render(<MenuBarPanel />)
+    expect(screen.getByText('1 needs attention')).toBeTruthy()
   })
 
   it('one automation needing attention takes the singular verb', () => {

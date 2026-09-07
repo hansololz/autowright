@@ -362,6 +362,12 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                             result["status"] = v
                         elif f == "chip":
                             result["chip"] = v
+                        elif f == "count":
+                            # §6.1: the executor validated it; the engine still
+                            # refuses anything but a non-negative int (a
+                            # hand-rolled control line must not poison the audit).
+                            if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                                result["count"] = v
                     elif op == "notify":
                         holder["text"] = msg.get("text")
                     elif op == "reply":
@@ -932,7 +938,7 @@ class Engine:
             # §7: duration_ms accumulates across retry passes — the pass clock is
             # the one _launch stamped (a direct _execute call stamps its own)
             state["pass_start"] = h["_pass_start"] = state.get("pass_start") or time.time()
-            result: dict[str, Any] = {"status": "ok", "chip": None}
+            result: dict[str, Any] = {"status": "ok", "chip": None, "count": None}
             result_touched = False
             notify_text: str | None = None
             # §3 per-execution idle-sleep hold, through the §2 platform layer —
@@ -1177,7 +1183,15 @@ class Engine:
                     result["chip"] = self._redact(h, result["chip"], redactions)
                 h["chip"] = result["chip"]
                 h["chip_status"] = result["status"] if result["chip"] else None
+                # §4.5 count: an int carries no secret — stored as reported.
+                h["count"] = result["count"]
             self.store.update_execution(h)
+            # §6/§4.1 collapse: read after the record settled (update_execution
+            # invalidated the memo), so the verdict includes this run.
+            collapse = None
+            if h["status"] == "succeeded" and h.get("kind") != "test" and not h.get("_test"):
+                with self.store.lock:  # the memo walks the shared header table
+                    collapse = self.store.output_collapse(auto)
             # No OS notification for a cancelled execution (the user did it
             # themselves, seconds ago) or a §11 draft test (editor-scoped —
             # its outcome shows on the Test card).
@@ -1187,7 +1201,8 @@ class Engine:
                 # Center) — redact it like a log line.
                 if notify_text:
                     notify_text = self._redact(h, notify_text, redactions)
-                self._notify_end(auto, ver, h, result if result_touched else None, notify_text)
+                self._notify_end(auto, ver, h, result if result_touched else None, notify_text,
+                                 collapse)
         except Exception as e:  # noqa: BLE001
             # This path must always complete — if the original failure was a
             # disk error, logging/persisting can raise again; swallow those so
@@ -1358,16 +1373,23 @@ class Engine:
                                 on_reply=on_reply, step_i=step_index - 1)
 
     def _notify_end(self, auto: dict, ver: dict, h: dict, result: dict | None,
-                    notify_text: str | None) -> None:
-        """§6: at most one notification, at the end, per the §4.9 setting."""
+                    notify_text: str | None, collapse: dict | None = None) -> None:
+        """§6: at most one notification, at the end, per the §4.9 setting.
+        `collapse` is the §4.1 output-collapsed verdict for this run: the
+        first zero run of an episode is attention-class, like a failure."""
         setting = self.store.settings.get("notifications", "attention")
         status = h["status"]
+        episode_start = bool(collapse and collapse.get("episodeStart"))
         interesting = (
             status == "failed"
+            or episode_start
             or (result or {}).get("status") in ("changes", "attention")
         )
         if setting == "all" or interesting:
-            body = notify_text or (result or {}).get("chip") or \
+            # §6 body precedence: notify(text) > collapse body > chip > default.
+            collapse_body = (f"Returned nothing this time. Recent executions returned "
+                             f"about {collapse['typical']} items each.") if episode_start else None
+            body = notify_text or collapse_body or (result or {}).get("chip") or \
                 ("Execution failed" if status == "failed" else "Execution finished")
             title_param = None
             for p in ver.get("params", []):

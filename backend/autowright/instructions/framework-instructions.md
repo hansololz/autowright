@@ -152,6 +152,9 @@ workspace                 # per-execution dir, already the cwd (relative paths l
 log(text)                 # also log.warn(text) / log.error(text)
 result.status('changes' | 'ok' | 'attention')
 result.chip(text)         # short summary chip
+result.count(n)           # how many items this execution FOUND in its source (rows
+                          #   scraped, messages read, files processed) — the size of
+                          #   the input, before any diff against memory; 0 included
 result.path               # dir for output files; a result.md there renders as
                           #   markdown, result.html as a styled page, images inline
 notify(text)              # title = the automation name; a param literally named
@@ -178,6 +181,7 @@ entries = json.loads(pathlib.Path("entries.json").read_text())
 seen = memory.load("seen_ids", default=[])
 new = [e for e in entries if e["id"] not in seen]
 log(f"{len(new)} new of {len(entries)}")
+result.count(len(entries))  # what the source yielded, not what is new
 
 if not new:
     result.status("ok")
@@ -208,6 +212,13 @@ Notes:
 
 - `result.chip(text)` is a short summary chip — optional: skip it when the job
   has nothing worth summarizing in three words.
+- Call `result.count(n)` in the last step whenever the job has a countable
+  input — the number of rows, entries, messages, or files the source yielded
+  this run, before filtering against memory, and 0 when it yielded nothing.
+  Autowright compares each run's count with the automation's own recent runs
+  and flags a script that keeps succeeding but has quietly started returning
+  nothing (a page restructured, an export renamed). Skip it only when there is
+  nothing to count.
 - Everything beyond the chip is files: write the report as `result.md` in
   `result.path` — markdown renders in the UI.
 - Pass data between steps as files in the workspace (the cwd) — it lives for

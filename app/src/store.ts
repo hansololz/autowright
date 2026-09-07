@@ -93,10 +93,11 @@ interface Model {
   // Steps, status, and logs live on the ordinary exec record (executionFull[executionId],
   // kept fresh by exec.* events).
   test: { executionId: string } | null
-  // §7/§9.2 Fix with AI: the failed execution id handed to the editor, which
-  // seeds the thread and sends the §11 canned analyze chat message on mount,
-  // then clears it.
-  fixExec: string | null
+  // §7/§9.2 Fix with AI: the execution handed to the editor, which seeds the
+  // thread and sends the §11 canned analyze chat message on mount, then clears
+  // it. `collapse` marks the §4.1 output-collapsed variant (the zero run plus
+  // the typical count) instead of a failure.
+  fixExec: { executionId: string | null; collapse?: { typical: number } } | null
   ollamaPull: { model: string; line: string; percent?: number; done: boolean; ok?: boolean } | null
   // §19 harness.install stream, latest event per provider id
   harnessInstall: Record<string, { line?: string; percent?: number; done: boolean; ok?: boolean; error?: string }>
@@ -667,11 +668,12 @@ function mergeAutoRows(cur: Automation[], rows: Automation[]): Automation[] {
   })
 }
 
-// §13: the dot is failed-or-overdue only — the other problems kinds are
-// config nits the in-app amber chip covers.
+// §13: the dot is failed, overdue, or output-collapsed only — the other
+// problems kinds are config nits the in-app amber chip covers.
+export const TRAY_ALERT_KINDS = new Set(['overdue', 'output-collapsed'])
 export function trayAlertOn(automations: Automation[]) {
   return automations.some((a) => a.lastStatus === 'failed'
-    || (a.problems ?? []).some((p) => p.kind === 'overdue'))
+    || (a.problems ?? []).some((p) => TRAY_ALERT_KINDS.has(p.kind)))
 }
 
 function updateTrayAlert(automations: Automation[]) {

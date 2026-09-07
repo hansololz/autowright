@@ -134,6 +134,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   Read-only and lock-free — §6 atomic commit means a read never sees a partial file. A
   non-UTF-8 (binary) file is not printed: the 422 message points at the memory directory
   on disk instead.
+- **Item count parity (§4.5):** `execution show`'s human output prints a `count: N items`
+  line ("1 item") ahead of the `result:` chip line when the execution reported a
+  `result.count`; `--json` carries `result.count` as always.
 - **Trigger message parity (§7):** `execution show`'s human output prints a
   `trigger message:` line when the record carries the §4.5 `triggerPayload` — the same input
   the UI's TRIGGER MESSAGE block shows. Kind-aware, like the UI: Discord prints

@@ -208,6 +208,14 @@ class Result:
         # blow the engine's size-capped control-line read.
         emit("result", field="chip", value=str(text)[:1_000])
 
+    def count(self, n: int) -> None:
+        # §6.1: how many items this execution found in its source — the §4.1
+        # output-collapsed history. A non-negative int only (bools are ints in
+        # Python, so they are refused explicitly).
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError("result.count must be a non-negative integer")
+        emit("result", field="count", value=n)
+
 
 def scan_outbound(text: str, what: str, scan: dict[str, str]) -> None:
     """§6: refuse to send `text` anywhere off this Mac if it carries a secret

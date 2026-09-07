@@ -4057,7 +4057,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### cryptography 50.0.0 — Apache-2.0 OR BSD-3-Clause (Linux only)
+### cryptography 50.0.1 — Apache-2.0 OR BSD-3-Clause (Linux only)
 
 ```
 This software is made available under the terms of *either* of the licenses

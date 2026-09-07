@@ -45,7 +45,10 @@ the placeholder never reaches a prompt, the UI, or stored instructions.
 
 - `backend/autowright/instructions/framework-instructions.md` — the contract preamble that travels
   with **every** call, written as structured markdown (headings, fenced code blocks for the
-  envelopes and SDK reference, a table for parameter kinds): the agent's role, the generic
+  envelopes and SDK reference, a table for parameter kinds; the SDK reference teaches
+  `result.count(n)` as the last step's habit whenever the job has a countable input, the
+  size of the input rather than the diff, so the §4.1 `output-collapsed` audit has a
+  history to compare against without any user setup): the agent's role, the generic
   file-block envelope (the per-call TASK directive
   names the exact files, and governs whether files are returned at all: the envelope rule
   applies only when the TASK names files to return, so a chat answer stays plain prose with
@@ -294,7 +297,8 @@ so the agent never fixes an already-fixed failure or reads stale output as curre
 behavior. The newest run (and the run named by the §19 `executionId` body field — the §11
 Fix-with-AI entry — regardless of age) additionally carries full detail: per-step statuses
 and durations, the §4.5 error (message + reason), the failing step's log tail plus earlier
-steps' log tails (the cause is often upstream), and on success the result chip plus a
+steps' log tails (the cause is often upstream), and on success the result chip, the
+§4.5 item count when reported ("item count: N"), plus a
 clipped `result.md` excerpt and the result-file list. Log lines are the already-redacted
 execution output (§6); secret values never travel.
 

@@ -183,9 +183,10 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
   installed-check is served from a cached scan of the §6.2 environment, refreshed when that
   environment changes, so the audit never re-walks site-packages per automation. Each
   condition mirrors a real §7 pre-step gate or a §6.2/§5.1 fact (an unresolvable agent has
-  no pre-step gate - it fails its step at step time); `overdue` alone mirrors the §6
-  scheduling reality instead — its claim that scheduled moments passed with no run is
-  checked against the execution record, so the chip still never cries wolf. Kinds,
+  no pre-step gate - it fails its step at step time); `overdue` and `output-collapsed`
+  alone mirror the §6 execution reality instead — the claim that scheduled moments passed
+  with no run, or that a succeeding run has gone empty, is checked against the execution
+  record, so the chip still never cries wolf. Kinds,
   in serialized order (each `label` is the exact UI copy):
   - `overdue` — the schedule is being missed: some **enabled cron** trigger has had **two
     consecutive occurrences** pass since its baseline with no real run. The baseline is
@@ -214,6 +215,27 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
     dot, and the §6 overdue notification are its discovery path. "Scheduled executions
     are being missed — it last ran <§4.1 date label>." / never ran: "Scheduled
     executions are being missed — it has never run."
+  - `output-collapsed` — the automation still runs and still exits 0, but it has started
+    returning nothing: the world its steps touch changed (a page restructured, an export
+    renamed, an API field dropped) and a deterministic script keeps succeeding over an
+    empty input. Derived from the §4.5 `count` history, execution index only: the
+    automation's most recent **finished** real execution (the `lastStatus` population,
+    `skipped`/`queued`/test records excluded, an in-flight `executing` record skipped so a
+    run in progress neither raises nor clears the verdict) **succeeded with `count` 0**,
+    while the earlier succeeded real executions that reported a count, the most recent
+    ten of them and at least three, have a median ≥ 1. Zero against a non-zero history,
+    never a percentage drop: a count that varies day to day must not cry wolf, and zero
+    is the collapse that has no error to notify on. Fewer than three counted runs, a
+    history whose median is already 0, a latest finished run that failed or was
+    cancelled, or a latest run that reported no count at all (steps that never call
+    `result.count`) → no entry. The entry carries `typical`, the rounded median, and
+    states it in the copy so the user sees the gap: "The latest execution returned
+    nothing. Recent executions returned about <typical> items each." The verdict is
+    memoized per automation and invalidated whenever an execution of that automation
+    settles or is deleted (the same bookkeeping that keeps `_latest` current), so
+    serialization never re-scans the index. Its discovery path: this kind, the §13 tray
+    dot, and the §6 collapse notification; the §9.2 banner row's **Fix with AI** action
+    opens the editor seeded with the collapse (§11).
   - `secret-unresolved` — an effective step secret or a discord trigger's token secret
     references an id in `unresolvedReferences` (kind secret): the §5.1 import found no
     match for it, and the id matches no stored record by construction, so this kind and
@@ -834,9 +856,16 @@ carries only the `logs` dir path above, so the §7 pane can reveal the files the
 Result object:
 ```
 { chip?, chipStatus?: changes|ok|attention — both only when the execution set a chip,
+  count?: int ≥ 0 — only when the execution called result.count(n) (§6.1): how many items
+        the run found in its source; the history the §4.1 output-collapsed audit reads,
   files: [{ name, size }] — every file in the result dir, plus the dir
         path for the "Show in Finder" button }
 ```
+
+The result object exists when the execution has files, a chip, or a count; otherwise
+`result` is null. `count` is stored like the chip: a `count` key on `execution.yaml` and a
+nullable `count` column in `executions.db` (§5), null when the execution never called
+`result.count()`; records written before the key existed load as null (§21).
 
 The chip is optional — an automation may choose not to use one. It is stored on the execution
 record itself (`chip` + `chip_status` columns in `executions.db`, §5): the engine copies

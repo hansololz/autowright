@@ -1598,6 +1598,91 @@ def test_notification_all_setting_and_body_precedence(store, monkeypatch):
     assert calls[-1] == ("Override", "Custom notify text")  # notify() beats the chip
 
 
+
+def _seed_counted_run(store, a, started_at, count):
+    """A settled real execution carrying a §4.5 count — the history the §4.1
+    collapse audit reads at the end of a real engine run."""
+    h = store.create_execution(a, "version", a["current_version"], "manual", [])
+    h["started_at"] = started_at
+    h["finished_at"] = started_at
+    h["status"] = "succeeded"
+    h["count"] = count
+    store.update_execution(h)
+    return h
+
+
+def test_result_count_is_stored_on_the_header(store):
+    """§6.1/§4.5: result.count(n) lands on the execution record and rides the
+    result object out."""
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"][1]["code"] = 'from autowright import result\nresult.count(12)\n'
+    a = store.create_automation(ver, "Counter", None)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "succeeded"
+    assert h["count"] == 12
+    assert store.exec_json(h, full=True)["result"]["count"] == 12
+
+
+def test_result_count_rejects_bad_values(store):
+    """§6.1: anything but a non-negative int raises in the step — bools
+    included, since they are ints in Python."""
+    from autowright.engine import Engine
+
+    engine = Engine(store)
+    for bad in ("True", "-1", '"3"'):
+        ver = make_version()
+        ver["steps"][1]["code"] = f'from autowright import result\nresult.count({bad})\n'
+        a = store.create_automation(ver, f"Bad {bad}", None)
+        h = engine.start(a, "manual")
+        wait_done(engine, h["id"])
+        assert h["status"] == "failed", bad
+        assert "non-negative integer" in h["error"]["message"], bad
+
+
+def test_collapse_notification_first_zero_run_only(store, monkeypatch):
+    """§6 collapse notification: the run that OPENS a §4.1 output-collapsed
+    episode notifies under the default setting, like a failure; the next zero
+    run posts nothing, and a step's own notify() still wins."""
+    from autowright.engine import Engine
+
+    calls = _notify_recorder(monkeypatch)
+    assert store.settings.get("notifications", "attention") == "attention"
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"][1]["code"] = 'from autowright import result\nresult.count(0)\n'
+    a = store.create_automation(ver, "Gone Empty", None)
+    for at in ("2026-08-01T08:00:00", "2026-08-02T08:00:00", "2026-08-03T08:00:00"):
+        _seed_counted_run(store, a, at, 40)
+
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    assert h["status"] == "succeeded" and h["count"] == 0
+    assert calls == [("Gone Empty", "Returned nothing this time. Recent executions "
+                                   "returned about 40 items each.")]
+
+    # second zero run of the same episode — the banner and the tray dot carry it
+    h2 = engine.start(a, "manual")
+    wait_done(engine, h2["id"])
+    assert h2["status"] == "succeeded"
+    assert len(calls) == 1
+
+    # a step that says what an empty run means keeps its own body
+    ver2 = make_version()
+    ver2["steps"][1]["code"] = ('from autowright import notify, result\n'
+                                'result.count(0)\nnotify("Nothing today")\n')
+    b = store.create_automation(ver2, "Spoken For", None)
+    for at in ("2026-08-01T08:00:00", "2026-08-02T08:00:00", "2026-08-03T08:00:00"):
+        _seed_counted_run(store, b, at, 40)
+    h3 = engine.start(b, "manual")
+    wait_done(engine, h3["id"])
+    assert h3["status"] == "succeeded"
+    assert calls[-1] == ("Spoken For", "Nothing today")
+
+
 def test_notification_title_param_overrides_automation_name(store, monkeypatch):
     from autowright.engine import Engine
 

@@ -346,6 +346,10 @@ export function ResultSection({ label, result, executionId, stamp, compact }: {
           <Eyebrow>{label}</Eyebrow>
         </button>
         {chip && <MetaChip c={c} bg={bg}>{chip}</MetaChip>}
+        {/* §4.5 count: plain and untinted — "0 items" is shown, the zero being the point */}
+        {result.count != null && (
+          <MetaChip>{result.count} {result.count === 1 ? 'item' : 'items'}</MetaChip>
+        )}
         {result.when && (
           <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)' }}>{result.when}</span>
         )}

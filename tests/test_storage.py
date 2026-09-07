@@ -1393,6 +1393,164 @@ def test_enable_stamp_is_kept_across_edits_and_never_healed(store):
     assert store.overdue(a)
 
 
+# ---------- §4.1 output-collapsed (the §4.5 count history) ----------
+
+def _counted_run(store, a, started_at, count, status="succeeded", **over):
+    """A settled real execution with a §4.5 count — the history the collapse
+    audit reads. `started_at` is set by hand so the ordering is explicit."""
+    h = store.create_execution(a, "version", a["current_version"], "manual", [], **over)
+    h["started_at"] = started_at
+    h["status"] = status
+    h["count"] = count
+    h["finished_at"] = started_at
+    store.update_execution(h)
+    return h
+
+
+def test_output_collapsed_needs_three_counted_runs_then_flags_zero(store):
+    """§4.1: a succeeded latest run with count 0 against at least three counted
+    succeeded runs whose median is ≥ 1 flags — with only two, nothing does."""
+    a = store.create_automation(make_version(), "Scraper", None)
+    cur = a["versions"][a["current_version"]]
+    for at, n in (("2026-08-01T08:00:00", 40), ("2026-08-02T08:00:00", 38),
+                  ("2026-08-03T08:00:00", 42), ("2026-08-04T08:00:00", 0)):
+        _counted_run(store, a, at, n)
+    assert store.problems_json(a, cur) == [{
+        "kind": "output-collapsed", "typical": 40,
+        "label": "The latest execution returned nothing. Recent executions "
+                 "returned about 40 items each."}]
+    assert store.output_collapse(a) == {"typical": 40, "episodeStart": True}
+
+    # two counted runs behind the zero is below COLLAPSE_MIN_RUNS — no verdict
+    b = store.create_automation(make_version(), "Young Scraper", None)
+    for at, n in (("2026-08-01T08:00:00", 40), ("2026-08-02T08:00:00", 38),
+                  ("2026-08-03T08:00:00", 0)):
+        _counted_run(store, b, at, n)
+    assert store.problems_json(b, b["versions"][b["current_version"]]) == []
+    assert store.output_collapse(b) is None
+
+
+def test_output_collapsed_zero_history_never_flags(store):
+    """§4.1: a history whose median is already 0 is an automation that returns
+    nothing by nature — zero against zero is not a collapse."""
+    a = store.create_automation(make_version(), "Always Empty", None)
+    cur = a["versions"][a["current_version"]]
+    for at in ("2026-08-01T08:00:00", "2026-08-02T08:00:00",
+               "2026-08-03T08:00:00", "2026-08-04T08:00:00"):
+        _counted_run(store, a, at, 0)
+    assert store.problems_json(a, cur) == []
+    assert store.output_collapse(a) is None
+
+
+def test_output_collapsed_ignores_uncounted_failed_and_executing_runs(store):
+    """§4.1: the verdict reads the latest FINISHED real execution — an in-flight
+    record is skipped, and a latest run that failed or reported no count at all
+    clears it."""
+    a = store.create_automation(make_version(), "Feeder", None)
+    cur = a["versions"][a["current_version"]]
+    for at in ("2026-08-01T08:00:00", "2026-08-02T08:00:00", "2026-08-03T08:00:00"):
+        _counted_run(store, a, at, 40)
+    _counted_run(store, a, "2026-08-04T08:00:00", 0)
+    assert [p["kind"] for p in store.problems_json(a, cur)] == ["output-collapsed"]
+
+    # a run in progress neither raises nor clears the verdict (the memo is
+    # invalidated on settle, so drop it by hand to force the real re-scan)
+    live = store.create_execution(a, "version", a["current_version"], "manual", [])
+    live["started_at"] = "2026-08-05T08:00:00"
+    a.pop("_collapse", None)
+    assert [p["kind"] for p in store.problems_json(a, cur)] == ["output-collapsed"]
+
+    # …and once it settles failed it IS the latest finished run → cleared
+    live["status"] = "failed"
+    live["finished_at"] = "2026-08-05T08:00:00"
+    store.update_execution(live)
+    assert store.problems_json(a, cur) == []
+
+    # a latest succeeded run that never called result.count clears it too
+    _counted_run(store, a, "2026-08-06T08:00:00", None)
+    assert store.problems_json(a, cur) == []
+
+
+def test_output_collapsed_episode_start_only_on_first_zero(store):
+    """§6 collapse notification: only the run that OPENS the episode is an
+    episode start — the second zero run keeps the verdict without it."""
+    a = store.create_automation(make_version(), "Watcher", None)
+    for at in ("2026-08-01T08:00:00", "2026-08-02T08:00:00", "2026-08-03T08:00:00"):
+        _counted_run(store, a, at, 40)
+    _counted_run(store, a, "2026-08-04T08:00:00", 0)
+    assert store.output_collapse(a) == {"typical": 40, "episodeStart": True}
+    _counted_run(store, a, "2026-08-05T08:00:00", 0)
+    assert store.output_collapse(a) == {"typical": 40, "episodeStart": False}
+
+
+def test_output_collapsed_memo_invalidates_on_settle_and_delete(store):
+    """§4.1: the verdict is memoized per automation and dropped whenever an
+    execution settles or is deleted — never served stale."""
+    a = store.create_automation(make_version(), "Memoized", None)
+    cur = a["versions"][a["current_version"]]
+    for at in ("2026-08-01T08:00:00", "2026-08-02T08:00:00", "2026-08-03T08:00:00"):
+        _counted_run(store, a, at, 40)
+    zero = _counted_run(store, a, "2026-08-04T08:00:00", 0)
+    assert "_collapse" not in a  # the settle dropped the memo
+    assert [p["kind"] for p in store.problems_json(a, cur)] == ["output-collapsed"]
+    assert a["_collapse"] == {"typical": 40, "episodeStart": True}  # …and cached it
+
+    store.delete_execution(zero["id"])
+    assert "_collapse" not in a
+    assert store.problems_json(a, cur) == []
+
+
+def test_output_collapsed_orders_after_overdue(store):
+    """§4.1 serialized order: overdue first, output-collapsed second, the
+    reference audit after both."""
+    trig = {"id": "t1", "kind": "cron", "enabled": True,
+            "expression": "0 8 * * *", "source": "user"}
+    a = store.create_automation(make_version(), "Stale Scraper", None, triggers=[trig])
+    a["created_at"] = "2020-01-01T08:00:00"
+    a["triggers"][0]["enabledAt"] = "2020-01-01T08:00:00+00:00"
+    cur = a["versions"][a["current_version"]]
+    for at in ("2020-01-01T08:00:00", "2020-01-02T08:00:00", "2020-01-03T08:00:00"):
+        _counted_run(store, a, at, 40)
+    _counted_run(store, a, "2020-01-04T08:00:00", 0)
+    assert [p["kind"] for p in store.problems_json(a, cur)] == ["overdue", "output-collapsed"]
+
+
+def test_exec_yaml_without_count_loads(store, home):
+    """§21.4: records written before the §4.5 count key existed load with count
+    None, and a hand-edited non-int reads as None rather than reaching the
+    audit as a string."""
+    from autowright.yamlio import load_yaml, save_yaml
+
+    a = store.create_automation(make_version(), "Countless", None)
+    h = _counted_run(store, a, "2026-08-01T08:00:00", None)
+    yfile = store.exec_yaml_path(h["id"])
+    meta = load_yaml(yfile)
+    assert meta["count"] is None  # written for every record, null when unset
+
+    meta.pop("count")
+    save_yaml(yfile, meta)
+    assert store.read_exec_yaml(h["id"])["count"] is None
+    assert store.exec_full(h["id"])["count"] is None
+    assert store.result_json(store.read_exec_yaml(h["id"])) is None
+
+    # a hand-edited string count is not a count (§5 lenient read)
+    save_yaml(yfile, {**meta, "count": "12"})
+    assert store.read_exec_yaml(h["id"])["count"] is None
+
+
+def test_result_json_carries_count_and_exists_for_count_alone(store):
+    """§4.5: a count is part of the result object — and an execution whose only
+    builder call was result.count still has one."""
+    a = store.create_automation(make_version(), "Counter", None)
+    h = _counted_run(store, a, "2026-08-01T08:00:00", 0)
+    assert store.result_json(h) == {
+        "files": [], "path": str(store.exec_dir(h["id"]) / "result"), "count": 0}
+    h["chip"] = "0 new"
+    h["chip_status"] = "ok"
+    r = store.result_json(h)
+    assert (r["chip"], r["chipStatus"], r["count"]) == ("0 new", "ok", 0)
+
+
 # ---------- §4.1 unresolvedReferences (§5.1 import's no-match map) ----------
 
 def _imported(store, *, secret_in_code=None, secret_in_entry=None, agent_in_entry=None,

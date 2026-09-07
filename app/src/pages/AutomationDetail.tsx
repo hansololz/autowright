@@ -177,6 +177,10 @@ export default function AutomationDetail() {
   const latestExec = autoExecs.find((e) =>
     e.status !== 'skipped' && e.status !== 'queued' && !e.test)
   const failedExec = latestExec?.status === 'failed' && latestExec.error ? latestExec : null
+  // §9.2/§4.1 output-collapsed: the banner's Fix with AI hands the editor the
+  // latest finished run (the zero run) — the verdict is about that record.
+  const finishedExec = autoExecs.find((e) =>
+    e.status !== 'skipped' && e.status !== 'queued' && e.status !== 'executing' && !e.test)
   const params = auto.params ?? []
   const steps = auto.steps ?? []
   const spec = auto.spec ?? []
@@ -324,6 +328,21 @@ export default function AutomationDetail() {
                 <button className="ad-btn-text dim" onClick={() => go('secrets')} style={{ flex: 'none' }}>
                   Open Secrets
                 </button>
+              ) : p.kind === 'output-collapsed' ? (
+                // §7 Fix with AI, collapse variant (§11): the editor opens
+                // seeded with the zero run and the typical count.
+                <button
+                  className="ad-btn-text dim"
+                  onClick={() => {
+                    useStore.setState({ fixExec: {
+                      executionId: finishedExec?.id ?? null, collapse: { typical: p.typical ?? 0 },
+                    } })
+                    setSurface('create', 'edit')
+                  }}
+                  style={{ flex: 'none' }}
+                >
+                  Fix with AI
+                </button>
               ) : p.kind !== 'package-missing' && p.kind !== 'overdue' ? (
                 <button className="ad-btn-text dim" onClick={() => setSurface('create', 'edit')} style={{ flex: 'none' }}>
                   Edit
@@ -365,7 +384,7 @@ export default function AutomationDetail() {
               onView={() => go('execution', { executionId: failedExec.id })}
               // §7/§9.2 Fix with AI: open the editor seeded with this failure
               onFix={() => {
-                useStore.setState({ fixExec: failedExec.id })
+                useStore.setState({ fixExec: { executionId: failedExec.id } })
                 setSurface('create', 'edit')
               }}
               style={{ marginBottom: lr ? 10 : 0 }}

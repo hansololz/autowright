@@ -68,6 +68,15 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-07 - `count` added to `execution.yaml` and the `executions.db` header.** The
+  §4.5 item count that `result.count(n)` stores, written as a `count` key on every record
+  from now on (null when the execution reported none, like `chip`). Additive: an absent
+  key is the old shape and reads as null, so the §4.1 `output-collapsed` audit treats
+  pre-existing runs as uncounted. The derived index gains a nullable `count` column under
+  a `SCHEMA_VERSION` bump (drop-and-rebuild, §17 - no migration code). First version
+  writing the new shape: the next release after 2026-09-07; oldest shape still read:
+  v0.6.0 (key absent). Fixture test: `tests/test_storage.py::test_exec_yaml_without_count_loads`.
+
 - **2026-09-05 - version `params` narrowed to definitions only (read-side migration).** The
   2026-09-01 save-side fix (`strip_param_values`) stopped new versions from storing resolved
   value keys (`value`/`on`/`lines`/`rows`) inside `versions/vN/automation.yaml` `params`,

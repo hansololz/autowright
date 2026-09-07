@@ -1113,6 +1113,9 @@ def cmd_execution_show(c: Client, args) -> None:
         if err.get("reason"):
             print(f"possible reason: {err['reason']}")
     r = full.get("result") or {}
+    if r.get("count") is not None:
+        n = r["count"]
+        print(f"count: {n} item{'' if n == 1 else 's'}")
     if r.get("chip"):
         print(f"result: {r['chip']}")
     for f in r.get("files") or []:
