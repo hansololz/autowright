@@ -471,7 +471,11 @@ helper children never show a terminal window under the §3 `pythonw.exe` service
 only (`--only-binary :all:` — a source-only
 distribution fails fast with pip's "no matching distribution" rather than hitting a compiler
 users don't have). The bundle inside the .app is never written to (read-only,
-replaced whole on update). The executor prepends this directory to `sys.path` for every step,
+replaced whole on update). On macOS the interpreter that imports these wheels is the §3 signed
+bundle, so it carries the §3 interpreter entitlement (`disable-library-validation`): wheel
+extension modules are ad-hoc signed, and hardened-runtime library validation would otherwise
+refuse to load them at import time even though the install succeeded. The executor prepends
+this directory to `sys.path` for every step,
 so deleting it (or an app update) is always recoverable. Installing is one idempotent "ensure"
 operation shared by every call site: a fast installed-check first (distribution present in the
 directory, **any** version — the installed version is never compared against the manifest,

@@ -161,14 +161,40 @@ cat > "$ENTITLEMENTS" <<'EOF'
 </plist>
 EOF
 
+# Interpreter entitlement (SPEC §3): hardened-runtime library validation only
+# lets a process load code signed by Apple or by its own Team ID, and the §6.2
+# declared packages are pip wheels whose extension modules are ad-hoc signed
+# (no Team ID). Without this exception every native wheel (numpy, pandas,
+# pillow, ...) installs fine and then dies at import with dlopen's "different
+# Team IDs". Only the Python executables carry it: entitlements come from the
+# process's main executable, so the .so/.dylib files and the Electron side
+# (which keeps full library validation) never get it.
+PY_ENTITLEMENTS="$BUILD/python-entitlements.plist"
+cat > "$PY_ENTITLEMENTS" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict>
+</plist>
+EOF
+
 echo "· codesigning (identity: $CODESIGN_IDENTITY, hardened runtime, inside-out)"
 SIGN=(codesign --force --options runtime --timestamp -s "$CODESIGN_IDENTITY")
 
-# 1. Python tree: shared objects + executables
+# 1. Python tree: shared objects, then executables. The Mach-O ones (the
+# interpreter binaries) get the interpreter entitlement; pip's script
+# entry points (text, never executed inside the bundle) sign as before.
 find "$APP/Contents/Resources/python" -type f \( -name '*.so' -o -name '*.dylib' \) -print0 \
   | xargs -0 -n 16 "${SIGN[@]}"
-find "$APP/Contents/Resources/python/bin" -type f -perm +111 -print0 \
-  | xargs -0 -n 16 "${SIGN[@]}"
+while IFS= read -r -d '' f; do
+  if file -b "$f" | grep -q 'Mach-O'; then
+    "${SIGN[@]}" --entitlements "$PY_ENTITLEMENTS" "$f"
+  else
+    "${SIGN[@]}" "$f"
+  fi
+done < <(find "$APP/Contents/Resources/python/bin" -type f -perm +111 -print0)
 
 # 2. every Mach-O inside Frameworks — detect by content, not name/location:
 # executables hide in odd places (Squirrel's Resources/ShipIt, Electron's
@@ -190,6 +216,24 @@ done
 # 5. the app bundle itself
 "${SIGN[@]}" --entitlements "$ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"
+
+# ---- post-sign probe (SPEC §3): the signed interpreter loads an ad-hoc .so ----
+# A copy of one bundled extension module, re-signed ad-hoc exactly the way a
+# pip wheel's extension arrives, must dlopen under the signed interpreter.
+# Fails the build the moment the interpreter entitlement drops off, instead of
+# shipping a DMG whose every native wheel is dead. Runs with
+# PYTHONDONTWRITEBYTECODE=1 and a probe file outside the bundle, so it writes
+# nothing into the sealed tree (the seal is re-verified below regardless).
+PROBE="$BUILD/adhoc-probe.so"
+PROBE_SRC="$(find "$APP/Contents/Resources/python/lib" -name '*.so' -print | head -1)"
+[ -n "$PROBE_SRC" ] || { echo "no extension module found for the ad-hoc probe"; exit 1; }
+cp "$PROBE_SRC" "$PROBE"
+codesign --force -s - "$PROBE"
+PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -c \
+  'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$PROBE" \
+  || { echo "signed interpreter cannot load an ad-hoc-signed extension: interpreter entitlement missing (SPEC §3)"; exit 1; }
+rm -f "$PROBE"
+echo "· signed interpreter loads ad-hoc extensions OK"
 
 # ---- notarize the app (SPEC §3) ----
 # Submit a zip of the signed app, then staple the ticket onto the app itself so

@@ -142,7 +142,11 @@ that live in more than one hand-maintained file: the app version agrees across `
 `instructions/framework-instructions.md`, and §6.2 itself, with the import-name ↔
 distribution-name mapping written out in the guard; and every `*.ps1` in the §17 script
 directories still starts with a UTF-8 BOM (Windows PowerShell 5.1 misreads a BOM-less file
-as ANSI and fails to parse the scripts' non-ASCII result lines); and the §17
+as ANSI and fails to parse the scripts' non-ASCII result lines); the §3 interpreter
+entitlement (`disable-library-validation`) sits in `prod.sh`'s interpreter plist and not the
+Electron one, rides the Python-tree executable signing step, and the post-sign ad-hoc probe
+is still in place (a dropped entitlement kills every native §6.2 wheel on user Macs and shows
+up nowhere else before a DMG ships); and the §17
 `docs/CHANGELOG.md` carries a `## v<version> - <date>` entry for the current `VERSION` with its
 version headings in strictly descending semver order (newest first, no duplicates). The
 changelog guard deliberately checks "an entry exists", not "the top entry matches":

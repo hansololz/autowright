@@ -438,3 +438,35 @@ def test_powershell_scripts_start_with_a_utf8_bom():
         assert head == b"\xef\xbb\xbf", (
             f"{path.relative_to(REPO)} lost its UTF-8 BOM — Windows PowerShell "
             "5.1 would misread its non-ASCII output lines and fail to parse it")
+
+
+# ------------------------------------------------- §3 interpreter entitlement
+LIBRARY_VALIDATION_EXCEPTION = "com.apple.security.cs.disable-library-validation"
+
+
+def test_macos_interpreter_signs_with_the_library_validation_exception():
+    """§3: the bundled interpreter is signed with the hardened runtime, whose
+    library validation refuses any code not signed by Apple or by our own Team
+    ID. §6.2 declared packages are pip wheels whose extension modules arrive
+    ad-hoc signed, so without `disable-library-validation` on the interpreter
+    executables every native wheel (numpy, pandas, pillow, ...) installs and
+    then dies at import with dlopen's "different Team IDs", the bug every
+    release up to 0.10.1 shipped, invisible in dev because the repo venv is
+    unsigned. The entitlement lives in one heredoc in `prod.sh` and is only
+    exercised by a signed DMG on a user's Mac, so pin it here: it must sit in
+    the interpreter plist (not the Electron one, which keeps full library
+    validation), ride the Python-tree executable signing step, and the
+    post-sign ad-hoc probe must still be there to catch the runtime effect."""
+    src = _read("scripts/prod.sh")
+    plists = dict(re.findall(r'(\w+)="\$BUILD/[\w-]+\.plist"\ncat > "\$\1" <<\'EOF\'\n(.*?)\nEOF',
+                             src, re.S))
+    assert set(plists) == {"ENTITLEMENTS", "PY_ENTITLEMENTS"}, sorted(plists)
+    assert LIBRARY_VALIDATION_EXCEPTION in plists["PY_ENTITLEMENTS"]
+    assert LIBRARY_VALIDATION_EXCEPTION not in plists["ENTITLEMENTS"], (
+        "the Electron side must keep library validation; only the interpreter needs the exception")
+    python_bin_step = src[src.index("Contents/Resources/python/bin"):]
+    python_bin_step = python_bin_step[:python_bin_step.index("# 2.")]
+    assert '--entitlements "$PY_ENTITLEMENTS"' in python_bin_step, (
+        "the Python-tree executable signing step must apply the interpreter entitlement")
+    assert "ctypes.CDLL" in src and "codesign --force -s - \"$PROBE\"" in src, (
+        "the post-sign ad-hoc probe is gone; a dropped entitlement would ship unnoticed")
