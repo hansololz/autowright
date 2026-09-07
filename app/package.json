@@ -99,7 +99,8 @@
       "shortcutName": "Autowright",
       "menuCategory": false,
       "installerIcon": "electron/icon/icon.ico",
-      "uninstallerIcon": "electron/icon/icon.ico"
+      "uninstallerIcon": "electron/icon/icon.ico",
+      "include": "electron/installer.nsh"
     }
   },
   "devDependencies": {

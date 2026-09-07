@@ -306,6 +306,25 @@ describe('§3 Windows packaging config (electron-builder)', () => {
     expect(build.nsis.shortcutName).toBe('Autowright')
   })
 
+  it('reopens an already-installed same-version app instead of reinstalling (§3)', () => {
+    // NSIS never runs under vitest, so this pins the hook's shape: the include
+    // is wired in, it is a preInit (before the running-app check), it steps
+    // aside for silent and updater runs, and it launches the recorded install
+    // only when the recorded version is this installer's own.
+    expect(build.nsis.include).toBe('electron/installer.nsh')
+    const nsh = readFileSync(join(ELECTRON_DIR, 'installer.nsh'), 'utf-8')
+    expect(nsh).toMatch(/^!macro preInit$/m)
+    expect(nsh).toMatch(/\$\{ifNot\} \$\{Silent\}/)
+    expect(nsh).toMatch(/\$\{AndIfNot\} \$\{isUpdated\}/)
+    expect(nsh).toMatch(/ReadRegStr \$R0 HKCU "\$\{UNINSTALL_REGISTRY_KEY\}" "DisplayVersion"/)
+    expect(nsh).toMatch(/ReadRegStr \$R1 HKCU "\$\{INSTALL_REGISTRY_KEY\}" "InstallLocation"/)
+    expect(nsh).toMatch(/\$\{if\} \$R0 == "\$\{VERSION\}"/)
+    expect(nsh).toMatch(/\$\{andIf\} \$\{FileExists\} "\$R1\\\$\{APP_EXECUTABLE_FILENAME\}"/)
+    expect(nsh).toMatch(/\$\{StdUtils\.ExecShellAsUser\} \$0 "\$R1\\\$\{APP_EXECUTABLE_FILENAME\}" "open" ""\n(\s+;[^\n]*\n)*\s+SetErrorLevel 0\n\s+Quit\n/)
+    // A per-user install (§3) — never a machine hive.
+    expect(nsh).not.toMatch(/HKLM|SHELL_CONTEXT/)
+  })
+
   it('ships the renderer, the shell and the staged interpreter — and no more', () => {
     expect(build.files).toContain('dist/**/*')
     expect(build.files).toContain('electron/**/*')

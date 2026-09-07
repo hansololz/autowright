@@ -72,8 +72,11 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
 - **NSIS-specific updater behavior has zero test coverage on macOS hosts.** The
   electron-updater describe in `app/tests/main-cjs-leaf.test.ts` runs on every OS, so the
   shared handler logic is covered on mac hosts — but NsisUpdater-specific behavior
-  (installer swap, differential/blockmap) still is not. Run the renderer suite (and e2e)
-  on a real Windows host before the next Windows release.
+  (installer swap, differential/blockmap) still is not, and neither is the §3
+  `installer.nsh` preInit hook (same-version relaunch): its vitest guard only pins the
+  script's shape. Run the renderer suite (and e2e) on a real Windows host before the
+  next Windows release, and run the freshly built installer twice — the second run must
+  open the app with no install progress window.
 
 ## Linux
 

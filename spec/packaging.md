@@ -737,6 +737,23 @@ and dropped (dormant project; the name-sharing Squirrel.Mac stays on macOS uncha
   upgrade must always find the previous install, and the stable GUID + path + appId are
   what let a future signed build upgrade an unsigned install in place. Needs `icon.ico`
   generated beside the existing icns/png (§14 assets, `scripts/gen_icon.cjs`).
+  - **Already installed at this version → open the app (decided).** After a first
+    install, Windows Search and the Start menu's "Recommended" list keep surfacing the
+    installer exe itself, so a user who double-clicks it again expects Autowright to
+    open — not a second full install with its progress window. `app/electron/installer.nsh`
+    (electron-builder `nsis.include`) adds a `preInit` hook, the first thing `.onInit`
+    runs: an interactive run (not `/S`, not electron-updater's `--updated`) that finds
+    this installer's own `${VERSION}` already recorded as `DisplayVersion` under the
+    per-user uninstall key and the app exe at the `InstallLocation` recorded under
+    `HKCU\Software\<GUID>` launches that exe as the user and quits. Because it runs
+    before the running-app check, an app that is already open is brought forward by the
+    §9 single-instance lock instead of being killed and re-extracted. Every other case —
+    a different or missing installed version, a missing exe, silent runs, updater runs —
+    installs exactly as before; a same-version repair is uninstall-then-install. The
+    hook is NSIS-only and unreachable from tests: the §15 packaging-config guard pins the
+    include path and the hook's shape, and the behavior is verified on a Windows host by
+    building with `prod.ps1` and running the installer twice (second run: no progress
+    window, the app opens; the `spec/ports.md` Windows worksheet).
 - **Updater:** `electron-updater` (NsisUpdater on win32; since v0.6.1 every OS runs
   electron-updater — darwin's `MacUpdater` flow is specified in the §3 mac update bullets
   above). main.cjs's update block is one shared code path; the §2 platform layer's

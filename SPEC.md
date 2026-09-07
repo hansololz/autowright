@@ -294,7 +294,9 @@ migrate-on-load migration so data written by released versions keeps loading (§
   the checked-in tray PNGs (`trayTemplate.png`/`@2x`, `trayAlert.png`/`@2x` — the mac
   template images — and the §13 Windows colored variants `trayWin.png`/`@2x`,
   `trayWinAlert.png`/`@2x`),
-  rendered by `scripts/gen_tray_icon.py`.
+  rendered by `scripts/gen_tray_icon.py`, and `installer.nsh` — the §3 Windows NSIS
+  `preInit` hook (electron-builder `nsis.include`) that reopens an already-installed
+  same-version app instead of reinstalling it.
   The Vite dev server allows serving from the repo root (`server.fs.allow` in
   `vite.config.ts`): the §9.4 doc modals raw-import documents from `docs/`
   (`docs/PRIVACY.md`, `docs/TERMS.md`, `docs/CHANGELOG.md`), and Vite's default
