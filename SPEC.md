@@ -430,14 +430,15 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `aria-label` "Download for macOS" keeps it accessible) and the Windows button takes
   the primary accent styling. Elsewhere both full labelled buttons show, macOS
   primary). Each is a direct download of that
-  OS's latest versioned installer: on load, page JS fetches the same-origin
+  OS's latest installer: on load, page JS fetches the same-origin
   `downloads.json` distributable index (relative URL, so it also works when the page
   is served from a sub-path in local previews) and rewrites each download anchor's
   `href` to the `url` of the index entry named by the anchor's `data-download` value
   (`darwin-arm64` → the DMG, `win32-x86_64` → the NSIS `.exe`, `linux-x86_64` → the
   AppImage) — the released
-  artifact's `github.com/…/releases/download/…` URL, so the click downloads the
-  installer with the version in its filename; an anchor whose entry is missing or
+  artifact's `github.com/…/releases/download/…` URL, so the click downloads that
+  release's installer (the mac and Linux file names carry the version; the Windows
+  installer is the bare `Autowright.exe`, §3); an anchor whose entry is missing or
   malformed is left alone. The static fallback `href` (no JS, fetch failure) is the
   repo's latest-release GitHub page. Under the buttons
   a mono platform line "MIT licensed · Linux (Experimental)", where "Linux (Experimental)"

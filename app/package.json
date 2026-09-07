@@ -32,7 +32,7 @@
     "directories": {
       "output": "../build/win"
     },
-    "artifactName": "Autowright-${version}-win32-x86_64.${ext}",
+    "artifactName": "Autowright.${ext}",
     "publish": [
       {
         "provider": "generic",

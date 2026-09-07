@@ -754,6 +754,31 @@ and dropped (dormant project; the name-sharing Squirrel.Mac stays on macOS uncha
     include path and the hook's shape, and the behavior is verified on a Windows host by
     building with `prod.ps1` and running the installer twice (second run: no progress
     window, the app opens; the `spec/ports.md` Windows worksheet).
+- **Artifact name (decided 2026-09-07, from v0.11.0): the bare `Autowright.exe`.** The
+  top-level `artifactName` is `Autowright.${ext}`, so every Windows release ships
+  `Autowright.exe` plus `Autowright.exe.blockmap`, and the version lives only in the
+  release-tag path of the download URL
+  (`github.com/…/releases/download/v<version>/Autowright.exe`). Same-named assets never
+  collide because each GitHub release is its own asset namespace. Releases through
+  v0.10.2 shipped `Autowright-<version>-win32-x86_64.exe`; those assets stay under their
+  old names, and nothing rewrites their feeds. Consequences, all accepted:
+  - Nothing installed changes: the installed binary (`productName`), the Start-menu
+    shortcut (`shortcutName`), and the Apps & features entry (GUID) never carried the
+    artifact name, so an in-app update across the rename is an ordinary update.
+  - electron-updater derives the *previous* release's blockmap URL by substituting the
+    old version for the new one in the new installer's URL, so the first update across
+    the rename (0.10.x → 0.11.0) looks for `v0.10.x/Autowright.exe.blockmap`, misses, logs
+    "Cannot download differentially, fallback to full download", and fetches the whole
+    installer once. From 0.11.0 onward the substituted URL resolves again (the tag path
+    carries the version) and updates are differential as before.
+  - The installer in a user's Downloads folder now shares the installed app's name, and
+    Windows Search surfaces both; the "already installed → open the app" hook above is
+    what keeps a stray double-click harmless. Repeated downloads land as
+    `Autowright (1).exe` with no version in the name — the version is in the tag path
+    of the URL the §17 download button and the feed hand out, and in Apps & features.
+  - `prod.ps1` and `release.ps1` look for the bare name in `build\win`; the §15 drift
+    guards check the version of a Windows feed URL on its tag path only (the mac and
+    Linux artifact names keep the version and are still checked on the file name too).
 - **Updater:** `electron-updater` (NsisUpdater on win32; since v0.6.1 every OS runs
   electron-updater — darwin's `MacUpdater` flow is specified in the §3 mac update bullets
   above). main.cjs's update block is one shared code path; the §2 platform layer's
@@ -832,7 +857,9 @@ refuses, the package manager owns updates).
   no separate `.blockmap` artifact: for the AppImage target electron-builder **embeds**
   the block map in the AppImage itself and records its size as the yml's `blockMapSize`.
 - **Artifact:** `Autowright-<version>-linux-x86_64.AppImage` via the `linux.artifactName`
-  override (the top-level `artifactName` is the Windows form). The `build.linux` config
+  override (the top-level `artifactName` is the Windows form, the bare `Autowright.${ext}`
+  — the Linux name deliberately keeps the version, since an AppImage is the runnable
+  program itself and users keep several beside each other). The `build.linux` config
   pins the AppImage/x64 target, the checked-in `electron/icon/icon.png`, category
   `Utility`, and its own `publish` generic-provider entry — the Linux feed base URL,
   overriding the top-level win32 entry, so the `app-update.yml` electron-builder embeds

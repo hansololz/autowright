@@ -285,7 +285,9 @@ describe('§3 Windows packaging config (electron-builder)', () => {
   it('carries the §3 identifiers, artifact name and generic feed', () => {
     expect(build.appId).toBe('ai.autowright.app')
     expect(build.productName).toBe('Autowright')
-    expect(build.artifactName).toBe('Autowright-${version}-win32-x86_64.${ext}')
+    // §3 Windows artifact name: the bare Autowright.exe from v0.11.0; the version
+    // rides only in the release-tag path of the download URL.
+    expect(build.artifactName).toBe('Autowright.${ext}')
     // The publish entry is what puts app-update.yml (this URL) in the package,
     // so it must be the same base the §2 win32 module serves.
     expect(build.publish).toEqual([

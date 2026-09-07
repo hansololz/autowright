@@ -170,7 +170,9 @@ try {
     Pop-Location
 }
 
-$INSTALLER = Join-Path $OUT "Autowright-$VERSION-win32-x86_64.exe"
+# §3 artifact name: the bare Autowright.exe (from v0.11.0), per app/package.json's
+# top-level artifactName.
+$INSTALLER = Join-Path $OUT 'Autowright.exe'
 $BLOCKMAP = "$INSTALLER.blockmap"
 $LATEST = Join-Path $OUT 'latest.yml'
 foreach ($artifact in @($INSTALLER, $BLOCKMAP, $LATEST)) {

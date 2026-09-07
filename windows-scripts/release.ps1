@@ -74,7 +74,9 @@ Write-Host "· version: $VERSION - building the Windows release"
 Invoke-Native 'prod.ps1' { & (Join-Path $PSScriptRoot 'prod.ps1') }
 
 $OUT = Join-Path $ROOT 'build\win'
-$INSTALLER = Join-Path $OUT "Autowright-$VERSION-win32-x86_64.exe"
+# §3 artifact name: the bare Autowright.exe (from v0.11.0) - the version rides in
+# the release-tag path of the download URL, not in the file name.
+$INSTALLER = Join-Path $OUT 'Autowright.exe'
 $BLOCKMAP = "$INSTALLER.blockmap"
 $BUILT_YML = Join-Path $OUT 'latest.yml'
 foreach ($artifact in @($INSTALLER, $BLOCKMAP, $BUILT_YML)) {

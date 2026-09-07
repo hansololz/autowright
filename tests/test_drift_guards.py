@@ -150,6 +150,24 @@ FEEDS = {
     "linux-x86_64": ("release/linux-x86_64/latest-linux.yml", ".AppImage"),
 }
 
+# Keys whose artifact file name carries the version (`Autowright-<version>-…`). The
+# §3 Windows installer is the bare `Autowright.exe` from v0.11.0 - its version rides
+# only in the release-tag path of the URL - so its file name is deliberately absent
+# here; the `/v<version>/` tag check below still pins every feed to its release.
+VERSIONED_ARTIFACT_NAMES = {"darwin-arm64", "darwin-x86_64", "linux-x86_64"}
+
+
+def _assert_url_names_release(where: str, key: str, url: str, version: str) -> None:
+    """The URL must point into the `v<version>` release, and - where the artifact
+    name carries the version - name that version in the file too."""
+    assert f"/v{version}/" in url, (
+        f"{where} says version {version!r} but its URL {url!r} names a "
+        "different release")
+    if key in VERSIONED_ARTIFACT_NAMES:
+        assert version in url.rsplit("/", 1)[-1], (
+            f"{where} says version {version!r} but its URL {url!r} names an "
+            "artifact of a different version")
+
 # §3 legacy 0.6.0 bridge: the Squirrel.Mac JSON feeds pre-0.6.1 mac installs read.
 # Rewritten exactly once - by the 0.6.1 release, pointing at the 0.6.1 DMG (that
 # updater mounts the DMG and builds Squirrel's zip on-device) - then frozen
@@ -199,8 +217,9 @@ def _present_feeds() -> dict[str, tuple[str, str, list[str]]]:
 
 def test_update_feeds_name_a_consumable_artifact():
     """§3: every URL a feed hands the updater must be a GitHub release download
-    for this repo, embed the feed's own version, and carry the extension that
-    OS's update flow can actually open."""
+    for this repo, name the feed's own release (and, where the artifact name is
+    versioned, its own version), and carry the extension that OS's update flow
+    can actually open."""
     feeds = _present_feeds()
     assert feeds, "no §3 update feed found under release/ - did the feeds move?"
     for key, (rel, version, urls) in feeds.items():
@@ -214,9 +233,7 @@ def test_update_feeds_name_a_consumable_artifact():
                 f"{rel} points at {url!r}, but the {key} update flow consumes a "
                 f"{ext} - a feed naming any other artifact fails at update time "
                 "on an installed copy, not here")
-            assert f"/v{version}/" in url and version in url.rsplit("/", 1)[-1], (
-                f"{rel} says version {version!r} but its URL {url!r} names a "
-                "different release")
+            _assert_url_names_release(rel, key, url, version)
 
 
 def test_update_feeds_never_run_ahead_of_the_version_file():
@@ -333,9 +350,7 @@ def test_downloads_index_agrees_with_the_feeds():
         assert url.startswith(RELEASE_DOWNLOAD_PREFIX), (
             f"docs/downloads.json[{key}] points at {url!r}; downloads come from "
             "the GitHub release")
-        assert f"/v{entry_version}/" in url and entry_version in url.rsplit("/", 1)[-1], (
-            f"docs/downloads.json[{key}] says version {entry_version!r} but its "
-            f"URL {url!r} names a different release")
+        _assert_url_names_release(f"docs/downloads.json[{key}]", key, url, entry_version)
         if key in feeds:
             rel, feed_version, feed_urls = feeds[key]
             assert entry_version == feed_version, (

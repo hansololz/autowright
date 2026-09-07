@@ -196,7 +196,10 @@ version that ran ahead of the published release stays invisible until an install
 tries to update. Five checks, over whichever feeds exist on disk (a feed is absent until
 its OS's release leg first runs, and absence is never a failure): every download URL a
 feed hands the updater is a `github.com/hansololz/autowright/releases/download/…` URL,
-embeds that feed's own version, and carries the extension that OS's update flow can
+names that feed's own release tag (`/v<version>/`) — and, for the mac and Linux
+artifacts whose file names carry the version, that version in the file name too (the
+Windows installer is the bare `Autowright.exe` from v0.11.0, §3, so its name is not
+checked) — and carries the extension that OS's update flow can
 actually open (`.zip` for the mac electron-updater/Squirrel path, `.exe` for the NSIS
 updater, `.AppImage` for the AppImage updater); no feed is *newer* than `VERSION` (it
 would name a release that does not exist - the reverse is legitimate and deliberately
