@@ -472,6 +472,14 @@ export default function CreateFlow() {
         instructionCache.framework = framework
         instructionCache.defaultBuild = defaultBuild
         setFw(framework)
+        // §11: the first create-flow open of a session seeds the empty draft
+        // before this answer lands — back-fill the Build-instructions card so
+        // the user reads the same rules the agent is given (§19 substitutes
+        // them for a create-mode call carrying none). Only an untouched empty
+        // card: a resumed draft's own text and an open editor stay as they are.
+        if (!isEdit) {
+          setRev((r) => r && !r.instructions && !r.instrEdit ? { ...r, instructions: defaultBuild } : r)
+        }
       })
       .catch(() => { /* panel renders empty; next mount retries */ })
   }, [])

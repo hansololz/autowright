@@ -913,7 +913,14 @@ editors enter with
   draft — Save applies it like any manual instruction edit (same dirty gating and toast),
   Cancel discards it. In
   create mode the card arrives pre-filled with the app's default best-practice rules (§8) —
-  edit or delete them freely before saving.
+  edit or delete them freely before saving. The pre-fill reads the session's cached
+  `GET /instructions` answer; when that fetch resolves **after** the empty draft was seeded
+  (the first create-flow open of an app session), the response back-fills the draft's
+  instructions — only while the card is still empty and not being edited, so a resumed
+  pending draft that carries its own text and an editor the user already opened are never
+  overwritten. The card is never left empty by a slow fetch: the agent is told the same
+  rules either way (the §19 chat call substitutes them when a create-mode `current` carries
+  none), so what the user reads must match what the agent receives.
 - **NOTES** — collapsible card below the Spec card holding the §4.1 agent-owned notes
   document; bare header like the other cards; collapsed with content it shows the
   first-line preview (status-aware rule above). View state renders the markdown (shared §4.5 renderer, same

@@ -2823,3 +2823,51 @@ describe('document-editor modal (§11)', () => {
     expect(bodyLi('Pruned by hand')).toBeTruthy()
   })
 })
+
+// §11: the first create-flow open of a session seeds the empty draft before
+// GET /instructions answers, so the Build-instructions card starts empty and
+// the fetch back-fills it — never over a resumed draft's own text.
+describe('CreateFlow build-instructions back-fill (§8/§11)', () => {
+  const EMPTY_LINE = 'No instructions yet — press Edit to add standing rules.'
+  let resolveInstructions: (payload: { framework: string; defaultBuild: string }) => void
+  beforeEach(async () => {
+    armPendingPoll()
+    // instructionCache is a module-level singleton: an earlier create-mode
+    // test leaves it warm, which would skip the fetch path entirely.
+    const { instructionCache } = await import('../src/pages/createflow/model')
+    instructionCache.framework = null
+    instructionCache.defaultBuild = ''
+    ;(mockedApi.instructions as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((res) => { resolveInstructions = res as typeof resolveInstructions }),
+    )
+    storeMod.useStore.setState({ createFrom: 'app', automationId: null })
+  })
+  const settleInstructions = async () => {
+    await act(async () => { resolveInstructions({ framework: '# Framework', defaultBuild: '- rules' }) })
+  }
+  const instrCard = () => cardOf(screen.getByText('BUILD INSTRUCTIONS'))
+
+  it('back-fills the Build-instructions card when GET /instructions resolves after the empty seed', async () => {
+    render(<CreateFlow />)
+    // the empty seed landed first — the card carries its placeholder line
+    expect(within(instrCard()).getByText(EMPTY_LINE)).toBeTruthy()
+    await settleInstructions()
+    await waitFor(() => expect(bodyLi('rules')).toBeTruthy())
+    expect(within(instrCard()).queryByText(EMPTY_LINE)).toBeNull()
+  })
+
+  it('never overwrites a resumed draft’s own instructions', async () => {
+    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
+      draft: {
+        spec: [{ kind: 'h1', text: 'Kept' }, { kind: 'p', text: 'Body.' }], steps: [],
+        instructions: '- keep it simple',
+      },
+      agentId: null,
+    })
+    render(<CreateFlow />)
+    await waitFor(() => expect(bodyLi('keep it simple')).toBeTruthy())
+    await settleInstructions()
+    expect(bodyLi('keep it simple')).toBeTruthy()
+    expect(screen.queryAllByText('rules')).toHaveLength(0)
+  })
+})
