@@ -532,7 +532,7 @@ export default function AutomationsList() {
       </div>
       {automations.length === 0 && (
         <EmptyState
-          text="No automations yet. Describe a job in plain words — your AI writes it as scripts you can read, and Autowright executes them on your schedule."
+          text="No automations yet. Describe a job in plain words. Your AI writes it as scripts you can read, and Autowright executes them on your schedule."
           cta={(
             <BtnPrimary
               onClick={() => (pendingDraft ? setConfirmFresh(true) : setSurface('create', 'app'))}

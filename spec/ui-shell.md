@@ -437,7 +437,7 @@ its card carries the faint one-line note "Your AI is drafting…", and while it 
 the draft to review." — faint text only, never a spinner (§11 owns live progress). The
 header's Resume draft button carries no such note: for the `pending` owner the button
 itself is the only surface (the create flow shows the job's state on entry). Empty state (dashed card):
-"No automations yet. Describe a job in plain words — your AI writes it as scripts you can read,
+"No automations yet. Describe a job in plain words. Your AI writes it as scripts you can read,
 and Autowright executes them on your schedule." with accent CTA "Create your first automation" —
 the CTA behaves exactly like the header New automation button: with a pending draft it shows
 the same discard confirm (delete slot + clear chat) before opening the create flow.
