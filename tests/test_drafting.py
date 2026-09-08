@@ -2505,6 +2505,8 @@ def test_default_build_instructions_carry_result_sanity_check_bullet():
     assert ("Sanity-check the result only when the job has a natural expectation"
             in DEFAULT_INSTRUCTIONS)
     assert "result.status('attention')" in DEFAULT_INSTRUCTIONS
+    # the chip-wording rule is the user's editable standing rule, not framework knowledge
+    assert 'never an internal label like "check failed"' in DEFAULT_INSTRUCTIONS
 
 
 def test_framework_instructions_pair_attention_with_a_chip():
@@ -2513,6 +2515,8 @@ def test_framework_instructions_pair_attention_with_a_chip():
     for p in (build_chat_prompt("x", None, GRANTS),
               build_steps_prompt("# T\n\nBody.", None, GRANTS)):
         assert "always pair `attention` with a chip" in p
+        # knowledge only: where the chip is shown (the wording rule is a build bullet)
+        assert "The chip is shown to the user on the automations list" in " ".join(p.split())
 
 
 # ---------- §8 RECENT EXECUTIONS context (testexec.executions_context) ----------

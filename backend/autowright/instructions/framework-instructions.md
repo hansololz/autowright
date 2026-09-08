@@ -214,7 +214,9 @@ Notes:
   result looks wrong — the run still counts as succeeded, the app shows a
   flagged-result notice, and a notification goes out. The status is stored only
   together with a chip, so always pair `attention` with a chip that says what
-  looks off and why (`result.chip("0 items, usually ~40")`).
+  looks off and why (`result.chip("0 items, usually ~40")`). The chip is shown
+  to the user on the automations list and on the result header, orange when
+  the status is attention.
 - Everything beyond the chip is files: write the report as `result.md` in
   `result.path` — markdown renders in the UI.
 - Pass data between steps as files in the workspace (the cwd) — it lives for

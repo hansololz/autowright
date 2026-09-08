@@ -119,7 +119,11 @@ the placeholder never reaches a prompt, the UI, or stored instructions.
   The section also carries the **memory-visibility note**: memory contents never travel in
   any drafting call (only run logs do) — when a diagnosis genuinely needs them, the agent
   says so and points the user at the §9.2 MEMORY card's Show in Finder or the §20
-  `automation memory show` command instead of guessing. The §11
+  `automation memory show` command instead of guessing. The runtime Notes carry the
+  **result-status legend** (the §6 `ok` / `changes` / `attention` meanings, attention always
+  paired with a chip) and the fact that the chip is shown to the user on the automations
+  list and the result header, orange for attention — knowledge only; the wording rule lives
+  in the default build instructions. The §11
   Framework-instructions card renders this file as markdown.
 - `backend/autowright/instructions/default-build-instructions.md` — the default best-practice
   build instructions, written as a markdown bullet list (never delete files, write only to
@@ -132,8 +136,9 @@ the placeholder never reaches a prompt, the UI, or stored instructions.
   track seen items in memory, sanity-check the result only when the job carries a natural
   expectation (a scraper that always finds items, a report that always has rows, a total
   near last time's) — when it looks off the step still finishes as a success, sets
-  `result.status('attention')` plus a chip naming what looks off and why, and writes the
-  detail to result.md; never raise for a plausible-but-surprising result, and skip the check
+  `result.status('attention')` plus a chip naming what looks off and why in a few plain
+  words the user understands on the automations list (never an internal label), and writes
+  the detail to result.md; never raise for a plausible-but-surprising result, and skip the check
   when the spec implies no expectation (a zero or a change is not by itself a problem); a
   baseline the check compares against lives in `memory/` under a named key, and the agent
   says so in its reply and in the notes when it adds one (the §9.2 step-script MEMORY facts
