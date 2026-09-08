@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.11.1 - 2026-09-07
+
+- Runs that succeed but return something that looks off now flag themselves with an orange notice on the execution and automation pages.
+- Attention notes now describe what looks wrong in plain words instead of an internal label.
+- The Build instructions card no longer opens blank when you start a new automation.
+
 ## v0.11.0 - 2026-09-07
 
 - Running the Windows installer for a version you already have now reopens Autowright instead of leaving you with nothing.
