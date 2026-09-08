@@ -76,7 +76,7 @@ function SectionCard({ eyebrow, open, onToggle, inert, right, hint, preview, chi
           className="ad-btn-bare ad-focus-inset"
           onClick={() => onToggle(true)}
           style={{
-            padding: '0 18px 13px 41px', font: cardHintFont, color: 'var(--text-muted)', cursor: 'pointer', userSelect: 'none',
+            padding: '0 18px 13px', font: cardHintFont, color: 'var(--text-muted)', cursor: 'pointer', userSelect: 'none',
             ...(preview != null ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } : {}),
           }}
         >
@@ -93,7 +93,7 @@ function SectionCard({ eyebrow, open, onToggle, inert, right, hint, preview, chi
 // in-card empty state, hint-styled and hint-indented (§11: same left edge as
 // the collapsed line, so an empty card's text stays put when the card opens)
 function CardEmpty({ children }: { children: React.ReactNode }) {
-  return <div style={{ padding: '10px 18px 16px 41px', fontSize: 12.5, lineHeight: 1.5, color: 'var(--text-muted)' }}>{children}</div>
+  return <div style={{ padding: '10px 18px 16px', font: cardHintFont, color: 'var(--text-muted)' }}>{children}</div>
 }
 
 // §11: the one markdown body every card renders through — same padding, same
@@ -303,7 +303,7 @@ export function LeftColumn({
                 </button>
               )
             })}
-            <div style={{ padding: '12px 18px', font: "400 11.5px/1.55 var(--sans)", color: 'var(--text-muted)' }}>
+            <div style={{ padding: '12px 18px', font: cardHintFont, color: 'var(--text-muted)' }}>
               Steps marked <i className="fa-solid fa-microchip" style={{ fontSize: 9, color: 'var(--accent-hover)' }} /> call one of these mid-execution for the parts plain code can’t do, like reading a messy page or writing prose.
             </div>
           </div>
@@ -387,9 +387,9 @@ export function LeftColumn({
               </div>
             ))}
             {secrets.length === 0 && secRefs.length === 0 && (
-              <EmptyLine style={{ borderBottom: '1px solid var(--hairline-dim)' }}>
+              <div style={{ padding: '14px 18px', font: cardHintFont, color: 'var(--text-muted)', borderBottom: '1px solid var(--hairline-dim)' }}>
                 No secrets in your {copy.secretStore} yet — press New secret.
-              </EmptyLine>
+              </div>
             )}
             {/* §11: a secret added from this card is an explicit grant — auto-allowed on save */}
             <div style={{ padding: '12px 18px 0', ...lockStyle }}>
@@ -398,7 +398,7 @@ export function LeftColumn({
                 New secret
               </button>
             </div>
-            <div style={{ padding: '12px 18px', font: "400 11.5px/1.55 var(--sans)", color: 'var(--text-muted)' }}>
+            <div style={{ padding: '12px 18px', font: cardHintFont, color: 'var(--text-muted)' }}>
               Only selected secrets are available to this automation at execution time. Values come from your {copy.secretStore} and never appear in scripts or logs.
             </div>
           </div>
@@ -427,9 +427,9 @@ export function LeftColumn({
           <CardMarkdown>
             {bld
               ? <Markdown text={bld} />
-              : <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)' }}>Couldn’t load build-instructions.md — reopen this page to retry.</div>}
+              : <div style={{ font: cardHintFont, color: 'var(--red-text)' }}>Couldn’t load build-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
-          <div style={{ padding: '0 18px 16px', font: cardHintFont, color: 'var(--text-muted)' }}>
+          <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
             {BUILD_INSTRUCTIONS_EXPLAINER}
           </div>
       </SectionCard>
@@ -473,9 +473,9 @@ export function LeftColumn({
           <CardMarkdown>
             {fw
               ? <Markdown text={fw} />
-              : <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)' }}>Couldn’t load framework-instructions.md — reopen this page to retry.</div>}
+              : <div style={{ font: cardHintFont, color: 'var(--red-text)' }}>Couldn’t load framework-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
-          <div style={{ padding: '0 18px 16px', font: cardHintFont, color: 'var(--text-muted)' }}>
+          <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
             {FRAMEWORK_INSTRUCTIONS_HINT}
           </div>
       </SectionCard>
@@ -598,7 +598,7 @@ export function RightCards({
                 </div>
               )
             })}
-            <div style={{ padding: '12px 18px', font: "400 11.5px/1.55 var(--sans)", color: 'var(--text-muted)' }}>
+            <div style={{ padding: '12px 18px', font: cardHintFont, color: 'var(--text-muted)' }}>
               Values aren’t part of a version — set them on the automation page, or ask your AI here (staged values apply when you save). For a test, set test-only values in the test-run modal — or ask your AI, which can also change the parameter definitions and set test values when it runs a test.
             </div>
           </>
@@ -668,7 +668,7 @@ export function RightCards({
         ) : (<>
           <Collapse open={!pkgSecOpenEff}>
             {/* §11 status-aware collapsed line — the card only collapses when the list is non-empty */}
-            <button className="ad-btn-bare ad-focus-inset" onClick={() => up({ pkgSecOpen: true })} style={{ padding: '0 18px 13px 41px', font: cardHintFont, color: 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <button className="ad-btn-bare ad-focus-inset" onClick={() => up({ pkgSecOpen: true })} style={{ padding: '0 18px 13px', font: cardHintFont, color: 'var(--text-muted)', cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {rev.packages.map((p) => p.pip).join(' · ')}
             </button>
           </Collapse>
@@ -735,7 +735,7 @@ export function RightCards({
                 </button>
               </div>
             )}
-            <div style={{ padding: '12px 18px', font: "400 11.5px/1.55 var(--sans)", color: 'var(--text-muted)' }}>
+            <div style={{ padding: '12px 18px', font: cardHintFont, color: 'var(--text-muted)' }}>
               Your AI picked these Python packages for the steps. They install automatically — nothing for you to run.
             </div>
           </div>

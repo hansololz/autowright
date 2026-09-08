@@ -795,8 +795,13 @@ without an action, open or collapsed — is exactly the framework card's header 
 left-column cards render through **one shared card template** (header row, collapsed hint,
 body top-hairline), so the treatment cannot drift per card; the collapsed hints and the
 in-card empty states share one text style (11.5px/1.5 faint sans) **and one left edge**
-(the card's 18 px inset plus the caret column, flush with the eyebrow's first character), so an empty card's text stays put when the card opens — a
+(the card's 18 px inset, flush with the caret — never indented to the eyebrow's first
+character), so an empty card's text stays put when the card opens — a
 card's description never changes size or position between its collapsed and open states.
+The same 11.5px/1.5 style is the only explainer text inside an open card: the footer note
+under the agents, secrets, parameters and packages lists, the instruction cards' repeated
+explainer, and a document card's load-error line all render in it — no card body carries a
+second explainer size or line-height.
 The collapsed line is **status-aware**: a card holding content shows a one-line preview of
 that content (single line, ellipsized — notes show their first
 meaningful text line with markdown markers stripped; agents shows the enabled agent names,
@@ -902,7 +907,9 @@ editors enter with
   your AI follows when it builds this automation. Your spec can override all of them."
   Open, it shows the rendered document and the footer, exactly the framework card's
   structure. The footer repeats the explainer word for word, so the card reads the same
-  open and collapsed. (No em dashes in this card's copy.) The card never gates Save, never
+  open and collapsed; it sits under a dim hairline below the scroll body with the same
+  12 px inset the checklist cards' footers use, so a clipped last line of the document
+  never runs into it. (No em dashes in this card's copy.) The card never gates Save, never
   marks the workflow out of sync, and never participates in the draft, the undo snapshot,
   or the §5.1 archive.
 - **NOTES** — collapsible card below the Spec card holding the §4.1 agent-owned notes
