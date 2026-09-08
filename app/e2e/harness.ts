@@ -177,7 +177,6 @@ export class Backend {
         },
       ],
       spec: [{ kind: 'h1', text: name }, { kind: 'p', text: 'It runs end to end.' }],
-      instructions: null,
     }
     return await this.api('POST', '/automations', {
       draft, name,

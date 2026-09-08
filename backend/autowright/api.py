@@ -334,7 +334,6 @@ def _version_content(v: dict) -> dict:
             "packages": [strip(p) for p in v.get("packages") or []],
             "steps": [strip(s) for s in v.get("steps") or []],
             "spec": v.get("spec") or [],
-            "instructions": v.get("instructions") or "",
             "notes": v.get("notes") or ""}
 
 
@@ -469,10 +468,10 @@ def health() -> dict:
 @app.get("/instructions", dependencies=[Depends(auth)])
 def instructions() -> dict:
     """§8 instruction files for the create/edit page:
-    framework-instructions.md + default-build-instructions.md, with the
+    framework-instructions.md + build-instructions.md, with the
     §8 {{MACHINE}} placeholder resolved to the per-OS noun."""
     return {"framework": drafting.contract_preamble(),
-            "defaultBuild": drafting.default_instructions()}
+            "build": drafting.build_instructions()}
 
 
 @app.get("/state", dependencies=[Depends(auth)])
@@ -671,7 +670,7 @@ def _draft_to_version(d: dict) -> dict:
             "params": strip_param_values(d.get("params")),
             "packages": d.get("packages", []),
             "steps": d.get("steps") or [],
-            "spec": d.get("spec") or [], "instructions": d.get("instructions"),
+            "spec": d.get("spec") or [],
             "notes": d.get("notes") or ""}
 
 
@@ -1498,12 +1497,6 @@ def post_draft(body: models.DraftJobStart) -> dict:
         current["spec"] = body.spec
     # (§4.1 spelling boundary: the request model already normalized `current`'s
     # camelCase step flags to snake_case.)
-    if not body.automationId and not (current or {}).get("instructions"):
-        # §8: with no automation, drafting falls back to the default
-        # best-practice build instructions — belt-and-braces; the editor
-        # normally seeds and sends them with the fresh draft.
-        current = dict(current or {})
-        current["instructions"] = drafting.default_instructions()
     # §8/§19: in-editor grant arrays in the body win over the stored automation's —
     # the editor's live toggles are the truth while a draft is being worked on.
     enabled_ids = body.enabledAgents

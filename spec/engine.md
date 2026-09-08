@@ -403,7 +403,7 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   the §4.1 `problems` audit are all untouched). Its only effects are the orange chip, the
   orange §7 / §9.2 flagged-result notice, and the end-of-execution notification under the default
   §4.9 setting. Since status is stored only alongside a chip, an attention step must also set
-  a chip naming what looks off ("0 items, usually ~40") — the §8 default build instructions
+  a chip naming what looks off ("0 items, usually ~40") — the §8 build instructions
   say so. Everything else
   is files: `result.path` — `pathlib.Path` of the execution's result dir for direct file
   output (result.md, result.html, images, CSVs, …); any file dropped there is part of the

@@ -30,7 +30,7 @@ beforeAll(async () => {
 
 const auto = (over: Partial<Automation> = {}): Automation => ({
   id: 'a1', name: 'Job', description: '', version: 1, triggers: [], triggerChip: 'No triggers',
-  allTriggersOff: false, nextAtMs: null, instructions: '', notes: '', lastStatus: 'succeeded',
+  allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
   live: [], maxParallel: 1, maxQueued: 0, resultChip: null, resultStatus: null,
   lastExecutionLabel: '', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
   unresolvedReferences: {},

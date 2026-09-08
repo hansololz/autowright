@@ -12,7 +12,7 @@ vi.mock('../src/api', () => ({
 
 import {
   specToText, textToSpec, amendSpec, stepSecretIds, stepSecretTags, secretRefsOf,
-  instrToMd, mergeDraftTriggers, needsMessageTriggerSetup, persistChat, chatSinceBoundary, applyTestValues,
+  mergeDraftTriggers, needsMessageTriggerSetup, persistChat, chatSinceBoundary, applyTestValues,
   applyTriggerOps, coerceParamValue,
   stripTrigger,
 } from '../src/pages/CreateFlow'
@@ -106,53 +106,6 @@ describe('secretRefsOf', () => {
       { id: ALPHA_ID, steps: [0], importedName: 'STRIPE_KEY' },
       { id: DB_ID, steps: [0] },
     ])
-  })
-})
-
-describe('instrToMd', () => {
-  it('bare prose lines become bullets; block syntax stays untouched', () => {
-    const input = [
-      'Rule one',
-      '- already bullet',
-      '* star bullet',
-      '# heading',
-      '1. ordered',
-      '| a | b |',
-      '',
-      'Rule two',
-    ].join('\n')
-    expect(instrToMd(input)).toBe([
-      '- Rule one',
-      '- already bullet',
-      '* star bullet',
-      '# heading',
-      '1. ordered',
-      '| a | b |',
-      '',
-      '- Rule two',
-    ].join('\n'))
-  })
-  it('a 4-hash heading is not block syntax — it gets bulleted', () => {
-    // Intentional pinning: the regex allows #{1,3} only, so "#### x" reads as
-    // bare prose and becomes a bullet. The spec's headings stop at h3.
-    expect(instrToMd('#### x')).toBe('- #### x')
-    expect(instrToMd('### x')).toBe('### x')
-  })
-  it('fenced code passes through untouched (fence state tracked)', () => {
-    const input = [
-      'Before fence',
-      '```py',
-      'plain code line',
-      '```',
-      'after fence',
-    ].join('\n')
-    expect(instrToMd(input)).toBe([
-      '- Before fence',
-      '```py',
-      'plain code line',
-      '```',
-      '- after fence',
-    ].join('\n'))
   })
 })
 
@@ -543,7 +496,7 @@ describe('grant seeds (§11 Review checkboxes)', () => {
     const r = seedFromPayload(d, AGENTS, SECRET_IDS)
     expect(r.enabledAgents).toEqual(['g1'])
     const a = seedFromAuto({
-      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '',
+      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [],
       triggers: [], stepAgents: ['g2', 'gone'], allowedSecrets: ['MAIL_PASSWORD', 'DELETED_KEY'],
       agentId: null, draft: null,
     } as unknown as Automation, AGENTS, SECRET_IDS)
@@ -553,10 +506,10 @@ describe('grant seeds (§11 Review checkboxes)', () => {
 
   it('edit mode prefers the draft snapshot grants over the saved automation ones', () => {
     const a = seedFromAuto({
-      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '',
+      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [],
       triggers: [], stepAgents: ['g1'], allowedSecrets: ['MAIL_PASSWORD'],
       agentId: null,
-      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '', note: '',
+      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], note: '',
                stepAgents: ['g2'], allowedSecrets: ['CRM_API_KEY'] },
     } as unknown as Automation, AGENTS, SECRET_IDS)
     expect(a.enabledAgents).toEqual(['g2'])
@@ -568,7 +521,7 @@ describe('seedFromAuto packages (§4.1 curated deps)', () => {
   it('copies the version packages fresh — editor mutations never leak back', () => {
     const pkgs = [{ pip: 'pandas', import: 'pandas', why: 'tables', version: '2.2' }]
     const r = seedFromAuto({
-      name: 'A', description: '', spec: [], steps: [], instructions: '', notes: '',
+      name: 'A', description: '', spec: [], steps: [], notes: '',
       params: [], packages: pkgs, triggers: [], stepAgents: [], allowedSecrets: [],
       agentId: null, draft: null,
     } as unknown as Automation, AGENTS, SECRET_IDS)
@@ -591,6 +544,15 @@ describe('serializeDraft (§4.4 draft payload)', () => {
       packages: [{ pip: 'pandas', import: 'pandas', status: 'installed', version: '2.2' }],
     } as ReturnType<typeof seedEmpty>
     expect(serializeDraft(r).packages).toEqual([{ pip: 'pandas', import: 'pandas' }])
+  })
+
+  it('a stored draft carrying the retired `instructions` key still seeds, and never re-serializes it', () => {
+    const legacy = {
+      spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '- an old per-automation rule',
+    } as unknown as DraftPayload
+    const r = seedFromPayload(legacy, AGENTS, SECRET_IDS)
+    expect(r).not.toHaveProperty('instructions')
+    expect(serializeDraft(r)).not.toHaveProperty('instructions')
   })
 
   it('never carries the thread — chat persists via /chat/{owner} (§4.4 thread lifetime)', () => {
@@ -623,10 +585,10 @@ describe('serializeDraft (§4.4 draft payload)', () => {
       .toEqual({ city: 'Bergen' })
     expect(seedFromPayload({} as DraftPayload, AGENTS, SECRET_IDS).testValues).toBeNull()
     const a = seedFromAuto({
-      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '',
+      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [],
       triggers: [], stepAgents: ['g1'], allowedSecrets: [],
       agentId: null,
-      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '', note: '', testValues: { city: 'Bergen' } },
+      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], note: '', testValues: { city: 'Bergen' } },
     } as unknown as Automation, AGENTS, SECRET_IDS)
     expect(a.testValues).toEqual({ city: 'Bergen' })
   })
@@ -641,10 +603,10 @@ describe('serializeDraft (§4.4 draft payload)', () => {
       .toEqual({ maxQueued: 5 })
     expect(seedFromPayload({} as DraftPayload, AGENTS, SECRET_IDS).concurrency).toBeNull()
     const a = seedFromAuto({
-      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '',
+      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [],
       triggers: [], stepAgents: ['g1'], allowedSecrets: [],
       agentId: null,
-      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '', note: '', concurrency: { maxParallel: 3, maxQueued: 1 } },
+      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], note: '', concurrency: { maxParallel: 3, maxQueued: 1 } },
     } as unknown as Automation, AGENTS, SECRET_IDS)
     expect(a.concurrency).toEqual({ maxParallel: 3, maxQueued: 1 })
   })
@@ -657,10 +619,10 @@ describe('serializeDraft (§4.4 draft payload)', () => {
     expect(seedFromPayload({ outOfSync: true } as DraftPayload, AGENTS, SECRET_IDS).dirty).toBe(true)
     expect(seedFromPayload({} as DraftPayload, AGENTS, SECRET_IDS).dirty).toBe(false)
     const a = seedFromAuto({
-      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '',
+      name: 'A', description: '', spec: [{ kind: 'h1', text: 'T' }], steps: [],
       triggers: [], stepAgents: ['g1'], allowedSecrets: [],
       agentId: null,
-      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], instructions: '', note: '', outOfSync: true },
+      draft: { spec: [{ kind: 'h1', text: 'T' }], steps: [], note: '', outOfSync: true },
     } as unknown as Automation, AGENTS, SECRET_IDS)
     expect(a.dirty).toBe(true)
   })

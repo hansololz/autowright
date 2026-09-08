@@ -239,7 +239,7 @@ describe('§9 per-OS copy — Secrets', () => {
 // §9.2 automation detail page — the §13 surface is the tray on Windows.
 const AUTO: Automation = {
   id: 'a1', name: 'Job', description: '', version: 1, triggers: [], triggerChip: 'No triggers',
-  allTriggersOff: false, nextAtMs: null, instructions: '', notes: '', lastStatus: 'succeeded',
+  allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
   live: [], maxParallel: 1, maxQueued: 10, resultChip: null, resultStatus: null,
   lastExecutionLabel: 'Today', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
   unresolvedReferences: {},

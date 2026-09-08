@@ -470,7 +470,7 @@ describe('executions list finished paging (§7)', () => {
 describe('executions filter modal (§7)', () => {
   const auto = (over: Partial<Automation> = {}): Automation => ({
     id: 'a1', name: 'Alpha', description: '', version: 1, triggers: [], triggerChip: 'No triggers',
-    allTriggersOff: false, nextAtMs: null, instructions: '', notes: '', lastStatus: 'succeeded',
+    allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
     live: [], maxParallel: 1, maxQueued: 0, resultChip: null, resultStatus: null,
     lastExecutionLabel: '', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
     unresolvedReferences: {},

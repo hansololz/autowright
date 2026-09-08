@@ -33,7 +33,7 @@ import { LeftColumn, RightCards } from './createflow/SectionCards'
 // imports keep one stable import path.
 export {
   specToText, textToSpec, amendSpec, newEntry, persistChat, chatSinceBoundary,
-  stepSecretTags, stepSecretIds, secretRefsOf, instrToMd,
+  stepSecretTags, stepSecretIds, secretRefsOf,
   seedEmpty, seedFromPayload, seedFromAuto,
   stripTrigger, mergeDraftTriggers, serializeDraft, applyTestValues,
   applyTriggerOps, coerceParamValue,
@@ -79,7 +79,7 @@ export default function CreateFlow() {
   // confirming discards and proceeds, cancelling aborts the send with the
   // composer text kept. An open editor holding no changes never asks.
   const [confirmEditDiscard, setConfirmEditDiscard] =
-    useState<{ doc: 'spec' | 'instructions' | 'notes'; proceed: () => void } | null>(null)
+    useState<{ doc: 'spec' | 'notes'; proceed: () => void } | null>(null)
   const draftSnap = useRef<Rev | null>(null)
   const seededRef = useRef(false)
 
@@ -284,10 +284,9 @@ export default function CreateFlow() {
   // §11: which open manual editor holds unsaved changes (the edits are
   // mutually exclusive, so at most one can). Sends and syncs route through
   // guardManualEdit so typed edits are never silently destroyed.
-  const editHoldsChanges = (r: Rev): 'spec' | 'instructions' | 'notes' | null =>
+  const editHoldsChanges = (r: Rev): 'spec' | 'notes' | null =>
     r.specEdit && r.specText !== r.specTextOrig ? 'spec'
-      : r.instrEdit && r.instrDraft != null && r.instrDraft !== r.instructions ? 'instructions'
-        : r.notesEdit && r.notesDraft != null && r.notesDraft !== r.notes ? 'notes' : null
+      : r.notesEdit && r.notesDraft != null && r.notesDraft !== r.notes ? 'notes' : null
   const guardManualEdit = (proceed: () => void) => {
     const doc = rev ? editHoldsChanges(rev) : null
     if (doc) setConfirmEditDiscard({ doc, proceed })
@@ -465,21 +464,15 @@ export default function CreateFlow() {
 
   // ---- instruction files (§8) — fetched once per app session ----
   const [fw, setFw] = useState<string>(instructionCache.framework ?? '')
+  const [bld, setBld] = useState<string>(instructionCache.build)
   useEffect(() => {
     if (instructionCache.framework) return
     api.instructions()
-      .then(({ framework, defaultBuild }) => {
+      .then(({ framework, build }) => {
         instructionCache.framework = framework
-        instructionCache.defaultBuild = defaultBuild
+        instructionCache.build = build
         setFw(framework)
-        // §11: the first create-flow open of a session seeds the empty draft
-        // before this answer lands — back-fill the Build-instructions card so
-        // the user reads the same rules the agent is given (§19 substitutes
-        // them for a create-mode call carrying none). Only an untouched empty
-        // card: a resumed draft's own text and an open editor stay as they are.
-        if (!isEdit) {
-          setRev((r) => r && !r.instructions && !r.instrEdit ? { ...r, instructions: defaultBuild } : r)
-        }
+        setBld(build)
       })
       .catch(() => { /* panel renders empty; next mount retries */ })
   }, [])
@@ -624,7 +617,7 @@ export default function CreateFlow() {
         spec: snap.spec, steps: snap.steps, params: snap.params, packages: snap.packages,
         triggers: snap.triggers, paramValues: snap.paramValues, concurrency: snap.concurrency,
         testValues: snap.testValues,
-        instructions: snap.instructions, notes: snap.notes,
+        notes: snap.notes,
         dirty: snap.dirty, undo: null, touched: true,
         // §11: the thread records the rollback — persisted, so the agent's §8
         // CONVERSATION context never assumes the undone rewrites still stand
@@ -847,9 +840,9 @@ export default function CreateFlow() {
         }))
       } else if (auto.draft) {
         setRev((r) => ({ ...seedFromAuto(auto, agents, secrets.map((s) => s.id)), chat: r ? r.chat : [] }))
-      } else setRev((r) => r && loadVersionInto(r, { spec: auto.spec ?? [], steps: auto.steps ?? [], instructions: auto.instructions, notes: auto.notes, params: auto.params, packages: auto.packages }, 'draft'))
+      } else setRev((r) => r && loadVersionInto(r, { spec: auto.spec ?? [], steps: auto.steps ?? [], notes: auto.notes, params: auto.params, packages: auto.packages }, 'draft'))
     } else if (key === auto.version) {
-      setRev((r) => r && loadVersionInto(r, { spec: auto.spec ?? [], steps: auto.steps ?? [], instructions: auto.instructions, notes: auto.notes, params: auto.params, packages: auto.packages }, key))
+      setRev((r) => r && loadVersionInto(r, { spec: auto.spec ?? [], steps: auto.steps ?? [], notes: auto.notes, params: auto.params, packages: auto.packages }, key))
     } else {
       const s = (auto.versions ?? []).find((v) => v.version === key)
       if (s) setRev((r) => r && loadVersionInto(r, s, key))
@@ -1252,6 +1245,7 @@ export default function CreateFlow() {
                 rev={rev}
                 up={up}
                 fw={fw}
+                bld={bld}
                 isEdit={isEdit}
                 isCreateEmpty={isCreateEmpty}
                 busyRewrite={busyRewrite}
@@ -1353,12 +1347,9 @@ export default function CreateFlow() {
           state) and proceeds; cancelling aborts with the composer text kept */}
       {confirmEditDiscard && (
         <ConfirmModal
-          title={confirmEditDiscard.doc === 'spec' ? 'Discard your spec edits?'
-            : confirmEditDiscard.doc === 'instructions' ? 'Discard your instruction edits?'
-              : 'Discard your notes edits?'}
+          title={confirmEditDiscard.doc === 'spec' ? 'Discard your spec edits?' : 'Discard your notes edits?'}
           body={confirmEditDiscard.doc === 'spec' ? 'The changes you typed into the spec editor will be lost.'
-            : confirmEditDiscard.doc === 'instructions' ? 'The changes you typed into the build instructions will be lost.'
-              : 'The changes you typed into the notes editor will be lost.'}
+            : 'The changes you typed into the notes editor will be lost.'}
           confirmLabel="Discard edits"
           danger
           onConfirm={() => { const { proceed } = confirmEditDiscard; setConfirmEditDiscard(null); proceed() }}

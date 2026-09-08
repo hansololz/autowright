@@ -46,14 +46,13 @@ triggerChip: derived chip string (§4.3): one trigger → its short label, sever
   empty → "No triggers"
 allTriggersOff: bool — derived: the list is nonempty and every trigger is off (drives the OFF tag)
 nextAtMs: epoch ms of the next enabled occurrence across all triggers (§4.3) | null
-instructions: optional multiline free-text user instructions to the agent
 notes: agent-owned working-knowledge document (markdown string, may be empty) — selectors and
   short HTML excerpts, API endpoints and quirks, approaches that failed and why, environment
   facts the authoring agent discovered while building and testing, and the reason behind any
   non-obvious choice a later sync might otherwise simplify away (rationale evident from the
   steps themselves is skipped). Written only by §8 agent
   responses (a chat or call-2 `notes.md` block — the agent keeps it a terse cheat sheet);
-  user-readable and prunable in the §11 NOTES card. Versioned like spec/instructions, and sent back
+  user-readable and prunable in the §11 NOTES card. Versioned like the spec, and sent back
   to the agent on every §8 chat and steps call so later syncs don't retry dead ends. A notes
   change never marks the workflow out of sync (§11): notes are advisory input to the next
   sync, not a contract the steps must match
@@ -119,8 +118,8 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   the box tag's tooltip (§11). A step's effective packages are these entries unioned with the
   declared imports appearing in its code; a code-matched import with no declared entry falls
   back to the package declaration's why; with no why at all the tooltip drops its why clause. All three lists are chosen
-  by the authoring agent per the §8 selection rule (the SPEC and build instructions win when they
-  name a choice; the authoring agent's own judgment otherwise). timeout: optional per-step time
+  by the authoring agent per the §8 selection rule (a choice the SPEC names wins, then one the
+  §8 build instructions name; the authoring agent's own judgment otherwise). timeout: optional per-step time
   limit in seconds (positive int) enforced by the §6 watchdog; noTimeout: true removes the limit
   entirely (never combined with timeout — §8 validation); absent → the 900 s engine default (§6).
   Both are written by the authoring agent per the §8 timeout rule (short by default; long or
@@ -145,7 +144,7 @@ packages: [{ pip, import, why }] — the current version's §6.2 declared packag
   under the package's row on the §11 Packages card (per-step purposes live on the steps'
   own packages entries, above); versioned like spec/steps — each version
   entry below carries its own list
-versions: [{ version, when, note, spec, steps, instructions, notes, params, packages }] — prior-version
+versions: [{ version, when, note, spec, steps, notes, params, packages }] — prior-version
   history, newest-first (the current version is not repeated in this list)
 draft: unsaved edit snapshot (create-flow shape) | null
 agentId: agent that writes/edits this automation
@@ -542,7 +541,7 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
 ### 4.4 Versions and drafts
 
 - Saving an edit creates version N+1 (on disk: a fresh `versions/vN+1/` folder, then the
-  `current_version` pointer flip, per §5), applies spec/steps/instructions/stepAgents/allowedSecrets/
+  `current_version` pointer flip, per §5), applies spec/steps/stepAgents/allowedSecrets/
   agentId, merges the draft's trigger list into the automation's (§4.3 trigger merge —
   triggers themselves stay unversioned), applies the draft's staged `param_values` to the
   automation's stored values (§4.2 — name+kind matched against the landing version's
@@ -550,7 +549,7 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   (§8 action — partial `{ maxParallel?, maxQueued? }` over the stored §4.1 fields, like
   the §19 PATCH), sets `specMeta` to "vN · updated Today".
   Prior versions are untouched. **Operational-only save skips the version mint**: when the
-  sent draft's versioned content — spec, steps, instructions, notes, param definitions,
+  sent draft's versioned content — spec, steps, notes, param definitions,
   packages — equals the current version's (compared over the stored serialization, ids and
   timestamps aside), the save applies only the operational state (trigger list, staged
   param values, grants, identity patch) and mints no version — a chat session that only
@@ -567,7 +566,7 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   draft-keep path (leaving the editor, switching views in the Version menu), never silently
   discarded. (Defensive: should the working state ever record the current version as the
   view, its touched edits still count as draft edits — the keep paths must not drop them.)
-- The draft snapshot carries the **full working state**: spec, steps, instructions, notes
+- The draft snapshot carries the **full working state**: spec, steps, notes
   (§4.1), params,
   packages, the editor's trigger list (stored as a draft-only `triggers` key — the §4.3
   merged preview, so a resumed draft keeps a synced schedule change), the chat-staged

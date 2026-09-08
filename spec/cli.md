@@ -186,11 +186,15 @@ create take the workdir as a required positional; only pull's is optional. Files
   `retries`/`infinite_retries`: the per-step §4.1 keys, snake_case where the API spells
   them camelCase, written by `pull` and accepted by `push`).
 - `NN-name.py` — one file per step, matching `steps[].file`.
-- `instructions.md` — the version's build instructions (`instructions`), when present.
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
 
+There is no `instructions.md`: build rules are the app's §8 `build-instructions.md`, and a
+rule an automation needs changed is stated in its `spec.md` (§8). `push` and `create`
+ignore an `instructions.md` a workdir still holds from an older CLI (it is not a managed
+file, so `pull` leaves it alone too).
+
 `pull` owns the workdir's managed files: it rewrites every file above and removes the
-managed files it did not write this time — a `notes.md` or `instructions.md` the version no
+managed files it did not write this time — a `notes.md` the version no
 longer carries, and any `NN-name.py` not in the manifest — so a re-pull into the same
 directory never resurrects deleted content on the next push. Files it doesn't manage (a
 README, a virtualenv) are left alone.
@@ -332,9 +336,10 @@ version. The §17 skill's instructions still require presenting a summary before
 `create`/`push` + `execute` — including the full command with its `--grant-*` flags, per the
 grant model above.
 
-**`instructions`** prints the §8 `framework-instructions.md` (and `--json` both files) so an
-agent authoring step code reads the engine contract — the step SDK, curated imports, policy
-sections — from the same canonical file the drafting pipeline sends to harness agents.
+**`instructions`** prints the §8 `framework-instructions.md` (and `--json` both files, as
+`{ framework, build }`) so an agent authoring step code reads the engine contract — the
+step SDK, curated imports, policy sections — and the build rules from the same canonical
+files the drafting pipeline sends to harness agents.
 
 Old flat commands (`autowright list`, `execute`, `executions`, `tail`, `secrets`, `agents`,
 `export`, `import`) are replaced by the groups above — no aliases, no back-compat (the CLI

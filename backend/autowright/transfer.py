@@ -285,8 +285,6 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
             ("automation/automation.yaml", yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)),
             ("automation/spec.md", blocks_to_md(ver.get("spec", []))),
         ]
-        if ver.get("instructions"):
-            files.append(("automation/instructions.md", ver["instructions"].strip() + "\n"))
         if (ver.get("notes") or "").strip():
             files.append(("automation/notes.md", ver["notes"].strip() + "\n"))
         for s in ver["steps"]:
@@ -671,12 +669,13 @@ def _validate(z: zipfile.ZipFile) -> dict:
                                 "archive's agents.yaml")
 
     spec_md = _text(z, "automation/spec.md")
-    instr = _text(z, "automation/instructions.md", required=False)
+    # §21.4 (2026-09-07): an archive from an older release may carry
+    # automation/instructions.md; it is accepted as a member and ignored here.
     notes = _text(z, "automation/notes.md", required=False)
     return {"name": name.strip(), "agent": agent_ref, "os": os_token,
             "triggers": triggers, "param_values": values,
             "description": meta.get("description", ""), "params": params, "packages": packages,
-            "steps": steps, "spec": md_to_blocks(spec_md), "instructions": (instr or "").strip() or None,
+            "steps": steps, "spec": md_to_blocks(spec_md),
             "notes": (notes or "").strip(),
             "agents": agents, "secrets": secrets}
 
@@ -1030,7 +1029,7 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
         steps.append(entry)
     ver = {"description": arch["description"], "note": "Imported", "params": arch["params"],
            "packages": arch["packages"], "steps": steps,
-           "spec": arch["spec"], "instructions": arch["instructions"], "notes": arch["notes"]}
+           "spec": arch["spec"], "notes": arch["notes"]}
     triggers = [{"id": new_id(), "enabled": False,
                  **(t if t.get("kind") != "discord"
                     else {**t, "secret": secret_id_by_ref[t["secret"]]})}

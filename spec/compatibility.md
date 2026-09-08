@@ -12,7 +12,7 @@ the log, so the history of compatibility decisions can be revisited in one place
 
 On-disk user data written by any released version >= v0.6.0 loads and works in every newer
 version. Covered: everything the app persists under the §5 roots that the user would lose by
-deletion - automations (manifest, spec, instructions, notes, versions, step scripts),
+deletion - automations (manifest, spec, notes, versions, step scripts),
 triggers, executions, agents, secrets metadata (their Keychain entries included), and
 settings. Derived stores are exempt where the spec already defines a rebuild: `executions.db`
 keeps its `SCHEMA_VERSION` drop-and-rebuild (§17), and caches, markers, and step
@@ -68,6 +68,23 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-07 - per-automation `instructions.md` retired.** Build instructions became an
+  app-shipped document (§8 `build-instructions.md`, overridable by the spec). The §4.1
+  `instructions` field, the version folder's `instructions.md`, the §5.1 archive member
+  `automation/instructions.md`, and the §20 workdir file are no longer written or read.
+  Migration at the read seam: a `versions/vN/instructions.md` written by v0.6.0 through
+  v0.11.1 is ignored on load and **left in place** - the version writer never creates,
+  rewrites, or unlinks it (before this change the writer unlinked the file when a version
+  carried none, so ignoring the file is not enough on its own: the writer must not touch
+  it). No data rewrite exists; recognition is structural (the file is simply not read).
+  Custom rules a user wrote there are not carried into the spec automatically - the app
+  cannot tell a custom rule from an old seeded default - so the user re-states them as
+  spec build rules (§8); the file stays on disk for that. Import ignores an older
+  archive's `automation/instructions.md`; the CLI ignores a workdir's. A `current.instructions`
+  key sent by an older client is ignored by `POST /drafts`, `PUT /draft`, `POST /automations`,
+  and `POST /automations/{id}/versions`. First version writing the new shape: the next
+  release after 2026-09-07; oldest shape still read: v0.6.0 (file present). Fixture test:
+  `tests/test_storage.py::test_version_folder_with_legacy_instructions_loads_and_keeps_the_file`.
 - **2026-09-05 - version `params` narrowed to definitions only (read-side migration).** The
   2026-09-01 save-side fix (`strip_param_values`) stopped new versions from storing resolved
   value keys (`value`/`on`/`lines`/`rows`) inside `versions/vN/automation.yaml` `params`,

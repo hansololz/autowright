@@ -1,8 +1,8 @@
-// §11 document-editor modal: the one editing surface for the spec, notes and
-// build-instructions documents on the create/edit page. Pressing a card's Edit
+// §11 document-editor modal: the one editing surface for the spec and notes
+// documents on the create/edit page. Pressing a card's Edit
 // opens it over the page (the card keeps its view state behind the backdrop);
 // it is the §9.2 step-script modal's code pane on its own — a fixed toolbar
-// (eyebrow, filename, live line count, Reset to default / Cancel / Save) over a
+// (eyebrow, filename, live line count, Cancel / Save) over a
 // full-height textarea on the --bg-code ground, and a footer stating what Save
 // does. Cancel, Escape and a backdrop click close silently when the text is
 // unchanged and raise the discard confirm otherwise (the Modal's guardClose);
@@ -10,7 +10,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { ConfirmModal, Eyebrow, Modal, isTopModal, useOverlayThumb } from '../../ui'
 
-export type DocKind = 'spec' | 'notes' | 'instructions'
+export type DocKind = 'spec' | 'notes'
 
 export const DOC_META: Record<DocKind, {
   eyebrow: string; file: string; placeholder: string; footer: string; discardTitle: string; discardBody: string
@@ -28,13 +28,6 @@ export const DOC_META: Record<DocKind, {
     footer: 'Notes guide the next sync — saving never marks the workflow out of sync.',
     discardTitle: 'Discard your notes edits?',
     discardBody: 'The changes you typed into the notes editor will be lost.',
-  },
-  instructions: {
-    eyebrow: 'BUILD INSTRUCTIONS', file: 'instructions.md',
-    placeholder: 'Markdown — one rule per line: “Prefer Python.” “Never delete files — move them to the Trash.”',
-    footer: 'Saving marks the workflow out of sync — sync the steps before saving the automation.',
-    discardTitle: 'Discard your instruction edits?',
-    discardBody: 'The changes you typed into the build instructions will be lost.',
   },
 }
 
@@ -57,7 +50,7 @@ export function docModalFrame(text: string): string {
   return `clamp(440px, ${Math.ceil(TOOLBAR + FOOTER + PAD_Y + (lines + 6) * LINE)}px, 82vh)`
 }
 
-export function DocEditorModal({ kind, text, original, onChange, onSave, onDiscard, extra }: {
+export function DocEditorModal({ kind, text, original, onChange, onSave, onDiscard }: {
   kind: DocKind
   text: string
   /** the text the modal opened with — Save is disabled while `text` equals it */
@@ -67,8 +60,6 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
   onSave: () => void
   /** fired after the exit animation: drop the edit state without applying */
   onDiscard: () => void
-  /** toolbar buttons placed before Cancel (build instructions: Reset to default) */
-  extra?: React.ReactNode
 }) {
   const meta = DOC_META[kind]
   const thumb = useOverlayThumb()
@@ -140,7 +131,6 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
                 {count} {count === 1 ? 'line' : 'lines'}
               </span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 6 }}>
-                {extra}
                 <button className="ad-btn-text dim small ad-focus-inset" onClick={cancel}>
                   Cancel
                 </button>

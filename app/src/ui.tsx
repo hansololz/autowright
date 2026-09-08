@@ -237,7 +237,7 @@ export function FailureNotice({ error, onView, onFix, style }: {
 // §7 / §9.2 flagged result — orange notice (the chip orange, §14 — never the amber
 // needs-fixing tone) for a SUCCEEDED execution whose step
 // set `result.status('attention')`: the chip text (what looks off and why, per
-// the §8 default build instructions) and one plain sentence. Pure rendering of
+// the §8 build instructions) and one plain sentence. Pure rendering of
 // the stored §4.5 chipStatus — the engine never judges a result (§6) — and no
 // button: nothing failed, so there is nothing to fix. Shown on the execution
 // page in the failure notice's slot and above the §9.2 LATEST RESULT card.

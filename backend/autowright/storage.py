@@ -651,9 +651,6 @@ class Store:
             if s.get("file") and f.is_file():
                 code = f.read_text(encoding="utf-8")
             steps.append({**s, "code": code})
-        instructions = None
-        if (vd / "instructions.md").exists():
-            instructions = (vd / "instructions.md").read_text(encoding="utf-8").strip()
         notes = ""
         if (vd / "notes.md").exists():
             notes = (vd / "notes.md").read_text(encoding="utf-8").strip()
@@ -668,7 +665,9 @@ class Store:
             "packages": meta.get("packages", []) or [],
             "steps": steps,
             "spec": md_to_blocks(spec_md),
-            "instructions": instructions,
+            # §21.4 (2026-09-07): a folder written by v0.6.0 through v0.11.1 may
+            # hold an instructions.md. The per-automation build instructions are
+            # retired, so it is not read here, and the writer below never touches it.
             "notes": notes,
             "step_agents": meta.get("step_agents"),
             "allowed_secrets": meta.get("allowed_secrets"),
@@ -756,6 +755,9 @@ class Store:
         Stale files from a previous draft save are pruned only after the new
         manifest is in place."""
         vd.mkdir(parents=True, exist_ok=True)
+        # §21.4 (2026-09-07): instructions.md is never written any more, but a
+        # legacy one stays in `keep` so the prune below leaves it on disk (and no
+        # step file can claim the name).
         keep = {"automation.yaml", "spec.md", "instructions.md", "notes.md"}
         manifest_steps = []
         for i, s in enumerate(ver["steps"], 1):
@@ -785,10 +787,6 @@ class Store:
             keep.add(fname)
             atomic_write_text(vd / fname, s.get("code", ""))
         atomic_write_text(vd / "spec.md", blocks_to_md(ver.get("spec", [])))
-        if ver.get("instructions"):
-            atomic_write_text(vd / "instructions.md", ver["instructions"].strip() + "\n")
-        elif (vd / "instructions.md").exists():
-            (vd / "instructions.md").unlink()
         # §4.1 notes — the agent-owned working-knowledge doc; absent when empty
         if (ver.get("notes") or "").strip():
             atomic_write_text(vd / "notes.md", ver["notes"].strip() + "\n")
@@ -2014,7 +2012,7 @@ class Store:
             # Year always included — "created Jul 18" is ambiguous a year later.
             when_label = ("created" if n == 1 else "updated") + f" {dt.strftime('%b')} {dt.day}, {dt.year}"
         return {"version": n, "when": when_label, "note": ver.get("note"),
-                "spec": ver.get("spec", []), "instructions": ver.get("instructions") or "",
+                "spec": ver.get("spec", []),
                 "notes": ver.get("notes") or "",
                 "steps": [self.step_json(s) for s in ver.get("steps", [])],
                 "params": ver.get("params", []),
@@ -2042,7 +2040,7 @@ class Store:
             out = {
                 **extra,
                 "note": ver.get("note"),
-                "spec": ver.get("spec", []), "instructions": ver.get("instructions") or "",
+                "spec": ver.get("spec", []),
                 "notes": ver.get("notes") or "",
                 "steps": [self.step_json(s) for s in ver.get("steps", [])],
                 "params": ver.get("params", []),
@@ -2263,7 +2261,6 @@ class Store:
             "triggerChip": triggerlib.trigger_chip(a["triggers"]),
             "allTriggersOff": bool(a["triggers"]) and all(not t["enabled"] for t in a["triggers"]),
             "nextAtMs": int(nxt.timestamp() * 1000) if nxt else None,
-            "instructions": cur.get("instructions") or "",
             "notes": cur.get("notes") or "",
             "lastStatus": a.get("_last_status", "none"),
             "live": live_ids,

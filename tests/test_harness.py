@@ -1445,13 +1445,14 @@ def test_scratch_watcher_ignores_everything_but_response_documents(tmp_path):
     real.write_text("# real\n", encoding="utf-8")
     if os.name != "nt":  # symlinks need extra privileges on Windows
         (tmp_path / "notes.md").symlink_to(real)
-    for name in ("instructions.md", "actions.yaml", "manifest.yaml", "02-send.py"):
+    # §21.4: instructions.md is retired — no longer a response document either
+    (tmp_path / "instructions.md").write_text("- keep it short\n", encoding="utf-8")
+    for name in ("actions.yaml", "manifest.yaml", "02-send.py"):
         (tmp_path / name).write_text(f"{name}\n", encoding="utf-8")
     watcher._poll()
-    assert [n for n, _ in ev.files] == ["02-send.py", "actions.yaml",
-                                        "instructions.md", "manifest.yaml"]
+    assert [n for n, _ in ev.files] == ["02-send.py", "actions.yaml", "manifest.yaml"]
     assert [n for n, _ in watcher.documents()] == ["02-send.py", "actions.yaml",
-                                                   "instructions.md", "manifest.yaml"]
+                                                   "manifest.yaml"]
 
 
 def test_scratch_watcher_stop_does_a_final_sweep(tmp_path):

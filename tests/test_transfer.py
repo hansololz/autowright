@@ -43,7 +43,6 @@ def _build(store: Store):
              "agent": True, "why": "judgment", "agents": [{"id": coder_id}]},
         ],
         "spec": [{"kind": "h1", "text": "Watch"}, {"kind": "p", "text": "Body."}],
-        "instructions": "Keep it short.",
     }
     a = store.create_automation(
         ver, name="Watcher", agent_id=store.agents[0]["id"],
@@ -184,7 +183,9 @@ def test_export_layout_and_numeric_refs(store):
     z = zipfile.ZipFile(io.BytesIO(data))
     names = set(z.namelist())
     assert {"manifest.yaml", "automation/automation.yaml", "automation/spec.md",
-            "automation/instructions.md", "agents.yaml", "secrets.yaml"} <= names
+            "agents.yaml", "secrets.yaml"} <= names
+    # §21.4: the per-automation build instructions are retired — never exported
+    assert "automation/instructions.md" not in names
     manifest = yaml.safe_load(z.read("manifest.yaml"))
     assert manifest["format_version"] == 2
     # §5.1: every export records the app version (not read on import today -
@@ -241,7 +242,7 @@ def test_export_round_trips_packages_and_notes(store):
            "packages": [{"pip": "pandas", "import": "pandas", "why": "builds the table"}],
            "steps": [{"name": "Only", "description": "", "code": "print('x')\n",
                       "packages": [{"import": "pandas", "why": "the frame"}]}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": "",
+           "spec": [{"kind": "h1", "text": "T"}],
            "notes": "The feed drops the last row on Sundays."}
     a = store.create_automation(ver, name="Packaged", agent_id=None, triggers=[])
     data = transfer.export_automation(store, a)
@@ -314,7 +315,7 @@ def test_export_writes_run_if_missed_only_for_an_opted_out_cron(store):
     default cron's manifest entry keeps the pre-field shape."""
     ver = {"description": "", "params": [], "packages": [],
            "steps": [{"name": "Only", "description": "", "code": "print('x')\n"}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     a = store.create_automation(
         ver, name="Sleepy", agent_id=None,
         triggers=[{"id": new_id(), "kind": "cron", "enabled": True,
@@ -340,7 +341,7 @@ def test_export_rejects_dangling_reference_but_allows_odd_agent_names(store):
     ver = {"description": "", "params": [], "packages": [],
            "steps": [{"name": "Only", "description": "", "code": "print('x')\n",
                       "agent": True, "why": "w", "agents": [{"id": odd["id"]}]}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     a = store.create_automation(ver, name="Odd", agent_id=odd["id"], triggers=[])
     z = zipfile.ZipFile(io.BytesIO(transfer.export_automation(store, a)))
     assert yaml.safe_load(z.read("agents.yaml"))["agents"][0]["name"] == 'He said "hi" \\ ok'
@@ -363,7 +364,7 @@ def test_export_rejects_a_dangling_agent_reference(store):
            "steps": [{"name": "Only", "description": "", "code": "print('x')\n",
                       "agent": True, "why": "w",
                       "agents": [{"id": coder["id"]}, {"id": gone}]}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     a = store.create_automation(ver, name="Dangling Agent", agent_id=coder["id"],
                                 triggers=[])
     with pytest.raises(transfer.TransferError) as ei:
@@ -385,7 +386,7 @@ def test_export_rejects_subscripts_that_are_not_stored_ids(store):
                       "code": 'from autowright import secrets\n'
                               f'x = secrets["{ids["API_KEY"]}"]  # API_KEY\n'
                               '# was: y = secrets["<id>"]  # API_KEY\n'}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     a = store.create_automation(ver, name="Placeholder", agent_id=None, triggers=[])
     with pytest.raises(transfer.TransferError) as ei:
         transfer.export_automation(store, a)
@@ -842,7 +843,7 @@ def test_import_on_same_machine_matches_everything_and_grants_it(store):
     assert fetch["secrets"] == [{"id": ids["MAIL_PASS"], "why": "sends the mail"}]
     assert summarize["agents"] == [{"id": gids["Coder"]}]
     assert b["versions"][1]["spec"] == a["versions"][1]["spec"]
-    assert b["versions"][1]["instructions"] == "Keep it short."
+    assert "instructions" not in b["versions"][1]
     assert b["versions"][1]["note"] == "Imported"
     assert b["param_values"] == {"count": 7}
     # every trigger lands off, with fresh ids
@@ -881,6 +882,26 @@ def test_import_on_fresh_machine_keeps_content_and_flags_every_reference(
     assert len(b["unresolved_references"]) == 5
     assert s2.secrets == [] and s2.agents == []
     assert b["agent_id"] is None and b["enabled_agents"] == []
+
+
+def test_import_ignores_a_legacy_instructions_member(store):
+    """§21.4: an archive written before 2026-09-07 carries
+    automation/instructions.md — the member is still accepted, the import
+    ignores it, and the automation lands with nothing of it stored."""
+    a = _build(store)
+    data = transfer.export_automation(store, a)
+    src = zipfile.ZipFile(io.BytesIO(data))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as out:
+        for nm in src.namelist():
+            out.writestr(nm, src.read(nm))
+        out.writestr("automation/instructions.md", "- keep it short\n")
+
+    b, summary = transfer.import_automation(store, buf.getvalue())
+    assert b["current_version"] == 1
+    assert b["versions"][1]["spec"] == a["versions"][1]["spec"]
+    assert "instructions" not in b["versions"][1]
+    assert not (store.auto_dir(b) / "versions" / "v1" / "instructions.md").exists()
 
 
 def test_import_grants_ride_the_creation_call(store):
@@ -1068,7 +1089,7 @@ def test_step_limits_retry_pair_and_handle_normalization(store, monkeypatch, tmp
                       "timeout": 900, "retries": 4},
                      {"name": "Listen", "description": "", "code": "print('y')\n",
                       "no_timeout": True, "infinite_retries": True}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     a = store.create_automation(
         ver, name="Limits", agent_id=None,
         triggers=[{"id": new_id(), "kind": "imessage", "enabled": True,
@@ -1135,7 +1156,7 @@ def test_import_rejects_out_of_bounds_step_limits(store):
     ver = {"description": "", "params": [], "packages": [],
            "steps": [{"name": "Only", "description": "", "code": "print('x')\n",
                       "timeout": 60, "retries": 2}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     a = store.create_automation(ver, name="Bounds", agent_id=None, triggers=[])
     data = transfer.export_automation(store, a)
     before = len(store.autos)
@@ -1282,7 +1303,7 @@ def test_import_without_optional_members_succeeds(store):
 
     ver = {"description": "", "params": [], "packages": [],
            "steps": [{"name": "Only", "description": "", "code": "print('x')\n"}],
-           "spec": [{"kind": "h1", "text": "T"}], "instructions": ""}
+           "spec": [{"kind": "h1", "text": "T"}]}
     plain = store.create_automation(ver, name="Plain", agent_id=None, triggers=[])
     b, summary = transfer.import_automation(
         store, _strip(transfer.export_automation(store, plain)))

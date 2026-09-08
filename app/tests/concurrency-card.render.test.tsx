@@ -35,7 +35,7 @@ const NOW = 1_700_000_000_000
 
 const auto = (over: Partial<Automation> = {}): Automation => ({
   id: 'a1', name: 'Job', description: '', version: 1, triggers: [], triggerChip: 'No triggers',
-  allTriggersOff: false, nextAtMs: null, instructions: '', notes: '', lastStatus: 'succeeded',
+  allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
   live: [], maxParallel: 2, maxQueued: 10, resultChip: null, resultStatus: null,
   lastExecutionLabel: 'Today', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
   unresolvedReferences: {},

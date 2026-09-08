@@ -356,7 +356,6 @@ def make_version(**over):
                      'result.status("ok")\nresult.chip("All good")\n'},
         ],
         "spec": [{"kind": "h1", "text": "Test automation"}, {"kind": "p", "text": "It tests."}],
-        "instructions": None,
     }
     ver.update(over)
     return ver

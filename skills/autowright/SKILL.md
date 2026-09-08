@@ -99,7 +99,9 @@ resolve); executions and snapshots by id prefix.
      (per-package status prints; a `warning:` line means the install failed — relay it to the
      user, the save still stands) and self-heals before every execution. Wheels only: a
      source-only distribution won't install. Never write pip/install code in steps.
-   - `instructions.md` — optional standing build rules for this automation.
+   - Build rules are the app's (`autowright instructions --json` prints them under `build`);
+     a rule this automation needs changed goes into `spec.md` in plain words (a
+     "## Build rules" section), never into a workdir file.
 3. `autowright automation create <dir> [--name "..."] [--agent "..."]
    [--grant-agent NAME]… [--grant-secret NAME]…` — validates everything (schema, param
    defaults, step order, syntax, import allowlist, trigger dialect) and creates v1. Grants

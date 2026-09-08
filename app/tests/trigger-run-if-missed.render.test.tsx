@@ -46,7 +46,7 @@ const trigger = (over: Partial<Trigger> = {}): Trigger => ({
 
 const auto = (triggers: Trigger[]): Automation => ({
   id: 'a1', name: 'Job', description: '', version: 1, triggers, triggerChip: 'Daily 8:00',
-  allTriggersOff: false, nextAtMs: null, instructions: '', notes: '', lastStatus: 'succeeded',
+  allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
   live: [], maxParallel: 1, maxQueued: 0, resultChip: null, resultStatus: null,
   lastExecutionLabel: 'Today', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
   unresolvedReferences: {},

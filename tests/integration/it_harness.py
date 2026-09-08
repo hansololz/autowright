@@ -140,7 +140,6 @@ def make_draft(**over) -> dict:
              "code": 'from autowright import result\nresult.status("ok")\nresult.chip("All good")\n'},
         ],
         "spec": [{"kind": "h1", "text": "Integration automation"}, {"kind": "p", "text": "It integrates."}],
-        "instructions": None,
     }
     d.update(over)
     return d

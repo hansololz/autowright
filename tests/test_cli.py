@@ -333,7 +333,7 @@ API_TOKEN_ID = "11111111-1111-1111-1111-111111111111"
 
 FULL_AUTO = {
     "id": "abc12345-0000-0000-0000-000000000000", "name": "Daily Report",
-    "description": "Reports daily", "instructions": "- keep it short",
+    "description": "Reports daily",
     "spec": [{"kind": "h1", "text": "Daily Report"}, {"kind": "p", "text": "Fetch and report."}],
     "triggers": [
         {"id": "t1", "kind": "cron", "expression": "0 8 * * *", "enabled": False, "timezone": "Asia/Tokyo",
@@ -388,12 +388,11 @@ def test_workdir_pull_push_round_trip(tmp_path):
     c = _WorkdirClient()
     d = tmp_path / "wd"
     written = cli.write_workdir(d, FULL_AUTO)
-    assert set(written) == {"spec.md", "manifest.yaml", "01-fetch.py", "instructions.md"}
+    assert set(written) == {"spec.md", "manifest.yaml", "01-fetch.py"}
     assert (d / "spec.md").read_text().startswith("# Daily Report")
 
     draft = cli.validate_workdir(c, d)
     assert draft["spec"] == FULL_AUTO["spec"]
-    assert draft["instructions"] == "- keep it short"
     assert [s["file"] for s in draft["steps"]] == ["01-fetch.py"]
     assert draft["steps"][0]["code"] == "import json\nprint('hi')\n"
     assert draft["steps"][0]["secrets"] == [{"id": API_TOKEN_ID, "why": "authenticates the fetch"}]
@@ -422,7 +421,32 @@ def test_workdir_pull_prunes_managed_files_it_did_not_write(tmp_path):
     assert not (d / "03-old.py").exists()
     assert not (d / "notes.md").exists()
     assert (d / "README.md").read_text() == "mine\n"      # unmanaged, untouched
-    assert (d / "01-fetch.py").exists() and (d / "instructions.md").exists()
+    assert (d / "01-fetch.py").exists()
+
+
+def test_workdir_ignores_a_stray_instructions_file(tmp_path):
+    """§20/§21.4: the per-automation build instructions are retired — pull
+    never writes instructions.md, an older CLI's leftover is unmanaged (never
+    pruned), and push reads straight past it."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    written = cli.write_workdir(d, FULL_AUTO)
+    assert "instructions.md" not in written
+    (d / "instructions.md").write_text("- keep it short\n", encoding="utf-8")
+
+    draft = cli.validate_workdir(_WorkdirClient(), d)
+    assert "instructions" not in draft
+    assert [s["file"] for s in draft["steps"]] == ["01-fetch.py"]
+
+    # a re-pull leaves the unmanaged file alone
+    cli.write_workdir(d, FULL_AUTO)
+    assert (d / "instructions.md").read_text() == "- keep it short\n"
+
+    c = _WorkdirClient()
+    _run(c, "automation", "push", "Daily Report", str(d))
+    _method, _path, body = c.posted[-1]
+    assert "instructions" not in body["draft"]
 
 
 def test_workdir_notes_round_trip(tmp_path):
@@ -433,8 +457,7 @@ def test_workdir_notes_round_trip(tmp_path):
     auto = {**FULL_AUTO, "notes": "watch the rate limit"}
     d = tmp_path / "wd"
     written = cli.write_workdir(d, auto)
-    assert set(written) == {"spec.md", "manifest.yaml", "01-fetch.py",
-                            "instructions.md", "notes.md"}
+    assert set(written) == {"spec.md", "manifest.yaml", "01-fetch.py", "notes.md"}
     assert (d / "notes.md").read_text() == "watch the rate limit\n"
 
     draft = cli.validate_workdir(_WorkdirClient(auto), d)
@@ -1256,11 +1279,14 @@ def test_cmd_status_prints_counts_and_json(capsys):
 
 
 def test_cmd_instructions_prints_framework_text(capsys):
-    gets = {"/instructions": {"framework": "## Contract\nrules here"}}
+    gets = {"/instructions": {"framework": "## Contract\nrules here",
+                              "build": "- build it well"}}
     _run(_RouteClient(gets), "instructions")
-    assert "## Contract" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "## Contract" in out and "build it well" not in out
     _run(_RouteClient(gets), "instructions", "--json")
-    assert json.loads(capsys.readouterr().out) == {"framework": "## Contract\nrules here"}
+    assert json.loads(capsys.readouterr().out) == {"framework": "## Contract\nrules here",
+                                                   "build": "- build it well"}
 
 
 def test_cmd_automation_list_row_format_and_json(capsys):

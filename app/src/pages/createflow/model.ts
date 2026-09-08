@@ -155,24 +155,11 @@ export function secretRefsOf(steps: Step[], unresolved?: UnresolvedRefs): Secret
 // "steps 1, 3" formatter for the grant warning copy
 export const stepList = (idx: number[]) => idx.map((i) => i + 1).join(', ')
 
-// §11 Build-instructions card: bare lines (no markdown block syntax, outside code fences)
-// become bullets so plain one-rule-per-line text renders as a list, not one paragraph.
-export function instrToMd(text: string): string {
-  let fence = false
-  return text.split('\n').map((raw) => {
-    const l = raw.trim()
-    if (l.startsWith('```')) { fence = !fence; return raw }
-    if (fence || !l || /^(#{1,3}\s|[-*]\s|\d+\.\s|\|)/.test(l)) return raw
-    return `- ${l}`
-  }).join('\n')
-}
-
-// The two §8 instruction files (framework-instructions.md, shown verbatim in the read-only
-// Framework-instructions card, and default-build-instructions.md, the Build-instructions
-// pre-fill). Loaded from the backend (GET /instructions) once per app session — the page
-// fills this cache so both cards always show exactly what the agent is told, and the
-// seeds below pre-fill new drafts from it.
-export const instructionCache = { framework: null as string | null, defaultBuild: '' }
+// The two §8 instruction files (framework-instructions.md and build-instructions.md),
+// each shown verbatim in its own read-only card. Loaded from the backend
+// (GET /instructions) once per app session — the page fills this cache so both cards
+// always show exactly what the agent is told.
+export const instructionCache = { framework: null as string | null, build: '' }
 
 // ---------- review working-copy state ----------
 
@@ -194,11 +181,10 @@ export interface Rev {
   testValues: Record<string, unknown> | null
   packages: PackageDep[]    // §6.2 declared packages — display-only, the pipeline owns the list
   triggers: DraftTrigger[]  // §11 TRIGGERS card preview — what saving stores (§4.3 cron-subset replace)
-  instructions: string
   notes: string             // §4.1 agent-owned working knowledge — never marks out of sync
   enabledAgents: string[]
   allowedSecrets: string[]
-  // §11 dirty gating: true only for spec/instruction/agent-ask changes — grant
+  // §11 dirty gating: true only for spec/agent-ask changes — grant
   // (agent/secret) sync state is derived from steps vs grants, never stored.
   dirty: boolean
   touched: boolean
@@ -214,10 +200,8 @@ export interface Rev {
     triggers: DraftTrigger[]; paramValues: Record<string, unknown>
     concurrency: ConcurrencyStage | null
     testValues: Record<string, unknown> | null
-    instructions: string; notes: string; dirty: boolean; entryId: string
+    notes: string; dirty: boolean; entryId: string
   } | null
-  instrEdit: boolean
-  instrDraft: string | null
   notesEdit: boolean
   notesDraft: string | null
   // §11 chat-action chaining (§8 actions.yaml): `pendingSync` starts a sync as
@@ -265,7 +249,6 @@ const revDefaults = {
   dirty: false, touched: false,
   specEdit: false, specText: '', specTextOrig: '',
   undo: null as Rev['undo'],
-  instrEdit: false, instrDraft: null as string | null,
   notesEdit: false, notesDraft: null as string | null,
   pendingSync: false, pendingTest: null as Rev['pendingTest'],
   chat: [] as ChatEntry[],
@@ -280,15 +263,14 @@ const revDefaults = {
 }
 
 // §11: the editor mounts on the create empty state — empty thread, placeholder
-// cards, the default build instructions pre-filled; the first chat message is
-// an ordinary §8 chat job (the new-automation rule).
+// cards; the first chat message is an ordinary §8 chat job (the
+// new-automation rule).
 export function seedEmpty(agents: Agent[], secretIds: string[]): Rev {
   return {
     ...revDefaults,
     name: 'New automation', description: '', note: '',
     spec: [], steps: [], params: [], paramValues: {}, concurrency: null, testValues: null, packages: [],
     triggers: [],
-    instructions: instructionCache.defaultBuild,
     notes: '',
     enabledAgents: agents.map((g) => g.id),
     allowedSecrets: secretIds,
@@ -305,9 +287,6 @@ export function seedFromPayload(d: DraftPayload, agents: Agent[], secretIds: str
     testValues: d.testValues ?? null,
     packages: d.packages ?? [],
     triggers: d.triggers ?? [],
-    // §8: a fresh draft pre-fills from default-build-instructions.md; the §19
-    // shared draft serializer answers "" when the container holds none.
-    instructions: d.instructions || instructionCache.defaultBuild,
     notes: d.notes ?? '',
     // §4.4: a resumed pending draft carries its grant selections; a fresh
     // drafting-job payload has none — default to everything enabled/allowed.
@@ -324,9 +303,9 @@ export function seedFromPayload(d: DraftPayload, agents: Agent[], secretIds: str
 
 export function seedFromAuto(a: Automation, agents: Agent[], secretIds: string[]): Rev {
   // §4.4/§19: the draft container payload when one is kept, else the current version
-  const src: Pick<DraftPayload, 'spec' | 'steps' | 'instructions' | 'notes' | 'params' | 'packages'> =
+  const src: Pick<DraftPayload, 'spec' | 'steps' | 'notes' | 'params' | 'packages'> =
     a.draft ?? {
-      spec: a.spec ?? [], steps: a.steps ?? [], instructions: a.instructions || '', notes: a.notes || '',
+      spec: a.spec ?? [], steps: a.steps ?? [], notes: a.notes || '',
       params: a.params,
       packages: a.packages,
     }
@@ -341,7 +320,6 @@ export function seedFromAuto(a: Automation, agents: Agent[], secretIds: string[]
     testValues: a.draft?.testValues ?? null,
     packages: (src.packages ?? []).map((p) => ({ ...p })),
     triggers: (a.draft?.triggers ?? a.triggers).map(stripTrigger),
-    instructions: src.instructions || '',
     notes: src.notes || '',
     // §4.4: a draft carries its own grant selections — resume restores them
     enabledAgents: (a.draft?.stepAgents ?? a.stepAgents).filter((id) => agents.some((x) => x.id === id)),
@@ -354,16 +332,15 @@ export function seedFromAuto(a: Automation, agents: Agent[], secretIds: string[]
   }
 }
 
-export function loadVersionInto(r: Rev, snap: { spec: SpecBlock[]; steps: Step[]; instructions: string; notes?: string; params?: VersionInfo['params']; packages?: VersionInfo['packages'] }, viewing: Rev['viewing']): Rev {
+export function loadVersionInto(r: Rev, snap: { spec: SpecBlock[]; steps: Step[]; notes?: string; params?: VersionInfo['params']; packages?: VersionInfo['packages'] }, viewing: Rev['viewing']): Rev {
   return {
     ...r,
     spec: (snap.spec ?? []).map((b) => ({ ...b })),
     steps: (snap.steps ?? []).map((s) => ({ ...s })),
     params: snap.params ? snap.params.map((p) => ({ ...p })) : r.params,
     packages: (snap.packages ?? []).map((p) => ({ ...p })),
-    instructions: snap.instructions || '',
     notes: snap.notes || '',
-    specEdit: false, specText: '', specTextOrig: '', undo: null, instrEdit: false, instrDraft: null,
+    specEdit: false, specText: '', specTextOrig: '', undo: null,
     notesEdit: false, notesDraft: null, pendingSync: false, pendingTest: null,
     dirty: false, syncBusy: false, chatBusy: false,
     // A freshly loaded view is pristine — a stale carried-over `touched` would
@@ -470,7 +447,6 @@ export function serializeDraft(r: Rev): DraftPayload {
     packages: r.packages.map(({ pip, import: imp, why }) => ({ pip, import: imp, why })),
     steps: r.steps,
     spec: r.spec,
-    instructions: r.instructions,
     notes: r.notes,
     triggers: r.triggers,
     // §4.2: the staged value map rides the snapshot only when nonempty

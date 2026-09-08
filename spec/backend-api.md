@@ -52,8 +52,9 @@ remain plain dicts (§2).
   (`[{ owner, jobId, status, mode }]` — every §19 drafting job currently building or held
   for consumption, `owner` an automation id or the literal `pending`; backs the §9.1
   drafting notes, kept current by the `draftjob.changed` event below)
-- `GET /instructions` → `{ framework, defaultBuild }` — the two §8 instruction files verbatim
-  (backs the §11 Framework-instructions and Build-instructions cards)
+- `GET /instructions` → `{ framework, build }` — the two §8 instruction files verbatim
+  (the §8 per-OS placeholder resolved; backs the §11 Framework-instructions and
+  Build-instructions cards)
 - `GET /automations` · `GET /automations/{id}` · `DELETE /automations/{id}` — delete cancels
   every live execution and queued firing, **and settles the automation's draft work the same
   way a save does** (the §11 draft test is cancelled and its record marked so a landing test
@@ -400,9 +401,9 @@ remain plain dicts (§2).
   draft), the
   agents grant defaults to **all**
   configured agents and the secrets grant to **all** stored secrets — matching the all-on
-  seeds the Review page starts from; a chat or sync body carrying no `automationId` and no
-  `current.instructions` gets the §8 default build instructions substituted into the
-  prompt context (belt-and-braces — the editor normally seeds and sends them); clients track progress by polling
+  seeds the Review page starts from; the build instructions never travel in the body — the
+  backend reads §8 `build-instructions.md` itself for every call, and a `current.instructions`
+  key from an older client is ignored; clients track progress by polling
   `GET /drafts/{jobId}` → state (`status`, `stage`, live §8 `detail` line, the §8 `events`
   activity feed — each entry stage-stamped, §8 — plus the §8 stage-timing stamps:
   `stageTimes` (one `{stage, time}` per stage entered) and `endedTime` (epoch seconds,

@@ -15,7 +15,7 @@ vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
   openWs: vi.fn(() => () => {}),
   api: {
-    instructions: vi.fn(async () => ({ framework: '# Framework', defaultBuild: '- rules' })),
+    instructions: vi.fn(async () => ({ framework: '# Framework', build: '- build rules' })),
     postDraftJob: vi.fn(async () => ({ jobId: 'j1' })),
     patchAutomation: vi.fn(async () => ({})),
     getDraftJob: vi.fn(() => new Promise(() => { /* poll never answers in tests */ })),
@@ -84,7 +84,6 @@ const SECRETS: SecretMeta[] = [
 const AUTO = {
   id: 'a1', name: 'My auto', description: '', version: 1,
   triggers: [], triggerChip: 'No triggers', allTriggersOff: false, nextAtMs: null,
-  instructions: '- keep it simple',
   lastStatus: 'none', live: [], resultChip: null, resultStatus: null, lastExecutionLabel: '',
   agentId: 'g1', stepAgents: ['g1', 'g2'], allowedSecrets: [MAIL_ID, CRM_ID], problems: [],
   snapshotSettings: { preVersion: true, preClear: true, preRestore: true },
@@ -451,7 +450,7 @@ describe('CreateFlow BUILD and TEST cards (§11)', () => {
   const withLastTest = (test: Record<string, unknown>) => ({
     ...AUTO,
     draft: {
-      spec: AUTO.spec, steps: AUTO.steps, instructions: AUTO.instructions, notes: '',
+      spec: AUTO.spec, steps: AUTO.steps, notes: '',
       params: [], packages: [], test,
     },
   } as unknown as Automation)
@@ -656,7 +655,7 @@ describe('CreateFlow blockers thread entries (§11)', () => {
     storeMod.useStore.setState({
       automations: [{
         ...AUTO, version: 2,
-        versions: [{ version: 1, when: 'Jul 1', note: null, spec: AUTO.spec, steps: AUTO.steps, instructions: '', notes: '', params: [], packages: [] }],
+        versions: [{ version: 1, when: 'Jul 1', note: null, spec: AUTO.spec, steps: AUTO.steps, notes: '', params: [], packages: [] }],
       } as unknown as Automation],
     })
     ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValueOnce(BLOCKED_SYNC)
@@ -676,7 +675,7 @@ describe('CreateFlow blockers thread entries (§11)', () => {
   it('version menu: only older rows carry delete; confirming calls the DELETE and toasts', async () => {
     const edited = {
       ...AUTO, version: 2,
-      versions: [{ version: 1, when: 'created Jul 1, 2026', note: null, spec: AUTO.spec, steps: AUTO.steps, instructions: '', notes: '', params: [], packages: [] }],
+      versions: [{ version: 1, when: 'created Jul 1, 2026', note: null, spec: AUTO.spec, steps: AUTO.steps, notes: '', params: [], packages: [] }],
     } as unknown as Automation
     storeMod.useStore.setState({ automations: [edited] })
     ;(mockedApi.getAutomation as ReturnType<typeof vi.fn>).mockResolvedValue({ ...edited, versions: [] })
@@ -1549,17 +1548,15 @@ describe('CreateFlow draft undo (§11)', () => {
     fireEvent.click(screen.getByText('Send'))
   }
 
-  it('one Undo reverts everything one response rewrote — spec, instructions, and notes', async () => {
+  it('one Undo reverts everything one response rewrote — spec and notes', async () => {
     ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue(done({
       spec: [{ kind: 'h1', text: 'My auto' }, { kind: 'p', text: 'Rewritten body.' }],
-      instructions: '- be bold',
       notes: '- Learned a quirk',
     }))
     render(<CreateFlow />)
     send('Change everything')
     await waitFor(() => expect(screen.getByText('Spec updated.')).toBeTruthy(), { timeout: 3000 })
     expect(screen.getByText('Rewritten body.')).toBeTruthy()
-    expect(bodyLi('be bold')).toBeTruthy()
     expect(bodyLi('Learned a quirk')).toBeTruthy()
     // the standalone undo row is the page's only undo affordance
     const undos = screen.getAllByText('Undo this change')
@@ -1567,31 +1564,12 @@ describe('CreateFlow draft undo (§11)', () => {
     fireEvent.click(undos[0])
     // every rewritten document came back, and the dirty flag with them
     expect(screen.getByText('Does things.')).toBeTruthy()
-    expect(bodyLi('keep it simple')).toBeTruthy()
     expect(screen.queryByText(/Learned a quirk/)).toBeNull()
     expect(screen.getByText(/In sync with the spec/)).toBeTruthy()
     expect(screen.queryByText('Undo this change')).toBeNull() // single-level: the snapshot cleared
     // the thread records the rollback for the agent's CONVERSATION context
     expect(screen.getByText('Last change undone — the rewrites above no longer apply.')).toBeTruthy()
     expect(storeMod.useStore.getState().toast).toBe('Last change undone.')
-  })
-
-  it('an instructions-only response renders the undo row beneath its system chip', async () => {
-    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue(done({
-      spec: null, instructions: '- be bold',
-    }))
-    render(<CreateFlow />)
-    send('Toughen the rules')
-    await waitFor(() => expect(screen.getByText('Build instructions updated.')).toBeTruthy(), { timeout: 3000 })
-    expect(screen.getByText(/Out of sync/)).toBeTruthy()
-    const undos = screen.getAllByText('Undo this change')
-    expect(undos).toHaveLength(1)
-    // the row sits directly beneath the anchoring chip
-    const chip = screen.getByText('Build instructions updated.')
-    expect(chip.compareDocumentPosition(undos[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    fireEvent.click(undos[0])
-    expect(bodyLi('keep it simple')).toBeTruthy()
-    expect(screen.getByText(/In sync with the spec/)).toBeTruthy()
   })
 
   it('a notes-only undo restores the notes and stays in sync', async () => {
@@ -2142,7 +2120,7 @@ describe('CreateFlow old-version view: thread survival + test gating (§11)', ()
   beforeEach(armPendingPoll)
   const V1_ROW = {
     version: 1, when: 'Jul 1', note: null,
-    spec: AUTO.spec, steps: AUTO.steps, instructions: '', notes: '', params: [], packages: [],
+    spec: AUTO.spec, steps: AUTO.steps, notes: '', params: [], packages: [],
   }
   const testRow = (status: string) => ({
     id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'Test',
@@ -2288,21 +2266,6 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
     await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
     expect(draftBody(0).text).toBe('and also weekends')
     expect(screen.queryByTestId('spec-editor')).toBeNull()
-  })
-
-  it('starting a sync under an unsaved instructions edit asks the same way', async () => {
-    render(<CreateFlow />)
-    const card = cardOf(screen.getByText('BUILD INSTRUCTIONS'))
-    fireEvent.click(screen.getByText('BUILD INSTRUCTIONS'))
-    fireEvent.click(within(card).getByText('Edit'))
-    fireEvent.change(screen.getByTestId('instructions-editor'), { target: { value: '- new rule' } })
-    fireEvent.click(screen.getByText('Sync spec'))
-    const dialog = screen.getByRole('alertdialog')
-    expect(within(dialog).getByText('Discard your instruction edits?')).toBeTruthy()
-    fireEvent.click(within(dialog).getByText('Cancel'))
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    expect(mockedApi.postDraftJob).not.toHaveBeenCalled()
-    expect((screen.getByTestId('instructions-editor') as HTMLTextAreaElement).value).toBe('- new rule')
   })
 
   it('Fix with AI waits for the stored thread - the job carries the kept history and the seed', async () => {
@@ -2796,20 +2759,6 @@ describe('document-editor modal (§11)', () => {
     expect(storeMod.useStore.getState().toast).toBeNull()
   })
 
-  it('the build-instructions editor carries Reset to default, which disables once applied', async () => {
-    const { instructionCache } = await import('../src/pages/createflow/model')
-    instructionCache.defaultBuild = '- rules' // the mocked GET /instructions payload
-    render(<CreateFlow />)
-    fireEvent.click(screen.getByText('BUILD INSTRUCTIONS'))
-    const card = cardOf(screen.getByText('BUILD INSTRUCTIONS'))
-    fireEvent.click(within(card).getByText('Edit'))
-    const modal = screen.getByTestId('doc-editor')
-    expect((within(modal).getByText('Reset to default') as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(within(modal).getByText('Reset to default'))
-    expect((screen.getByTestId('instructions-editor') as HTMLTextAreaElement).value).toBe('- rules')
-    expect((within(modal).getByText('Reset to default') as HTMLButtonElement).disabled).toBe(true)
-  })
-
   it('one document at a time: the notes Save closes the editor and lands in the card', async () => {
     storeMod.useStore.setState({
       automations: [{ ...AUTO, notes: '- Site rate-limits at 10 rpm' } as unknown as Automation],
@@ -2824,65 +2773,57 @@ describe('document-editor modal (§11)', () => {
   })
 })
 
-// §11: the first create-flow open of a session seeds the empty draft before
-// GET /instructions answers, so the Build-instructions card starts empty and
-// the fetch back-fills it — never over a resumed draft's own text.
-describe('CreateFlow build-instructions back-fill (§8/§11)', () => {
-  const EMPTY_LINE = 'No instructions yet — press Edit to add standing rules.'
-  let resolveInstructions: (payload: { framework: string; defaultBuild: string }) => void
+// §11: BUILD INSTRUCTIONS is a read-only built-in document, exactly like the
+// framework card — the same text in create and edit mode, no Edit button.
+describe('CreateFlow BUILD INSTRUCTIONS card (§11)', () => {
+  const EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec overrides any of them: just say so in plain words.'
+  const FOOTER = 'Built-in rules the AI follows when writing steps, word for word. To change one for this automation, state the new rule in the spec or ask the chat; these defaults update with the app.'
+  let resolveInstructions: (payload: { framework: string; build: string }) => void
   beforeEach(async () => {
     armPendingPoll()
-    // instructionCache is a module-level singleton: an earlier create-mode
-    // test leaves it warm, which would skip the fetch path entirely.
+    // instructionCache is a module-level singleton: an earlier test leaves it
+    // warm, which would skip the fetch path entirely.
     const { instructionCache } = await import('../src/pages/createflow/model')
     instructionCache.framework = null
-    instructionCache.defaultBuild = ''
+    instructionCache.build = ''
     ;(mockedApi.instructions as ReturnType<typeof vi.fn>).mockImplementation(
       () => new Promise((res) => { resolveInstructions = res as typeof resolveInstructions }),
     )
-    storeMod.useStore.setState({ createFrom: 'app', automationId: null })
   })
   const settleInstructions = async () => {
-    await act(async () => { resolveInstructions({ framework: '# Framework', defaultBuild: '- rules' }) })
+    await act(async () => { resolveInstructions({ framework: '# Framework', build: '- build rules' }) })
   }
   const instrCard = () => cardOf(screen.getByText('BUILD INSTRUCTIONS'))
 
-  it('back-fills the Build-instructions card when GET /instructions resolves after the empty seed', async () => {
+  it('renders the fetched build document, collapsed explainer and no Edit, in create mode', async () => {
+    storeMod.useStore.setState({ createFrom: 'app', automationId: null })
     render(<CreateFlow />)
-    // the empty seed landed first — the card carries its placeholder line
-    expect(within(instrCard()).getByText(EMPTY_LINE)).toBeTruthy()
+    // defaults collapsed: the explainer is the collapsed line, the document
+    // and its footer sit in the closed body
+    const explainer = within(instrCard()).getByText(EXPLAINER)
+    expect(collapseOf(explainer).classList.contains('open')).toBe(true)
+    expect(collapseOf(within(instrCard()).getByText(FOOTER)).classList.contains('open')).toBe(false)
+    fireEvent.click(screen.getByText('BUILD INSTRUCTIONS'))
     await settleInstructions()
-    await waitFor(() => expect(bodyLi('rules')).toBeTruthy())
-    expect(within(instrCard()).queryByText(EMPTY_LINE)).toBeNull()
+    await waitFor(() => expect(bodyLi('build rules')).toBeTruthy())
+    const card = instrCard()
+    // open: the rendered document and the footer, and nothing else — no
+    // second copy of the explainer inside the body, no Edit button
+    expect(collapseOf(within(card).getByText(FOOTER)).classList.contains('open')).toBe(true)
+    expect(within(card).getAllByText(EXPLAINER)).toHaveLength(1)
+    expect(collapseOf(within(card).getByText(EXPLAINER)).classList.contains('open')).toBe(false)
+    expect(within(card).queryByText('Edit')).toBeNull()
   })
 
-  it('never overwrites a resumed draft’s own instructions', async () => {
-    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
-      draft: {
-        spec: [{ kind: 'h1', text: 'Kept' }, { kind: 'p', text: 'Body.' }], steps: [],
-        instructions: '- keep it simple',
-      },
-      agentId: null,
-    })
+  it('renders the same read-only document in edit mode', async () => {
     render(<CreateFlow />)
-    await waitFor(() => expect(bodyLi('keep it simple')).toBeTruthy())
+    expect(within(instrCard()).getByText(EXPLAINER)).toBeTruthy()
+    fireEvent.click(screen.getByText('BUILD INSTRUCTIONS'))
     await settleInstructions()
-    expect(bodyLi('keep it simple')).toBeTruthy()
-    expect(screen.queryAllByText('rules')).toHaveLength(0)
-  })
-
-  it('a first-session authoring request carries the unedited default build instructions', async () => {
-    render(<CreateFlow />)
-    await settleInstructions()
-    await waitFor(() => expect(bodyLi('rules')).toBeTruthy())
-    fireEvent.change(screen.getByPlaceholderText('Describe the job — one sentence is enough.'),
-      { target: { value: 'Watch a folder' } })
-    fireEvent.click(screen.getByText('Send'))
-    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
-    const body = draftBody(0)
-    expect(body.mode).toBe('chat')
-    expect('automationId' in body).toBe(false)   // create mode addresses no automation
-    // §8/§19: the back-filled card is what the agent is handed
-    expect((body.current as { instructions: string }).instructions).toBe('- rules')
+    await waitFor(() => expect(bodyLi('build rules')).toBeTruthy())
+    const card = instrCard()
+    expect(collapseOf(within(card).getByText(FOOTER)).classList.contains('open')).toBe(true)
+    expect(within(card).getAllByText(EXPLAINER)).toHaveLength(1)
+    expect(within(card).queryByText('Edit')).toBeNull()
   })
 })

@@ -4,8 +4,8 @@ The `chat` call is every editor turn (§11 chat column): framework instructions 
 grants + build instructions + the agent's NOTES, the recent CONVERSATION, the
 RECENT EXECUTIONS (test/draft/version output with log tails, assembled by the API
 layer), the package install state, and the current draft (spec + steps) — and
-the RESPONSE SHAPE decides the outcome: any subset of spec.md / instructions.md /
-notes.md / actions.yaml blocks is a rewrite-plus-actions (validated per block),
+the RESPONSE SHAPE decides the outcome: any subset of spec.md / notes.md /
+actions.yaml blocks is a rewrite-plus-actions (validated per block),
 plain prose is an answer, a blocker envelope blocks. A fresh draft's first
 message is a chat call like any other — the §8 new-automation rule has the agent
 write the spec, set name/description actions, and chain the build with
@@ -147,20 +147,20 @@ FENCE_OPEN_RE = harness.FENCE_OPEN_RE
 
 # §8 prompt texts live as markdown next to the code so they can be read and
 # edited without touching Python: framework-instructions.md travels with EVERY
-# drafting call (role, envelope, SDK, §6 policies); default-build-instructions.md seeds
-# `instructions` for new automations (users edit or delete freely — it versions like
-# any instructions). The per-call TASK directives below stay in Python because
-# they define the exact envelope the validators parse.
+# drafting call (role, envelope, SDK, §6 policies); build-instructions.md is the
+# app's build policy, read here for every drafting call, never sent by a client
+# and never returned by one. The per-call TASK directives below stay in Python
+# because they define the exact envelope the validators parse.
 _INSTRUCTIONS_DIR = Path(__file__).parent / "instructions"
 CONTRACT_PREAMBLE = (_INSTRUCTIONS_DIR / "framework-instructions.md").read_text(encoding="utf-8")
-DEFAULT_INSTRUCTIONS = (_INSTRUCTIONS_DIR / "default-build-instructions.md").read_text(encoding="utf-8")
+BUILD_INSTRUCTIONS = (_INSTRUCTIONS_DIR / "build-instructions.md").read_text(encoding="utf-8")
 
 
 def _per_os(text: str) -> str:
     """§8/§9: the checked-in instruction markdown names the user's machine via
     the literal {{MACHINE}} placeholder and the OS itself via {{OS}}; every
     consumer resolves both with the per-OS forms at read time — neither ever
-    reaches a prompt, the UI, or stored instructions."""
+    reaches a prompt or the UI."""
     return (text
             .replace("{{MACHINE}}", paths.machine_noun())
             .replace("{{OS}}", paths.os_display_name(paths.current_os())))
@@ -170,8 +170,8 @@ def contract_preamble() -> str:
     return _per_os(CONTRACT_PREAMBLE)
 
 
-def default_instructions() -> str:
-    return _per_os(DEFAULT_INSTRUCTIONS)
+def build_instructions() -> str:
+    return _per_os(BUILD_INSTRUCTIONS)
 
 
 # §8: every prompt section opens with a `=== NAME ===` header — one dialect
@@ -182,24 +182,24 @@ def _framework_section() -> str:
 # ---------- prompts ----------
 
 STEPS_TASK = """=== TASK ===
-Build the automation that implements the SPEC below, following the BUILD INSTRUCTIONS. Derive the triggers, every parameter (each with a default), and the steps from the SPEC — and add any trigger or parameter you judge the automation is missing (see Triggers and Parameters above; message-trigger details come from the SPEC or BUILD INSTRUCTIONS, never invented). Return manifest.yaml plus one file block per step — no spec.md (and no name/description keys — identity changes only through the chat call's actions):
+Build the automation that implements the SPEC below, following the BUILD INSTRUCTIONS. Derive the triggers, every parameter (each with a default), and the steps from the SPEC — and add any trigger or parameter you judge the automation is missing (see Triggers and Parameters above; message-trigger details come from the SPEC, never invented). Return manifest.yaml plus one file block per step — no spec.md (and no name/description keys — identity changes only through the chat call's actions):
 
 ===FILE: manifest.yaml===
 note: One-line version note for the history menu
 params:                                # each param MUST carry a default
   - { name: snake_case_name, kind: toggle|list|kv|number|text, label: ..., help: ..., default: ... }
 test_values:                           # OPTIONAL — best-effort values for the user's first draft test
-  snake_case_name: value               # only params you can set confidently from the SPEC or BUILD
-                                       # INSTRUCTIONS (a URL or folder they name); OMIT any param whose
-                                       # realistic value you can't determine — never guess, its default
-                                       # is used; never passwords or tokens (those belong in secrets)
+  snake_case_name: value               # only params you can set confidently from the SPEC (a URL or
+                                       # folder it names); OMIT any param whose realistic value you
+                                       # can't determine — never guess, its default is used; never
+                                       # passwords or tokens (those belong in secrets)
 packages:                              # extra PyPI packages beyond the allowed list (see Allowed imports);
   - { pip: pandas, import: pandas,     # bare distribution name, NO version; omit the key when none are needed
       why: one line — what the steps use the package for }
 triggers:                              # see Triggers above; omit the whole key when the automation needs no trigger (manual / menu bar only)
   - cron: "0 8 * * *"                  # optional timezone: IANA zone, only when the spec names one
-  - { imessage: "+15551234567" }       # sender handle from the SPEC or BUILD INSTRUCTIONS only; optional pattern
-  - { discord: "1234567890",           # channel id from the SPEC or BUILD INSTRUCTIONS only; optional pattern / mention / author (sender filter: numeric user id or list of them)
+  - { imessage: "+15551234567" }       # sender handle from the SPEC only; optional pattern
+  - { discord: "1234567890",           # channel id from the SPEC only; optional pattern / mention / author (sender filter: numeric user id or list of them)
       secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }   # the granted token secret's ID, copied exactly from the grants yaml — never its name
   - app_start: true                    # executes when the app starts
 steps:                                 # ordered; file names NN-name.py, two-digit, gapless from 01;
@@ -263,12 +263,10 @@ Decide what the USER REQUEST above needs:
 - The result lists each new chapter with its title and date.
 ===END===
 
-- A change to the automation → return file blocks, any subset of these four (prose before the first block is shown to the user as your message):
+- A change to the automation → return file blocks, any subset of these three (prose before the first block is shown to the user as your message):
 
 ===FILE: spec.md===
-The FULL updated spec — markdown (# title first, then ## sections, - bullets, paragraphs) written for the user in plain words, no code, no yaml, no file names. Keep everything the request doesn't touch unchanged. Never return step files — the steps are rebuilt from the spec later.
-===FILE: instructions.md===
-The FULL updated build instructions — only when the user asks to change their standing rules.
+The FULL updated spec — markdown (# title first, then ## sections, - bullets, paragraphs) written for the user in plain words, no code, no yaml, no file names. Keep everything the request doesn't touch unchanged. Never return step files — the steps are rebuilt from the spec later. When the user asks to change how the automation is built (a standing rule), write the rule into spec.md in plain words (a "## Build rules" section is the usual home) and request sync; there is no build-instructions rewrite.
 ===FILE: notes.md===
 The FULL updated notes — your own working knowledge for this automation: selectors, endpoints, quirks, approaches that failed and why, and the reason behind any non-obvious choice a later sync might otherwise simplify away (skip rationale evident from the steps themselves). Update it whenever you learn something a later build or fix should know; keep it a terse cheat sheet, not a log.
 ===FILE: actions.yaml===
@@ -333,9 +331,9 @@ def _common_context(current: dict | None, grants: dict) -> list[str]:
         "a variable — with the secret's name in a trailing comment: "
         "secrets[\"<id>\"]  # NAME):\n"
         f"{_grants_yaml(grants.get('secrets', []))}\n"
-        "One rule decides which agents and secrets each step uses: when the SPEC or BUILD "
-        "INSTRUCTIONS name a choice, follow them; otherwise pick the most appropriate "
-        "entries yourself."
+        "One rule decides which agents and secrets each step uses: a choice the SPEC "
+        "names wins; failing that, a choice the BUILD INSTRUCTIONS name; otherwise pick "
+        "the most appropriate entries yourself."
     ]
     # §8/§5.1: the import's no-match map, right after the grants context —
     # the steps still carry placeholder ids for these, and a fix means
@@ -353,16 +351,11 @@ def _common_context(current: dict | None, grants: dict) -> list[str]:
              for e in unresolved.values()],
             sort_keys=False, allow_unicode=True).strip()
            if unresolved else "none"))
-    # §8: instructions travel with every call — always present (`none` when the
-    # automation has none) so TASK references to the section never dangle. The
-    # chat call may return an updated instructions.md when the user asks; the
-    # sync call never returns them. With no automation, the API seeds
-    # DEFAULT_INSTRUCTIONS when none are given (belt-and-braces — the editor
-    # normally sends them).
-    instructions = str((current or {}).get("instructions") or "").strip()
-    parts.append("=== BUILD INSTRUCTIONS (the user's standing rules — follow them; "
-                 "rewritten only when the user asks to change them and the TASK "
-                 "allows an instructions.md block) ===\n" + (instructions or "none"))
+    # §8: the app's build instructions travel with every call — read here from
+    # the shipped document, never sent by a client and never returned by a call.
+    parts.append("=== BUILD INSTRUCTIONS (the app's default rules for building an "
+                 "automation; never returned by any call; the SPEC overrides them "
+                 "wherever it says otherwise) ===\n" + build_instructions())
     # §8 SYSTEM TOOLS: the §6 installed-tools probe, so the agent designs
     # against CLIs that really exist on this machine instead of hedging.
     tools = harness.probe_tools()
@@ -743,7 +736,7 @@ def validate_spec(files: dict[str, str]) -> tuple[dict, list[str]]:
     return {"md": md, "blocks": blocks}, []
 
 
-CHAT_FILES = ("spec.md", "instructions.md", "notes.md", "actions.yaml")
+CHAT_FILES = ("spec.md", "notes.md", "actions.yaml")
 
 
 def parse_dialect_entry(t, allow_time: bool = False, *,
@@ -975,8 +968,8 @@ def validate_chat_files(files: dict[str, str],
     bad: set[str] = set()
     extras = sorted(f for f in files if f not in CHAT_FILES)
     if extras:
-        errors.append("a chat response may only return spec.md, instructions.md, "
-                      f"notes.md, and actions.yaml — never step files (got {extras})")
+        errors.append("a chat response may only return spec.md, notes.md, and "
+                      f"actions.yaml — never step files (got {extras})")
         bad.update(extras)
     payload: dict = {}
     if "spec.md" in files:
@@ -986,8 +979,6 @@ def validate_chat_files(files: dict[str, str],
             bad.add("spec.md")
         else:
             payload["spec"] = spec["blocks"]
-    if "instructions.md" in files:
-        payload["instructions"] = files["instructions.md"].strip()
     if "notes.md" in files:
         payload["notes"] = files["notes.md"].strip()
     if "actions.yaml" in files:
@@ -1000,10 +991,10 @@ def validate_chat_files(files: dict[str, str],
         # §8: undo is exclusive of rewrites too — restoring the draft and
         # rewriting it in one response is contradictory.
         conflict = actions.get("undo") and any(
-            f in files for f in ("spec.md", "instructions.md", "notes.md"))
+            f in files for f in ("spec.md", "notes.md"))
         if conflict:
-            errors.append("actions.yaml: undo cannot be combined with spec.md, "
-                          "instructions.md, or notes.md rewrites")
+            errors.append("actions.yaml: undo cannot be combined with spec.md "
+                          "or notes.md rewrites")
         if errs or conflict:
             bad.add("actions.yaml")
         else:
@@ -1017,8 +1008,8 @@ def validate_chat(raw: str, files: dict[str, str],
                   param_names: list[str] | None = None,
                   triggers_count: int | None = None) -> tuple[dict, list[str]]:
     """§8 chat-call response with file blocks → terminal payload
-    { answer?, spec?, instructions?, notes?, actions? }. Prose before the first
-    marker is the accompanying chat message; only the four CHAT_FILES names
+    { answer?, spec?, notes?, actions? }. Prose before the first
+    marker is the accompanying chat message; only the three CHAT_FILES names
     are allowed."""
     payload, errors, _ = validate_chat_files(files, param_names, triggers_count)
     if errors:
@@ -1640,7 +1631,7 @@ class DraftJobs:
                    pkg_state: list[dict] | None = None) -> None:
         """§8 chat call: one call whose response shape decides the outcome —
         plain prose is an answer, file blocks are rewrites/actions
-        (spec.md / instructions.md / notes.md / actions.yaml — validated, up to
+        (spec.md / notes.md / actions.yaml — validated, up to
         §15 AUTOWRIGHT_REPAIR_ROUNDS per-block repair rounds, then diagnosis),
         a blocker envelope blocks (blockedAt: chat). Repair is per-block: an
         invalid round's valid blocks are kept as written, the repair round is
@@ -1698,7 +1689,7 @@ class DraftJobs:
         - ("blocked", {blockers, notes?}, …) — a valid blocker envelope,
           terminal; `notes` the optional notes.md riding beside it (§8).
         - ("done", payload, …) — payload the terminal { answer?, spec?,
-          instructions?, notes?, actions? } dict (empty for an empty response).
+          notes?, actions? } dict (empty for an empty response).
         - ("invalid", errors, kept2, answer2, failed) — kept2 the valid blocks
           of the merged set (kept as written for the next round), failed the
           block names the errors attribute to (empty when the envelope itself
@@ -2032,14 +2023,13 @@ class DraftJobs:
 
     # §8 chat-call streamed-marker labels — one per allowed block name.
     _CHAT_LABELS = {"spec.md": "Writing the spec",
-                    "instructions.md": "Writing the build instructions",
                     "notes.md": "Updating the notes",
                     "actions.yaml": "Recording the changes — name, description, triggers"}
 
     # §8 chat-job stage flip: the first streamed rewrite marker moves the job
     # from the neutral deciding stage to the documents stage; answer-only,
     # actions-only, and blocker responses never flip.
-    _REWRITE_MARKS = frozenset({"spec.md", "instructions.md", "notes.md"})
+    _REWRITE_MARKS = frozenset({"spec.md", "notes.md"})
 
     def _chat_cb(self, job: dict, prefix: str = ""):
         """§8 chat-call live progress: returns (on_chunk, on_file) sharing one

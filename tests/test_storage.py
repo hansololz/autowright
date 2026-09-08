@@ -2126,24 +2126,54 @@ def test_load_skips_malformed_automation_dirs(store, caplog):
 
 
 def test_version_writer_clears_what_the_new_version_no_longer_carries(store):
-    """§5: rewriting a version folder prunes instructions.md, notes.md and any
-    file the new manifest doesn't name. Driven through the writer itself,
-    because every public save path writes a fresh directory: the prune is only
-    reachable on a folder that already holds a previous write."""
-    a = store.create_automation(
-        make_version(notes="working thoughts", instructions="build it this way"),
-        "Prune", None)
+    """§5: rewriting a version folder prunes notes.md and any file the new
+    manifest doesn't name. Driven through the writer itself, because every
+    public save path writes a fresh directory: the prune is only reachable on a
+    folder that already holds a previous write. §21.4: a legacy instructions.md
+    is the one file the prune must leave alone."""
+    a = store.create_automation(make_version(notes="working thoughts"), "Prune", None)
     vd = store.auto_dir(a) / "versions" / "v1"
-    assert (vd / "instructions.md").exists() and (vd / "notes.md").exists()
+    assert (vd / "notes.md").exists()
+    (vd / "instructions.md").write_text("build it this way\n", encoding="utf-8")
     (vd / "leftover.py").write_text("a step the new version dropped\n", encoding="utf-8")
 
-    store._write_version_folder(vd, make_version(notes="   \n", instructions=None))
-    assert not (vd / "instructions.md").exists()
+    store._write_version_folder(vd, make_version(notes="   \n"))
     assert not (vd / "notes.md").exists()
     assert not (vd / "leftover.py").exists()
+    # §21.4: the retired per-automation build instructions stay exactly as written.
+    assert (vd / "instructions.md").read_text(encoding="utf-8") == "build it this way\n"
     # The kept set survives: manifest, spec, and the steps the manifest names.
     assert (vd / "automation.yaml").exists() and (vd / "spec.md").exists()
     assert (vd / "01-say.py").exists() and (vd / "02-finish.py").exists()
+
+
+def test_version_folder_with_legacy_instructions_loads_and_keeps_the_file(store):
+    """§21.4 (2026-09-07): a versions/vN/instructions.md written by v0.6.0
+    through v0.11.1 is ignored on load and left in place. Nothing exposes the
+    retired field, and no write path (a new version here, the writer's prune)
+    creates, rewrites, or unlinks the file."""
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Legacy build rules", None)
+    v1 = store.auto_dir(a) / "versions" / "v1"
+    legacy = "- keep it short\n- never delete anything\n"
+    (v1 / "instructions.md").write_text(legacy, encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    loaded = s2.autos[a["id"]]
+    assert "instructions" not in loaded["versions"][1]
+    assert "instructions" not in s2.auto_json(loaded)
+    assert "instructions" not in s2.version_json(loaded, 1, loaded["versions"][1])
+
+    s2.save_new_version(loaded, make_version(note="Second version"))
+    assert loaded["current_version"] == 2
+    # The old folder's file is untouched, byte for byte...
+    assert (v1 / "instructions.md").read_bytes() == legacy.encode("utf-8")
+    # ...and no version folder gains one.
+    versions = store.auto_dir(a) / "versions"
+    assert [d.name for d in sorted(versions.iterdir())
+            if (d / "instructions.md").exists()] == ["v1"]
 
 
 def test_param_default_per_kind_and_kind_mismatch():

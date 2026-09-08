@@ -20,9 +20,9 @@ SMTP_PASSWORD_ID = "51111111-1111-4111-8111-111111111111"
 VAULT_DRIVE_KEY_ID = "52222222-2222-4222-8222-222222222222"
 
 
-def _mk_ver(desc, params, steps, spec, instr=None, note=None):
+def _mk_ver(desc, params, steps, spec, note=None):
     return {"description": desc, "params": params, "steps": steps, "spec": spec,
-            "instructions": instr, "note": note}
+            "note": note}
 
 
 def seed(store: Store) -> None:
@@ -123,11 +123,9 @@ def seed(store: Store) -> None:
         {"kind": "h2", "text": "Change (v3)"},
         {"kind": "p", "text": "Added display names so long titles stay readable in the table."},
     ]
-    manga_instr = ("Prefer Python for scripts.\nNever delete anything — move files to the Trash instead.\n"
-                   "Never pass a secret as the input for an agent.\nKeep it to one notification per execution.")
     manga = store.create_automation(
         _mk_ver("Checks the manga you follow every morning and tells you when new chapters are out.",
-                manga_params, manga_steps, manga_spec, instr=manga_instr, note="Created"),
+                manga_params, manga_steps, manga_spec, note="Created"),
         "Track manga chapters", agent_id, triggers=[{"id": new_id(), "kind": "cron", "source": "spec", "enabled": True, "expression": "0 8 * * *"}])
     # older versions v2 (v1 base), then current becomes v3
     v2_spec = [b for b in manga_spec if not (b["kind"] == "h2" and b["text"].startswith("Change"))
@@ -135,10 +133,9 @@ def seed(store: Store) -> None:
     store.save_new_version(manga, _mk_ver(manga["description"], manga_params, manga_steps,
                                           v2_spec + [{"kind": "h2", "text": "Change (v2)"},
                                                      {"kind": "p", "text": "The table now links straight to the newest chapter."}],
-                                          instr=manga_instr,
                                           note="Skip list lines that aren't links instead of failing."))
     store.save_new_version(manga, _mk_ver(manga["description"], manga_params, manga_steps,
-                                          manga_spec, instr=manga_instr,
+                                          manga_spec,
                                           note="Added display names so long titles stay readable in the table."))
     store.patch_automation(manga, {"paramValues": {
         "manga_list": ["https://mangaplus.shueisha.co.jp/titles/100020",

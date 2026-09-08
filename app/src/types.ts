@@ -90,8 +90,7 @@ export interface VersionInfo {
   when: string
   note: string | null
   spec: SpecBlock[]
-  instructions: string
-  notes?: string     // §4.1 agent-owned working-knowledge doc — versions like spec/instructions
+  notes?: string     // §4.1 agent-owned working-knowledge doc — versions like the spec
   steps: Step[]
   params: ParamDef[]
   packages: PackageDep[]
@@ -177,7 +176,6 @@ export interface Automation {
   triggerChip: string        // one → its short label · several → "N triggers" · none → "No triggers"
   allTriggersOff: boolean    // nonempty list, every trigger off (drives the OFF tag)
   nextAtMs: number | null      // epoch ms of the next enabled occurrence
-  instructions: string
   notes: string              // §4.1 — the current version's notes doc ("" when empty)
   lastStatus: Exclude<Status, 'queued' | 'skipped'>  // §4.1: those two can never be an automation's latest
   live: string[]             // §4.1 execution ids in progress, oldest first — maxParallel may allow several
@@ -400,7 +398,7 @@ export interface ChatActions {
   undo?: boolean // §8: always alone — runs the §11 draft-undo restore
 }
 
-// §8: `chat` jobs return any subset of { answer, spec, instructions, notes, actions };
+// §8: `chat` jobs return any subset of { answer, spec, notes, actions };
 // create/sync jobs return the full payload.
 export interface DraftPayload {
   name?: string | null
@@ -410,7 +408,6 @@ export interface DraftPayload {
   packages?: PackageDep[]    // §6.2 — statuses attached after the install stage
   steps?: Step[]
   spec: SpecBlock[] | null
-  instructions?: string | null
   notes?: string             // §4.1 notes doc — rides drafts and §8 chat/sync payloads
   triggers?: DraftTrigger[]  // §8: cron-only in drafts
   secretReferences?: string[] // §8: code-referenced secret ids

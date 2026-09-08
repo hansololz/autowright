@@ -11,12 +11,16 @@ import { StepList, type StepHistory } from '../../steps'
 import type { Agent, SecretMeta, UnresolvedRefs } from '../../types'
 import { Caret, CheckBox, Collapse, EmptyLine, Eyebrow, MetaChip, MiniBadge, Notice, ScrollArea, agName, dispModel, paramSummary } from '../../ui'
 import { Markdown, SpecMarkdown } from '../../result'
-import { type AgentRef, type Rev, type SecretRef, applyTestValues, instrToMd, instructionCache, shortId, specToText, stepList, textToSpec } from './model'
+import { type AgentRef, type Rev, type SecretRef, applyTestValues, shortId, specToText, stepList, textToSpec } from './model'
 import { DocEditorModal } from './DocEditorModal'
 
 // §11: one text style for a card's collapsed hint — the description never
 // changes size between collapsed and open
 export const cardHintFont = "400 11.5px/1.5 var(--sans)"
+
+// §11 BUILD INSTRUCTIONS card: the collapsed explainer for a static built-in
+// document, like the framework card.
+const BUILD_INSTRUCTIONS_EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec overrides any of them: just say so in plain words.'
 
 // §11 status-aware collapsed line: the first meaningful text line of a
 // markdown-ish document, markdown markers stripped — null when nothing remains
@@ -113,6 +117,7 @@ export interface LeftColumnProps {
   rev: Rev
   up: (patch: Partial<Rev>) => void
   fw: string
+  bld: string
   isEdit: boolean
   isCreateEmpty: boolean
   busyRewrite: boolean
@@ -142,7 +147,7 @@ export interface LeftColumnProps {
 }
 
 export function LeftColumn({
-  rev, up, fw, isEdit, isCreateEmpty, busyRewrite, viewingOld, testLive, lockStyle,
+  rev, up, fw, bld, isEdit, isCreateEmpty, busyRewrite, viewingOld, testLive, lockStyle,
   agents, secrets, unresolvedReferences, availAgents, agentStepIdx,
   agWarn, agNone, agNotEnabled, agMissing, agFallbackIdx,
   secWarn, secNotAllowed, secMissing, secRefs,
@@ -153,10 +158,10 @@ export function LeftColumn({
   const copy = usePlatformCopy()
   // §11 Secrets card New secret modal — a secret saved here is auto-allowed.
   const [secretModal, setSecretModal] = useState(false)
-  // §11 document-editor modal: the three manual edits are mutually exclusive,
+  // §11 document-editor modal: the two manual edits are mutually exclusive,
   // so at most one of these is open; each Save applies exactly what the old
   // in-card Save did, and the modal fires it after its exit animation.
-  const docEdit = rev.specEdit ? 'spec' : rev.notesEdit ? 'notes' : rev.instrEdit ? 'instructions' : null
+  const docEdit = rev.specEdit ? 'spec' : rev.notesEdit ? 'notes' : null
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -178,7 +183,7 @@ export function LeftColumn({
               if (busyRewrite || viewingOld || testLive) return
               const t = specToText(rev.spec)
               up({
-                instrDraft: null, instrEdit: false, notesDraft: null, notesEdit: false,
+                notesDraft: null, notesEdit: false,
                 specText: t, specTextOrig: t, specEdit: true,
               })
             }}
@@ -215,7 +220,7 @@ export function LeftColumn({
               e.stopPropagation()
               if (busyRewrite || viewingOld) return
               up({
-                specEdit: false, specText: '', specTextOrig: '', instrDraft: null, instrEdit: false,
+                specEdit: false, specText: '', specTextOrig: '',
                 notesDraft: rev.notes, notesEdit: true,
               })
             }}
@@ -409,40 +414,23 @@ export function LeftColumn({
         />
       )}
 
-      {/* BUILD INSTRUCTIONS */}
+      {/* BUILD INSTRUCTIONS — §11: a read-only built-in document, exactly like
+          the framework card below. The rules ship with the app, so nothing here
+          differs between automations or between create and edit mode. */}
       <SectionCard
         eyebrow="BUILD INSTRUCTIONS"
         open={instrOpenEff}
         onToggle={(o) => up({ instrSecOpen: o })}
-        hint="Standing rules your AI follows every time it writes or edits this automation."
-        preview={rev.instructions.trim() ? docPreview(rev.instructions) : null}
-        right={instrOpenEff && (
-          <button
-            // §11: an old version is browsed read-only — an instruction save
-            // here would mark the draft dirty while Sync now and Restore are
-            // both locked (viewingOld), a dead end with no escape.
-            className="ad-btn-text small ad-focus-inset" disabled={busyRewrite || viewingOld || testLive}
-            onClick={(e) => {
-              e.stopPropagation()
-              if (busyRewrite || viewingOld || testLive) return
-              up({
-                specEdit: false, specText: '', specTextOrig: '', notesDraft: null, notesEdit: false,
-                instrDraft: rev.instructions, instrEdit: true,
-              })
-            }}
-            style={{ flex: 'none' }}
-          >
-            Edit
-          </button>
-        )}
+        hint={BUILD_INSTRUCTIONS_EXPLAINER}
       >
-        {rev.instructions.trim() ? (
           <CardMarkdown>
-            <Markdown text={instrToMd(rev.instructions)} />
+            {bld
+              ? <Markdown text={bld} />
+              : <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)' }}>Couldn’t load build-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
-        ) : (
-          <CardEmpty>No instructions yet — press Edit to add standing rules.</CardEmpty>
-        )}
+          <div style={{ padding: '0 18px 16px', font: cardHintFont, color: 'var(--text-muted)' }}>
+            Built-in rules the AI follows when writing steps, word for word. To change one for this automation, state the new rule in the spec or ask the chat; these defaults update with the app.
+          </div>
       </SectionCard>
 
       {/* §11 document-editor modal — one document at a time */}
@@ -471,27 +459,6 @@ export function LeftColumn({
           // §4.1: a notes change never marks the workflow out of sync;
           // §11 draft undo: a manual Save under the snapshot clears it
           onSave={() => up({ notes: rev.notesDraft ?? rev.notes, notesDraft: null, notesEdit: false, touched: true, undo: null })}
-        />
-      )}
-      {docEdit === 'instructions' && (
-        <DocEditorModal
-          kind="instructions" text={rev.instrDraft ?? rev.instructions} original={rev.instructions}
-          onChange={(t) => up({ instrDraft: t })}
-          onDiscard={() => up({ instrDraft: null, instrEdit: false })}
-          onSave={() => {
-            // §11 draft undo: a manual Save under the snapshot clears it
-            up({ instructions: rev.instrDraft ?? rev.instructions, instrDraft: null, instrEdit: false, touched: true, dirty: true, undo: null })
-            showToast('Instructions saved — the workflow is out of sync. Sync the steps before saving.', 5800)
-          }}
-          extra={
-            <button
-              className="ad-btn-text dim small ad-focus-inset"
-              disabled={!instructionCache.defaultBuild || (rev.instrDraft ?? rev.instructions) === instructionCache.defaultBuild}
-              onClick={() => up({ instrDraft: instructionCache.defaultBuild })}
-            >
-              Reset to default
-            </button>
-          }
         />
       )}
 

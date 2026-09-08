@@ -188,8 +188,10 @@ automations/<uuid>/
                                # + declared packages (§6.2, absent when none):
                                # packages: [{pip: pandas, import: pandas, why: one-line purpose}]
     spec.md                    # the version's spec as plain markdown (h1/h2/li/p blocks)
-    instructions.md            # user's free-text instructions to the agent (§4.1 instructions),
-                               # plain markdown; absent when none were given
+                               # (no instructions.md: the per-automation build instructions
+                               # were retired 2026-09-07 — a folder written by an older
+                               # release may still hold one; it is ignored on load and never
+                               # touched by the version writer, §21)
     notes.md                   # the §4.1 agent-owned notes document, plain markdown;
                                # absent when empty
     NN-name.py                 # step scripts as real files, beside the manifest —
@@ -283,7 +285,7 @@ with the same live `developerMode` gate as the request-log files above. A valida
 user never sees (a repair round fixed it) still records — near-misses are exactly the
 instruction-tuning signal.
 
-A version folder holds **what the agent wrote** (spec, instructions, steps + scripts, param
+A version folder holds **what the agent wrote** (spec, steps + scripts, param
 definitions); the top-level `automation.yaml` holds **what the user owns and operates**
 (identity — name and description, triggers, param values, agent choice, permission grants). Two consequences:
 
@@ -384,7 +386,7 @@ executions/
 
 **Load model:** automations are **fully loaded at startup** — the backend walks `automations/`,
 parses every top-level `automation.yaml` plus each `versions/vN/` folder (its `automation.yaml`
-+ `spec.md` + `instructions.md` + `notes.md` + step scripts), and serves all automation reads (lists,
++ `spec.md` + `notes.md` + step scripts), and serves all automation reads (lists,
 detail, scheduler, menu bar) from memory. There is no automations table: the YAML files plus the
 startup walk are the whole story. The id → path map and `nextAtMs` are derived in memory
 during/after the walk, and the walk loads any stored draft straight onto the record;
@@ -522,7 +524,8 @@ automation/                  # exactly the §5 version-folder shape; import copi
                              #   when/note (import stamps v1 fresh), never the
                              #   draft-only step_agents/allowed_secrets/triggers/param_values/concurrency keys
   spec.md                    #   verbatim
-  instructions.md            #   verbatim; absent when none
+                             #   (no instructions.md — retired 2026-09-07; an archive from an
+                             #   older release may carry one, and import ignores it)
   notes.md                   #   verbatim; absent when empty (§4.1 notes)
   NN-name.py                 #   every step script, verbatim except the ref-form
                              #   secrets["1"]/agents["2"] code subscripts (below)

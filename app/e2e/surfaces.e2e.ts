@@ -58,7 +58,7 @@ describe('surfaces e2e', () => {
       draft: {
         name: 'Execution list e2e', description: 'test', note: null, params: [],
         steps: [FINISH_STEP],
-        spec: [{ kind: 'h1', text: 'Execution list e2e' }], instructions: null,
+        spec: [{ kind: 'h1', text: 'Execution list e2e' }],
       },
       enabledAgents: [], allowedSecrets: [],
     }) as { executionId: string }

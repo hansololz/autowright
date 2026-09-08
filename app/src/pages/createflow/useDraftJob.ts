@@ -348,7 +348,7 @@ export function useDraftJob(d: DraftJobDeps) {
   const makeChatHandlers = (ctx: { request: string; hadSnap: boolean; planEntryId: string | null }): PollHandlers => ({
     onDone: (dft) => {
       const actions = dft.actions ?? {}
-      const rewrote = !!dft.spec || dft.instructions != null || dft.notes != null
+      const rewrote = !!dft.spec || dft.notes != null
       const empty = !dft.answer && !rewrote && !dft.actions
       // §4.1/§11 uniqueness backstop: a chat rename into another automation's
       // name is skipped with a system entry — checked against the store's
@@ -387,7 +387,7 @@ export function useDraftJob(d: DraftJobDeps) {
               spec: snap.spec, steps: snap.steps, params: snap.params, packages: snap.packages,
               triggers: snap.triggers, paramValues: snap.paramValues, concurrency: snap.concurrency,
               testValues: snap.testValues,
-              instructions: snap.instructions, notes: snap.notes,
+              notes: snap.notes,
               dirty: snap.dirty, undo: null,
             }
             chat.push(newEntry({ kind: 'system', icon: 'fa-rotate-left', text: 'Last change undone — the rewrites above no longer apply.' }))
@@ -411,13 +411,6 @@ export function useDraftJob(d: DraftJobDeps) {
             const h1 = dft.spec.find((b) => b.kind === 'h1')?.text
             if (h1) next = { ...next, name: h1 }
           }
-        }
-        if (dft.instructions != null && dft.instructions !== r.instructions) {
-          const entry = newEntry({ kind: 'system', icon: 'fa-list-check', text: 'Build instructions updated.' })
-          anchorId = entry.id
-          // like a manual Build-instructions save — same dirty gating (§11)
-          next = { ...next, instructions: dft.instructions, dirty: true }
-          chat.push(entry)
         }
         if (dft.notes != null && dft.notes !== r.notes) {
           const entry = newEntry({ kind: 'system', icon: 'fa-note-sticky', text: 'Notes updated.' })
@@ -508,7 +501,7 @@ export function useDraftJob(d: DraftJobDeps) {
               spec: r.spec, steps: r.steps, params: r.params, packages: r.packages,
               triggers: r.triggers, paramValues: r.paramValues, concurrency: r.concurrency,
               testValues: r.testValues,
-              instructions: r.instructions, notes: r.notes,
+              notes: r.notes,
               dirty: r.dirty, entryId: anchorId,
             },
           }
@@ -561,10 +554,10 @@ export function useDraftJob(d: DraftJobDeps) {
   })
 
   // §11: a chat message starts one §8 `chat` job — the authoring agent gets the
-  // in-editor draft (spec + steps + build instructions + notes), the grants
+  // in-editor draft (spec + steps + notes), the grants
   // context, and the recent thread; the backend adds the RECENT EXECUTIONS and
   // PACKAGES context itself. One response may combine an answer with rewrites
-  // (spec / build instructions / notes) and follow-up actions (sync, test,
+  // (spec / notes) and follow-up actions (sync, test,
   // rename) — applied in that order (§11), with the sync/test chain armed as
   // pending flags a watcher effect fires.
   const sendChat = async (textArg?: string, executionId?: string) => {
@@ -589,7 +582,7 @@ export function useDraftJob(d: DraftJobDeps) {
     attachedRef.current = false // a live-started job never runs the re-attach trigger guard
     setRev((r) => r && ({
       ...r,
-      specEdit: false, specText: '', specTextOrig: '', instrDraft: null, instrEdit: false, // one edit at a time
+      specEdit: false, specText: '', specTextOrig: '', // one edit at a time
       notesDraft: null, notesEdit: false,
       // §11 auto-dismiss on reply: a sent message answers any open
       // clarification blockers (chat source); sync entries stay
@@ -714,7 +707,7 @@ export function useDraftJob(d: DraftJobDeps) {
     dirtyBeforeSync.current = specOverride ? true : rev.dirty
     attachedRef.current = false // a live-started job never runs the re-attach trigger guard
     up({
-      specEdit: false, specText: '', specTextOrig: '', instrDraft: null, instrEdit: false, // discard unsaved edits
+      specEdit: false, specText: '', specTextOrig: '', // discard unsaved edits
       notesDraft: null, notesEdit: false,
       syncBusy: true, genStage: null, genDetail: null, genEvents: [], genStageStartedAt: null, touched: true,
       // §11 draft undo: a repair amend replaces the spec outside the undo flow

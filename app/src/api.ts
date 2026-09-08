@@ -102,7 +102,7 @@ export const api = {
     return r.json() as Promise<Health>
   },
   state: () => req<StateSnapshot>('GET', '/state'),
-  instructions: () => req<{ framework: string; defaultBuild: string }>('GET', '/instructions'),
+  instructions: () => req<{ framework: string; build: string }>('GET', '/instructions'),
   // §4.5/§19: the machine kind — the API serializes the display label
   // §6/§19 `queue`: the §9.2 capacity popup's Queue action — at capacity the
   // start joins the firing queue instead of answering 409.

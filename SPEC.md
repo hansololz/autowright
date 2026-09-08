@@ -252,8 +252,8 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `console_python` — the §2 console-interpreter rule for Python children), `timefmt.py` (§4.1 display labels + §5 canonical UTC
   timestamps), `yamlio.py` (§5 atomic temp-write + rename IO).
   `autowright/instructions/` holds the §8 prompt texts as markdown (packaged via
-  `[tool.setuptools.package-data]`): `framework-instructions.md` (contract preamble) and
-  `default-build-instructions.md` (default build instructions seeded into new automations).
+  `[tool.setuptools.package-data]`): `framework-instructions.md` (the contract preamble:
+  facts) and `build-instructions.md` (the app's build policy, overridable by the spec).
   `pyproject.toml` defines the `autowright` / `autowright-backend` entry points, and
   `constraints.txt` beside it pins the full runtime dependency closure (direct **and**
   transitive) at exact versions, so two §3 distributables built from one commit ship the

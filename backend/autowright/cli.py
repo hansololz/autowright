@@ -203,7 +203,10 @@ def _exit_by_status(status: str) -> None:
 
 # ---------------------------------------------------------------- workdir (§20)
 
-WORKDIR_META = ("spec.md", "manifest.yaml", "instructions.md", "notes.md")
+# §20/§21.4: no instructions.md. The per-automation build instructions are
+# retired, so pull never writes one, and an instructions.md an older CLI left
+# in the workdir is unmanaged: never read, never pruned.
+WORKDIR_META = ("spec.md", "manifest.yaml", "notes.md")
 # §4.2: the resolved value fields per kind — stripped from pulled manifests
 # (values are user-owned operational state, set via `param set`, never versioned).
 PARAM_VALUE_KEYS = ("on", "lines", "rows", "value")
@@ -245,7 +248,7 @@ def _all_grants(c: Client) -> dict:
 
 def validate_workdir(c: Client, d: Path) -> dict:
     """§8 validation of a workdir; prints every error and exits 1 on failure.
-    Returns the draft payload (spec blocks + steps/params/packages/triggers/instr)."""
+    Returns the draft payload (spec blocks + steps/params/packages/triggers)."""
     from . import drafting
 
     files = read_workdir(d)
@@ -256,7 +259,7 @@ def validate_workdir(c: Client, d: Path) -> dict:
         errors += errs
     else:
         errors.append("spec.md is missing")
-    step_files = {n: t for n, t in files.items() if n not in ("spec.md", "instructions.md", "notes.md")}
+    step_files = {n: t for n, t in files.items() if n not in ("spec.md", "notes.md")}
     # §20: the manifest's cron entries may carry `run_if_missed` (§4.3), a key
     # the §8 rule-9 dialect does not know; lifted out before validation and
     # stamped back onto the drafted crons by (expression, timezone).
@@ -283,8 +286,6 @@ def validate_workdir(c: Client, d: Path) -> dict:
             draft["name"] = str(manifest["name"])
         if manifest.get("description"):
             draft["description"] = str(manifest["description"])
-    if "instructions.md" in files:
-        draft["instructions"] = files["instructions.md"].strip()
     if "notes.md" in files:
         draft["notes"] = files["notes.md"].strip()
     return draft
@@ -384,9 +385,6 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     for s in auto.get("steps") or []:
         (d / s["file"]).write_text(s.get("code", ""), encoding="utf-8")
         written.append(s["file"])
-    if auto.get("instructions"):
-        (d / "instructions.md").write_text(auto["instructions"] + "\n", encoding="utf-8")
-        written.append("instructions.md")
     if (auto.get("notes") or "").strip():
         (d / "notes.md").write_text(auto["notes"].strip() + "\n", encoding="utf-8")
         written.append("notes.md")
@@ -1683,7 +1681,7 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p = _sub(ag, "pull", cmd_automation_pull, "copy an automation into a directory to edit",
              description="Write an automation's current version into a directory as editable "
                          "files: spec.md, manifest.yaml, one NN-name.py per step, plus "
-                         "instructions.md and notes.md when the version has them. Edit them "
+                         "notes.md when the version has one. Edit them "
                          "with anything, then `automation push` the directory back."
                          "\n\n"
                          "Parameter values are deliberately not written. A version describes "

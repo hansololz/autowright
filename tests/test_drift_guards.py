@@ -111,7 +111,7 @@ def test_curated_list_matches_the_framework_instructions():
     """Home 3, `instructions/framework-instructions.md`: the §8 contract
     preamble the authoring agent reads. It names *import* modules."""
     text = _read("backend/autowright/instructions/framework-instructions.md")
-    m = re.search(r"## Allowed imports\s+Python stdlib,(.*?)— always available",
+    m = re.search(r"## Allowed imports\s+Python stdlib,(.*?)always available",
                   text, re.S)
     assert m, "framework-instructions.md has no 'Allowed imports' sentence to check"
     listed = set(_backticked(m.group(1))) - {"autowright"}
@@ -134,6 +134,35 @@ def test_curated_list_matches_the_spec():
         "distribution, plus the import module where they differ): "
         f"only in the spec {sorted(listed - expected)}, "
         f"only in the list {sorted(expected - listed)}")
+
+
+# ---------------------------------------------------------------- §8 instruction split
+
+def test_build_instructions_open_with_the_override_rule():
+    """§8: the precedence rule lives inside `build-instructions.md` itself, in
+    its opening paragraph, so the authoring agent reads it as part of the build
+    instructions and not only as a prompt header."""
+    text = _read("backend/autowright/instructions/build-instructions.md")
+    assert "The spec overrides them" in text[:1200], (
+        "build-instructions.md must open by stating that the spec overrides it")
+
+
+def test_no_instructions_md_response_block_is_named_anywhere():
+    """§8/§21.4: the per-automation build instructions are retired — neither
+    instruction file nor any TASK directive may name an `instructions.md`
+    response block, or an agent would return one no validator accepts."""
+    from autowright import drafting
+
+    for name in ("framework-instructions.md", "build-instructions.md"):
+        text = _read(f"backend/autowright/instructions/{name}")
+        assert "instructions.md" not in text.replace("framework-instructions.md", "") \
+                                           .replace("build-instructions.md", ""), (
+            f"{name} names an instructions.md response block")
+    for label, text in (("CHAT_TASK", drafting.CHAT_TASK),
+                        ("STEPS_TASK", drafting.STEPS_TASK),
+                        ("FILE_OUTPUT_BLOCK", drafting.FILE_OUTPUT_BLOCK)):
+        assert "instructions.md" not in text, (
+            f"drafting.{label} names an instructions.md response block")
 
 
 # ---------------------------------------------------------------- §3 update feeds

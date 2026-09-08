@@ -175,8 +175,7 @@ applies unchanged; the chat pane never collapses.
     Font Awesome class); an entry without one (older persisted threads, backend-seeded
     entries) falls back to `fa-circle-info`. The map, by operation: sync
     ("Steps synced with the spec.", "Test skipped — the steps aren't in sync with the
-    spec.") `fa-rotate`; instructions ("Build
-    instructions updated.") `fa-list-check`; notes ("Notes updated.")
+    spec.") `fa-rotate`; notes ("Notes updated.")
     `fa-note-sticky`; identity ("Renamed to `<name>`.", "Description updated.")
     `fa-pen`; parameters ("Parameter "X" staged — applies when you save.", "Value for
     "X" dropped — no such parameter after the rebuild.") `fa-sliders`; concurrency
@@ -307,7 +306,7 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
   simply travels with an empty draft, and the §8 new-automation rule has the agent write
   the spec, name the automation through the `name`/`description` actions, and normally
   chain the first steps build with `sync: true`. The job carries the in-editor draft as `current`
-  (spec + steps + instructions + notes), the in-editor grant arrays, and the recent thread
+  (spec + steps + notes), the in-editor grant arrays, and the recent thread
   (§19 `chat` — only entries after the newest §4.4 boundary marker: a settled draft
   session's conversation never reaches the agent, §8) — answers and rewrites match what's
   on screen, unsaved edits included; the
@@ -324,9 +323,6 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
     Draft undo below) — and appends the rewrite chip ("Spec updated.", entry kinds
     above; the toast is
     skipped when the response's actions immediately sync);
-  - an **instructions rewrite** replaces the Build-instructions text like a manual
-    instructions Save (same dirty gating) and appends a system entry ("Build instructions
-    updated.");
   - a **notes rewrite** replaces the §4.1 notes document (never dirties the workflow) and
     appends a system entry ("Notes updated.");
   - **actions** (§8 `actions.yaml`) run after the rewrites land: `name`/`description` apply like
@@ -366,7 +362,7 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
     diffing. All staged kinds mark the
     draft touched, never out of sync, and land only at save (§4.4). **Workflow chip
     group — hold-and-flush:** a turn's chips split into two groups mirroring the page.
-    The document chips (the rewrite chip, "Build instructions updated.", "Notes
+    The document chips (the rewrite chip, "Notes
     updated.", "Renamed to …", "Description updated.") land at apply time. The
     staged-change chips (parameter staged, the trigger-op chips, concurrency staged)
     are the **workflow group**: when the response arms a sync (`sync: true`, or
@@ -778,8 +774,8 @@ are create-only manifest keys). When an execution is live during an edit, a cyan
 shows: "An execution is happening right now on vN. Saving won't interrupt it — that execution finishes on vN.
 vN+1 takes over from the next execution (`<short label of the next trigger>`)." Sections (left column: spec, notes,
 agents, secrets, instructions, framework — the spec and the agent's working notes on top, the
-grant cards under them, the standing-rules cards last: build instructions second-last, the
-read-only framework reference closing the column; right column: the BUILD card, then the TEST
+grant cards under them, the two read-only built-in instruction cards last: build
+instructions second-last, the framework reference closing the column; right column: the BUILD card, then the TEST
 card, then steps, triggers, parameters, concurrency, packages). Motion on this page follows §14: every collapsible card
 animates open/closed through the Collapse primitive — the body **and** the collapsed hint,
 which hand off as a crossfade per the §14 collapsible motion (content fades while the rows
@@ -787,12 +783,12 @@ resize; open decelerates at `--t-enter`, close accelerates at `--t-exit`) — ne
 text or two competing height animations; **every** collapsible card header on this page (spec, build
 instructions, notes, agents, secrets, framework, packages) follows the framework-card pattern:
 the whole header row toggles the card and is an `.ad-hover-row` hover surface (no card is
-ever held open by a manual edit: the three document editors open in the document-editor
+ever held open by a manual edit: the two document editors open in the document-editor
 modal below, over the page, never inside the card). The step rows and the agent/secret checklist rows are `.ad-hover-row`
-surfaces too. The card-header action — one **Edit** button on the spec, notes and build-instructions
+surfaces too. The card-header action — one **Edit** button on the spec and notes
 cards — is a compact borderless muted text button at the small text-button size, never a
 bordered or filled box: chat is the primary way to change these documents, so the manual
-control stays quiet (the document-editor modal's Cancel / Reset to default, faint, and
+control stays quiet (the document-editor modal's Cancel, faint, and
 Save, link-styled in accent, keep the same faces). Its line box is
 tightened (line-height 1) so it never exceeds the eyebrow line: every card header — with or
 without an action, open or collapsed — is exactly the framework card's header height. The six
@@ -802,14 +798,14 @@ in-card empty states share one text style (11.5px/1.5 faint sans) **and one left
 (the card's 18 px inset plus the caret column, flush with the eyebrow's first character), so an empty card's text stays put when the card opens — a
 card's description never changes size or position between its collapsed and open states.
 The collapsed line is **status-aware**: a card holding content shows a one-line preview of
-that content (single line, ellipsized — notes and build instructions show their first
+that content (single line, ellipsized — notes show their first
 meaningful text line with markdown markers stripped; agents shows the enabled agent names,
 secrets the allowed secret names, packages the package names, each " · "-joined), while an
 empty card shows its explainer sentence — the explainer teaches exactly when there is
 nothing to preview, and a collapsed filled card reads as a summary of this automation
-instead of repeated manual text. Two cards always show their explainer: the spec card (its
-first line would duplicate the page title) and the framework card (a static built-in
-document). Rendered-markdown card bodies
+instead of repeated manual text. Three cards always show their explainer: the spec card (its
+first line would duplicate the page title) and the two instruction cards (static built-in
+documents). Rendered-markdown card bodies
 (spec, build instructions, notes, framework) share **one markdown body wrapper** too: same
 padding, same 440 px max height with inner scroll (§14 overlay scrollbar), same full-bleed
 table allowance — markdown looks identical in every card. Clicking a header
@@ -840,9 +836,9 @@ editors enter with
   spec is unchanged."). On failure the §8 error renders as a thread error entry; a `blocked`
   outcome renders a thread blockers entry (source: chat) — either way the draft is
   untouched, except a blocked payload's `draft.notes` (§8 blocker notes), applied like
-  any notes rewrite (Blockers above). Manual spec/instruction edits are mutually exclusive (one edit at a time), and
+  any notes rewrite (Blockers above). Manual spec/notes edits are mutually exclusive (one edit at a time), and
   both are locked while a chat/sync job runs (inputs lock below). Sending a chat
-  message or starting a sync while a manual spec / build-instructions / notes edit
+  message or starting a sync while a manual spec / notes edit
   holds unsaved changes first asks through the editor's discard confirm — the same
   alert the document-editor modal's own Cancel / Escape / backdrop raise (below):
   ("Discard your spec edits?" / "Discard your instruction edits?" / "Discard your
@@ -855,7 +851,7 @@ editors enter with
   parameter definitions, packages, triggers, the staged `param_values` map (§4.2), the
   staged `concurrency` object (§8), the
   drafted test-value map (`testValues`, test-setup section below),
-  build instructions, notes, and the dirty flag
+  notes, and the dirty flag
   of that moment (an answer-only response leaves the existing snapshot untouched; grants
   and name/description are user-owned, never agent-rewritten, and stay out — chat-staged
   trigger ops and values are draft state, so the restore covers them). One ghost **Undo**
@@ -886,56 +882,44 @@ editors enter with
   persists (§4.4), so the agent's §8 CONVERSATION context learns the rollback and never
   assumes its earlier rewrites still stand. The
   snapshot is single-level — each new draft-changing response replaces it — and it clears
-  on any manual document Save (spec, build instructions, or notes — an undo would silently
+  on any manual document Save (spec or notes — an undo would silently
   destroy the newer manual work), on a repair-block spec amend, on Clear chat (the anchor
   row leaves with the thread), and on loading a version
   from the Version menu. It lives only in
   editor state: it is not part of the serialized draft and does not survive leaving the page.
   There is deliberately **no multi-level revert history**: chat can walk any change back, and
   durable rollback is the version menu.
-- **BUILD INSTRUCTIONS** — collapsible card sitting second-last in the left column, directly
-  above the Framework-instructions card (the two standing-rules documents close the column
-  together); holds the §4.1 `instructions` free text; its Edit button opens the
-  document-editor modal (below); defaults collapsed in create and edit mode alike (standing rules are rarely touched);
-  collapsed with content it shows the first-rule preview (status-aware rule above); empty, the
-  explainer: "Standing rules your AI follows every time it writes or edits this automation."; the view state renders the text as markdown (same renderer as the Spec and
-  Framework-instructions cards), first prefixing every bare line — one that starts no markdown
-  block (heading, list item, table row, code fence) and sits outside any fence — with "- " so
-  plain one-rule-per-line text still renders as a bullet list instead of collapsing into one
-  paragraph; the view caps at the Spec card's 440 px max height and scrolls internally
-  (§14 overlay scrollbar) past it, so a long rule list never swallows the column; the
-  modal's edit placeholder "Markdown — one rule per line: “Prefer
-  Python.” “Never delete files — move them to the Trash.”", empty state "No instructions yet —
-  press Edit to add standing rules." While editing, a ghost **Reset to default** button sits
-  left of Cancel in the modal's toolbar: it fills the editor with the app's current §8
-  `default-build-instructions.md` text (from `GET /instructions`), and is disabled while the
-  editor already holds that text (or the file hasn't loaded yet). It changes only the unsaved
-  draft — Save applies it like any manual instruction edit (same dirty gating and toast),
-  Cancel discards it. In
-  create mode the card arrives pre-filled with the app's default best-practice rules (§8) —
-  edit or delete them freely before saving. The pre-fill reads the session's cached
-  `GET /instructions` answer; when that fetch resolves **after** the empty draft was seeded
-  (the first create-flow open of an app session), the response back-fills the draft's
-  instructions — only while the card is still empty and not being edited, so a resumed
-  pending draft that carries its own text and an editor the user already opened are never
-  overwritten. The card is never left empty by a slow fetch: the agent is told the same
-  rules either way (the §19 chat call substitutes them when a create-mode `current` carries
-  none), so what the user reads must match what the agent receives.
+- **BUILD INSTRUCTIONS** — read-only collapsible card sitting second-last in the left
+  column, directly above the Framework-instructions card (the two built-in instruction
+  documents close the column together). It shows the §8 `build-instructions.md` **rendered
+  as markdown** (the shared §4.5 Markdown component — full GFM; the shared 440 px markdown
+  body, §14 overlay scrollbar style), byte-for-byte what the agent receives, from the same
+  cached §19 `GET /instructions` answer as the framework card. No Edit button, no editor,
+  no Reset, no per-automation text: the rules ship with the app and update with it, so
+  nothing about this card differs between automations or between create and edit mode.
+  Defaults collapsed in both modes; collapsed, it always shows its explainer (a static
+  built-in document, like the framework card, never a content preview): "Default rules
+  your AI follows when it builds this automation. Your spec overrides any of them: just
+  say so in plain words." Open, it shows the rendered document and the footer, exactly
+  the framework card's structure. Footer copy: "Built-in rules the AI follows when
+  writing steps, word for word. To change one for this automation, state the new rule in
+  the spec or ask the chat; these defaults update with the app." (No em dashes in this
+  card's copy.) The card never gates Save, never marks the workflow out of sync, and
+  never participates in the draft, the undo snapshot, or the §5.1 archive.
 - **NOTES** — collapsible card below the Spec card holding the §4.1 agent-owned notes
   document; bare header like the other cards; collapsed with content it shows the
   first-line preview (status-aware rule above). View state renders the markdown (shared §4.5 renderer, same
   max-height + inner scroll as the spec card); Edit opens the same document-editor modal as
-  Build instructions (Cancel / Save in its toolbar) so the user can prune stale or wrong lines —
+  the Spec (Cancel / Save in its toolbar) so the user can prune stale or wrong lines —
   but the document is normally agent-written: §8 chat and sync responses may carry a
   `notes.md` rewrite, which replaces the text and lands a quiet "Notes updated." system
   entry. A notes change (manual or agent) marks the draft touched but **never** marks the
   workflow out of sync and never gates Save (§4.1: notes are advisory input to the next
   sync). Defaults collapsed; collapsed-empty hint and in-card empty state: "No notes yet —
   your AI records what it learns (page quirks, dead ends, fixes) as you build and test." Notes
-  version with the automation and ride drafts and §5.1 archives like spec and
-  instructions.
-- **Document-editor modal** — the one editing surface for the three documents. Pressing Edit
-  on the Spec, Notes, or Build-instructions card opens it over the page; the card stays in
+  version with the automation and ride drafts and §5.1 archives like the spec.
+- **Document-editor modal** — the one editing surface for the two documents. Pressing Edit
+  on the Spec or Notes card opens it over the page; the card stays in
   its view state behind the backdrop, and no card body ever turns into a textarea. It is the
   §9.2 step-script modal's code pane on its own: a §14 `Modal` card `min(860px, 92vw)` wide,
   `overflow: hidden`, no header row and nothing that scrolls the card as a whole, on the
@@ -944,39 +928,36 @@ editors enter with
   padding + six spare lines>, 82vh)` — so a short document gets a card that fits it with room
   to write and a long one caps at the viewport; text that outgrows the frame scrolls inside
   the editor and never resizes the card. A fixed 44 px **toolbar** (hairline bottom border)
-  carries, left, the faint mono eyebrow naming the document ("SPEC" / "NOTES" / "BUILD
-  INSTRUCTIONS") followed by the document's §4.1 version-folder filename in dimmer mono
-  (`spec.md` / `notes.md` / `instructions.md`) and, right, a live "`<n>` lines" count of the
-  editor's current text ("1 line" in the singular, "0 lines" for an empty editor; a trailing
-  final newline is not counted) and the control cluster: for build instructions the ghost
-  **Reset to default** (rule above), then **Cancel** (faint) and **Save** (accent link,
-  disabled while the text equals what the modal opened with). There is no ✕ — Cancel is the
+  carries, left, the faint mono eyebrow naming the document ("SPEC" / "NOTES") followed
+  by the document's §4.1 version-folder filename in dimmer mono (`spec.md` / `notes.md`)
+  and, right, a live "`<n>` lines" count of the editor's current text ("1 line" in the
+  singular, "0 lines" for an empty editor; a trailing final newline is not counted) and the
+  control cluster: **Cancel** (faint) and **Save** (accent link, disabled while the text
+  equals what the modal opened with). There is no ✕ — Cancel is the
   close. Below the toolbar the **editor** is one textarea filling the pane at full height:
   transparent on the pane's ground, borderless, no focus ring (the card is the focus),
   12px/1.65 mono `--text-2` (the step-script modal's rhythm), soft-wrapping, padded 14 px top, 18 px left and bottom, and a
   28 px right inset so no line runs under the thumb; it is its own §14 overlay-scrollbar pane
   with the thumb inset to `right: 6px` like the step-script modal (same 12 px corner
   reason). It is focused on open with the caret at the end of the text. Placeholders: spec
-  "Markdown — what the automation should do, in plain words."; notes and build instructions
-  keep the placeholders their cards named above. A 36 px **footer** (hairline top border, the
+  "Markdown — what the automation should do, in plain words."; notes keep the placeholder
+  their card named above. A 36 px **footer** (hairline top border, the
   cards' 11.5 sans muted hint style) states what Save does — spec: "Saving rewrites the
-  steps to match the new spec."; build instructions: "Saving marks the workflow out of sync
-  — sync the steps before saving the automation."; notes: "Notes guide the next sync —
+  steps to match the new spec."; notes: "Notes guide the next sync —
   saving never marks the workflow out of sync." **Save** applies the document exactly as
   the cards' Save did (spec: the text parsed back to blocks, dirty, toast "Spec saved — the
-  workflow is out of sync. Sync the steps before saving."; instructions: dirty, toast
-  "Instructions saved — the workflow is out of sync. Sync the steps before saving."; notes:
+  workflow is out of sync. Sync the steps before saving."; notes:
   touched only), clears the draft-undo snapshot, and closes the modal; ⌘S / Ctrl+S while
   the modal is open saves too (swallowed with no effect while Save is disabled). **Cancel**,
   Escape, and a backdrop click all close the modal the same way: silently when the text is
   unchanged, otherwise through the editor's discard confirm above ("Discard your spec
-  edits?" / "Discard your instruction edits?" / "Discard your notes edits?", confirm label
+  edits?" / "Discard your notes edits?", confirm label
   "Discard edits"), which stacks above the editor card so Escape closes only the confirm;
   confirming discards the typed text and closes, cancelling returns to the editor with the
   text intact (the §14 `Modal` close guard). The edits stay mutually exclusive — one modal,
-  one document at a time — and the drafts behind them (`specText` / `instrDraft` /
+  one document at a time — and the drafts behind them (`specText` /
   `notesDraft`) remain editor state, never serialized into the §4.4 draft.
-- **Dirty gating** — any spec/instruction/chat-rewrite change marks the workflow out of sync and
+- **Dirty gating** — any spec/chat-rewrite change marks the workflow out of sync and
   **blocks saving** until the BUILD card's "Sync now" button makes one §8 `sync` call
   regenerating the steps ("Steps synced with the spec — review them, then save."). The
   out-of-sync state persists with the draft (§4.4 `outOfSync`) and is restored on resume —
@@ -1014,14 +995,13 @@ editors enter with
   or a chat job is in flight, every input on the review screen is disabled:
   the spec Edit button and the thread's undo row, the chat input (its own busy hint above), the
   agent-enablement and secret-allowance checkbox rows (and the missing-secret add row and the
-  Secrets card's New secret button), the
-  build-instructions Edit button, the TEST card's Test draft button and the test-run modal's
+  Secrets card's New secret button), the TEST card's Test draft button and the test-run modal's
   test-value editors and Run test, the version menu, the drafting-agent picker, and Discard draft / Start over. The only
   live control is the running job's Cancel button (the composer's). **Rewrites
   lock while a test
   executes** — while a draft test is executing, every affordance that would rewrite the
   workflow under the running test disables: the BUILD card's sync button, the spec card's Edit,
-  the thread's undo row, the chat input, and the build-instructions Edit.
+  the thread's undo row, and the chat input.
   Grant toggles, test-parameter editors, and navigation stay live — the test's inputs were
   snapshotted at start (a grant change surfaces through the ordinary out-of-sync state,
   where the live test keeps its Cancel). Every disabled control shares one look:
@@ -1149,8 +1129,8 @@ editors enter with
   all — old data — drops the clause) — and every step
   shows the §9.2 clock-icon time-limit tag and, when its §4.1 retry budget is set, the §9.2
   rotate-icon retry tag (same labels, tooltips, and hide-at-zero rule). Which agents a step calls is decided by
-  the authoring agent per the §8 selection rule — changing it happens through the spec or
-  build instructions plus sync (or the agent-enablement card), not per step. Step rows open the same §9.2 step-script modal (whole-row click; unlike the
+  the authoring agent per the §8 selection rule — changing it happens through the spec
+  plus sync (or the agent-enablement card), not per step. Step rows open the same §9.2 step-script modal (whole-row click; unlike the
   detail page's rows the editor's carry **no** right-edge expand glyph — the row's hover
   fill is the only affordance, and the button's "View script" `title` tooltip is kept on
   the row itself; one step shows at a
@@ -1257,7 +1237,7 @@ editors enter with
   body, §14 overlay scrollbar style). The file content itself is untouched —
   what is rendered is byte-for-byte what the agent receives. Content comes from §19
   `GET /instructions` (fetched once per app session and cached); the same response carries
-  `default-build-instructions.md` as the fallback pre-fill for the Build instructions card.
+  `build-instructions.md` for the Build-instructions card above.
   Collapsed hint and footer copy: built-in instructions the AI reads before writing anything,
   word for word — they update with the app, nothing for the user to maintain.
 - **BUILD card and TEST card** — the top two cards of the right column, 14 px apart (the

@@ -11,7 +11,7 @@ vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
   openWs: vi.fn(() => () => {}),
   api: {
-    instructions: vi.fn(async () => ({ framework: '# Framework', defaultBuild: '- rules' })),
+    instructions: vi.fn(async () => ({ framework: '# Framework', build: '- rules' })),
     postDraftJob: vi.fn(async () => ({ jobId: 'j1' })),
     patchAutomation: vi.fn(async () => ({})),
     getDraftJob: vi.fn(() => new Promise(() => { /* poll never answers in tests */ })),
@@ -63,7 +63,6 @@ const AGENTS: Agent[] = [
 const AUTO = {
   id: 'a1', name: 'My auto', description: '', version: 1,
   triggers: [], triggerChip: 'No triggers', allTriggersOff: false, nextAtMs: null,
-  instructions: '- keep it simple',
   lastStatus: 'none', live: [], resultChip: null, resultStatus: null, lastExecutionLabel: '',
   agentId: 'g1', stepAgents: ['g1'], allowedSecrets: [], problems: [],
   snapshotSettings: { preVersion: true, preClear: true, preRestore: true },

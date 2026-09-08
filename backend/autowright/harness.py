@@ -357,8 +357,7 @@ def blocked_mark_outside_fences(text: str) -> re.Match | None:
 # accepts — exactly the envelope's file names, flat regular files only, so
 # build residue an agent leaves behind (__pycache__, helper scripts) never
 # reaches the feed or the recombined reply.
-_DOCUMENT_NAMES = ("spec.md", "instructions.md", "notes.md",
-                   "manifest.yaml", "actions.yaml")
+_DOCUMENT_NAMES = ("spec.md", "notes.md", "manifest.yaml", "actions.yaml")
 _SCRATCH_POLL_S = 0.3
 
 
