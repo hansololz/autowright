@@ -802,15 +802,13 @@ The same 11.5px/1.5 style is the only explainer text inside an open card: the fo
 under the agents, secrets, parameters and packages lists, the instruction cards' repeated
 explainer, and a document card's load-error line all render in it — no card body carries a
 second explainer size or line-height.
-The collapsed line is **status-aware**: a card holding content shows a one-line preview of
-that content (single line, ellipsized — agents shows the enabled agent names,
-secrets the allowed secret names, packages the package names, each " · "-joined), while an
-empty card shows its explainer sentence — the explainer teaches exactly when there is
-nothing to preview, and a collapsed filled card reads as a summary of this automation
-instead of repeated manual text. Four cards always show their explainer: the spec card (its
-first line would duplicate the page title), the notes card (an agent-written document
-normally opens with a title heading, so a first-line preview would read as a lone
-"Notes"), and the two instruction cards (static built-in documents). Rendered-markdown card bodies
+**Every left-column card always shows its explainer** — collapsed, as the collapsed line;
+open, repeated word for word as the footer under the body — so a card describes what it
+holds in both states and never previews its content (a notes document opens with a title
+heading, so a first-line preview read as a lone "Notes"; the granted-name lists duplicated
+the checklist and the header counts). Only the right-column Packages card keeps a
+status-aware collapsed line: the package names " · "-joined when it holds content, its
+explainer when empty. Rendered-markdown card bodies
 (spec, build instructions, notes, framework) share **one markdown body wrapper** too: same
 padding, same 440 px max height with inner scroll (§14 overlay scrollbar), same full-bleed
 table allowance — markdown looks identical in every card. Clicking a header
@@ -824,7 +822,8 @@ editors enter with
   this document when it changes." — and clicking it expands the card, same as the other
   collapsed-section hints on this page). Open, the header is the same bare row as every other
   card — caret + `SPEC` eyebrow + the Edit button, no inline subtitle; the explanatory line
-  lives only in the collapsed hint. Editable as markdown-ish text (`#`, `##`, `-`,
+  is the collapsed hint and the footer under the open body (the shared explainer footer,
+  below a dim hairline), never an inline subtitle. Editable as markdown-ish text (`#`, `##`, `-`,
   plain ↔ h1/h2/li/p blocks) in the **document-editor modal** (below); the card body is the
   view state only, rendered through the shared §4.5 Markdown renderer, sized to its content
   under the 440 px max height with inner scrolling.
@@ -1176,8 +1175,9 @@ editors enter with
   (Agents page) arrive unchecked in edit mode — stored grants never widen silently, same rule
   as secrets. The agents card is collapsible,
   defaults collapsed — the header's "X of Y enabled" count stays visible either way; the
-  collapsed line lists the enabled agent names (explainer when none is enabled, status-aware
-  rule above) — and is
+  card's explainer, shown as the collapsed line and repeated as the footer under the
+  checklist, is "Which agents steps may call mid-execution for the parts plain code can’t
+  do, like reading a messy page or writing prose." — and the card is
   forced open while its warning shows (the same collapsed-when-healthy, forced-open-on-problem
   pattern as the Packages card).
 - **Secrets** — card eyebrow "SECRETS · ALLOWED FOR STEPS". Step code is scanned for literal
@@ -1191,10 +1191,11 @@ editors enter with
   mono name — the same row anatomy as the Agents card) toggle secret **ids** in `allowedSecrets` (§4.1); all matching is by id. A used-but-not-allowed
   secret is a grant gap (Dirty gating above): it locks saving until the secret is re-allowed or a
   sync rewrites the steps. A missing-from-Keychain secret only warns — adding the value through the
-  fix row also allows it. "X of Y allowed". The card's explainer (the collapsed hint, and the
-  footer note under the expanded list) states the grant rule verbatim: "Only selected secrets
-  are available to this automation at execution time." The footer note appends "Values come from your Keychain and never appear in scripts
-  or logs." (`copy.secretStore` names the platform store). **Default state: on a new automation (create mode)
+  fix row also allows it. "X of Y allowed". The card's explainer (the collapsed line, and
+  repeated as the footer under the expanded list) states the grant rule verbatim: "Only
+  selected secrets are available to this automation at execution time. Values come from your
+  Keychain and never appear in scripts or logs." (`copy.secretStore` names the platform
+  store). **Default state: on a new automation (create mode)
   every Keychain secret starts allowed** — the same all-on seed as agent enablement; the user
   unchecks what a workflow shouldn't reach. Edit mode restores the stored grants (and a resumed
   draft its own selections, §4.4). The expanded card closes with a quiet **New secret** button
@@ -1206,8 +1207,7 @@ editors enter with
   automation) arrive unchecked in edit mode — stored grants never widen silently. The empty
   state points at the button: "No secrets in your Keychain yet — press New secret."
   Collapsible card, defaults collapsed — the header's "X of Y allowed" count stays visible
-  either way; the collapsed line lists the allowed secret names (explainer when none is
-  allowed, status-aware rule above) — forced open while a warning shows (same pattern as the
+  either way; the collapsed line is the explainer above — forced open while a warning shows (same pattern as the
   agents and Packages cards).
 - **PACKAGES** card — in the **right column**, below the Concurrency card: display-only like
   Triggers and Parameters — the drafting pipeline owns the list; the user's only write is the

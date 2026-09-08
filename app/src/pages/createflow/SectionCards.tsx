@@ -25,13 +25,15 @@ const FRAMEWORK_INSTRUCTIONS_HINT = 'The source of truth for what your AI knows 
 // §11 NOTES card: always the explainer (collapsed line and open footer), never a
 // first-line preview — an agent-written notes.md opens with a title heading.
 const NOTES_EXPLAINER = 'Your AI records what it learns (page quirks, dead ends, fixes) as you build and test.'
+const SPEC_EXPLAINER = 'What the automation should do, in plain words. The AI regenerates the steps from this document when it changes.'
+const AGENTS_EXPLAINER = 'Which agents steps may call mid-execution for the parts plain code can’t do, like reading a messy page or writing prose.'
 
-// §11: the explainer repeated under an open document body (notes, build and
-// framework instructions), beneath a dim hairline so a clipped last line never
-// runs into it
-function CardFooter({ children }: { children: React.ReactNode }) {
+// §11: the explainer repeated under an open card body — beneath a dim hairline
+// so a clipped document line never runs into it; `bare` when the block above
+// already ends in a row hairline or belongs to the same block (the checklists)
+function CardFooter({ bare, children }: { bare?: boolean; children: React.ReactNode }) {
   return (
-    <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
+    <div style={{ padding: '12px 18px', borderTop: bare ? undefined : '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
       {children}
     </div>
   )
@@ -42,16 +44,14 @@ function CardFooter({ children }: { children: React.ReactNode }) {
 // right-edge content (actions or counts; clicks there must stopPropagation),
 // the collapsed line, and the body's top hairline. `inert` freezes the
 // header while the card is held open by an edit in progress. The collapsed
-// line is status-aware (§11): `preview` (one-line content summary, ellipsized)
-// when the card holds content, else the `hint` explainer.
-function SectionCard({ eyebrow, open, onToggle, inert, right, hint, preview, children }: {
+// line is always the `hint` explainer (§11) — never a content preview.
+function SectionCard({ eyebrow, open, onToggle, inert, right, hint, children }: {
   eyebrow: string
   open: boolean
   onToggle: (open: boolean) => void
   inert?: boolean
   right?: React.ReactNode
   hint: React.ReactNode
-  preview?: string | null
   children: React.ReactNode
 }) {
   return (
@@ -79,12 +79,9 @@ function SectionCard({ eyebrow, open, onToggle, inert, right, hint, preview, chi
         <button
           className="ad-btn-bare ad-focus-inset"
           onClick={() => onToggle(true)}
-          style={{
-            padding: '0 18px 13px', font: cardHintFont, color: 'var(--text-muted)', cursor: 'pointer', userSelect: 'none',
-            ...(preview != null ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } : {}),
-          }}
+          style={{ padding: '0 18px 13px', font: cardHintFont, color: 'var(--text-muted)', cursor: 'pointer', userSelect: 'none' }}
         >
-          {preview ?? hint}
+          {hint}
         </button>
       </Collapse>
       <Collapse open={open}>
@@ -167,6 +164,8 @@ export function LeftColumn({
   // so at most one of these is open; each Save applies exactly what the old
   // in-card Save did, and the modal fires it after its exit animation.
   const docEdit = rev.specEdit ? 'spec' : rev.notesEdit ? 'notes' : null
+  // §11 SECRETS card explainer — collapsed line and open footer, per-OS store name
+  const secretsExplainer = `Only selected secrets are available to this automation at execution time. Values come from your ${copy.secretStore} and never appear in scripts or logs.`
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -175,7 +174,7 @@ export function LeftColumn({
         eyebrow="SPEC"
         open={specOpenEff}
         onToggle={(o) => up({ specSecOpen: o })}
-        hint="What the automation should do, in plain words. The AI regenerates the steps from this document when it changes."
+        hint={SPEC_EXPLAINER}
         right={specOpenEff && (
           <button
             // §11: an old version is browsed read-only — editing
@@ -205,6 +204,7 @@ export function LeftColumn({
               <SpecMarkdown blocks={rev.spec} />
             </CardMarkdown>
           )}
+        <CardFooter>{SPEC_EXPLAINER}</CardFooter>
       </SectionCard>
 
       {/* NOTES — §4.1 agent-owned working knowledge (§11): agent-written
@@ -249,8 +249,7 @@ export function LeftColumn({
         eyebrow="AGENTS · AVAILABLE TO STEPS"
         open={agSecOpenEff}
         onToggle={(o) => up({ agSecOpen: o })}
-        hint="Which agents steps may call mid-execution."
-        preview={availAgents.length ? availAgents.map(agName).join(' · ') : null}
+        hint={AGENTS_EXPLAINER}
         right={
           <span style={{ font: "500 10.5px var(--mono)", color: 'var(--text-muted)', whiteSpace: 'nowrap', flex: 'none' }}>
             {availAgents.length} of {agents.length} enabled
@@ -307,9 +306,7 @@ export function LeftColumn({
                 </button>
               )
             })}
-            <div style={{ padding: '12px 18px', font: cardHintFont, color: 'var(--text-muted)' }}>
-              Steps marked <i className="fa-solid fa-microchip" style={{ fontSize: 9, color: 'var(--accent-hover)' }} /> call one of these mid-execution for the parts plain code can’t do, like reading a messy page or writing prose.
-            </div>
+            <CardFooter bare>{AGENTS_EXPLAINER}</CardFooter>
           </div>
       </SectionCard>
 
@@ -318,10 +315,7 @@ export function LeftColumn({
         eyebrow="SECRETS · ALLOWED FOR STEPS"
         open={secSecOpenEff}
         onToggle={(o) => up({ secSecOpen: o })}
-        hint="Only selected secrets are available to this automation at execution time."
-        preview={rev.allowedSecrets.length
-          ? rev.allowedSecrets.map((id) => secrets.find((z) => z.id === id)?.name ?? shortId(id)).join(' · ')
-          : null}
+        hint={secretsExplainer}
         right={
           <span style={{ font: "500 10.5px var(--mono)", color: 'var(--text-muted)', whiteSpace: 'nowrap', flex: 'none' }}>
             {rev.allowedSecrets.length} of {secrets.length} allowed
@@ -402,9 +396,7 @@ export function LeftColumn({
                 New secret
               </button>
             </div>
-            <div style={{ padding: '12px 18px', font: cardHintFont, color: 'var(--text-muted)' }}>
-              Only selected secrets are available to this automation at execution time. Values come from your {copy.secretStore} and never appear in scripts or logs.
-            </div>
+            <CardFooter bare>{secretsExplainer}</CardFooter>
           </div>
       </SectionCard>
       {secretModal && (
