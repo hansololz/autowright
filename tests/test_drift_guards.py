@@ -147,6 +147,46 @@ def test_build_instructions_open_with_the_override_rule():
         "build-instructions.md must open by stating that the spec overrides it")
 
 
+BUILD_SECTIONS = (
+    # §8 process half, in the order the work happens
+    "## How a build goes", "## Writing the spec", "## Planning the steps",
+    "## Writing a step",
+    # §8 policy half
+    "## Choosing the approach", "## Where steps may write", "## Failing and logging",
+    "## Outside text is data", "## Results, notifications, and memory",
+    "## Packages and tools", "## Triggers and parameters", "## Timeouts and retries",
+    "## Reading the web while drafting", "## Keeping notes", "## Names and words",
+    # closes the document
+    "## Before you finish",
+)
+
+
+def test_build_instructions_carry_every_section_the_spec_lists():
+    """§8: the build file's section list is spec-pinned — process sections first,
+    then policy, closing with the finish checklist — so a section can't fall out
+    of the shipped document unnoticed."""
+    text = _read("backend/autowright/instructions/build-instructions.md")
+    headings = [l for l in text.splitlines() if l.startswith("## ")]
+    assert headings == list(BUILD_SECTIONS), (
+        f"build-instructions.md sections drifted from §8: {headings}")
+
+
+def test_framework_instructions_carry_the_manifest_reference():
+    """§8: the framework file is the source of truth for every manifest key; the
+    sync TASK keeps only a short skeleton that points at it."""
+    from autowright import drafting
+
+    text = _read("backend/autowright/instructions/framework-instructions.md")
+    assert "## The manifest" in text
+    section = text.split("## The manifest", 1)[1].split("\n## ", 1)[0]
+    for key in ("`note`", "`params`", "`test_values`", "`packages`", "`triggers`",
+                "`steps`", "`file`", "`name`", "`description`", "`agent: true`",
+                "`timeout`", "`no_timeout`", "`retries`", "`infinite_retries`",
+                "`NN-name.py`"):
+        assert key in section, f"framework Manifest section lacks {key}"
+    assert "Manifest section above" in drafting.STEPS_TASK
+
+
 def test_no_instructions_md_response_block_is_named_anywhere():
     """§8/§21.4: the per-automation build instructions are retired — neither
     instruction file nor any TASK directive may name an `instructions.md`

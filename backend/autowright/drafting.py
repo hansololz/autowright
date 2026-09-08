@@ -182,50 +182,26 @@ def _framework_section() -> str:
 # ---------- prompts ----------
 
 STEPS_TASK = """=== TASK ===
-Build the automation that implements the SPEC below, following the BUILD INSTRUCTIONS. Derive the triggers, every parameter (each with a default), and the steps from the SPEC — and add any trigger or parameter you judge the automation is missing (see Triggers and Parameters above; message-trigger details come from the SPEC, never invented). Return manifest.yaml plus one file block per step — no spec.md (and no name/description keys — identity changes only through the chat call's actions):
+Build the automation that implements the SPEC below, following the BUILD INSTRUCTIONS. Derive the triggers, every parameter (each with a default), and the steps from the SPEC — and add any trigger or parameter you judge the automation is missing (see Triggers and Parameters above; message-trigger details come from the SPEC, never invented). Return manifest.yaml plus one file block per step — no spec.md (and no name/description keys — identity changes only through the chat call's actions). The skeleton below shows the shape; the Manifest, Triggers, Parameters, Timeouts, and Retries sections above hold the rules for every key:
 
 ===FILE: manifest.yaml===
 note: One-line version note for the history menu
-params:                                # each param MUST carry a default
+params:                                # each param MUST carry a default (kinds: see Parameters above)
   - { name: snake_case_name, kind: toggle|list|kv|number|text, label: ..., help: ..., default: ... }
-test_values:                           # OPTIONAL — best-effort values for the user's first draft test
-  snake_case_name: value               # only params you can set confidently from the SPEC (a URL or
-                                       # folder it names); OMIT any param whose realistic value you
-                                       # can't determine — never guess, its default is used; never
-                                       # passwords or tokens (those belong in secrets)
-packages:                              # extra PyPI packages beyond the allowed list (see Allowed imports);
-  - { pip: pandas, import: pandas,     # bare distribution name, NO version; omit the key when none are needed
-      why: one line — what the steps use the package for }
-triggers:                              # see Triggers above; omit the whole key when the automation needs no trigger (manual / menu bar only)
-  - cron: "0 8 * * *"                  # optional timezone: IANA zone, only when the spec names one
-  - { imessage: "+15551234567" }       # sender handle from the SPEC only; optional pattern
-  - { discord: "1234567890",           # channel id from the SPEC only; optional pattern / mention / author (sender filter: numeric user id or list of them)
-      secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }   # the granted token secret's ID, copied exactly from the grants yaml — never its name
-  - app_start: true                    # executes when the app starts
-steps:                                 # ordered; file names NN-name.py, two-digit, gapless from 01;
-                                       # timeout: seconds the step may run before it is stopped (see Timeouts above);
-                                       # no_timeout: true = no limit, only when asked for — never combined with timeout;
-                                       # retries: automatic re-attempts when the step fails (1-10, see Retries above);
-                                       # infinite_retries: true = retry until success, only for persistent/listening
-                                       # steps — never combined with retries;
-                                       # secrets: granted secrets the step uses, as { id, why }
-                                       # entries — id copied EXACTLY from the grants yaml, why: one
-                                       # line on why the step needs that secret (omit the key when
-                                       # the step uses none);
-                                       # agents: granted agents an agent step may call, as { id, why? }
-                                       # entries — id from the grants yaml; the first is what the bare
-                                       # `agent` handle is bound to (omit the key to use the
-                                       # automation's default); when a step lists two or more, every
-                                       # entry needs its own why naming that agent's role in the step;
-                                       # packages: declared packages the step uses, as { import, why }
-                                       # entries — why: one line on what THIS step uses the package for
-                                       # (one package can serve different jobs in different steps — name
-                                       # this step's; omit the key when the step uses none)
+test_values:                           # OPTIONAL: best-effort values for the user's first draft test;
+  snake_case_name: value               # only params you can set confidently from the SPEC — omit the
+                                       # rest (never guess, never passwords or tokens)
+packages:                              # PyPI packages beyond the allowed list; omit when none are needed
+  - { pip: pandas, import: pandas, why: one line — what the steps use the package for }
+triggers:                              # see Triggers above; omit the whole key when the automation needs none
+  - cron: "0 8 * * *"
+  - { discord: "1234567890", secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }   # details from the SPEC only
+steps:                                 # ordered; every key is described in the Manifest section above
   - { file: 01-fetch.py, name: ..., description: ..., timeout: 60,
-      secrets: [{ id: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34,   # API_TOKEN
-                  why: authenticates the feed fetch }],
+      secrets: [{ id: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34, why: authenticates the feed fetch }],   # API_TOKEN
       packages: [{ import: pandas, why: parses the fetched price tables }] }
-  - { file: 02-judge.py, name: ..., description: ..., timeout: 180, agent: true, why: one line — why judgment is needed,
+  - { file: 02-judge.py, name: ..., description: ..., timeout: 180, agent: true,
+      why: one line — why judgment is needed,
       agents: [{ id: 7c9e6679-7425-40de-944b-e07fc1f90ae7 }] }   # the granted agent's id
 ===FILE: 01-fetch.py===
 (python source)

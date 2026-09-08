@@ -61,6 +61,35 @@ hitting the blocker isn't lost. Start from the NOTES you were given and keep
 everything in them that is still true; extend the document, never restart it. No
 other file may accompany a blocker.
 
+## The manifest
+
+`manifest.yaml` is the automation's build sheet. Its keys, all optional except `steps`:
+
+- `note`: one line saying what this version changed; it is the entry in the version
+  history menu.
+- `params`: the parameter definitions (the Parameters section below); each carries a
+  default.
+- `test_values`: a `param name: value` map of best-effort values for the user's first
+  draft test; only values the SPEC states outright (a URL or folder it names), never a
+  guess and never a password or token (those are secrets). An omitted param keeps its
+  default.
+- `packages`: PyPI packages beyond the always-available set (Allowed imports below).
+- `triggers`: the trigger list (Triggers below); omit the key when the automation has no
+  trigger of its own.
+- `steps`: the ordered step list. Each entry carries `file` (the script's file name),
+  `name` (short, plain words), `description` (one sentence), and optionally `agent: true`
+  with a required `why` (why the step needs judgment), `agents`, `secrets`, `packages`
+  (the three sections below), `timeout` or `no_timeout`, and `retries` or
+  `infinite_retries` (Timeouts and Retries below).
+
+Step file names are `NN-name.py`: two digits, gapless from `01` in step order, a hyphen,
+then lowercase letters, digits, and hyphens only (`01-fetch-feeds.py`, never
+`1_fetch.py` or `01-Fetch.py`). The response carries every file named in `steps` as its
+own block, and may add one `notes.md` block with the full updated notes document.
+`name` and `description` are never manifest keys: identity changes only through the
+editing session's actions. The validator drops an unknown manifest or step key silently,
+so a misspelled key never errors and its setting never lands; use the keys above exactly.
+
 ## Agents and secrets in the manifest
 
 Each step declares what it uses in `manifest.yaml`, referencing every agent and
@@ -89,8 +118,10 @@ With a single entry the `why` is optional: the step's own `why` already covers
 it and shows as the agent tag's tooltip note, so write it in the user's plain
 words. One rule decides both choices: a choice the SPEC names wins; failing that, a
 choice the BUILD INSTRUCTIONS name; otherwise pick whichever granted entries fit
-the step best, by your own judgment. Omit `agents` to let the step use the
-automation's default agent; omit `secrets` when the step uses none.
+the step best, by your own judgment. Omit `agents` to bind the step to the
+automation's first enabled agent; a step whose listed agents all fail to resolve
+(revoked or deleted grants) fails outright, never falling back to another. Omit
+`secrets` when the step uses none.
 
 A step receives only the secrets it declares or literally subscripts in code
 (`secrets["<id>"]`). Reading an allowed-but-undeclared secret fails the step. Values
@@ -164,7 +195,7 @@ result.path               # pathlib.Path of the result dir; result / "x" and ope
                           #   work too. Every file dropped there is part of the result:
                           #   result.md renders as markdown, result.html as a page inside
                           #   a sandboxed frame (no scripts, no remote loads), images
-                          #   inline, csv/json/txt/yaml/log/tsv/xml as text previews,
+                          #   inline, csv/json/txt/yaml/yml/log/tsv/xml as text previews,
                           #   anything else as a download with no preview
 notify(text)              # the body of the end-of-execution notification (see the
                           #   engine policies below for when one is sent); title = the
@@ -231,7 +262,9 @@ Facts about results and the process:
   the status is attention.
 - Everything beyond the chip is files: the report is `result.md` in `result.path`.
 - Data passes between steps as files in the workspace (the cwd). The workspace
-  lives for the whole execution and is discarded after; a retry of a failed step
+  lives for the whole execution and stays with the execution record afterwards (the
+  user can open it from the execution page; retention removes it with the record);
+  a retry of a failed step
   keeps the same workspace and result dir, so earlier steps' outputs are still
   there, and only the steps that had not run yet execute again. Only `memory`
   survives between executions; only `result.path` reaches the user.
@@ -242,11 +275,21 @@ Facts about results and the process:
 - A step's environment carries `AUTOWRIGHT_AUTOMATION_ID`, `AUTOWRIGHT_AUTOMATION_NAME`,
   `AUTOWRIGHT_EXECUTION_ID`, `AUTOWRIGHT_STEP_INDEX`, `AUTOWRIGHT_STEP_NAME`,
   `AUTOWRIGHT_TRIGGER`, `AUTOWRIGHT_TRIGGER_PAYLOAD`, `AUTOWRIGHT_WORKSPACE`,
-  `AUTOWRIGHT_MEMORY_DIR`, and `AUTOWRIGHT_RESULT_DIR` for child processes. Param
+  `AUTOWRIGHT_MEMORY_DIR`, and `AUTOWRIGHT_RESULT_DIR` for child processes
+  (`AUTOWRIGHT_TRIGGER_PAYLOAD` only on message-trigger executions). Param
   and secret values never enter the environment.
-- A step's `PATH` is the app's plus `~/.local/bin`, `~/.opencode/bin`,
-  `/opt/homebrew/bin`, and `/usr/local/bin`, so a `shutil.which` pre-flight finds
-  the same tools under a Dock launch as in a terminal.
+- A step's `PATH` is the app's plus the usual install locations, so a `shutil.which`
+  pre-flight finds the same tools under a desktop launch as in a terminal. macOS and
+  Linux: `~/.local/bin`, `~/.opencode/bin`, `/opt/homebrew/bin`, `/usr/local/bin`,
+  `/usr/bin`, `/snap/bin`, `~/.nix-profile/bin`. Windows: `~/.local/bin`,
+  `~/.opencode/bin`, and npm's global bin under `%APPDATA%`.
+- Hard limits: `reply(text)` raises above 200,000 characters; `notify(text)` is cut
+  at 10,000 characters and `result.chip(text)` at 1,000, silently; `secrets.NAME`
+  attribute access raises (subscript by id); `result.status` with any value other
+  than the three above raises.
+- Cancel or skip sends SIGTERM to the step's whole process group and SIGKILL 5 s
+  later; an in-flight agent call dies with the step. A persistent step that must
+  clean up does it inside those 5 s.
 
 ## Reading the web while drafting
 
@@ -316,7 +359,8 @@ timezone: Asia/Tokyo }`); otherwise omit `timezone` and times read as the
 Message and app-start triggers can be drafted too:
 
 - `- { imessage: "+15551234567" }`: the sender handle (E.164 phone or email);
-  optional `pattern` fires only on messages containing that text. Handles match
+  optional `pattern` fires only on messages containing that text (a case-insensitive
+  substring match, on both trigger kinds). Handles match
   case-insensitively in E.164 form. Messages the user sent themselves, group
   chats, tapbacks, and edits never fire.
 - `- { discord: "1234567890", secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }`:
@@ -326,7 +370,7 @@ Message and app-start triggers can be drafted too:
   (matches user and managed-role mentions), and `author` (sender filter: a numeric
   user id or a list of them; fires only on those senders' messages). Messages from
   any bot, the automation's own replies included, never fire.
-- `- app_start: true`: executes when the app starts.
+- `- app_start: true`: executes when the app starts; at most one per automation.
 
 A message trigger's identifying details (channel id, which secret holds the
 token, sender handle) must come from the SPEC. Never invent one. When those
@@ -336,7 +380,7 @@ trigger will deliver, added on the automation page or through an editing-session
 `triggers` op once the user supplies the details. Never emit one-shot (`time`)
 triggers in a manifest (an editing-session `triggers` op may carry one, because the
 user asked for it directly). When the automation needs no trigger at all, omit the
-`triggers` key entirely. Each trigger also carries a per-trigger "run if missed"
+`triggers` key entirely. Cron and one-shot triggers also carry a "run if missed"
 setting the user controls on the automation page; never emit it.
 
 On an edit, drafted triggers merge safely into the user's stored list: crons
@@ -383,8 +427,9 @@ of the automation's `max_parallel` slots for as long as the step keeps failing.
 ## Memory across versions
 
 Memory survives every rebuild: a new version starts with whatever the old steps
-left behind, never a fresh dir. A draft test runs on the draft's own memory dir,
-never the live one. The app snapshots live memory before a version's first
+left behind, never a fresh dir. A draft test runs on a throwaway copy of the draft's
+memory (seeded from the live memory when the draft has none) that is discarded when
+the test ends, so a test never writes the live dir. The app snapshots live memory before a version's first
 execution when the automation's automatic-snapshot setting is on (the default)
 and the memory dir isn't empty, so a botched migration is restorable from the
 MEMORY card. The BUILD INSTRUCTIONS say how to migrate a changed shape.
@@ -515,5 +560,5 @@ than one detail at a time.
 One thing you never see: **memory contents**. No request carries the memory
 dir's files; only run logs reach you. When a diagnosis genuinely needs the
 actual stored data, say so plainly and point the user at the automation's
-MEMORY card (Show in Finder) or the CLI's `autowright automation memory show`
+MEMORY card's reveal button (Show in Finder on macOS) or the CLI's `autowright automation memory show`
 command. Never guess at what memory holds.

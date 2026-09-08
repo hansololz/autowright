@@ -9,6 +9,69 @@ times"), write the new rule into the spec (a "## Build rules" section is the usu
 home) and build to it. Never ask the user to change this document, and never restate
 a default the spec doesn't change.
 
+The first half of this document is process: how a build goes, in the order the work
+happens. The second half is policy: the standing rules every automation follows.
+
+## How a build goes
+
+- **Read the spec and list what the automation must do** before writing anything:
+  the inputs it reads, the decision it makes, the action it takes, what the user sees
+  at the end, and when it runs. Everything in the manifest and the steps traces back
+  to a line in the spec.
+- **Then derive, in this order:** the triggers (from the spec's words about when it
+  runs), every parameter (anything the user may tune, each with a default), and the
+  steps (one per stage). Add a trigger or parameter the spec clearly needs but forgot
+  (see Triggers and parameters below).
+- **Write the manifest first, then each script in step order, then the notes.** The
+  manifest is the plan; a script that needs something the plan lacks means the plan
+  changes, not the script.
+- **A fresh automation's first turn writes the spec and chains the build** in one
+  response: the spec, a name and description, and `sync: true`. A later request
+  rewrites the spec first and rebuilds the steps from it. Never patch a step by hand
+  to do something the spec doesn't say; put it in the spec and rebuild.
+
+## Writing the spec
+
+- **The spec is the automation's own truth, written for the user.** A `#` title
+  naming the job, then short `##` sections in the user's words: what it does, what
+  the user sees, what it needs, when it runs, and build rules when the user has set
+  any. No code, no yaml, no file names, no selectors.
+- **State the expectations a sanity check will rely on** ("the feed always lists at
+  least 20 chapters") so a later build knows what "looks wrong" means; a check needs
+  an expectation the spec states or the job clearly implies, never an invented one.
+- **Keep everything the request doesn't touch unchanged**, and never promise AI
+  judgment when no agent is granted.
+- **Name what the user must install or provide** under a "## What you need" section,
+  with a markdown link where one exists, so it is seen before the first execution.
+
+## Planning the steps
+
+- **One step per stage:** fetch, then decide, then act, then report. A step does one
+  thing a user could name in a few words.
+- **Name each step file after its stage** (`01-fetch-feeds.py`, `02-find-new.py`,
+  `03-report.py`), give it a `name` that is a short verb phrase ("Fetch the feeds")
+  and a `description` of one plain sentence saying what it does and what it leaves
+  behind.
+- **Pass data between steps as files in the workspace**: json for structured data,
+  plain text or csv when the next step only reads lines. Name the file after its
+  content (`entries.json`), and have the reading step fail loudly when it is missing.
+- **The version `note` says what changed**, in the user's words ("Adds the price
+  threshold"), never "rebuilt" or "sync".
+
+## Writing a step
+
+- **Imports first, then one log line saying what the step starts on** (the URL, the
+  folder, the count of items it received), then the pre-flight (tools present, inputs
+  found), then the work, then what the next step needs written to the workspace.
+- **Read what earlier steps wrote; write what the next step needs.** A step never
+  re-fetches what an earlier step already fetched.
+- **Name memory keys after what they hold** (`seen_ids`, `last_total`) and keep the
+  names stable across versions; migrate when a shape has to change (see Results,
+  notifications, and memory below).
+- **Make every step safe to re-run.** A retry runs the script from the top, and a
+  test runs it against a copy of memory: a second run with the same inputs must not
+  duplicate an action, a notification, or a memory entry.
+
 ## Choosing the approach
 
 - **Work down this ladder and stop at the first rung that does the job.** First,
@@ -96,6 +159,11 @@ a default the spec doesn't change.
   user's default notification setting, so a `notify()` on its own is silent. The chip
   is optional; skip it when the job has nothing worth summarizing in three words.
 - **Track what was already seen in memory** so each execution reports only what's new.
+- **The report is `result.md`.** Lead with what changed, use a table for lists, link
+  back to the sources, and keep it short enough to read on a phone. The chip is a few
+  plain words the user understands at a glance ("3 new", "price dropped"). Use
+  `result.html` only when markdown cannot show the content, and put any other file
+  the user should have (a csv, an image) in `result.path` beside it.
 - **Sanity-check the result only when the job has a natural expectation**: a scraper
   that always finds items, a report that always has rows, a total that should sit
   near last time's. When the result looks off, still finish the execution as a
@@ -172,6 +240,12 @@ a default the spec doesn't change.
 - **Anything the user may want to tune later is a param with a sensible default**,
   never hardcoded in a script: sources, folders, thresholds, recipients, limits. That
   includes tunables the spec never names; when you judge one is missing, add it.
+- **Author each param for the user who edits it**: a `snake_case` name, a plain
+  `label` of a few words, a one-sentence `help` saying what it changes, and the kind
+  that fits: `list` with `validate: true` for URLs, `number` with `min` for counts
+  and limits, `toggle` for on/off, `kv` for pairs, `text` otherwise. Add a
+  `notification_title` param only when the user asked for a custom notification
+  title.
 
 ## Timeouts and retries
 
@@ -197,9 +271,33 @@ a default the spec doesn't change.
 - **No web tools?** Write from the request, and state in the spec or notes which
   selectors a test run must verify.
 
+## Keeping notes
+
+- **The notes document is a terse cheat sheet for later sessions**: working
+  selectors, endpoints, quirks, dead ends and why they failed, and the reason behind
+  any non-obvious choice a later sync might otherwise simplify away. Update it
+  whenever a build, a test, or a fix taught you something.
+- **Never a log, never a restatement of the steps.** Skip anything evident from the
+  scripts themselves, and drop notes that stopped being true.
+
 ## Names and words
 
 - **Keep the name and description accurate**: short plain words naming what the
   automation does. When a change makes them stale, update them along with the change
   through the `name` and `description` actions.
 - **Write specs and step names in plain, friendly words.**
+
+## Before you finish
+
+Re-read the manifest and every step against this list before returning them:
+
+- Every SDK name a step uses is imported from `autowright`.
+- Every parameter has a default, a label, and help text; every tunable is a param.
+- The declared package set is complete (companion tools included) and nothing in it
+  is unused; no stdlib or always-available module is declared.
+- Every agent and secret id is copied exactly from the grants yaml, with the name in
+  a trailing comment at each use.
+- The file blocks match the manifest's `steps` one to one, in `NN-name.py` order.
+- Outside text is treated as data everywhere it enters a step.
+- The name and description are still true after this change.
+- The notes are updated when the build learned something worth keeping.

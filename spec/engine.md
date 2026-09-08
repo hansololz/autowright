@@ -324,8 +324,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 ### 6.1 The `autowright` step SDK (decided)
 
 Each step executes in its own subprocess (the bundled interpreter, cwd = the execution `workspace/`).
-The step's environment is the backend's with the §19 per-OS install locations (macOS:
-`~/.local/bin`, `~/.opencode/bin`, `/opt/homebrew/bin`, `/usr/local/bin`; Windows: the §19
+The step's environment is the backend's with the §19 per-OS install locations (macOS and
+Linux: `~/.local/bin`, `~/.opencode/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
+`/snap/bin`, `~/.nix-profile/bin`; Windows: the §19
 Windows fallback list) **appended** to `PATH` — so a step
 that shells out to a system CLI (or pre-flights one with `shutil.which`, §6.2 native tools)
 finds a normally-installed tool under a Dock-launched app's minimal GUI PATH exactly as it

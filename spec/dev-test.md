@@ -169,7 +169,9 @@ that live in more than one hand-maintained file: the app version agrees across `
 (import names), the `backend/pyproject.toml` dependencies (distribution names),
 `instructions/framework-instructions.md`, and §6.2 itself, with the import-name ↔
 distribution-name mapping written out in the guard; the §8 instruction split holds
-(`build-instructions.md` opens by stating that the spec overrides it, and neither
+(`build-instructions.md` opens by stating that the spec overrides it and carries every
+section heading §8 lists for it, `framework-instructions.md` carries the manifest
+reference, and neither
 instruction file nor any TASK directive names an `instructions.md` response block); and
 every `*.ps1` in the §17 script
 directories still starts with a UTF-8 BOM (Windows PowerShell 5.1 misreads a BOM-less file

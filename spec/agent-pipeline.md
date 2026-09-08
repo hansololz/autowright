@@ -61,7 +61,8 @@ can override it.
 
 - `backend/autowright/instructions/framework-instructions.md` — the contract preamble that travels
   with **every** call, written as structured markdown (headings, fenced code blocks for the
-  envelopes and SDK reference, a table for parameter kinds). It holds **facts only**: the
+  envelopes, the manifest reference, and the SDK reference, a table for parameter kinds). It
+  holds **facts only**: the
   agent's role; the generic file-block envelope (the per-call TASK directive names the exact
   files, and governs whether files are returned at all: the envelope rule applies only when
   the TASK names files to return, so a chat answer stays plain prose with no envelope); the
@@ -70,8 +71,19 @@ can override it.
   use (never for mere uncertainty, never for anything a declared pip package solves, all
   blockers in one response); the grants contract (`agents` / `secrets` manifest entries by
   granted id copied exactly, the `why` rules, the first agent entry binding the bare `agent`
-  handle, `agents["<id>"]` for the others) with the **selection rule** (a choice the SPEC
+  handle, `agents["<id>"]` for the others; omitting `agents` binds the step to the
+  automation's **first enabled agent** (§6), and a step whose listed agents all fail to
+  resolve fails outright) with the **selection rule** (a choice the SPEC
   names wins, then one the build instructions name, otherwise the agent's own judgment); the
+  **manifest reference** — every key `manifest.yaml` may carry (`note`, `params`,
+  `test_values`, `packages`, `triggers`, `steps`) and every key a step entry may carry
+  (`file`, `name`, `description`, `agent` with its then-required `why`, `agents`, `secrets`,
+  `packages`, `timeout` / `no_timeout`, `retries` / `infinite_retries`), the `NN-name.py`
+  file rule (two digits, gapless from `01`, then lowercase letters, digits, and hyphens
+  only), the `note` as the §4.4 version note, the `test_values` policy (only values the
+  SPEC states outright, never guessed, never secret-like), the optional `notes.md` block a
+  sync may return, and the fact that the validator drops unknown manifest and step keys
+  silently, so a misspelled key never errors and its setting never lands; the
   `autowright` SDK reference with worked examples (a typical memory-diff last step; a
   validated `agent.ask` call) — the reference covers the **whole** §6.1 surface, message-trigger
   names included (`execution.trigger_payload` is the message context and the only place
@@ -85,8 +97,15 @@ can override it.
   is a global), the exact `memory` handle shape (`/`-join, `__fspath__`, `.path`, `.load`,
   `.save`; not a full `Path`; a name with no dot gets `.yaml`), the 1-based `step_index`,
   `fetch_page(url) -> str` (GET only), the §6.1 `sys.exit` semantics, the `AUTOWRIGHT_*`
-  environment variables a child process sees (never param or secret values), the augmented
-  step `PATH` (§6.1 — why a `shutil.which` pre-flight works under a Dock launch), which
+  environment variables a child process sees (never param or secret values;
+  `AUTOWRIGHT_TRIGGER_PAYLOAD` only on message-trigger executions), the augmented
+  step `PATH` (§6.1, stated per OS since the macOS, Linux, and Windows fallback dirs
+  differ — why a `shutil.which` pre-flight works under a Dock launch), the SDK's hard
+  limits (`reply` raises above 200 k characters; `notify` and `result.chip` silently
+  truncate at 10 000 and 1 000; `secrets.NAME` attribute access and an unknown
+  `result.status` value raise), the cancel semantics a persistent step observes (SIGTERM
+  to the step's process group, SIGKILL 5 s later, in-flight agent calls dying with the
+  step), which
   secrets a step actually receives (only the ones it declares or literally subscripts; an
   allowed-but-undeclared read fails the step, §7), the secret-value scan that fails a step
   when a secret value appears in `agent.ask` or `reply` text, the **result-status legend**
@@ -96,7 +115,10 @@ can override it.
   (`result.md` renders as markdown, `result.html` in a sandboxed frame with no scripts or
   remote loads, the §7 text-preview types, everything dropped in `result.path` is part of
   the result), the fact that the engine records a step's exception and shows it as the
-  execution's error (the message shape is a build rule), the curated package list and the
+  execution's error (the message shape is a build rule), the workspace's lifetime (the cwd
+  is per-execution and kept with the execution record — never deleted at the end of the
+  execution; retention removes it with the record — and the user can open it from the
+  execution page), the curated package list and the
   `packages:` declaration schema (one entry per distribution, bare name, required `why`,
   per-step `{ import, why }` entries; installs run when the steps are built and self-heal
   before each execution, as wheels into the app's own directory; the engine rejects any
@@ -107,17 +129,21 @@ can override it.
   machine — the prompt names it with the §9 per-OS machine noun — a listed tool is really
   installed and an unlisted tool may still exist), the parameter kinds table (§4.2, `kv`
   rows as `{ key, value }`), the trigger dialect (cron fields, `timezone`, the imessage /
-  discord / app_start forms, the merge semantics on edit, never a one-shot `time` entry in a
+  discord / app_start forms — `pattern` a case-insensitive substring, `author` a numeric
+  id or a list, at most one `app_start` entry — the merge semantics on edit, never a
+  one-shot `time` entry in a
   manifest — a chat `triggers` op may carry one — and the hard rule that a message
   trigger's identifying details come from the SPEC, never invented: absent, the trigger is
-  omitted and the steps are written against `execution.trigger_payload`), the per-trigger
-  `runIfMissed` option as a user knob the agent never emits, the timeout and retry
+  omitted and the steps are written against `execution.trigger_payload`), the cron- and
+  time-only `runIfMissed` option as a user knob the agent never emits, the timeout and retry
   mechanics (`timeout` / `no_timeout`, the 900 s default; `retries` 1–10 /
   `infinite_retries`, ≥ 1 s spacing for infinite, attempts pruned past 20; every retry
   re-runs the script from the top; an in-place retry keeps the workspace and result dir and
   re-executes only still-queued steps) with the pointer that the build instructions set
   the default policy and the SPEC overrides it, the memory facts (memory survives every
-  rebuild; a draft test runs on draft memory, never live; the §6.3 pre-version snapshot is
+  rebuild; a draft test runs on a throwaway copy of the draft's memory — seeded from live
+  memory when the draft has none — discarded when the test ends, so the live dir is never
+  written; the §6.3 pre-version snapshot is
   conditional — per-automation toggle, never on empty memory, never for draft tests), the
   **framework policies the engine enforces** (concurrency: at most `max_parallel`
   executions, message firings queue when `max_queued` allows and are skipped otherwise,
@@ -163,7 +189,8 @@ can override it.
   change only through a spec rewrite + sync; `test_values` affects a test only.
   The section also carries the **memory-visibility note**: memory contents never travel in
   any drafting call (only run logs do) — when a diagnosis genuinely needs them, the agent
-  says so and points the user at the §9.2 MEMORY card's Show in Finder or the §20
+  says so and points the user at the §9.2 MEMORY card's reveal button (Show in Finder on
+  macOS; the §9 per-OS verb elsewhere) or the §20
   `automation memory show` command instead of guessing. The §11
   Framework-instructions card renders this file as markdown.
 - `backend/autowright/instructions/build-instructions.md` — the app's **build instructions**:
@@ -173,7 +200,33 @@ can override it.
   otherwise in plain words, everything the spec is silent on follows them, and a user who
   wants one changed for an automation has the rule written into the spec (a
   "## Build rules" section is the usual home) rather than asking for this file to change.
-  Its sections and rules: **choosing the approach** (the task-solving ladder — deterministic
+  Its sections come in two halves: **process** first (how a build goes, in the order the
+  work happens), then **policy** (the standing rules). The process sections: **how a build
+  goes** (the workflow: read the spec and list what the automation must do; derive the
+  triggers, every parameter, and the steps; write the manifest, then each script in order,
+  then the notes; a fresh automation's first turn writes the spec and chains the build; a
+  later request rewrites the spec first and rebuilds the steps from it — the steps never
+  drift from the spec by hand); **writing the spec** (the document is written for the user
+  and is the automation's own truth: a `#` title naming the job, then plain sections — what
+  it does, what the user sees, what it needs, when it runs, build rules — in the user's
+  words, no code, yaml, or file names; state the expectations a sanity check will rely on;
+  keep everything the request doesn't touch; never promise AI judgment when no agent is
+  granted); **planning the steps** (one step per stage — fetch, decide, act, report — each
+  named after its stage in `NN-name.py`; `name` a short verb phrase, `description` one
+  plain sentence saying what the step does; data between steps as files in the workspace,
+  json for structured data; the version `note` says what changed, in the user's words);
+  **writing a step** (imports first; log what the step starts on; pre-flight before work;
+  read what earlier steps wrote and write what the next step needs; memory keys named
+  after what they hold and stable across versions; every step safe to re-run, since a
+  retry runs it from the top); **keeping notes** (the notes document is a terse cheat sheet
+  for later sessions: selectors, endpoints, quirks, dead ends, and the reason behind any
+  non-obvious choice; updated whenever something was learned; never a log or a restatement
+  of the steps); and, closing the document, **before you finish** (the checklist: every SDK
+  name imported; every parameter has a default; the declared package set is complete and
+  nothing in it is unused; every agent and secret id copied exactly; the file blocks match
+  the manifest's steps one to one; the name and description still true; the notes updated
+  when the build learned something).
+  The policy sections: **choosing the approach** (the task-solving ladder — deterministic
   code first, a proven existing library over hand-written code: stdlib and curated
   packages, then a declared PyPI package when none fits, hand-write only what no maintained
   library covers; an agent step only when judgment is truly needed — pre-extract the data
@@ -206,7 +259,10 @@ can override it.
   plus a chip naming what looks off and why in a few plain words the user understands on
   the automations list (never an internal label), and writes the detail to result.md;
   never raise for a plausible-but-surprising result, and skip the check when the spec
-  implies no expectation (a zero or a change is not by itself a problem); a baseline the
+  implies no expectation (a zero or a change is not by itself a problem); the report
+  rules: `result.md` leads with what changed, uses a table for lists and links back to
+  sources, the chip is a few plain words ("3 new"), and `result.html` is used only when
+  markdown cannot show the content; a baseline the
   check compares against lives in `memory/` under a named key, and the agent says so in
   its reply and in the notes when it adds one (the §9.2 step-script MEMORY facts show the
   key thereafter); the **memory-migration duty**: steps own the shape of what they store
@@ -228,7 +284,10 @@ can override it.
   trigger or a tunable parameter the spec forgot, add it with a sensible default;
   message-trigger details from the spec only; anything the user may want to tune later —
   sources, folders, thresholds, recipients — is a param with a sensible default, never
-  hardcoded); **timeouts and retries** (the §8 rule-8 policies: short realistic step
+  hardcoded; the authoring rules: snake_case names, a plain label and one-sentence help,
+  the kind that fits — `list` with `validate: true` for URLs, `number` with `min` for
+  counts, `toggle` for on/off, `kv` for pairs, `text` otherwise — and a `notification_title`
+  param only when the user asked for a custom notification title); **timeouts and retries** (the §8 rule-8 policies: short realistic step
   timeouts with suggested values — a fetch ~60 s, an agent step ~180 s — a long limit or
   `no_timeout: true` only when the spec asks; no step retries by default, `infinite_retries`
   + `no_timeout` for the persistent/listening steps the spec calls for, with durable state
@@ -241,7 +300,8 @@ can override it.
   change makes them stale; write specs and step names in plain, friendly words). The §11
   Build-instructions card renders this file as markdown, read-only, from the same §19
   `GET /instructions` answer as the framework card. §15 drift guards pin the split: the
-  build file states the override rule, and no prompt text, TASK directive, or
+  build file states the override rule and carries every section heading listed here, the
+  framework file carries the manifest reference, and no prompt text, TASK directive, or
   instruction file names an `instructions.md` response block.
 
 **Modes:** `chat` (one call — a §11 chat message about the in-editor draft: answer a
@@ -562,56 +622,34 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
 2. **TASK directive** — build the automation that implements the SPEC: derive the triggers,
    every parameter (each with a default), and the steps from the spec — adding any trigger or
    parameter the agent judges the automation is missing (rule 9's detail rule caps triggers);
-   return `manifest.yaml` plus one file block per step, no `spec.md`. Includes the manifest
-   shape:
+   return `manifest.yaml` plus one file block per step, no `spec.md`. Includes a **short
+   manifest skeleton** — one example line per key, with pointers to the framework file's
+   Manifest, Triggers, Parameters, Timeouts, and Retries sections for the key-by-key rules
+   (the skeleton shows the shape; the framework reference is the source of truth for every
+   key, so the two never restate each other):
 
    ```
    ===FILE: manifest.yaml===
-   note: Version note for the history menu (§4.4)
-                                     # name/description are never manifest keys — identity
-                                     # changes only through the chat call's actions (§4.1)
-   triggers:                         # rule-9 dialect; omit the whole key when the automation
-     - cron: "0 8 * * *"             # needs no trigger (manual/menu bar only)
-     - { cron: "0 9 * * 1", timezone: Asia/Tokyo }   # timezone optional — only when the spec names a zone
-     - { imessage: "+15551234567", pattern: check }     # details from the spec only
-     - { discord: "1234567890",                          # ditto; + optional pattern/mention/author
-         secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }  # secret: the token secret's id, copied
-                                                         # exactly from the grants yaml (§4.8 uuid)
-   params:                           # full definitions per §4.2, each with a default
-     - { name: sources, kind: list, label: Manga URLs, help: ..., validate: true }
-   test_values:                      # optional — best-effort draft-test values (policy below)
-     sources: ["https://example.com/manga"]
-   packages:                         # §6.2 declared packages — beyond curated only, bare
-     - { pip: pandas, import: pandas,    # distribution name, no version; omit the key when none are needed
-         why: one line — what the steps use the package for }
-   steps:                            # ordered; file names NN-name.py, two-digit, gapless;
-                                     # timeout: seconds the step may run (short, per the
-                                     # timeout rule below); no_timeout: true = no limit;
-                                     # retries: automatic re-attempts on failure (≤ 10, rule 8);
-                                     # infinite_retries: true = retry until success — the
-                                     # persistent-step shape, usually with no_timeout;
-                                     # secrets: granted secrets the step uses, as { id, why }
-                                     # entries — id copied exactly from the grants yaml
-                                     # (optional key; why required per entry — one line
-                                     # on why the step needs that secret);
-                                     # agents: granted agents an agent step may call, as
-                                     # { id, why? } entries — id from the grants yaml; the
-                                     # first is what the bare `agent` handle is bound to
-                                     # (optional key; per-entry why required when a step
-                                     # lists two or more agents, naming each agent's role);
-                                     # packages: declared §6.2 packages the step uses, as
-                                     # { import, why } entries (optional key; why required
-                                     # per entry — one line on what THIS step uses the
-                                     # package for)
-     - { file: 01-fetch.py, name: Fetch pages, description: ..., timeout: 60,
-         secrets: [{ id: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34,      # API_TOKEN
-                     why: authenticates the feed fetch }],
-         packages: [{ import: pandas, why: parses the chapter tables }] }
-     - { file: 02-classify.py, name: Classify updates, description: ..., timeout: 180, agent: true,
-         why: needs judgment on chapter titles,
-         agents: [{ id: 7c9e6679-7425-40de-944b-e07fc1f90ae7 }] }   # Fast local
+   note: One-line version note for the history menu
+   params:                           # each param MUST carry a default (kinds: Parameters above)
+     - { name: snake_case_name, kind: toggle|list|kv|number|text, label: ..., help: ..., default: ... }
+   test_values:                      # OPTIONAL: best-effort values for the user's first draft test;
+     snake_case_name: value          # only params you can set confidently from the SPEC — omit the
+                                     # rest (never guess, never passwords or tokens)
+   packages:                         # PyPI packages beyond the allowed list; omit when none are needed
+     - { pip: pandas, import: pandas, why: one line — what the steps use the package for }
+   triggers:                         # Triggers above; omit the whole key when the automation needs none
+     - cron: "0 8 * * *"
+     - { discord: "1234567890", secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }   # details from the SPEC only
+   steps:                            # ordered; every key is described in the Manifest section above
+     - { file: 01-fetch.py, name: ..., description: ..., timeout: 60,
+         secrets: [{ id: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34, why: authenticates the feed fetch }],   # API_TOKEN
+         packages: [{ import: pandas, why: parses the fetched price tables }] }
+     - { file: 02-judge.py, name: ..., description: ..., timeout: 180, agent: true,
+         why: one line — why judgment is needed,
+         agents: [{ id: 7c9e6679-7425-40de-944b-e07fc1f90ae7 }] }   # the granted agent's id
    ===FILE: 01-fetch.py===
-   ...python source...
+   (python source)
    ===END===
    ```
 
