@@ -146,19 +146,19 @@ const BLOCKED_SYNC = {
 describe('CreateFlow grant checkboxes → drafting payloads (§8/§11)', () => {
   it('unchecking an agent and a secret keeps both out of the sync job', async () => {
     render(<CreateFlow />)
-    expect(screen.getByText('2 of 2 enabled')).toBeTruthy()
-    expect(screen.getByText('2 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('AGENTS · ALLOWED FOR STEPS'))).getByText('2 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('SECRETS · ALLOWED FOR STEPS'))).getByText('2 of 2 allowed')).toBeTruthy()
 
     // §9/§11: each grant row is a role="checkbox" button around the §14 CheckBox glyph
     const agentRow = screen.getByText('Fast local').closest('[role="checkbox"]') as HTMLElement
     expect(agentRow.getAttribute('aria-checked')).toBe('true')
     expect(agentRow.querySelector('.ad-check[data-on]')).toBeTruthy()
     fireEvent.click(screen.getByText('Fast local'))     // uncheck agent g2
-    expect(screen.getByText('1 of 2 enabled')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('AGENTS · ALLOWED FOR STEPS'))).getByText('1 of 2 allowed')).toBeTruthy()
     expect(agentRow.getAttribute('aria-checked')).toBe('false')
     expect(agentRow.querySelector('.ad-check[data-on]')).toBeNull()
     fireEvent.click(screen.getByText('CRM_API_KEY'))    // disallow the secret
-    expect(screen.getByText('1 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('SECRETS · ALLOWED FOR STEPS'))).getByText('1 of 2 allowed')).toBeTruthy()
 
     // grant toggles alone never mark the workflow out of sync (§11) — the
     // panel still offers the on-demand sync
@@ -181,8 +181,8 @@ describe('CreateFlow grant checkboxes → drafting payloads (§8/§11)', () => {
     fireEvent.click(rowText('Fast local'))
     fireEvent.click(rowText('MAIL_PASSWORD'))
     fireEvent.click(rowText('CRM_API_KEY'))
-    expect(screen.getByText('0 of 2 enabled')).toBeTruthy()
-    expect(screen.getByText('0 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('AGENTS · ALLOWED FOR STEPS'))).getByText('0 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('SECRETS · ALLOWED FOR STEPS'))).getByText('0 of 2 allowed')).toBeTruthy()
 
     fireEvent.click(screen.getByText('Sync spec'))
     await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
@@ -216,7 +216,7 @@ describe('CreateFlow grant checkboxes → drafting payloads (§8/§11)', () => {
     render(<CreateFlow />)
     fireEvent.click(screen.getByText('Fast local'))     // uncheck…
     fireEvent.click(screen.getByText('Fast local'))     // …and re-check
-    expect(screen.getByText('2 of 2 enabled')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('AGENTS · ALLOWED FOR STEPS'))).getByText('2 of 2 allowed')).toBeTruthy()
 
     fireEvent.click(screen.getByText('Sync spec'))
     await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
@@ -1885,8 +1885,8 @@ describe('CreateFlow left-column cards + test-failure repair (§11)', () => {
       } as unknown as Automation],
     })
     render(<CreateFlow />)
-    expect(screen.getByText('2 of 2 enabled')).toBeTruthy()
-    expect(screen.getByText('2 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('AGENTS · ALLOWED FOR STEPS'))).getByText('2 of 2 allowed')).toBeTruthy()
+    expect(within(cardOf(screen.getByText('SECRETS · ALLOWED FOR STEPS'))).getByText('2 of 2 allowed')).toBeTruthy()
     expect(collapseOf(screen.getByText('Cloud writer')).classList.contains('open')).toBe(false)
     expect(collapseOf(screen.getByText('MAIL_PASSWORD')).classList.contains('open')).toBe(false)
     // unchecking the called agent opens the card on its warning…

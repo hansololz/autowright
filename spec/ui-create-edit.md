@@ -1169,12 +1169,14 @@ editors enter with
   step N.") - except an id carried by §4.1 `unresolvedReferences`, which warns with the
   imported name instead ("Step N calls `<NAME>` from the imported file, which has no
   match on this Mac - pick an agent or ask your AI to fix it."). All three derivations compare ids, never names — a rename changes nothing here. Per-automation
-  agent enablement list with "X of Y enabled" — one row per agent (name + model sub-line),
+  agent enablement list under the card eyebrow "AGENTS · ALLOWED FOR STEPS" (the secrets
+  card's wording, one grant vocabulary for both) with "X of Y allowed" — one row per agent
+  (name + model sub-line),
   the whole row a `role="checkbox"` button leading with the §14 `CheckBox` glyph; agents called by steps — including
   named-but-disabled ones — show a "called by step N" note. Agents created anywhere else
   (Agents page) arrive unchecked in edit mode — stored grants never widen silently, same rule
   as secrets. The agents card is collapsible,
-  defaults collapsed — the header's "X of Y enabled" count stays visible either way; the
+  defaults collapsed — the header's "X of Y allowed" count stays visible either way; the
   card's explainer, shown as the collapsed line and repeated as the footer under the
   checklist, is "Which agents steps may call mid-execution for the parts plain code can’t
   do, like reading a messy page or writing prose." — and the card is

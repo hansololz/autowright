@@ -244,15 +244,15 @@ export function LeftColumn({
         <CardFooter>{NOTES_EXPLAINER}</CardFooter>
       </SectionCard>
 
-      {/* AGENTS · AVAILABLE TO STEPS */}
+      {/* AGENTS · ALLOWED FOR STEPS */}
       <SectionCard
-        eyebrow="AGENTS · AVAILABLE TO STEPS"
+        eyebrow="AGENTS · ALLOWED FOR STEPS"
         open={agSecOpenEff}
         onToggle={(o) => up({ agSecOpen: o })}
         hint={AGENTS_EXPLAINER}
         right={
           <span style={{ font: "500 10.5px var(--mono)", color: 'var(--text-muted)', whiteSpace: 'nowrap', flex: 'none' }}>
-            {availAgents.length} of {agents.length} enabled
+            {availAgents.length} of {agents.length} allowed
           </span>
         }
       >
