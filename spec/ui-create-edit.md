@@ -914,8 +914,8 @@ editors enter with
   `notes.md` rewrite, which replaces the text and lands a quiet "Notes updated." system
   entry. A notes change (manual or agent) marks the draft touched but **never** marks the
   workflow out of sync and never gates Save (§4.1: notes are advisory input to the next
-  sync). Defaults collapsed; collapsed-empty hint and in-card empty state: "No notes yet —
-  your AI records what it learns (page quirks, dead ends, fixes) as you build and test." Notes
+  sync). Defaults collapsed; collapsed-empty hint and in-card empty state: "No notes yet.
+  Your AI records what it learns (page quirks, dead ends, fixes) as you build and test." Notes
   version with the automation and ride drafts and §5.1 archives like the spec.
 - **Document-editor modal** — the one editing surface for the two documents. Pressing Edit
   on the Spec or Notes card opens it over the page; the card stays in
@@ -1181,7 +1181,10 @@ editors enter with
   mono name — the same row anatomy as the Agents card) toggle secret **ids** in `allowedSecrets` (§4.1); all matching is by id. A used-but-not-allowed
   secret is a grant gap (Dirty gating above): it locks saving until the secret is re-allowed or a
   sync rewrites the steps. A missing-from-Keychain secret only warns — adding the value through the
-  fix row also allows it. "X of Y allowed". **Default state: on a new automation (create mode)
+  fix row also allows it. "X of Y allowed". The card's explainer (the collapsed hint, and the
+  footer note under the expanded list) states the grant rule verbatim: "Only selected secrets
+  are available to this automation at execution time." The footer note appends "Values come from your Keychain and never appear in scripts
+  or logs." (`copy.secretStore` names the platform store). **Default state: on a new automation (create mode)
   every Keychain secret starts allowed** — the same all-on seed as agent enablement; the user
   unchecks what a workflow shouldn't reach. Edit mode restores the stored grants (and a resumed
   draft its own selections, §4.4). The expanded card closes with a quiet **New secret** button

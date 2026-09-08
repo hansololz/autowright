@@ -210,7 +210,7 @@ export function LeftColumn({
         eyebrow="NOTES"
         open={notesOpenEff}
         onToggle={(o) => up({ notesSecOpen: o })}
-        hint="No notes yet — your AI records what it learns (page quirks, dead ends, fixes) as you build and test."
+        hint="No notes yet. Your AI records what it learns (page quirks, dead ends, fixes) as you build and test."
         preview={rev.notes.trim() ? docPreview(rev.notes) : null}
         right={notesOpenEff && (
           <button
@@ -236,7 +236,7 @@ export function LeftColumn({
             <Markdown text={rev.notes} />
           </CardMarkdown>
         ) : (
-          <CardEmpty>No notes yet — your AI records what it learns (page quirks, dead ends, fixes) as you build and test.</CardEmpty>
+          <CardEmpty>No notes yet. Your AI records what it learns (page quirks, dead ends, fixes) as you build and test.</CardEmpty>
         )}
       </SectionCard>
 
@@ -245,7 +245,7 @@ export function LeftColumn({
         eyebrow="AGENTS · AVAILABLE TO STEPS"
         open={agSecOpenEff}
         onToggle={(o) => up({ agSecOpen: o })}
-        hint="Which agents steps may call mid-execution. Fewer enabled means more predictable executions."
+        hint="Which agents steps may call mid-execution."
         preview={availAgents.length ? availAgents.map(agName).join(' · ') : null}
         right={
           <span style={{ font: "500 10.5px var(--mono)", color: 'var(--text-muted)', whiteSpace: 'nowrap', flex: 'none' }}>
@@ -304,7 +304,7 @@ export function LeftColumn({
               )
             })}
             <div style={{ padding: '12px 18px', font: "400 11.5px/1.55 var(--sans)", color: 'var(--text-muted)' }}>
-              Steps marked <i className="fa-solid fa-microchip" style={{ fontSize: 9, color: 'var(--accent-hover)' }} /> call one of these mid-execution — for the parts plain code can’t do, like reading a messy page or writing prose. Fewer enabled means more predictable executions.
+              Steps marked <i className="fa-solid fa-microchip" style={{ fontSize: 9, color: 'var(--accent-hover)' }} /> call one of these mid-execution for the parts plain code can’t do, like reading a messy page or writing prose.
             </div>
           </div>
       </SectionCard>
@@ -314,7 +314,7 @@ export function LeftColumn({
         eyebrow="SECRETS · ALLOWED FOR STEPS"
         open={secSecOpenEff}
         onToggle={(o) => up({ secSecOpen: o })}
-        hint={`Only checked secrets are handed to this automation at execution time. Values come from your ${copy.secretStore}.`}
+        hint="Only selected secrets are available to this automation at execution time."
         preview={rev.allowedSecrets.length
           ? rev.allowedSecrets.map((id) => secrets.find((z) => z.id === id)?.name ?? shortId(id)).join(' · ')
           : null}
@@ -399,7 +399,7 @@ export function LeftColumn({
               </button>
             </div>
             <div style={{ padding: '12px 18px', font: "400 11.5px/1.55 var(--sans)", color: 'var(--text-muted)' }}>
-              Only checked secrets are handed to this automation at execution time — a step that asks for anything else fails. Values come from your {copy.secretStore} and never appear in scripts or logs.
+              Only selected secrets are available to this automation at execution time. Values come from your {copy.secretStore} and never appear in scripts or logs.
             </div>
           </div>
       </SectionCard>
