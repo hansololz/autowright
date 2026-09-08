@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.11.2 - 2026-09-08
+
+- Build instructions now ship with Autowright and appear read-only in the editor, so every automation is drafted from the same current guidance.
+- Cards on the create page now show the same short explainer whether they are open or closed, instead of a preview of their contents.
+- The agents card now says "X of Y allowed", matching the wording on the secrets card.
+- Card copy across the create page is shorter and plainer, with consistent hint text and spacing.
+- Notes whose first line is a title no longer collapse to a bare "Notes" label on the card.
+
 ## v0.11.1 - 2026-09-07
 
 - Runs that succeed but return something that looks off now flag themselves with an orange notice on the execution and automation pages.
