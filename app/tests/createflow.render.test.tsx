@@ -2870,4 +2870,19 @@ describe('CreateFlow build-instructions back-fill (§8/§11)', () => {
     expect(bodyLi('keep it simple')).toBeTruthy()
     expect(screen.queryAllByText('rules')).toHaveLength(0)
   })
+
+  it('a first-session authoring request carries the unedited default build instructions', async () => {
+    render(<CreateFlow />)
+    await settleInstructions()
+    await waitFor(() => expect(bodyLi('rules')).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('Describe the job — one sentence is enough.'),
+      { target: { value: 'Watch a folder' } })
+    fireEvent.click(screen.getByText('Send'))
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
+    const body = draftBody(0)
+    expect(body.mode).toBe('chat')
+    expect('automationId' in body).toBe(false)   // create mode addresses no automation
+    // §8/§19: the back-filled card is what the agent is handed
+    expect((body.current as { instructions: string }).instructions).toBe('- rules')
+  })
 })

@@ -657,6 +657,46 @@ def test_draft_chat_attaches_stored_name_and_desc(client):
     assert "name: Ident target" in logged and "description: Watches the things." in logged
 
 
+def test_create_mode_chat_prompt_carries_both_instruction_files_verbatim(client):
+    # §8/§11 regression guard: a fresh create-flow authoring request must reach
+    # the agent with the framework instructions AND the unedited default build
+    # instructions, word for word — the Build-instructions card seeds from the
+    # same GET /instructions answer the editor sends back as `current`.
+    from autowright import paths, drafting
+
+    files = client.get("/instructions").json()
+    assert files["framework"] == drafting.contract_preamble()
+    assert files["defaultBuild"] == drafting.default_instructions()
+    assert "Sanity-check the result only when the job has a natural expectation" in files["defaultBuild"]
+    r = client.post("/drafts", json={
+        "mode": "chat", "agentId": "mock", "text": "Watch a page and tell me what changed",
+        "current": {"instructions": files["defaultBuild"]},
+    })
+    j = _wait_job(client, r.json()["jobId"])
+    assert j["status"] == "done", j
+    logged = paths.app_log().read_text(encoding="utf-8")
+    assert files["framework"] in logged
+    assert files["defaultBuild"] in logged
+    assert "=== BUILD INSTRUCTIONS" in logged and "===\nnone" not in logged.split("=== BUILD INSTRUCTIONS", 1)[1][:400]
+
+
+def test_create_mode_chat_substitutes_default_instructions_when_none_sent(client):
+    # §19 belt-and-braces: a create-mode call whose `current` carries no
+    # instructions (a slow GET /instructions, a bare CLI call) still gives the
+    # agent the default build instructions — never "none".
+    from autowright import paths, drafting
+
+    r = client.post("/drafts", json={
+        "mode": "chat", "agentId": "mock", "text": "Watch a page and tell me what changed",
+        "current": {"instructions": ""},
+    })
+    j = _wait_job(client, r.json()["jobId"])
+    assert j["status"] == "done", j
+    logged = paths.app_log().read_text(encoding="utf-8")
+    assert drafting.default_instructions() in logged
+    assert drafting.contract_preamble() in logged
+
+
 def test_draft_chat_requires_text(client):
     r = client.post("/drafts", json={"mode": "chat", "agentId": "mock"})
     assert r.status_code == 422
