@@ -401,7 +401,7 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   is the author's verdict, never the engine's: the engine applies no result analysis of its
   own, and an attention run still counts as `succeeded` everywhere (§4.5 status, the tray dot,
   the §4.1 `problems` audit are all untouched). Its only effects are the orange chip, the
-  §7 / §9.2 flagged-result notice, and the end-of-execution notification under the default
+  orange §7 / §9.2 flagged-result notice, and the end-of-execution notification under the default
   §4.9 setting. Since status is stored only alongside a chip, an attention step must also set
   a chip naming what looks off ("0 items, usually ~40") — the §8 default build instructions
   say so. Everything else

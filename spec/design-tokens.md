@@ -73,11 +73,14 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 - Status/error text: static error and validation copy always uses `--red-text` (never `--red`
   or `--red-hover`, which stay for icons/dots and hover states). Invalid text fields always use
   the `.ad-input.invalid` class — no inline red borders or glows.
-- Tinted notice banners (red/amber/accent/cyan) share one slim geometry: radius 10, padding
+- Tinted notice banners (red/amber/orange/accent/cyan) share one slim geometry: radius 10, padding
   `11px 14px`, tint background at `/ .07`, border at `/ .3`, 7 px leading dot. The tints are
-  tokens — `--notice-red-bg`/`--notice-red-border` and likewise `-amber-`, `-accent-`,
-  `-cyan-` — never hand-written oklch at call sites. The `Notice` primitive (`ui.tsx`;
-  `tone` red/amber/accent/cyan, optional `dashed` border) is the one renderer of the slim
+  tokens — `--notice-red-bg`/`--notice-red-border` and likewise `-amber-`, `-orange-`, `-accent-`,
+  `-cyan-` — never hand-written oklch at call sites. The `orange` tone is the chip orange
+  above and has exactly one user: the §7 / §9.2 flagged-result notice, so a flagged run
+  reads as the same thing as its orange chip (a result worth a look) and never as an amber
+  needs-fixing state. The `Notice` primitive (`ui.tsx`;
+  `tone` red/amber/orange/accent/cyan, optional `dashed` border) is the one renderer of the slim
   banner — the §9.2 concurrency note, the §11 gating and warning banners, the create-flow
   version notices. Card-sized notices (`Notice size="card"` — `FailureNotice` composes it;
   the §9.2 needs-fixing and draft banners) are radius 12, padding `14px 18px`, no leading

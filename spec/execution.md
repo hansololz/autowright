@@ -195,7 +195,7 @@ design), and hides Retry and Execute again — iteration on a draft happens from
 TEST card and test-run modal; Cancel and Skip step still work while it is live. Body stacks top to bottom: the
 failure notice (failed executions only) or the **flagged-result notice** (succeeded executions
 whose §4.5 result carries `chipStatus: attention` — never both, since the statuses are exclusive):
-an amber `Notice` (§14) in the failure notice's slot, title "This execution flagged its result",
+an orange `Notice` (§14 — the chip orange, never status amber) in the failure notice's slot, title "This execution flagged its result",
 then the chip text as the first body line and one plain sentence "The automation finished, but
 its own check thinks the result looks off." — no button (nothing failed, so there is nothing to
 fix; the result view below carries the detail). It is pure rendering of the stored status — the

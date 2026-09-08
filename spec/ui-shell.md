@@ -502,7 +502,7 @@ Sections top to bottom:
   it clears by the automation running again, or by its triggers changing). The banner is pure §4.1 `problems`
   rendering — no probe, no dismiss state: it disappears by the problems being fixed.
 - Optional **Draft banner** (§4.4), then the optional **flagged-result notice** — the §7
-  amber `Notice` (same title, chip line, and sentence), shown when the latest execution
+  orange `Notice` (same title, chip line, and sentence), shown when the latest execution
   **succeeded** with `chipStatus: attention` (a failed latest execution shows nothing here:
   its "Needs attention" list chip and the §7 failure notice already cover it). It sits below
   the Needs-fixing banner, which stays reserved for §4.1 `problems`, and clears the way the

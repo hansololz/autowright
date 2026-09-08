@@ -234,7 +234,8 @@ export function FailureNotice({ error, onView, onFix, style }: {
   )
 }
 
-// §7 / §9.2 flagged result — amber notice for a SUCCEEDED execution whose step
+// §7 / §9.2 flagged result — orange notice (the chip orange, §14 — never the amber
+// needs-fixing tone) for a SUCCEEDED execution whose step
 // set `result.status('attention')`: the chip text (what looks off and why, per
 // the §8 default build instructions) and one plain sentence. Pure rendering of
 // the stored §4.5 chipStatus — the engine never judges a result (§6) — and no
@@ -246,10 +247,10 @@ export function FlaggedResultNotice({ chip, onView, style }: {
   style?: React.CSSProperties
 }) {
   return (
-    <Notice tone="amber" size="card" className="ad-anim-item" style={style} testId="flagged-result-notice">
+    <Notice tone="orange" size="card" className="ad-anim-item" style={style} testId="flagged-result-notice">
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--amber)', fontSize: 12 }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--amber)' }}>
+        <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--orange)', fontSize: 12 }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--orange)' }}>
           This execution flagged its result
         </span>
         <div style={{ flex: 1 }} />
@@ -276,10 +277,10 @@ export function FlaggedResultNotice({ chip, onView, style }: {
  * `14px 18px`, no dot (FailureNotice, the §9.2 needs-fixing and draft banners).
  * `dashed` swaps the border style (the draft banner). */
 export function Notice({ tone, size = 'slim', dashed, className, style, children, testId }: {
-  tone: 'red' | 'amber' | 'accent' | 'cyan'; size?: 'slim' | 'card'; dashed?: boolean
+  tone: 'red' | 'amber' | 'orange' | 'accent' | 'cyan'; size?: 'slim' | 'card'; dashed?: boolean
   className?: string; style?: React.CSSProperties; children: React.ReactNode; testId?: string
 }) {
-  const dot = { red: 'var(--red)', amber: 'var(--amber)', accent: 'var(--accent)', cyan: 'var(--cyan)' }[tone]
+  const dot = { red: 'var(--red)', amber: 'var(--amber)', orange: 'var(--orange)', accent: 'var(--accent)', cyan: 'var(--cyan)' }[tone]
   const card = size === 'card'
   return (
     <div className={className} data-testid={testId} style={{
