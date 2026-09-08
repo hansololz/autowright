@@ -8,7 +8,7 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import { BackLink, Badge, EmptyNotice, Eyebrow, FailureNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, waitedLabel } from '../ui'
+import { BackLink, Badge, EmptyNotice, Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, waitedLabel } from '../ui'
 import { ResultSection, ViewCard } from '../result'
 import { ExecutionView } from '../executionView'
 import type { Execution, ParamDef, TriggerPayload } from '../types'
@@ -374,6 +374,10 @@ export default function ExecutionPage() {
                 } : undefined}
               />
             </div>
+          )}
+          {/* §7 flagged result — a succeeded run whose step set attention */}
+          {e.status === 'succeeded' && result?.chipStatus === 'attention' && (
+            <FlaggedResultNotice chip={result.chip} />
           )}
 
           {/* Full-width RESULT card (§7) — the execution's outcome, above the machinery */}

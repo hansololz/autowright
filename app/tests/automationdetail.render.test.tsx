@@ -4,7 +4,7 @@
 // notice (no run option). AutomationDetail renders for real (happy-dom) with
 // the store seeded and the api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { Automation, Execution, ParamDef, Trigger } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -220,6 +220,53 @@ describe('§9.2 needs-fixing banner', () => {
     // page header's own Edit is the only one on screen.
     expect(screen.getAllByText('Edit').length).toBe(1)
     expect(screen.queryByText('Open Secrets')).toBeNull()
+  })
+})
+
+// §9.2 flagged-result notice: the latest execution succeeded and its step set
+// `result.status('attention')` — a failed latest keeps the failure notice alone.
+describe('flagged-result notice (§9.2)', () => {
+  const finishedRow = (over: Partial<Execution> = {}): Execution => ({
+    id: 'e1', automationId: 'a1', automationName: 'Job', automationDeleted: false, versionLabel: 'v1',
+    status: 'succeeded', trigger: 'Manual', triggerSender: null, test: false, duration: '1.0s',
+    started: 'Today, 8:00 AM', startedMs: NOW, endedMs: NOW, queuedMs: 0, durationMs: null, passStartedMs: 0,
+    note: null, error: null, ...over,
+  })
+  const flaggedLatest = {
+    executionId: 'e1', when: 'Today', chip: '0 items, usually ~40',
+    chipStatus: 'attention' as const, files: [], path: '/tmp/r',
+  }
+
+  it('a succeeded latest carries the chip and links to the execution', () => {
+    seed(auto({ latest: flaggedLatest }), [finishedRow()])
+    render(<AutomationDetail />)
+
+    const notice = screen.getByTestId('flagged-result-notice')
+    expect(within(notice).getByText('This execution flagged its result')).toBeTruthy()
+    // the LATEST RESULT card carries its own copy of the chip
+    expect(within(notice).getByText('0 items, usually ~40')).toBeTruthy()
+
+    fireEvent.click(within(notice).getByRole('button', { name: /View execution/ }))
+    expect(storeMod.useStore.getState().page).toBe('execution')
+    expect(storeMod.useStore.getState().executionId).toBe('e1')
+  })
+
+  it('a failed latest keeps the failure notice and drops the flagged one', () => {
+    seed(
+      auto({ latest: flaggedLatest }),
+      [finishedRow({ status: 'failed', error: { step: 'Fetch', message: 'boom', reason: null } })],
+    )
+    render(<AutomationDetail />)
+
+    expect(screen.getByText('Failed at step “Fetch”')).toBeTruthy()
+    expect(screen.queryByTestId('flagged-result-notice')).toBeNull()
+  })
+
+  it('an ordinary latest result shows no notice', () => {
+    seed(auto({ latest: { ...flaggedLatest, chipStatus: 'ok' } }), [finishedRow()])
+    render(<AutomationDetail />)
+
+    expect(screen.queryByTestId('flagged-result-notice')).toBeNull()
   })
 })
 

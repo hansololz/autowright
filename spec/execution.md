@@ -193,7 +193,13 @@ started · duration. A §4.5 `test` execution additionally shows a **"Draft test
 title row, never shows the "(deleted)" marker (a create-mode test has no automation by
 design), and hides Retry and Execute again — iteration on a draft happens from the editor's
 TEST card and test-run modal; Cancel and Skip step still work while it is live. Body stacks top to bottom: the
-failure notice (failed executions only), a full-width **RESULT card**, then — on executions
+failure notice (failed executions only) or the **flagged-result notice** (succeeded executions
+whose §4.5 result carries `chipStatus: attention` — never both, since the statuses are exclusive):
+an amber `Notice` (§14) in the failure notice's slot, title "This execution flagged its result",
+then the chip text as the first body line and one plain sentence "The automation finished, but
+its own check thinks the result looks off." — no button (nothing failed, so there is nothing to
+fix; the result view below carries the detail). It is pure rendering of the stored status — the
+engine never judges a result (§6). Then a full-width **RESULT card**, then — on executions
 carrying a §4.5 `triggerPayload` — the **TRIGGER MESSAGE** block (the same block the queued
 page shows), one card:
 - **header line** — sender, then for Discord the origin: `in #channelName · guildName` when

@@ -501,7 +501,12 @@ Sections top to bottom:
   already says it installs on the first execution); `overdue` → no action (informational —
   it clears by the automation running again, or by its triggers changing). The banner is pure §4.1 `problems`
   rendering — no probe, no dismiss state: it disappears by the problems being fixed.
-- Optional **Draft banner** (§4.4), then **LATEST RESULT** card — the execution's chip (if it set one)
+- Optional **Draft banner** (§4.4), then the optional **flagged-result notice** — the §7
+  amber `Notice` (same title, chip line, and sentence), shown when the latest execution
+  **succeeded** with `chipStatus: attention` (a failed latest execution shows nothing here:
+  its "Needs attention" list chip and the §7 failure notice already cover it). It sits below
+  the Needs-fixing banner, which stays reserved for §4.1 `problems`, and clears the way the
+  chip does — by the next execution. Then the **LATEST RESULT** card — the execution's chip (if it set one)
   + metadata chips, then a **trimmed** version of the §7 result view stack for the latest
   execution: one file view for `result.md` (that exact name) expanded, and nothing else in the
   top slot no matter how many renderable files the run wrote — then the §7 **FILES footer**,

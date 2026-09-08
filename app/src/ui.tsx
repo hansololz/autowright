@@ -234,6 +234,43 @@ export function FailureNotice({ error, onView, onFix, style }: {
   )
 }
 
+// §7 / §9.2 flagged result — amber notice for a SUCCEEDED execution whose step
+// set `result.status('attention')`: the chip text (what looks off and why, per
+// the §8 default build instructions) and one plain sentence. Pure rendering of
+// the stored §4.5 chipStatus — the engine never judges a result (§6) — and no
+// button: nothing failed, so there is nothing to fix. Shown on the execution
+// page in the failure notice's slot and above the §9.2 LATEST RESULT card.
+export function FlaggedResultNotice({ chip, onView, style }: {
+  chip?: string | null
+  onView?: () => void
+  style?: React.CSSProperties
+}) {
+  return (
+    <Notice tone="amber" size="card" className="ad-anim-item" style={style} testId="flagged-result-notice">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <i className="fa-solid fa-triangle-exclamation" style={{ color: 'var(--amber)', fontSize: 12 }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--amber)' }}>
+          This execution flagged its result
+        </span>
+        <div style={{ flex: 1 }} />
+        {onView && (
+          <button className="ad-btn-text" onClick={onView}>
+            View execution <i className="fa-solid fa-chevron-right" style={{ fontSize: 9 }} />
+          </button>
+        )}
+      </div>
+      {chip && (
+        <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', fontWeight: 500, marginTop: 7 }}>
+          {chip}
+        </div>
+      )}
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text-2)', marginTop: chip ? 3 : 7 }}>
+        The automation finished, but its own check thinks the result looks off.
+      </div>
+    </Notice>
+  )
+}
+
 /** §14 tinted notice banner — the one renderer. `slim` (default): radius 10,
  * `11px 14px`, 7 px leading dot before `children`. `card`: radius 12,
  * `14px 18px`, no dot (FailureNotice, the §9.2 needs-fixing and draft banners).

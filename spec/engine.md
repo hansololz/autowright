@@ -393,7 +393,18 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   (`log.info` is an alias of `log`).
 - `result` — builder used by the last step (any step may add): `result.chip(text)` (optional —
   an automation may not use a chip at all), `result.status('changes'|'ok'|'attention')` — at
-  execution end the engine stores chip + status on the execution record (§4.5). Everything else
+  execution end the engine stores chip + status on the execution record (§4.5). The three
+  statuses mean: `ok` — nothing to report (the default); `changes` — something new for the
+  user (new items, a moved price); `attention` — the execution **completed**, but the
+  step's own sanity check thinks the result looks wrong (zero items from a source that
+  always has some, a total far from the baseline the automation keeps in memory). Attention
+  is the author's verdict, never the engine's: the engine applies no result analysis of its
+  own, and an attention run still counts as `succeeded` everywhere (§4.5 status, the tray dot,
+  the §4.1 `problems` audit are all untouched). Its only effects are the orange chip, the
+  §7 / §9.2 flagged-result notice, and the end-of-execution notification under the default
+  §4.9 setting. Since status is stored only alongside a chip, an attention step must also set
+  a chip naming what looks off ("0 items, usually ~40") — the §8 default build instructions
+  say so. Everything else
   is files: `result.path` — `pathlib.Path` of the execution's result dir for direct file
   output (result.md, result.html, images, CSVs, …); any file dropped there is part of the
   result (§4.5), so there is no attach call, and tables are markdown tables in result.md.

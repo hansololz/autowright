@@ -7,7 +7,7 @@ import { useStore } from '../store'
 import type { Automation, Execution } from '../types'
 import {
   BackLink, Badge, BtnGhost, BtnPrimary, Caret, Collapse, ConfirmModal, EmptyNotice, executingToast,
-  Eyebrow, FailureNotice, HeaderActions, MenuItemRow, MenuRow, MetaChip, MiniBadge, Modal, Notice,
+  Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, MenuItemRow, MenuRow, MetaChip, MiniBadge, Modal, Notice,
   PageTitle, PopMenu, ScrollArea, Toggle, nextIn, usePopover,
 } from '../ui'
 import { StepList } from '../steps'
@@ -177,6 +177,10 @@ export default function AutomationDetail() {
   const latestExec = autoExecs.find((e) =>
     e.status !== 'skipped' && e.status !== 'queued' && !e.test)
   const failedExec = latestExec?.status === 'failed' && latestExec.error ? latestExec : null
+  // §9.2 flagged-result notice: the latest execution SUCCEEDED and its step set
+  // `result.status('attention')` — never for a failed latest (the failure notice
+  // and the "Needs attention" list chip already cover that).
+  const flagged = latestExec?.status === 'succeeded' && lr?.chipStatus === 'attention'
   const params = auto.params ?? []
   const steps = auto.steps ?? []
   const spec = auto.spec ?? []
@@ -369,6 +373,13 @@ export default function AutomationDetail() {
                 setSurface('create', 'edit')
               }}
               style={{ marginBottom: lr ? 10 : 0 }}
+            />
+          )}
+          {flagged && lr && (
+            <FlaggedResultNotice
+              chip={lr.chip}
+              onView={() => go('execution', { executionId: lr.executionId })}
+              style={{ marginBottom: 10 }}
             />
           )}
           {lr && (

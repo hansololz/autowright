@@ -208,6 +208,13 @@ Notes:
 
 - `result.chip(text)` is a short summary chip — optional: skip it when the job
   has nothing worth summarizing in three words.
+- `result.status(...)` tints the chip and decides the notification: `ok` (the
+  default) means nothing to report; `changes` means something new for the user;
+  `attention` means the execution completed but the step's own check thinks the
+  result looks wrong — the run still counts as succeeded, the app shows a
+  flagged-result notice, and a notification goes out. The status is stored only
+  together with a chip, so always pair `attention` with a chip that says what
+  looks off and why (`result.chip("0 items, usually ~40")`).
 - Everything beyond the chip is files: write the report as `result.md` in
   `result.path` — markdown renders in the UI.
 - Pass data between steps as files in the workspace (the cwd) — it lives for

@@ -1206,6 +1206,52 @@ describe('execution page no-result reasons (§7)', () => {
   })
 })
 
+// §7 flagged result: a succeeded execution whose step set
+// `result.status('attention')` leads the RESULT card with the amber notice —
+// never in place of a failure notice.
+describe('execution page flagged result (§7)', () => {
+  const flagged = {
+    chip: '0 items, usually ~40', chipStatus: 'attention' as const, files: [], path: '/tmp/r',
+  }
+  const seedFull = (over: Partial<Execution>, result: Execution['result']) => {
+    const row = ex('e1', over)
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row], execLogs: {},
+      executionFull: { e1: { ...row, steps: [], result } },
+    })
+  }
+
+  it('a succeeded attention result shows the notice, its chip and its sentence', () => {
+    seedFull({ status: 'succeeded' }, flagged)
+    render(<ExecutionPage />)
+
+    const notice = screen.getByTestId('flagged-result-notice')
+    expect(within(notice).getByText('This execution flagged its result')).toBeTruthy()
+    // the chip reads above the sentence — the RESULT card carries its own copy
+    expect(within(notice).getByText('0 items, usually ~40')).toBeTruthy()
+    expect(within(notice).getByText(
+      'The automation finished, but its own check thinks the result looks off.')).toBeTruthy()
+  })
+
+  it('an ordinary changes result shows no notice', () => {
+    seedFull({ status: 'succeeded' }, { ...flagged, chipStatus: 'changes' })
+    render(<ExecutionPage />)
+
+    expect(screen.queryByTestId('flagged-result-notice')).toBeNull()
+  })
+
+  it('a failed execution shows the failure notice alone, attention result or not', () => {
+    seedFull(
+      { status: 'failed', error: { step: 'Fetch', message: 'boom', reason: null } },
+      flagged,
+    )
+    render(<ExecutionPage />)
+
+    expect(screen.getByText('Failed at step “Fetch”')).toBeTruthy()
+    expect(screen.queryByTestId('flagged-result-notice')).toBeNull()
+  })
+})
+
 // §7 TRIGGER MESSAGE: the input a message-triggered execution fired on. Origin
 // is Discord-only and best-effort (§6 name cache).
 describe('execution page trigger message (§7)', () => {
