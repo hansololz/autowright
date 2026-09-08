@@ -212,15 +212,7 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   on an automation whose steps write memory carries the §9.2 caution. Steps that write the
   `memory/` path directly, rather than through `memory.save`, get no guarantee at all.
 - **Notifications & results** — exactly one result per execution; at most one notification, at the end;
-  notify only on changes (per the notifications setting). **Collapse notification:** a
-  succeeded real execution that **starts** a §4.1 `output-collapsed` episode (its own
-  `count` is 0 and the previous counted succeeded run's was not; one per episode, derived
-  from the history at execution end, never stored) counts as attention-worthy, so its end
-  notification posts under both §4.9 values like a failure's, body "Returned nothing this
-  time. Recent executions returned about <typical> items each." A step's own
-  `notify(text)` still wins (the author already said what an empty run means). Body
-  precedence: `notify(text)` > collapse body > chip > default text. The second and later
-  zero runs of an episode post nothing new; the §9.2 banner and §13 dot carry the state. **Sender (decided):** the backend posts
+  notify only on changes (per the notifications setting). **Sender (decided):** the backend posts
   macOS notifications itself via `osascript -e 'display notification …'` — works headless with no
   UI process; the Electron app never posts.
 - **Overdue sweep** — once an hour on the scheduler tick (beside the retention sweep, same
@@ -407,14 +399,6 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   result (§4.5), so there is no attach call, and tables are markdown tables in result.md.
   The chip is stored on the execution record, so it is **redacted exactly like a log line**
   before it is persisted or published (§5: secret values never appear in any file).
-  `result.count(n)` — `n` a non-negative int: how many items this execution found in its
-  source (rows scraped, messages read, files processed, matches found) **before** any diff
-  against memory: the size of the input, not the number of new items, because a collapse
-  to an empty input is what the §4.1 `output-collapsed` audit watches for. The last call
-  wins; anything but a non-negative int (bools included) raises in the step. Stored on the
-  execution record as `count` (§4.5); an int carries no secret, so it is not redacted.
-  `framework-instructions.md` teaches it as the last step's habit whenever the job has a
-  countable input, 0 included, so the audit has a history without any user setup.
 - `notify(text)` — requests the end-of-execution notification (engine still applies the §4.9 setting
   and the one-notification rule). The notification title is the automation name, overridable by a
   param literally named `notification_title`. The body is **redacted like a log line** before it

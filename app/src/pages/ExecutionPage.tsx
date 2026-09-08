@@ -368,7 +368,7 @@ export default function ExecutionPage() {
                 // §7 Fix with AI — failed non-test executions whose automation
                 // still exists; tests iterate from the editor already
                 onFix={!e.test && auto ? () => {
-                  useStore.setState({ fixExec: { executionId: e.id } })
+                  useStore.setState({ fixExec: e.id })
                   go('automation', { automationId: auto.id })
                   useStore.getState().setSurface('create', 'edit')
                 } : undefined}

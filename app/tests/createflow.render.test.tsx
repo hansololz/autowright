@@ -2315,7 +2315,7 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
       duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
       error: { step: 'Fetch pages', message: 'boom', reason: null },
     }
-    storeMod.useStore.setState({ fixExec: { executionId: 'e7' }, executions: [failed] as never, executionFull: { e7: failed } as never })
+    storeMod.useStore.setState({ fixExec: 'e7', executions: [failed] as never, executionFull: { e7: failed } as never })
     render(<CreateFlow />)
     await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1), { timeout: 3000 })
     const body = draftBody(0)
@@ -2324,28 +2324,6 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
     const chat = body.chat as Array<{ kind: string; text?: string }>
     expect(chat.some((e) => e.text === 'Earlier question')).toBe(true)
     expect(chat.some((e) => e.kind === 'system' && /Execution failed at step Fetch pages/.test(e.text ?? ''))).toBe(true)
-  })
-
-  it('Fix with AI, collapse variant - the seed and the job name the typical count', async () => {
-    // §11/§4.1 output-collapsed: the run SUCCEEDED, so the seed and the canned
-    // message are about an empty result, not a failure.
-    const zeroRun = {
-      id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
-      status: 'succeeded', trigger: 'Manual', triggerSender: null, test: false, steps: [],
-      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
-      error: null,
-    }
-    storeMod.useStore.setState({
-      fixExec: { executionId: 'e9', collapse: { typical: 40 } },
-      executions: [zeroRun] as never, executionFull: { e9: zeroRun } as never,
-    })
-    render(<CreateFlow />)
-    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1), { timeout: 3000 })
-    const body = draftBody(0)
-    expect(body.executionId).toBe('e9')
-    expect(String(body.text)).toMatch(/^This execution succeeded but returned nothing/)
-    const chat = body.chat as Array<{ kind: string; text?: string }>
-    expect(chat.some((e) => e.kind === 'system' && /returned about 40 items each/.test(e.text ?? ''))).toBe(true)
   })
 
   it('one transient poll error never fails the job - the next tick recovers it', async () => {

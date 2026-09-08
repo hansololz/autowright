@@ -335,8 +335,7 @@ executions/
                                #     drops and rebuilds the index from the yamls — no
                                #     migration code),
                                #     duration_ms, note, chip / chip_status (§4.5 — NULL when the
-                               #     execution set no chip), count (§4.5 result.count — NULL
-                               #     when never reported), error_step / error_message /
+                               #     execution set no chip), error_step / error_message /
                                #     error_reason (§4.5 — NULL unless failed; denormalized
                                #     mirrors so list surfaces render without a yaml read)
                                #   indexes: (started_at DESC, id),
@@ -402,7 +401,7 @@ list row, detail page, or menu bar report about real executions.
 Executions load **headers-eagerly, bodies-lazily**: startup reads every header row from the
 `executions.db` index into an in-memory `executions` table — one header per execution with
 `id, automation_id, status, trigger, kind, version, queued_at, started_at, finished_at, duration_ms`, plus the
-light display fields (`automation_name`, `note`, `chip`/`chip_status`, `count`, `trigger_sender` —
+light display fields (`automation_name`, `note`, `chip`/`chip_status`, `trigger_sender` —
 the §4.5 `triggerPayload` sender for list rows, stamped onto the header **once at record
 creation** from the trigger payload; every reader takes it from that field alone, never by
 reaching into the payload — there is no dual-shape fallback — the §4.5 `error`

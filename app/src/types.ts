@@ -68,7 +68,6 @@ export interface ResultFile { name: string; size: string }
 export interface ExecutionResult {
   chip?: string
   chipStatus?: 'changes' | 'ok' | 'attention'
-  count?: number  // §4.5 result.count — items the run found in its source
   files?: ResultFile[]
   path?: string
   when?: string
@@ -193,13 +192,11 @@ export interface Automation {
   // §4.1 problems — the derived would-this-fire-successfully (and
   // is-it-firing-at-all) audit; non-empty drives the §9.1 Needs fixing chip
   // and the §9.2 banner. `label` is the exact UI copy; `kind` picks the
-  // banner row's action link — and `overdue` / `output-collapsed` also feed
-  // the §13 tray dot. `typical` rides only on `output-collapsed` (the rounded
-  // median count the latest zero run is measured against).
-  problems: { kind: 'overdue' | 'output-collapsed'
+  // banner row's action link — and `overdue` also feeds the §13 tray dot.
+  problems: { kind: 'overdue'
                   | 'secret-unresolved' | 'secret-missing' | 'secret-ungranted' | 'secret-unset'
                   | 'agent-unresolved' | 'agent-missing' | 'agent-ungranted' | 'package-missing'
-                  | 'os-mismatch'; label: string; typical?: number }[]
+                  | 'os-mismatch'; label: string }[]
   // §4.1/§5.1: the import's no-match map — the id is the minted placeholder
   // the steps carry; name/description are the archive record's. Always
   // present ({} when none), filtered to still-referenced ids.

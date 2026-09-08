@@ -209,24 +209,6 @@ describe('§9.2 needs-fixing banner', () => {
     expect(storeMod.useStore.getState().surface).toBe('create')
   })
 
-  it('output-collapsed rows offer Fix with AI, handing the editor the zero run and the typical count', () => {
-    // §9.2/§11 collapse variant: the seed is the latest FINISHED real run —
-    // the record the verdict is about.
-    const zeroRun: Execution = {
-      ...queuedRow('e-zero'), status: 'succeeded', duration: '2s', queuedMs: 0,
-    }
-    seed(auto({ problems: [
-      { kind: 'output-collapsed', typical: 40, label: 'The latest execution returned nothing. Recent executions returned about 40 items each.' },
-    ] }), [zeroRun])
-    render(<AutomationDetail />)
-    expect(screen.getByText('The latest execution returned nothing. Recent executions returned about 40 items each.')).toBeTruthy()
-    fireEvent.click(screen.getByText('Fix with AI'))
-    expect(storeMod.useStore.getState().fixExec).toEqual({
-      executionId: 'e-zero', collapse: { typical: 40 },
-    })
-    expect(storeMod.useStore.getState().surface).toBe('create')
-  })
-
   it('overdue rows are informational — label shown, no action link', () => {
     seed(auto({ problems: [
       { kind: 'overdue', label: 'Scheduled executions are being missed - it has never run.' },

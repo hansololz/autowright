@@ -128,21 +128,3 @@ def test_timestamps_store_as_iso_text_and_sort_chronologically(home):
     assert loaded["e-a"]["started_at"] == early
     assert loaded["e-b"]["finished_at"] is None
     db.close()
-
-
-def test_count_column_roundtrips_and_is_nullable(home):
-    """§4.5/§5 count: a nullable INTEGER column, mutable on conflict — the
-    index carries the §4.1 output-collapsed history, and a run that never
-    called result.count loads as None."""
-    from autowright import execdb
-
-    db = execdb.ExecDB(_db_path(home))
-    db.upsert(make_header(count=None))
-    assert db.load_all()["e-1"]["count"] is None
-    db.upsert(make_header(count=40, status="succeeded",
-                          finished_at="2026-07-20T08:31:05+00:00", duration_ms=65_000))
-    assert db.load_all()["e-1"]["count"] == 40
-    # a header written without the key at all still loads as None
-    db.upsert(make_header(id="e-2"))
-    assert db.load_all()["e-2"]["count"] is None
-    db.close()

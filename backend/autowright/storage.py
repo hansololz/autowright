@@ -696,7 +696,6 @@ class Store:
             a["_last_status"] = latest["status"] if latest else "none"
             a["_last_exec_at"] = latest["started_at"] if latest else None
             a["_live"] = live.get(a["id"], set())
-            a.pop("_collapse", None)
 
     @staticmethod
     def never_ran(h: dict) -> bool:
@@ -1287,7 +1286,7 @@ class Store:
     # rows, records demoted on their terminal transition).
     EXEC_HEADER_KEYS = ("id", "automation_id", "automation_name", "kind", "version", "status",
                         "trigger", "trigger_sender", "queued_at", "started_at", "finished_at",
-                        "duration_ms", "note", "chip", "chip_status", "count", "error")
+                        "duration_ms", "note", "chip", "chip_status", "error")
 
     @classmethod
     def exec_header(cls, h: dict) -> dict:
@@ -1316,7 +1315,7 @@ class Store:
                 "started_at": now,
                 "finished_at": None,
                 "duration_ms": None, "note": note, "chip": None, "chip_status": None,
-                "count": None, "error": None, "redacted_secrets": [],
+                "error": None, "redacted_secrets": [],
                 "steps": [{"name": s["name"], "file": s.get("file"),
                            "agent": bool(s.get("agent")),
                            **({"sha": s["sha"]} if s.get("sha") else {}),
@@ -1387,7 +1386,6 @@ class Store:
             else:
                 if a:
                     a["_live"].discard(h["id"])
-                    a.pop("_collapse", None)  # §4.1 output-collapsed memo
                 if a:
                     latest = self._latest_exec(a["id"])
                     a["_latest"] = latest
@@ -1417,7 +1415,6 @@ class Store:
             "note": h["note"],
             "chip": h.get("chip"),
             "chip_status": h.get("chip_status"),
-            "count": h.get("count"),
             "error": h.get("error"),
             "redacted_secrets": h["redacted_secrets"],
             "params": h.get("params", []),
@@ -1454,9 +1451,6 @@ class Store:
             "started_at": y.get("started_at"), "finished_at": y.get("finished_at"),
             "duration_ms": y.get("duration_ms"), "note": y.get("note"),
             "chip": y.get("chip"), "chip_status": y.get("chip_status"),
-            # §21: absent on records written before the key existed → None
-            "count": y.get("count") if isinstance(y.get("count"), int)
-            and not isinstance(y.get("count"), bool) else None,
             "error": y.get("error"), "redacted_secrets": y.get("redacted_secrets") or [],
             "params": y.get("params") or [], "steps": y.get("steps") or [],
             "pgid": y.get("pgid"),
@@ -1577,14 +1571,12 @@ class Store:
         """§4.5 result object: header chip + files listing + dir path.
         An execution with only output files (no builder calls) still has a result."""
         files = self.result_files(h["id"])
-        if not files and not h.get("chip") and h.get("count") is None:
+        if not files and not h.get("chip"):
             return None
         out = {"files": files, "path": str(self.exec_dir(h["id"]) / "result")}
         if h.get("chip"):
             out["chip"] = h["chip"]
             out["chipStatus"] = h.get("chip_status") or "ok"
-        if h.get("count") is not None:
-            out["count"] = h["count"]
         return out
 
     # §5/§6 retention: prefix of a directory renamed aside by a delete, waiting
@@ -1616,8 +1608,6 @@ class Store:
             # to remember to recompute after deleting.
             if h:
                 a = self.autos.get(h["automation_id"])
-                if a:
-                    a.pop("_collapse", None)  # §4.1 output-collapsed memo
                 if a and (a.get("_latest") or {}).get("id") == execution_id:
                     latest = self._latest_exec(a["id"])
                     a["_latest"] = latest
@@ -2134,39 +2124,6 @@ class Store:
         # trigger math runs on local naive datetimes (triggers.trigger_next)
         return triggerlib.is_overdue(a["triggers"], base.astimezone().replace(tzinfo=None), now)
 
-    COLLAPSE_HISTORY = 10   # §4.1: the most recent counted succeeded runs compared
-    COLLAPSE_MIN_RUNS = 3   # §4.1: fewer counted runs than this → no verdict
-
-    def output_collapse(self, a: dict) -> dict | None:
-        """§4.1 `output-collapsed`: the most recent finished real execution
-        succeeded with count 0 while the earlier counted succeeded runs (up to
-        COLLAPSE_HISTORY, at least COLLAPSE_MIN_RUNS) have a median ≥ 1.
-        Returns {typical, episodeStart} or None. Memoized on the automation
-        (`_collapse`, in-memory only) and invalidated by every execution
-        settle/delete, so serialization never re-scans the index."""
-        if "_collapse" in a:
-            return a["_collapse"]
-        hs = [h for h in self.execs.values()
-              if h["automation_id"] == a["id"] and not self.never_ran(h)
-              and not is_test(h) and h["status"] != "executing"]
-        hs.sort(key=lambda h: h["started_at"] or "", reverse=True)
-        verdict = None
-        if hs and hs[0]["status"] == "succeeded" and hs[0].get("count") == 0:
-            prev = [h["count"] for h in hs[1:]
-                    if h["status"] == "succeeded" and h.get("count") is not None]
-            prev = prev[:self.COLLAPSE_HISTORY]
-            if len(prev) >= self.COLLAPSE_MIN_RUNS:
-                s = sorted(prev)
-                mid = len(s) // 2
-                median = s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
-                if median >= 1:
-                    verdict = {"typical": int(round(median)),
-                               # the previous counted run was not itself zero →
-                               # this run opened the episode (§6 notification)
-                               "episodeStart": prev[0] > 0}
-        a["_collapse"] = verdict
-        return verdict
-
     def problems_json(self, a: dict, cur: dict) -> list[dict]:
         """§4.1 `problems` — the would-this-fire-successfully audit, derived at
         serialization from stored facts plus the §6.2 fast installed-check.
@@ -2182,12 +2139,6 @@ class Store:
             ran = f"it last ran {timefmt.date_label(last_dt)}" if last_dt else "it has never run"
             out.append({"kind": "overdue",
                         "label": f"Scheduled executions are being missed — {ran}."})
-        # §4.1 `output-collapsed`, second — the "is it still finding anything"
-        # half: a succeeding run that has gone empty against its own history.
-        if (collapse := self.output_collapse(a)):
-            out.append({"kind": "output-collapsed", "typical": collapse["typical"],
-                        "label": "The latest execution returned nothing. Recent executions "
-                                 f"returned about {collapse['typical']} items each."})
         secrets_by_id = {s["id"]: s for s in self.secrets}
         agents_by_id = {g["id"]: g for g in self.agents}
         # §4.1 effective references: manifest entries ∪ code subscripts.

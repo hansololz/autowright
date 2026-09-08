@@ -575,9 +575,9 @@ async function refreshTrayAlert() {
     })
     if (!res.ok) return
     const autos = await res.json()
-    // §13: failed, §4.1 overdue, or output-collapsed — same predicate as the renderer's.
+    // §13: failed or §4.1 overdue only — same predicate as the renderer's.
     setTrayAlert(autos.some((a) => a.lastStatus === 'failed'
-      || (a.problems || []).some((p) => p.kind === 'overdue' || p.kind === 'output-collapsed')))
+      || (a.problems || []).some((p) => p.kind === 'overdue')))
   } catch { /* backend down — keep the current icon */ }
 }
 

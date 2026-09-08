@@ -293,8 +293,6 @@ and sends the §11 canned analyze chat message as a §8 chat job carrying this e
 as the §19 `executionId` — the RECENT EXECUTIONS context includes the run's error and log tails, and
 the agent's answer, rewrites, and follow-up actions land in the thread (§11).
 Test executions never show it — draft iteration already lives in the editor.
-The same button, with a collapse seed instead of a failure seed, is the §9.2 banner's
-`output-collapsed` action (§11 Fix-with-AI entry, collapse variant).
 The LOGS pane shows the selected step's log. Its header opens with a faint mono
 **"LOG k OF n"** eyebrow (k = the selected step's 1-based position, n = the execution's step
 count, the same counter idiom as the §9.2 step-script modal's "STEP N OF M" toolbar) followed
@@ -364,9 +362,7 @@ collapsible **result views**, each with a chevron + title header and right-align
 ("4.1 KB") — every view expanded by default on this page (§9.2's LATEST RESULT card trims the
 same stack down), collapse state per-session only (never persisted). The section header row carries the result chip when the execution set one — tinted
 by its chip status (changes = accent, ok = green, attention = orange); an execution that set no chip
-gets no chip here — then, when the execution reported a §4.5 `count`, a plain untinted
-`MetaChip` reading "<n> items" ("1 item"; "0 items" is shown, the zero being the point) —
-plus metadata chips; the execution's
+gets no chip here — plus metadata chips; the execution's
 own status badge stays in the page title row, never here. View order: one **file view** per renderable
 file in alphabetical order (`.md` markdown, `.html` sandboxed iframe, images inline; titled
 by filename), then a collapsible **FILES footer** ("FILES · N" header, **collapsed** by default, like the

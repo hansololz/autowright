@@ -2574,9 +2574,8 @@ def test_executions_context_execution_id_selection(home):
 
 
 def test_executions_context_success_detail_and_result_excerpt(home):
-    # §8: a detailed successful run carries the result chip, the §4.5 item
-    # count, the result file listing, and a result.md excerpt truncated at
-    # RESULT_EXCERPT chars.
+    # §8: a detailed successful run carries the result chip, the result file
+    # listing, and a result.md excerpt truncated at RESULT_EXCERPT chars.
     from autowright import testexec
 
     store = _runs_store()
@@ -2585,7 +2584,6 @@ def test_executions_context_success_detail_and_result_excerpt(home):
                      steps=[{"name": "A", "file": "01-a.py", "status": "succeeded",
                              "duration_ms": 2500}])
     h["chip"] = "3 new chapters"
-    h["count"] = 7
     rdir = store.exec_dir(h["id"]) / "result"
     (rdir / "result.md").write_text("# Result\n" + "x" * 3000, encoding="utf-8")
     (rdir / "data.csv").write_text("a,b\n", encoding="utf-8")
@@ -2593,7 +2591,6 @@ def test_executions_context_success_detail_and_result_excerpt(home):
     ctx = testexec.executions_context(a, make_version()["steps"])
     assert "step 1: A — succeeded · 2s" in ctx
     assert "result chip: 3 new chapters" in ctx
-    assert "item count: 7" in ctx  # §4.5 count — the §4.1 collapse history
     assert "result files: data.csv, result.md" in ctx
     assert "result.md:\n# Result" in ctx
     assert "… [result.md truncated]" in ctx

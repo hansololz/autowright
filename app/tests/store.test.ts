@@ -264,9 +264,9 @@ describe('applyEvent', () => {
   it('fixExec is plain handed-off state, untouched by events', () => {
     // §7/§9.2 Fix with AI: the store only carries the failed executionId to the
     // editor; no event mutates it — CreateFlow consumes and clears it on mount.
-    store.useStore.setState({ fixExec: { executionId: 'eF' } })
+    store.useStore.setState({ fixExec: 'eF' })
     store.useStore.getState().applyEvent(execEv('execution.finished', ex('eF', 1, { status: 'failed' }), { name: 'A', resultChip: null } as never))
-    expect(store.useStore.getState().fixExec).toEqual({ executionId: 'eF' })
+    expect(store.useStore.getState().fixExec).toBe('eF')
   })
 
   it('toast suppressed for test executions and for cancelled status', () => {
@@ -848,16 +848,9 @@ describe('trayAlertOn (§13 tray dot predicate)', () => {
     ] })])).toBe(true)
   })
 
-  it('lights for an output-collapsed automation', () => {
-    expect(store.trayAlertOn([auto({ problems: [
-      { kind: 'output-collapsed', typical: 40, label: 'The latest execution returned nothing. Recent executions returned about 40 items each.' },
-    ] })])).toBe(true)
-  })
-
   it('stays dark for every other problems kind and for clean automations', () => {
     expect(store.trayAlertOn([auto()])).toBe(false)
-    // §13: the dot is failed, overdue or output-collapsed only — config nits
-    // never light it
+    // §13: the dot is failed-or-overdue only — config nits never light it
     expect(store.trayAlertOn([auto({ problems: [
       { kind: 'package-missing', label: 'x' }, { kind: 'secret-unset', label: 'y' },
     ] })])).toBe(false)

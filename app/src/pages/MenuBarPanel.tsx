@@ -1,7 +1,7 @@
 // Menu-bar surface (§13): 334px translucent panel — one row per automation.
 import { useEffect, useRef } from 'react'
 import { api } from '../api'
-import { TRAY_ALERT_KINDS, useStore } from '../store'
+import { useStore } from '../store'
 import { badgeOf, Eyebrow, PULSE, ScrollArea } from '../ui'
 
 const dotColor = (s: string) => badgeOf(s).c
@@ -14,9 +14,9 @@ export default function MenuBarPanel() {
   const showToast = useStore((s) => s.showToast)
   const ref = useRef<HTMLDivElement>(null)
 
-  // §13: the count matches the tray dot — failed, §4.1 overdue, or output-collapsed.
+  // §13: the count matches the tray dot — failed or §4.1 overdue only.
   const failed = automations.filter((a) => a.lastStatus === 'failed'
-    || (a.problems ?? []).some((p) => TRAY_ALERT_KINDS.has(p.kind))).length
+    || (a.problems ?? []).some((p) => p.kind === 'overdue')).length
   const aggregate = failed > 0
     ? `${failed} need${failed === 1 ? 's' : ''} attention`
     : `All good · ${automations.length} automation${automations.length === 1 ? '' : 's'}`

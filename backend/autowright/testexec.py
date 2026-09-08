@@ -233,8 +233,6 @@ def _execution_block(h: dict, cur_shas: list[str], detail: bool) -> str:
             lines.append("log tail (failing step):\n" + "\n".join(tail))
     if h.get("chip"):
         lines.append(f"result chip: {h['chip']}")
-    if h.get("count") is not None:
-        lines.append(f"item count: {h['count']}")
     files = store.result_files(h["id"])
     if files:
         lines.append("result files: " + ", ".join(f["name"] for f in files))
