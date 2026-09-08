@@ -2776,8 +2776,10 @@ describe('document-editor modal (§11)', () => {
 // §11: BUILD INSTRUCTIONS is a read-only built-in document, exactly like the
 // framework card — the same text in create and edit mode, no Edit button.
 describe('CreateFlow BUILD INSTRUCTIONS card (§11)', () => {
-  const EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec overrides any of them: just say so in plain words.'
-  const FOOTER = 'Built-in rules the AI follows when writing steps, word for word. To change one for this automation, state the new rule in the spec or ask the chat; these defaults update with the app.'
+  const EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec can override all of them.'
+  // the open card's footer repeats the explainer word for word (§11)
+  const openCopies = (card: HTMLElement) =>
+    within(card).getAllByText(EXPLAINER).filter((el) => collapseOf(el).classList.contains('open'))
   let resolveInstructions: (payload: { framework: string; build: string }) => void
   beforeEach(async () => {
     armPendingPoll()
@@ -2800,30 +2802,28 @@ describe('CreateFlow BUILD INSTRUCTIONS card (§11)', () => {
     render(<CreateFlow />)
     // defaults collapsed: the explainer is the collapsed line, the document
     // and its footer sit in the closed body
-    const explainer = within(instrCard()).getByText(EXPLAINER)
-    expect(collapseOf(explainer).classList.contains('open')).toBe(true)
-    expect(collapseOf(within(instrCard()).getByText(FOOTER)).classList.contains('open')).toBe(false)
+    expect(within(instrCard()).getAllByText(EXPLAINER)).toHaveLength(2)
+    expect(openCopies(instrCard())).toHaveLength(1)
     fireEvent.click(screen.getByText('BUILD INSTRUCTIONS'))
     await settleInstructions()
     await waitFor(() => expect(bodyLi('build rules')).toBeTruthy())
     const card = instrCard()
-    // open: the rendered document and the footer, and nothing else — no
-    // second copy of the explainer inside the body, no Edit button
-    expect(collapseOf(within(card).getByText(FOOTER)).classList.contains('open')).toBe(true)
-    expect(within(card).getAllByText(EXPLAINER)).toHaveLength(1)
-    expect(collapseOf(within(card).getByText(EXPLAINER)).classList.contains('open')).toBe(false)
+    // open: the rendered document and the footer (the explainer's open copy),
+    // the collapsed line closed, no Edit button
+    expect(within(card).getAllByText(EXPLAINER)).toHaveLength(2)
+    expect(openCopies(card)).toHaveLength(1)
     expect(within(card).queryByText('Edit')).toBeNull()
   })
 
   it('renders the same read-only document in edit mode', async () => {
     render(<CreateFlow />)
-    expect(within(instrCard()).getByText(EXPLAINER)).toBeTruthy()
+    expect(within(instrCard()).getAllByText(EXPLAINER)).toHaveLength(2)
     fireEvent.click(screen.getByText('BUILD INSTRUCTIONS'))
     await settleInstructions()
     await waitFor(() => expect(bodyLi('build rules')).toBeTruthy())
     const card = instrCard()
-    expect(collapseOf(within(card).getByText(FOOTER)).classList.contains('open')).toBe(true)
-    expect(within(card).getAllByText(EXPLAINER)).toHaveLength(1)
+    expect(within(card).getAllByText(EXPLAINER)).toHaveLength(2)
+    expect(openCopies(card)).toHaveLength(1)
     expect(within(card).queryByText('Edit')).toBeNull()
   })
 })

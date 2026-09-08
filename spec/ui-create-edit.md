@@ -899,13 +899,12 @@ editors enter with
   nothing about this card differs between automations or between create and edit mode.
   Defaults collapsed in both modes; collapsed, it always shows its explainer (a static
   built-in document, like the framework card, never a content preview): "Default rules
-  your AI follows when it builds this automation. Your spec overrides any of them: just
-  say so in plain words." Open, it shows the rendered document and the footer, exactly
-  the framework card's structure. Footer copy: "Built-in rules the AI follows when
-  writing steps, word for word. To change one for this automation, state the new rule in
-  the spec or ask the chat; these defaults update with the app." (No em dashes in this
-  card's copy.) The card never gates Save, never marks the workflow out of sync, and
-  never participates in the draft, the undo snapshot, or the §5.1 archive.
+  your AI follows when it builds this automation. Your spec can override all of them."
+  Open, it shows the rendered document and the footer, exactly the framework card's
+  structure. The footer repeats the explainer word for word, so the card reads the same
+  open and collapsed. (No em dashes in this card's copy.) The card never gates Save, never
+  marks the workflow out of sync, and never participates in the draft, the undo snapshot,
+  or the §5.1 archive.
 - **NOTES** — collapsible card below the Spec card holding the §4.1 agent-owned notes
   document; bare header like the other cards; collapsed with content it shows the
   first-line preview (status-aware rule above). View state renders the markdown (shared §4.5 renderer, same
@@ -1238,8 +1237,9 @@ editors enter with
   what is rendered is byte-for-byte what the agent receives. Content comes from §19
   `GET /instructions` (fetched once per app session and cached); the same response carries
   `build-instructions.md` for the Build-instructions card above.
-  Collapsed hint and footer copy: built-in instructions the AI reads before writing anything,
-  word for word — they update with the app, nothing for the user to maintain.
+  Collapsed hint: "The source of truth for what your AI knows about the app: the framework,
+  tools, and how everything works." The open card's footer repeats the hint word for word,
+  so the card reads the same open and collapsed.
 - **BUILD card and TEST card** — the top two cards of the right column, 14 px apart (the
   §14 stacked-card gap), BUILD above TEST: build, then test, read top to bottom. They
   replaced the earlier merged "BUILD & TEST" panel once the test run moved into the

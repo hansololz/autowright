@@ -20,7 +20,8 @@ export const cardHintFont = "400 11.5px/1.5 var(--sans)"
 
 // §11 BUILD INSTRUCTIONS card: the collapsed explainer for a static built-in
 // document, like the framework card.
-const BUILD_INSTRUCTIONS_EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec overrides any of them: just say so in plain words.'
+const BUILD_INSTRUCTIONS_EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec can override all of them.'
+const FRAMEWORK_INSTRUCTIONS_HINT = 'The source of truth for what your AI knows about the app: the framework, tools, and how everything works.'
 
 // §11 status-aware collapsed line: the first meaningful text line of a
 // markdown-ish document, markdown markers stripped — null when nothing remains
@@ -429,7 +430,7 @@ export function LeftColumn({
               : <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)' }}>Couldn’t load build-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
           <div style={{ padding: '0 18px 16px', font: cardHintFont, color: 'var(--text-muted)' }}>
-            Built-in rules the AI follows when writing steps, word for word. To change one for this automation, state the new rule in the spec or ask the chat; these defaults update with the app.
+            {BUILD_INSTRUCTIONS_EXPLAINER}
           </div>
       </SectionCard>
 
@@ -467,7 +468,7 @@ export function LeftColumn({
         eyebrow="FRAMEWORK INSTRUCTIONS"
         open={rev.fwOpen}
         onToggle={(o) => up({ fwOpen: o })}
-        hint="The built-in instructions your AI reads before writing anything, word for word. They update with the app, nothing for you to maintain."
+        hint={FRAMEWORK_INSTRUCTIONS_HINT}
       >
           <CardMarkdown>
             {fw
@@ -475,7 +476,7 @@ export function LeftColumn({
               : <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)' }}>Couldn’t load framework-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
           <div style={{ padding: '0 18px 16px', font: cardHintFont, color: 'var(--text-muted)' }}>
-            framework-instructions.md — sent to your AI, word for word, with every drafting request. Updates with the app, nothing for you to maintain.
+            {FRAMEWORK_INSTRUCTIONS_HINT}
           </div>
       </SectionCard>
     </div>
