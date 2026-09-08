@@ -22,15 +22,19 @@ export const cardHintFont = "400 11.5px/1.5 var(--sans)"
 // document, like the framework card.
 const BUILD_INSTRUCTIONS_EXPLAINER = 'Default rules your AI follows when it builds this automation. Your spec can override all of them.'
 const FRAMEWORK_INSTRUCTIONS_HINT = 'The source of truth for what your AI knows about the app: the framework, tools, and how everything works.'
+// §11 NOTES card: always the explainer (collapsed line and open footer), never a
+// first-line preview — an agent-written notes.md opens with a title heading.
+const NOTES_EXPLAINER = 'Your AI records what it learns (page quirks, dead ends, fixes) as you build and test.'
 
-// §11 status-aware collapsed line: the first meaningful text line of a
-// markdown-ish document, markdown markers stripped — null when nothing remains
-function docPreview(text: string): string | null {
-  for (const raw of text.split('\n')) {
-    const t = raw.replace(/^[\s#>*\-]+/, '').replace(/^\d+[.)]\s+/, '').replace(/[*_`]/g, '').trim()
-    if (t) return t
-  }
-  return null
+// §11: the explainer repeated under an open document body (notes, build and
+// framework instructions), beneath a dim hairline so a clipped last line never
+// runs into it
+function CardFooter({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
+      {children}
+    </div>
+  )
 }
 
 // §11: the one template every collapsible editor card renders through —
@@ -210,8 +214,7 @@ export function LeftColumn({
         eyebrow="NOTES"
         open={notesOpenEff}
         onToggle={(o) => up({ notesSecOpen: o })}
-        hint="No notes yet. Your AI records what it learns (page quirks, dead ends, fixes) as you build and test."
-        preview={rev.notes.trim() ? docPreview(rev.notes) : null}
+        hint={NOTES_EXPLAINER}
         right={notesOpenEff && (
           <button
             // §11: an old version is browsed read-only — notes saved onto a
@@ -236,8 +239,9 @@ export function LeftColumn({
             <Markdown text={rev.notes} />
           </CardMarkdown>
         ) : (
-          <CardEmpty>No notes yet. Your AI records what it learns (page quirks, dead ends, fixes) as you build and test.</CardEmpty>
+          <CardEmpty>No notes yet.</CardEmpty>
         )}
+        <CardFooter>{NOTES_EXPLAINER}</CardFooter>
       </SectionCard>
 
       {/* AGENTS · AVAILABLE TO STEPS */}
@@ -429,9 +433,7 @@ export function LeftColumn({
               ? <Markdown text={bld} />
               : <div style={{ font: cardHintFont, color: 'var(--red-text)' }}>Couldn’t load build-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
-          <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
-            {BUILD_INSTRUCTIONS_EXPLAINER}
-          </div>
+          <CardFooter>{BUILD_INSTRUCTIONS_EXPLAINER}</CardFooter>
       </SectionCard>
 
       {/* §11 document-editor modal — one document at a time */}
@@ -475,9 +477,7 @@ export function LeftColumn({
               ? <Markdown text={fw} />
               : <div style={{ font: cardHintFont, color: 'var(--red-text)' }}>Couldn’t load framework-instructions.md — reopen this page to retry.</div>}
           </CardMarkdown>
-          <div style={{ padding: '12px 18px', borderTop: '1px solid var(--hairline-dim)', font: cardHintFont, color: 'var(--text-muted)' }}>
-            {FRAMEWORK_INSTRUCTIONS_HINT}
-          </div>
+          <CardFooter>{FRAMEWORK_INSTRUCTIONS_HINT}</CardFooter>
       </SectionCard>
     </div>
   )

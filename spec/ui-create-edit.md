@@ -803,14 +803,14 @@ under the agents, secrets, parameters and packages lists, the instruction cards'
 explainer, and a document card's load-error line all render in it — no card body carries a
 second explainer size or line-height.
 The collapsed line is **status-aware**: a card holding content shows a one-line preview of
-that content (single line, ellipsized — notes show their first
-meaningful text line with markdown markers stripped; agents shows the enabled agent names,
+that content (single line, ellipsized — agents shows the enabled agent names,
 secrets the allowed secret names, packages the package names, each " · "-joined), while an
 empty card shows its explainer sentence — the explainer teaches exactly when there is
 nothing to preview, and a collapsed filled card reads as a summary of this automation
-instead of repeated manual text. Three cards always show their explainer: the spec card (its
-first line would duplicate the page title) and the two instruction cards (static built-in
-documents). Rendered-markdown card bodies
+instead of repeated manual text. Four cards always show their explainer: the spec card (its
+first line would duplicate the page title), the notes card (an agent-written document
+normally opens with a title heading, so a first-line preview would read as a lone
+"Notes"), and the two instruction cards (static built-in documents). Rendered-markdown card bodies
 (spec, build instructions, notes, framework) share **one markdown body wrapper** too: same
 padding, same 440 px max height with inner scroll (§14 overlay scrollbar), same full-bleed
 table allowance — markdown looks identical in every card. Clicking a header
@@ -913,16 +913,19 @@ editors enter with
   marks the workflow out of sync, and never participates in the draft, the undo snapshot,
   or the §5.1 archive.
 - **NOTES** — collapsible card below the Spec card holding the §4.1 agent-owned notes
-  document; bare header like the other cards; collapsed with content it shows the
-  first-line preview (status-aware rule above). View state renders the markdown (shared §4.5 renderer, same
+  document; bare header like the other cards; collapsed it always shows its explainer,
+  never a content preview (the instruction cards' structure). View state renders the markdown (shared §4.5 renderer, same
   max-height + inner scroll as the spec card); Edit opens the same document-editor modal as
   the Spec (Cancel / Save in its toolbar) so the user can prune stale or wrong lines —
   but the document is normally agent-written: §8 chat and sync responses may carry a
   `notes.md` rewrite, which replaces the text and lands a quiet "Notes updated." system
   entry. A notes change (manual or agent) marks the draft touched but **never** marks the
   workflow out of sync and never gates Save (§4.1: notes are advisory input to the next
-  sync). Defaults collapsed; collapsed-empty hint and in-card empty state: "No notes yet.
-  Your AI records what it learns (page quirks, dead ends, fixes) as you build and test." Notes
+  sync). Defaults collapsed. The explainer — shown collapsed, and repeated word for word as
+  the footer under the open body, beneath the same dim hairline the instruction cards use —
+  is "Your AI records what it learns (page quirks, dead ends, fixes) as you build and
+  test." With no notes, the body above the footer is the in-card empty state "No notes
+  yet." Notes
   version with the automation and ride drafts and §5.1 archives like the spec.
 - **Document-editor modal** — the one editing surface for the two documents. Pressing Edit
   on the Spec or Notes card opens it over the page; the card stays in
