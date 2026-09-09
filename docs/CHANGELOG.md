@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.11.3 - 2026-09-08
+
+- Autowright is a smaller download and takes up less room on disk, with no change to what it can do.
+
 ## v0.11.2 - 2026-09-08
 
 - Build instructions now ship with Autowright and appear read-only in the editor, so every automation is drafted from the same current guidance.
