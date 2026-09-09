@@ -498,9 +498,9 @@ def test_chat_prompt_fresh_draft_shape():
     # CURRENT sections beyond the always-present concurrency — the empty spec
     # is exactly what the new-automation rule keys on.
     p = build_chat_prompt("watch prices", None, GRANTS)
-    assert "=== SPEC (spec.md) ===" in p
+    assert "=== SPEC (spec.md — overrides the BUILD INSTRUCTIONS above" in p
     import re as _re
-    m = _re.search(r"=== SPEC \(spec\.md\) ===\n(.*?)(?:\n=== |\Z)", p, _re.S)
+    m = _re.search(r"=== SPEC \(spec\.md[^)]*\) ===\n(.*?)(?:\n=== |\Z)", p, _re.S)
     assert m and m.group(1).strip() == ""
     assert "=== CURRENT parameters" not in p and "=== CURRENT step" not in p
     assert "=== CURRENT concurrency" in p
@@ -526,7 +526,7 @@ def test_chat_prompt_section_order_and_content():
     p = build_chat_prompt("also check weekends", cur, GRANTS, chat)
     order = [p.index("=== FRAMEWORK INSTRUCTIONS ==="), p.index("=== GRANTS FOR THIS AUTOMATION ==="),
              p.index("=== BUILD INSTRUCTIONS"), p.index("=== SYSTEM TOOLS"), p.index("=== CONVERSATION"),
-             p.index("=== AUTOMATION"), p.index("=== SPEC (spec.md) ==="),
+             p.index("=== AUTOMATION"), p.index("=== SPEC (spec.md"),
              p.index("=== CURRENT parameters"), p.index("=== CURRENT triggers"),
              p.index("=== CURRENT concurrency"), p.index("=== CURRENT step"),
              p.index("=== USER REQUEST ==="), p.index("=== TASK ===")]
@@ -1509,7 +1509,7 @@ def test_chat_prompt_carries_notes_runs_and_packages():
                           pkg_state=[{"pip": "pandas", "import": "pandas",
                                       "status": "installed", "version": "2.2.0"}])
     order = [p.index("=== NOTES"), p.index("=== RECENT EXECUTIONS"), p.index("=== PACKAGES"),
-             p.index("=== SPEC (spec.md) ===")]
+             p.index("=== SPEC (spec.md")]
     assert order == sorted(order)
     assert "the RSS feed 404s" in p
     assert "Test execution · failed" in p

@@ -445,7 +445,8 @@ def build_chat_prompt(user_text: str | None, current: dict | None,
                      "via actions.yaml `name` / `description`) ===\n"
                      + yaml.safe_dump({"name": name, "description": desc},
                                       sort_keys=False, allow_unicode=True).strip())
-    parts.append("=== SPEC (spec.md) ===\n" + spec_as_md(current))
+    parts.append("=== SPEC (spec.md — overrides the BUILD INSTRUCTIONS above wherever it "
+                 "says otherwise) ===\n" + spec_as_md(current))
     # §8 CURRENT parameters — definitions + in-editor values; the only names
     # actions.yaml `test_values` / `param_values` keys may use.
     if params := (current or {}).get("params"):
@@ -537,7 +538,9 @@ def build_steps_prompt(spec_md: str, current: dict | None,
                    if trigs else "none"))
         for s in current.get("steps", []):
             parts.append(f"=== CURRENT step {_step_head(s)} ===\n{s.get('code', '')}")
-    parts.append("=== SPEC (spec.md — implement this exactly) ===\n" + (spec_md or "").strip())
+    parts.append("=== SPEC (spec.md — implement this exactly; it overrides the BUILD "
+                 "INSTRUCTIONS above wherever it says otherwise) ===\n"
+                 + (spec_md or "").strip())
     parts.append(STEPS_REMINDER)
     return "\n\n".join(parts)
 

@@ -121,7 +121,7 @@ def respond(prompt: str) -> str:
                     "since the last run, and **Build the result** summarizes what it found.")
         # §8 new-automation rule: an empty SPEC section marks a fresh draft —
         # write the spec, name the automation via actions, and chain the sync.
-        sm = re.search(r"=== SPEC \(spec\.md\) ===\n(.*?)(?:\n=== |\Z)", prompt, re.S)
+        sm = re.search(r"=== SPEC \(spec\.md[^)]*\) ===\n(.*?)(?:\n=== |\Z)", prompt, re.S)
         title = user.rstrip(".")[:48].capitalize() or "New automation"
         if not (sm.group(1).strip() if sm else ""):
             spec = SPEC_ENVELOPE.format(

@@ -397,8 +397,10 @@ as a yaml list, so install trouble is answerable, **AUTOMATION** — the automat
 name and one-line description as yaml (§4.1 user-owned identity; the §19 `current` body's
 `name`/`description`, and in edit mode the backend attaches the stored automation's when the body
 carries none — like triggers), headed with the rule that renaming or redescribing happens
-only through `actions.yaml`, so the agent edits what is really there, the in-editor spec
-(as markdown), **CURRENT parameters** — the §4.2 param definitions with their in-editor
+only through `actions.yaml`, so the agent edits what is really there, **SPEC** — the
+in-editor spec (as markdown), headed as overriding the BUILD INSTRUCTIONS above wherever it
+says otherwise (the precedence rule is stated at the point the agent reads the spec, not only
+in the build-instructions and grants headings), **CURRENT parameters** — the §4.2 param definitions with their in-editor
 values as a yaml list (the same rendering the sync call's CURRENT section uses), headed as
 the names `test_values` and `param_values` keys must use, **CURRENT triggers** — the
 automation's trigger list
@@ -680,7 +682,8 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    in the rule-9 dialect (`off` state and one-shot `time` entries marked — reference only), so
    the agent sees what already exists before judging a trigger missing (§19: the editor's
    `current.triggers` wins; absent that, the backend attaches the stored list).
-8. **SPEC** — the provided spec.
+8. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
+   BUILD INSTRUCTIONS above wherever it says otherwise.
 9. **Closing envelope reminder** — one final line restating the response shape (return
    `manifest.yaml` plus one file block per step, no `spec.md`, end with `===END===`), so the
    format sits at the end of the prompt as well as in the TASK directive near the top.
