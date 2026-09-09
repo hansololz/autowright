@@ -33,6 +33,11 @@
       "output": "../build/win"
     },
     "artifactName": "Autowright.${ext}",
+    "electronLanguages": [
+      "en",
+      "en-US",
+      "en-GB"
+    ],
     "publish": [
       {
         "provider": "generic",

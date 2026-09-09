@@ -568,3 +568,59 @@ def test_macos_interpreter_signs_with_the_library_validation_exception():
     assert signed.count('PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3"') >= 1 \
         and 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$APP/Contents/Resources/python/bin/python3"' in signed, (
         "the native-wheel probe must run the bundled interpreter without writing .pyc into the sealed tree")
+
+
+# ---------------------------------------------------------------- bundle trimming
+def test_macos_bundle_is_trimmed_before_signing():
+    """§3 bundle trimming: `prod.sh` trims the staged Python (Tcl/Tk, ensurepip,
+    C-API scaffolding, fat Mach-O thinned to the host arch) between the pip
+    install and the copy into the bundle, drops every non-English `.lproj` from
+    the app and the Electron framework before the codesign step (sealed
+    resources), packages the asar from an allowlist (through 0.11.2 the denylist
+    let vitest's coverage/ and the design-sync .ds-css/ ship), and writes the
+    DMG as ULMO. Nothing on the never-trimmed list (pip, __pycache__, curated
+    packages) may appear in the trim step. All of it is only exercised by a
+    release build, so pin the text here."""
+    src = _read("scripts/prod.sh")
+
+    pip_install = src.index('-m pip -q install -c "$ROOT/backend/constraints.txt"')
+    trim_python = src.index('echo "· trimming bundled Python')
+    copy_python = src.index('cp -R "$PYSTAGE" "$APP/Contents/Resources/python"')
+    trim_locales = src.index('echo "· trimming Electron locales')
+    smoke = src.index("bundled Python smoke check failed")
+    sign = src.index('echo "· codesigning')
+    assert pip_install < trim_python < copy_python < trim_locales < smoke < sign, (
+        "trim order broke: Python trim must sit between the pip install and the copy into the "
+        "bundle, the locale trim before the smoke check, and both before signing")
+
+    trim_step = src[trim_python:copy_python]
+    for name in ("lib/tcl*", "lib/tk*", "lib/libtcl*", "/tkinter", "/idlelib", "/ensurepip",
+                 '"$PYSTAGE"/include', "/lxml/includes", "lib-dynload/_tkinter*"):
+        assert name in trim_step, f"the Python trim step no longer removes {name}"
+    assert 'lipo -thin "$ARCH"' in trim_step and 'cat "$f.thin" > "$f"' in trim_step, (
+        "fat Mach-O files must be thinned to the host arch in place (mode preserved)")
+    rm_block = trim_step[trim_step.index("rm -rf"):trim_step.index("# Universal2")]
+    for forbidden in ("site-packages/pip", "__pycache__", "lxml/objectify",
+                      "site-packages/requests", "site-packages/bs4", "lib-dynload/_ssl"):
+        assert forbidden not in rm_block, f"{forbidden} is on the never-trimmed list (§3)"
+
+    locale_step = src[trim_locales:smoke]
+    assert '"$APP/Contents/Resources"' in locale_step, "app-level .lproj markers must be trimmed"
+    assert "Electron Framework.framework/Versions/A/Resources" in locale_step, (
+        "the framework's locale.pak payloads must be trimmed")
+    assert "-name '*.lproj' ! -name 'en*.lproj'" in locale_step, (
+        "only non-English locales go; every en*.lproj stays")
+
+    packager = src[src.index("npx electron-packager"):src.index('APP="$BUILD/pkg/')]
+    assert "--ignore '^/(?!(electron|dist|node_modules|package\\.json)($|/))'" in packager, (
+        "the packager must ignore every top-level entry outside the §3 allowlist")
+    assert '--ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\\$))"' in packager, (
+        "node_modules must still be filtered to the electron-updater closure")
+    assert packager.count("--ignore") == 2, "the packager ignore list is an allowlist, not a denylist"
+
+    dmg = src[src.index("# ---- DMG (SPEC §3"):]
+    assert "-format ULMO" in dmg and "-format UDZO" not in dmg, "the DMG format is ULMO (§3)"
+
+    build = json.loads(_read("app/package.json"))["build"]
+    assert build["electronLanguages"] == ["en", "en-US", "en-GB"], (
+        "the Windows/Linux electron-builder legs must keep only the English locales (§3)")

@@ -585,18 +585,24 @@ Dev workflow:
   §6.2 curated packages are part of the user-facing step environment)
   (inside the bundle the backend/CLI execute as
   `python3 -m autowright.main` / `-m autowright.cli` — pip's `bin/` entry scripts carry absolute
-  staging-path shebangs), uses the checked-in app icon `app/electron/icon/icon.icns`
+  staging-path shebangs), trims the staged Python per §3 bundle trimming (Tcl/Tk, ensurepip,
+  C-API scaffolding; fat Mach-O thinned to the host arch), uses the checked-in app icon
+  `app/electron/icon/icon.icns`
   (§14), packages `Autowright.app` with `@electron/packager` (bundle id
-  `ai.autowright.app`; ships only `electron/`, `dist/`, and `package.json` — the renderer is
-  fully bundled and main/preload use Electron builtins only, so no `node_modules`), copies
-  the interpreter to `Contents/Resources/python/`, smoke-checks that the bundled interpreter
+  `ai.autowright.app`; packages the §3 allowlist of `electron/`, `dist/`, `package.json`, and
+  the computed electron-updater `node_modules` closure, and ignores every other top-level
+  entry under `app/`; the renderer is fully bundled and main/preload use Electron builtins
+  plus electron-updater), copies
+  the interpreter to `Contents/Resources/python/`, drops every non-English `*.lproj` from the
+  app and the Electron framework (§3), smoke-checks that the bundled interpreter
   imports `autowright` + every curated package from inside the bundle, codesigns per §3
   (Developer ID + hardened runtime on every Mach-O, inside-out), runs the two §3 post-sign
   probes (the ad-hoc dlopen probe and the native-wheel probe: pip-install and import a real
   `numpy` wheel under the signed interpreter, outside the bundle), notarizes and staples
-  (no ad-hoc fallback), and produces `build/Autowright-<version>-darwin-<arch>.dmg` (hdiutil UDZO),
-  the §3 install + update artifact `release.sh` uploads (no separate update zip: the app
-  unpacks the DMG itself at update time, §3).
+  (no ad-hoc fallback), and produces the §3 update zip
+  `build/Autowright-<version>-darwin-<arch>.zip` (`ditto`, deflate) and the install artifact
+  `build/Autowright-<version>-darwin-<arch>.dmg` (hdiutil ULMO, §3), both of which
+  `release.sh` uploads.
 - **`./linux-scripts/prod.sh`** — the Linux production distribution (bash; §17
   `linux-scripts/`, §3 Linux packaging block), under `build/linux/` (gitignored). Order
   mirrors `prod.sh`: the same three-site version gate (reimplemented — `release.sh` is

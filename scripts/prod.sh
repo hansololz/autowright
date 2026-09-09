@@ -75,6 +75,32 @@ echo "· upgrading bundled pip"
 echo "· installing backend into bundled Python (pinned by backend/constraints.txt)"
 "$PYSTAGE/bin/python3" -m pip -q install -c "$ROOT/backend/constraints.txt" "$ROOT/backend"
 
+# ---- trim the bundled Python (SPEC §3 bundle trimming) ----
+# Only what runs ships. Tcl/Tk goes (a GUI toolkit; the backend and every step
+# run headless under launchd), ensurepip goes (pip is installed and upgraded
+# above; nothing in the bundle creates venvs), and the C-API build scaffolding
+# goes (§6.2 installs --only-binary, so no extension is ever compiled against
+# this interpreter). pip, the rest of the stdlib, __pycache__ (the sealed tree
+# is read-only at runtime) and every curated package stay whole. The in-bundle
+# smoke check below runs on the trimmed tree.
+echo "· trimming bundled Python (Tcl/Tk, ensurepip, C-API scaffolding)"
+PYLIB="$(echo "$PYSTAGE"/lib/python3.*)"
+rm -rf "$PYSTAGE"/lib/tcl* "$PYSTAGE"/lib/tk* "$PYSTAGE"/lib/itcl* "$PYSTAGE"/lib/thread* \
+       "$PYSTAGE"/lib/libtcl* "$PYSTAGE"/lib/libtk* \
+       "$PYLIB"/tkinter "$PYLIB"/idlelib "$PYLIB"/turtledemo "$PYLIB"/turtle.py \
+       "$PYLIB"/lib-dynload/_tkinter* \
+       "$PYLIB"/ensurepip \
+       "$PYSTAGE"/include "$PYSTAGE"/share "$PYSTAGE"/lib/pkgconfig "$PYLIB"/config-* \
+       "$PYLIB"/site-packages/lxml/includes
+# Universal2 wheels (lxml, charset-normalizer, ...) carry both Mach-O slices;
+# thin every fat .so/.dylib to the host arch, since the other slice can never
+# run here. Rewritten in place (cat, not mv) so the file keeps its mode.
+while IFS= read -r -d '' f; do
+  case "$(lipo -archs "$f" 2>/dev/null)" in
+    *" "*) lipo -thin "$ARCH" "$f" -output "$f.thin" && cat "$f.thin" > "$f" && rm -f "$f.thin" ;;
+  esac
+done < <(find "$PYSTAGE" -type f \( -name '*.so' -o -name '*.dylib' \) -print0)
+
 # ---- app icon (checked-in, SPEC §14) ----
 cp "$ROOT/app/electron/icon/icon.icns" "$BUILD/icon.icns"
 
@@ -82,9 +108,13 @@ cp "$ROOT/app/electron/icon/icon.icns" "$BUILD/icon.icns"
 # Only electron/ + dist/ + package.json + electron-updater's runtime closure
 # ship: the renderer is fully bundled into dist/ and main.cjs/preload.cjs use
 # Electron builtins plus electron-updater (§3), so src/, the vite scaffolding
-# and every other node_module stay out of the bundle. The closure is computed,
-# not hand-pinned, so an electron-updater upgrade can never silently strand a
-# missing transitive dependency inside the bundle.
+# and every other node_module stay out of the bundle. The packager gets an
+# ALLOWLIST (§3 bundle trimming): every top-level entry under app/ that is not
+# named ships nowhere, so a stray gitignored directory (vitest's coverage/ and
+# the design-sync .ds-css/ both rode inside app.asar through 0.11.2) can
+# never leak again. The closure is computed, not hand-pinned, so an
+# electron-updater upgrade can never silently strand a missing transitive
+# dependency inside the bundle.
 UPDATER_PKGS="$(cd "$ROOT/app" && node -e '
 const seen = new Set()
 const walk = (name) => {
@@ -102,20 +132,8 @@ echo "· packaging Autowright.app"
   --platform=darwin --arch="$EP_ARCH" --out "$BUILD/pkg" --overwrite \
   --icon "$BUILD/icon.icns" \
   --app-bundle-id ai.autowright.app \
-  --ignore '^/src($|/)' \
-  --ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\$))" \
-  --ignore '^/dev-app-update\.yml$' \
-  --ignore '^/e2e($|/)' \
-  --ignore '^/tests($|/)' \
-  --ignore '^/brand-electron\.cjs$' \
-  --ignore '^/ds-entry\.ts$' \
-  --ignore '^/index\.html$' \
-  --ignore '^/vite\.config\.ts$' \
-  --ignore '^/vitest\.config\.ts$' \
-  --ignore '^/vitest\.e2e\.config\.ts$' \
-  --ignore '^/tsconfig\.json$' \
-  --ignore '^/UI-GUIDE\.md$' \
-  --ignore '^/package-lock\.json$')
+  --ignore '^/(?!(electron|dist|node_modules|package\.json)($|/))' \
+  --ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\$))")
 
 APP="$BUILD/pkg/Autowright-darwin-$ARCH/Autowright.app"
 [ -d "$APP" ] || { echo "packaging failed: $APP missing"; exit 1; }
@@ -123,6 +141,18 @@ APP="$BUILD/pkg/Autowright-darwin-$ARCH/Autowright.app"
 echo "· bundling Python → Contents/Resources/python"
 rm -rf "$APP/Contents/Resources/python"
 cp -R "$PYSTAGE" "$APP/Contents/Resources/python"
+
+# ---- trim Electron locales (SPEC §3 bundle trimming) ----
+# English-only app. macOS picks the app's localization from the .lproj markers
+# in Contents/Resources (electron-packager creates one per Chromium locale, all
+# empty) and Electron then loads that locale's pak from the framework's
+# Resources. Drop every non-English pair from both places; Chromium falls back
+# to en-US for anything unmatched. Must land before signing (sealed resources).
+echo "· trimming Electron locales (English only)"
+for dir in "$APP/Contents/Resources" \
+           "$APP/Contents/Frameworks/Electron Framework.framework/Versions/A/Resources"; do
+  find "$dir" -mindepth 1 -maxdepth 1 -name '*.lproj' ! -name 'en*.lproj' -exec rm -rf {} +
+done
 
 # ---- §3 electron-updater config (app-update.yml) ----
 # electron-updater reads it at runtime for its cache directory name (main.cjs
@@ -281,9 +311,14 @@ rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 # ---- DMG (SPEC §3: the install artifact — website download + Homebrew cask) ----
+# ULMO (lzma) per §3 bundle trimming: ~30% smaller than the UDZO (zlib) image
+# shipped through 0.11.2, at the cost of minutes of single-threaded compression
+# here; it mounts in a few seconds. UDBZ (bzip2) is the fast fallback if that
+# build time ever bites.
 DMG="$BUILD/Autowright-$VERSION-darwin-$ARCH.dmg"
 rm -f "$DMG"
-hdiutil create -volname "Autowright" -srcfolder "$APP" -ov -quiet -format UDZO "$DMG"
+echo "· creating DMG (ULMO, takes a while)"
+hdiutil create -volname "Autowright" -srcfolder "$APP" -ov -quiet -format ULMO "$DMG"
 
 # ---- notarize the DMG ----
 codesign --force --timestamp -s "$CODESIGN_IDENTITY" "$DMG"

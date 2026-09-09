@@ -132,6 +132,46 @@ the update bullets below).
   `.pyc` files into `Resources/python`, and any write after signing breaks the bundle's resource
   seal — notarization then rejects the main binary even though the pre-write local verify passed.
   The seal is re-verified immediately before submission.
+- **Bundle trimming (decided):** the distributable ships only what runs. `prod.sh` trims in
+  three places, all **before signing** (the seal covers the final tree), and the in-bundle
+  smoke check runs on the trimmed tree, so a pruned module the backend or a curated package
+  still needs fails the build instead of shipping. (1) **The bundled Python tree**, right
+  after the pip install and before the copy into the bundle: the Tcl/Tk stack goes
+  (`lib/tcl*`, `lib/tk*`, `lib/itcl*`, `lib/thread*`, `lib/libtcl*`, `lib/libtk*`,
+  `lib/python3.X/tkinter`, `idlelib`, `turtledemo`, `turtle.py`, `lib-dynload/_tkinter*`: a
+  GUI toolkit; the backend and every step run headless under launchd), `ensurepip` goes (pip
+  is already installed and upgraded; nothing in the bundle creates venvs), the C-API build
+  scaffolding goes (`include/`, `share/`, `lib/pkgconfig`, `lib/python3.X/config-*`,
+  `site-packages/lxml/includes`: §6.2 installs `--only-binary :all:`, so no extension is ever
+  compiled against the bundled interpreter), and every fat Mach-O (`.so`/`.dylib`) is thinned
+  to the host arch with `lipo -thin` (universal2 wheels such as lxml carry a dead Intel slice
+  on arm64 and vice versa; the file is rewritten in place so its mode survives). **Never
+  trimmed:** `pip` (the §6.2 installer), `__pycache__` (the sealed tree is read-only at
+  runtime; without shipped bytecode the interpreter would try to write it into the bundle on
+  every import), any curated package or any part of one (`lxml.objectify` included: the
+  curated list is the user-facing step environment), and the stdlib beyond the modules named
+  above (`pydoc`, `unittest`, `venv`, `_pyrepl` stay: a step may reasonably use them).
+  (2) **Electron locales:** the app is English-only, so every `*.lproj` other than
+  `en*.lproj` is removed from both `Contents/Resources/` (the empty markers `@electron/packager`
+  creates; they are what macOS reads to pick the app's localization) and
+  `Electron Framework.framework/Versions/A/Resources/` (the `locale.pak` payloads, ~12 MB
+  compressed for the 200+ non-English locales). Chromium falls back to `en-US` for anything
+  unmatched. The Windows/Linux electron-builder legs get the same trim through
+  `build.electronLanguages` (`en`, `en-US`, `en-GB`) in `app/package.json`. (3) **The asar:**
+  `@electron/packager` packages an allowlist (`electron/`, `dist/`, `package.json`, and the
+  computed electron-updater `node_modules` closure) and ignores every other top-level entry
+  under `app/`, so a stray gitignored directory can never ride along again (through 0.11.2 the
+  ignore list was a denylist, and vitest's `coverage/` report, the design-sync `.ds-css/` font
+  cache, and `tsconfig.test.json` all shipped inside `app.asar`). (4) **DMG format:** `hdiutil
+  create -format ULMO` (lzma). Measured on the untrimmed 0.11.2 bundle: UDZO (zlib, the format
+  through 0.11.2) 225 MB / 11 s to create / 4 s to mount, ULFO (lzfse) 199 MB / 10 s, UDBZ
+  (bzip2) 183 MB / 40 s / 9 s to mount, ULMO 156 MB / ~16 min / 7 s to mount. ULMO's
+  single-threaded compression is the one cost, and a release cut (already minutes of
+  notarization) absorbs it; UDBZ is the documented fallback if that ever bites. The update zip
+  stays deflate (`ditto -c -k`): Squirrel.Mac unpacks it with `ditto` and reads nothing else. A §15 drift guard pins the trim steps' position
+  (Python trim between the pip install and the copy into the bundle, locale trim before the
+  codesign step), the never-trimmed names, the packager allowlist, the DMG format, and the
+  electron-builder language list.
 - **CLI on PATH (decided):** the CLI ships only inside the bundle — never via pip/PyPI (a second
   channel would reintroduce a user-provided Python and version skew between CLI and backend,
   which the one-`VERSION` design excludes by construction). The command is a shim script named
