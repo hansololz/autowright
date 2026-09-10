@@ -1019,6 +1019,100 @@ def test_atomic_write_failure_unlinks_tmp_and_keeps_original(tmp_path):
     assert not list(tmp_path.glob(".ad-tmp-*"))               # temp cleaned up
 
 
+def test_atomic_write_fsyncs_the_parent_directory(tmp_path, monkeypatch):
+    """§5: on POSIX the parent directory is fsynced after the rename — the
+    rename itself sits in the directory's page cache until then, so without it
+    a committed write can vanish in a power loss on ext4."""
+    import os
+    import stat
+
+    from autowright import yamlio
+
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd):
+        st = os.fstat(fd)
+        events.append(("fsync", stat.S_ISDIR(st.st_mode), st.st_ino))
+        return real_fsync(fd)
+
+    def spy_replace(src, dst):
+        events.append(("replace", None, None))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(yamlio.os, "fsync", spy_fsync)
+    monkeypatch.setattr(yamlio.os, "replace", spy_replace)
+    yamlio.atomic_write_text(tmp_path / "settings.yaml", "keep: me\n")
+
+    # the file's own fsync, the rename, then the directory's — in that order
+    assert [e[0] for e in events] == ["fsync", "replace", "fsync"]
+    assert events[-1][1] is True                       # a directory fd
+    assert events[-1][2] == os.stat(tmp_path).st_ino   # the parent directory
+
+
+def test_execdb_schema_8_with_indexes_rebuilds(store, home):
+    """§21 (2026-09-09): the three secondary indexes are gone (§5 loads the
+    whole table once and filters in memory). A DB left at `user_version` 8 —
+    indexes and all — is dropped at open and re-seeded from `execution.yaml`,
+    which stays the truth the index only points at."""
+    import sqlite3
+
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Indexed", None)
+    h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(h)
+    db = store.executions_dir() / "executions.db"
+    store.close_exec_db()
+    db.unlink()
+
+    # the shipped schema-8 DB: the same table, its three indexes, and a row
+    # whose header disagrees with the yaml on disk
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+    CREATE TABLE executions (
+      id               TEXT PRIMARY KEY,
+      automation_id    TEXT,
+      automation_name  TEXT NOT NULL,
+      kind             TEXT NOT NULL,
+      version          INTEGER,
+      status           TEXT NOT NULL,
+      "trigger"        TEXT NOT NULL,
+      trigger_sender   TEXT,
+      queued_at        TEXT,
+      started_at       TEXT NOT NULL,
+      finished_at      TEXT,
+      duration_ms      INTEGER,
+      note             TEXT,
+      chip             TEXT,
+      chip_status      TEXT,
+      error_step       TEXT,
+      error_message    TEXT,
+      error_reason     TEXT
+    );
+    CREATE INDEX index_executions_page ON executions (started_at DESC, id);
+    CREATE INDEX index_executions_automation ON executions (automation_id, started_at DESC);
+    CREATE INDEX index_executions_status ON executions (status, started_at DESC);
+    """)
+    with conn:
+        conn.execute('INSERT INTO executions (id, automation_id, automation_name, kind,'
+                     ' version, status, "trigger", started_at)'
+                     " VALUES (?,?,?,?,?,?,?,?)",
+                     (h["id"], a["id"], "Stale", "version", 1, "failed", "manual",
+                      h["started_at"]))
+    conn.execute("PRAGMA user_version=8")
+    conn.close()
+
+    s2 = Store()
+    s2.load_all()
+    r = s2.execs[h["id"]]
+    assert r["status"] == "succeeded" and r["automation_name"] == "Indexed"
+    indexes = [n for (n,) in s2.execdb.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")]
+    assert not [n for n in indexes if n.startswith("index_executions_")]
+    assert s2.execdb.conn.execute("PRAGMA user_version").fetchone()[0] == 10
+
+
 def test_problems_audit_kinds_order_and_precedence(store):
     """§4.1 `problems`: mirrors the §7 pre-step gates from stored facts only —
     at most one entry per record (missing > ungranted > unset), kinds in

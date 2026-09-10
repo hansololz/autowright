@@ -12,19 +12,6 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
 
 ## Shared (both OSes)
 
-- **Service-manager timeout multiplication — all three OSes.** Fixed poll counts multiply
-  with per-probe subprocess timeouts instead of a wall-clock deadline:
-  `platform/windows.py` `_await_running` 20 × a PowerShell probe blocking up to 30 s
-  (`windows.py:243-244`, `:376-383`), `platform/linux.py` `_await_active` 40 × 30 s
-  (`linux.py:34-35`, `:126`), and the macOS `service.py` loops (`:139`, `:248`). Blast
-  radius is smaller than first written up: a probe that *times out* returns an error and
-  aborts the loop, so the pathological case is repeated slow-but-successful probes
-  (~10–20 min ceiling), not stacked timeouts. Replace with a `monotonic()` deadline.
-- **`PRIVACY.md` hardcodes macOS copy** ("your Mac" `:8`, `:26`;
-  `~/Library/Application Support` `:11`; "macOS Keychain" `:13`) and is rendered verbatim
-  in-app (§9.4); needs a per-OS seam (the app's own store-name table is
-  `paths.py:50-51`). The §9.4 legal-disclaimer copy in `spec/ui-shell.md` ("on this
-  Mac") shares the problem.
 - **`managedInstall` answers false on both** (`win32.cjs:122-124`, `linux.cjs:153-156`);
   the probe may later detect a distro-package / winget-style managed install.
 - **Release messaging: Windows is advertised as a regular build; Linux is advertised as
@@ -52,9 +39,6 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   `win32.cjs:151` relies on it (`main.cjs:1274` gates `Menu.setApplicationMenu(null)` on
   `!caps.appMenu`). If a real build does draw it, ship the same one-line
   `appMenu: false` Linux got (Ctrl+C/V/X/A stay Blink-native).
-- **`skills/autowright/SKILL.md:46-49` hardcodes the POSIX PATH help** (`~/.local/bin`,
-  the zsh `~/.zprofile` one-liner) — wrong on Windows; needs per-OS wording before the
-  skill is advertised to Windows users.
 - **NSIS-specific updater behavior has zero test coverage on macOS hosts.** The
   electron-updater describe in `app/tests/main-cjs-leaf.test.ts` runs on every OS, so the
   shared handler logic is covered on mac hosts — but NsisUpdater-specific behavior

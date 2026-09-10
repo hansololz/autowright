@@ -10,12 +10,16 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 # §5: timestamps are stored as the canonical UTC ISO-8601 microsecond TEXT —
 # a fixed offset keeps lexicographic order equal to chronological order, so
-# the indexes below keep sorting correctly and the same-second ordering
-# promise survives a restart.
+# sorting over the loaded rows stays chronological and the same-second
+# ordering promise survives a restart.
+#
+# §5: one table, no secondary indexes — the only query is the full load below,
+# and every filter, sort and page runs over the in-memory set, so an index
+# would only tax each upsert on the execution hot path.
 DDL = """
 CREATE TABLE IF NOT EXISTS executions (
   id               TEXT PRIMARY KEY,
@@ -37,9 +41,6 @@ CREATE TABLE IF NOT EXISTS executions (
   error_message    TEXT,
   error_reason     TEXT
 );
-CREATE INDEX IF NOT EXISTS index_executions_page   ON executions (started_at DESC, id);
-CREATE INDEX IF NOT EXISTS index_executions_automation   ON executions (automation_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS index_executions_status ON executions (status, started_at DESC);
 """
 
 

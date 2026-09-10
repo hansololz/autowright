@@ -393,8 +393,9 @@ not already present, and triggers the user added themselves always survive.
 ## Parameters
 
 Every param has a kind and a default. A definition's keys are exactly `name`, `kind`,
-`default`, `label`, `help`, and the per-kind extras below (`min`, `placeholder`,
-`validate`); anything else is dropped. Kinds:
+`default`, `label` (the setting's title as the user sees it), `help` (one short line
+under it), and the per-kind extras below (`min`, `placeholder`, `validate`); anything
+else is dropped. Kinds:
 
 | Kind     | Holds                                                         |
 |----------|---------------------------------------------------------------|

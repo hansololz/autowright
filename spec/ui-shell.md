@@ -1120,7 +1120,10 @@ also open itself after an update (below) with the About page nowhere in sight.
   your data lives."; right-side "View" button opens the doc modal (title
   "Privacy policy") rendering `docs/PRIVACY.md` (§17) — the canonical
   copy, shipped into the bundle by the raw import, so the same text serves
-  GitHub visitors and the app. The file opens with an `# Privacy policy` H1 for
+  GitHub visitors and the app. Because one text serves every OS, its wording is
+  OS-neutral: "your computer", the per-OS data folder spelled out for all three
+  platforms, and "your operating system's secret store" naming the Keychain, Credential
+  Manager, and Secret Service alike — never a bare "your Mac". The file opens with an `# Privacy policy` H1 for
   GitHub; the app strips the first H1 line before rendering (the modal title
   already says it).
 - **Terms of service** - sub-line "No warranty, and your automations are your

@@ -101,6 +101,11 @@ def _remove_shim() -> str | None:
 
 LAUNCHCTL_TIMEOUT_S = 30
 _TIMED_OUT = "launchctl timed out"
+# The §3 registration polls are bounded by wall-clock deadlines, never a poll
+# count: a slow `launchctl print` must not stretch one verb into minutes.
+_UNLOAD_DEADLINE_S = 10.0
+_SWEEP_DEADLINE_S = 5.0  # the stop's second window, after the stray sweep
+_POLL_INTERVAL_S = 0.25
 
 
 class _TimedOut:
@@ -136,10 +141,13 @@ def _unload(p: Path) -> None:
     and leaves no registration at all (§3)."""
     if _launchctl("bootout", f"gui/{os.getuid()}/{LABEL}").returncode != 0:
         _launchctl("unload", str(p))
-    for _ in range(40):
+    deadline = time.monotonic() + _UNLOAD_DEADLINE_S
+    while True:
         if not _registered():
             return
-        time.sleep(0.25)
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(_POLL_INTERVAL_S)
 
 
 def _load(p: Path) -> str | None:
@@ -245,10 +253,13 @@ def stop() -> str:
         # bootout already requested removal, so KeepAlive cannot respawn the
         # job — the sweep's kill is what lets launchd finish a removal that
         # outlived _unload's wait. Give it a short second window.
-        for _ in range(20):
+        deadline = time.monotonic() + _SWEEP_DEADLINE_S
+        while True:
             if not _registered():
                 break
-            time.sleep(0.25)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_POLL_INTERVAL_S)
     if _registered():
         return "stop failed: launchd still reports the job"
     note = f" · ended {n} lingering process(es)" if n else ""

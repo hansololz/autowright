@@ -401,7 +401,9 @@ excludes them (a mid-execution trigger skip must not shadow the live execution's
 list row, detail page, or menu bar report about real executions.
 
 Executions load **headers-eagerly, bodies-lazily**: startup reads every header row from the
-`executions.db` index into an in-memory `executions` table — one header per execution with
+`executions.db` index (one table, **no secondary indexes** — the only query is that full
+load, and every filter, sort, and page runs over the in-memory set, so an index would
+only tax each upsert) into an in-memory `executions` table — one header per execution with
 `id, automation_id, status, trigger, kind, version, queued_at, started_at, finished_at, duration_ms`, plus the
 light display fields (`automation_name`, `note`, `chip`/`chip_status`, `trigger_sender` —
 the §4.5 `triggerPayload` sender for list rows, stamped onto the header **once at record
@@ -447,7 +449,8 @@ reach it.
 Rules:
 
 - Every write goes disk-first (atomic temp-write + rename for files — `execution.yaml`
-  included; a committed transaction for the `executions.db` index), then the in-memory state
+  included; on POSIX the parent directory is fsynced after the rename, so a committed
+  write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index), then the in-memory state
   updates. A crash between the two self-heals at the next startup, since startup rebuilds
   everything from disk: after loading the DB index, startup scans `executions/` for
   directories the index doesn't know (crash between the yaml write and the DB upsert, or a

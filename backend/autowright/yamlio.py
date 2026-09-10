@@ -35,6 +35,24 @@ def load_yaml(path: Path, default: Any = None) -> Any:
     return load_yaml_checked(path, default)[0]
 
 
+def _fsync_dir(d: Path) -> None:
+    """§5: on POSIX the parent directory is fsynced after the rename, so a
+    committed write survives a power loss on ext4 as well as APFS (the rename
+    itself is only in the directory's page cache until then). Windows has no
+    directory handle to sync, and a failure here never fails the write — the
+    bytes are already on disk."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        log.warning("can't fsync the directory %s (%s) — the write is committed anyway", d, e)
+
+
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ad-tmp-")
@@ -46,6 +64,7 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
     except BaseException:
         try:
             os.unlink(tmp)

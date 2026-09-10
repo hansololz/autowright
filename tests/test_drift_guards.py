@@ -17,6 +17,8 @@ Three guards, all deliberately dumb (read the file, pull the fact out, compare):
    the release that exists, is invisible until an installed copy tries to
    update. The frozen §3 legacy bridge feeds get their own guard: they are
    load-bearing for stranded 0.6.0 installs, so a rewrite past 0.6.1 is a bug.
+4. the §4.2 resolved-value parameter keys: the §20 CLI is a pure leaf and
+   cannot import the store, so the same tuple is spelled out in both modules.
 """
 import json
 import re
@@ -78,6 +80,20 @@ def test_version_agrees_across_every_site():
     assert not mismatched, (
         f"version drift: VERSION says {version!r} but: {mismatched}. "
         "Re-sync with `./scripts/release.sh --sync`.")
+
+
+# ---------------------------------------------------------------- §4.2 param values
+
+def test_param_value_keys_agree_between_the_cli_and_the_store():
+    """§4.2: the resolved-value keys `merged_params` adds must never persist
+    inside a versioned definition, and the §20 CLI strips them on pull with its
+    own copy of the tuple — it is a pure leaf that cannot import the store, so
+    nothing but this guard catches the two copies diverging."""
+    from autowright import cli, storage
+
+    assert cli.PARAM_VALUE_KEYS == storage.PARAM_VALUE_KEYS, (
+        "the CLI's §4.2 resolved-value keys drifted from the store's — a key "
+        "missing on either side leaks a value into a pulled definition")
 
 
 # ---------------------------------------------------------------- §6.2 curated list

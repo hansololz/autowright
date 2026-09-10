@@ -525,10 +525,11 @@ def test_stop_sweeps_strays_after_the_bootout(svc, monkeypatch):
 
 
 @launchd_only
-def test_stop_gives_launchd_a_second_window_after_the_sweep(svc, monkeypatch):
+def test_stop_gives_launchd_a_second_window_after_the_sweep(svc, monkeypatch,
+                                                              poll_clock):
     """§3: bootout can outlive _unload's own wait — the sweep's kill is what
     lets launchd finish the removal, so stop re-polls before judging."""
-    monkeypatch.setattr(svc.mod.time, "sleep", lambda _s: None)
+    poll_clock(svc.mod)  # no real waits inside the §3 deadline polls
     svc.plist.parent.mkdir(parents=True, exist_ok=True)
     svc.plist.write_bytes(b"<plist/>")
     state = {"swept": False, "polls": 0}
@@ -553,10 +554,10 @@ def test_stop_gives_launchd_a_second_window_after_the_sweep(svc, monkeypatch):
 
 
 @launchd_only
-def test_stop_fails_when_the_job_outlives_the_sweep(svc, monkeypatch):
+def test_stop_fails_when_the_job_outlives_the_sweep(svc, monkeypatch, poll_clock):
     """A job launchd still reports after the sweep is still a failed stop
     (exit 1) — the app must not quit its UI on top of a live backend."""
-    monkeypatch.setattr(svc.mod.time, "sleep", lambda _s: None)
+    poll_clock(svc.mod)  # no real waits inside the §3 deadline polls
     monkeypatch.setattr(svc.mod, "_sweep_strays", lambda: 1)
     monkeypatch.setattr(svc.mod, "_registered", lambda: True)
     svc.plist.parent.mkdir(parents=True, exist_ok=True)
@@ -564,6 +565,65 @@ def test_stop_fails_when_the_job_outlives_the_sweep(svc, monkeypatch):
     out = svc.mod.stop()
     assert out == "stop failed: launchd still reports the job"
     assert svc.mod.result_code(out) == 1
+
+
+@launchd_only
+def test_unload_wait_is_bounded_by_a_wall_clock_deadline(svc, monkeypatch,
+                                                         poll_clock):
+    """§3: the bootout wait is a 10 s wall-clock deadline, never a poll count —
+    a `launchctl print` that takes seconds to answer must not stretch the wait
+    into minutes. The deadline is checked after every probe, so a slow probe
+    ends the loop instead of extending it."""
+    clock = poll_clock(svc.mod)
+    probes = []
+
+    def slow_registered():
+        probes.append(clock.now)
+        clock.sleep(3)  # the probe itself blocks for 3 s
+        return True     # the job never goes away
+
+    monkeypatch.setattr(svc.mod, "_registered", slow_registered)
+    svc.plist.parent.mkdir(parents=True, exist_ok=True)
+    svc.plist.write_bytes(b"<plist/>")
+    svc.mod._unload(svc.plist)
+    # Every probe started inside the deadline, and the wait ended once one
+    # overran it — never 40 probes of 3 s.
+    assert probes[-1] < svc.mod._UNLOAD_DEADLINE_S
+    assert clock.now >= svc.mod._UNLOAD_DEADLINE_S
+    assert 1 < len(probes) <= 5
+
+
+@launchd_only
+def test_stops_second_window_is_bounded_by_a_wall_clock_deadline(svc, monkeypatch,
+                                                                 poll_clock):
+    """§3: the window after the sweep is 5 s of wall clock — the same rule as
+    the bootout wait, half the budget — and a still-registered job is still a
+    failed stop."""
+    clock = poll_clock(svc.mod)
+    state = {"swept": False}
+    probes = []
+
+    def sweep():
+        state["swept"] = True
+        return 1
+
+    def slow_registered():
+        if state["swept"]:
+            probes.append(clock.now)
+        clock.sleep(3)  # the probe itself blocks for 3 s
+        return True     # the job never goes away
+
+    monkeypatch.setattr(svc.mod, "_sweep_strays", sweep)
+    monkeypatch.setattr(svc.mod, "_registered", slow_registered)
+    svc.plist.parent.mkdir(parents=True, exist_ok=True)
+    svc.plist.write_bytes(b"<plist/>")
+    out = svc.mod.stop()
+    assert out == "stop failed: launchd still reports the job"
+    assert svc.mod.result_code(out) == 1
+    # probes[0] is the guard that opens the window and probes[-1] the judging
+    # probe after it; the window's own probes all started inside its 5 s.
+    assert probes[-2] - probes[1] < svc.mod._SWEEP_DEADLINE_S
+    assert 1 < len(probes) <= 5
 
 
 @launchd_only
@@ -589,10 +649,10 @@ def test_main_dispatches_stop(dispatch, capsys):
 
 
 @launchd_only
-def test_stop_failed_when_still_registered(svc, monkeypatch, capsys):
+def test_stop_failed_when_still_registered(svc, monkeypatch, capsys, poll_clock):
     # launchd refuses both bootout and legacy unload and keeps the job:
     # stop must report failure (exit 1) — the app then must not quit (§3).
-    monkeypatch.setattr(svc.mod.time, "sleep", lambda _s: None)
+    poll_clock(svc.mod)  # no real waits inside the §3 deadline polls
     svc.plist.parent.mkdir(parents=True, exist_ok=True)
     svc.plist.write_bytes(b"<plist/>")
     svc.registered["job"] = True

@@ -931,6 +931,14 @@ export const anyModalOpen = () => modalStack.length > 0
  * stacked above it, exactly as the Modal's own Escape handler does. */
 export const isTopModal = (zIndex = 60) => topModal()?.z === zIndex
 
+/** §14: what Tab may reach inside an open card. Disabled controls and
+ * `tabindex="-1"` holders (the card itself) are out; layout-based visibility is
+ * not tested (it would force a reflow on every Tab), only the `hidden`
+ * attribute, which is what the app uses to withhold a control. */
+const FOCUSABLE_IN_CARD =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]),'
+  + ' textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog', ariaLabel, guardClose, children }: {
   onClose: () => void; width: number; zIndex?: number; cardStyle?: React.CSSProperties
   role?: 'dialog' | 'alertdialog'; ariaLabel?: string
@@ -949,14 +957,49 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
   const guard = useRef(guardClose)
   guard.current = guardClose
   const escape = () => { if (!guard.current || guard.current()) setClosing(true) }
+  const card = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const entry = { id: Symbol('modal'), z: zIndex }
     modalStack.push(entry)
+    // §14: a card that opens while focus sits outside it takes focus, so the
+    // very first Tab is already inside the trap. Focus a child put on itself
+    // (a modal that autofocuses its input) is left alone — and re-running this
+    // effect (StrictMode mounts twice) then finds focus already inside and
+    // does nothing.
+    if (card.current && !card.current.contains(document.activeElement)) {
+      card.current.focus({ preventScroll: true })
+    }
+    // §14: Tab wraps within the card — the last focusable element leads back to
+    // the first and Shift+Tab back to the last, so no keypress reaches the page
+    // underneath. Only the top-most card traps, exactly as Escape does: a
+    // stacked confirm owns Tab and the card beneath it yields.
+    const trap = (e: KeyboardEvent) => {
+      if (!card.current) return
+      const items = [...card.current.querySelectorAll<HTMLElement>(FOCUSABLE_IN_CARD)]
+        .filter((el) => !el.closest('[hidden]'))
+      // A card with nothing to focus keeps the focus it took on open.
+      if (!items.length) { e.preventDefault(); card.current.focus({ preventScroll: true }); return }
+      const active = document.activeElement
+      const inside = card.current.contains(active)
+      if (e.shiftKey) {
+        // Backwards off the first element — or off the card itself, which sits
+        // ahead of them all — wraps to the last.
+        if (!inside || active === card.current || active === items[0]) {
+          e.preventDefault()
+          items[items.length - 1].focus()
+        }
+      } else if (!inside || active === items[items.length - 1]) {
+        e.preventDefault()
+        items[0].focus()
+      }
+    }
     const onKey = (e: KeyboardEvent) => {
       // §9.3: the developer-log overlay owns Escape while it is open — a modal
       // open underneath yields to it, like every other shortcut.
       if (devlogOverlayOpen()) return
-      if (e.key === 'Escape' && topModal()?.id === entry.id) escape()
+      if (topModal()?.id !== entry.id) return
+      if (e.key === 'Escape') escape()
+      else if (e.key === 'Tab') trap(e)
     }
     document.addEventListener('keydown', onKey)
     return () => {
@@ -986,7 +1029,7 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
           : 'adFadeIn var(--t-enter) var(--ease-enter) both',
       }}
     >
-      <div role={role} aria-modal="true" aria-label={ariaLabel} style={{
+      <div ref={card} role={role} aria-modal="true" aria-label={ariaLabel} tabIndex={-1} style={{
         background: 'var(--bg-menu)', border: '1px solid var(--border-input)', borderRadius: 12,
         boxShadow: 'var(--shadow-modal)', width, padding: '22px 24px',
         animation: closing ? EXIT_DOWN : ENTER_UP,

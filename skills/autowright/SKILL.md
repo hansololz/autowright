@@ -43,7 +43,8 @@ operation the app's UI offers is available there.
 6. **If `autowright` isn't found on PATH**, the CLI is disabled or not installed. Stop and
    ask the user to enable it — never talk to the backend's HTTP API directly, and never
    install or move files yourself. Tell them: open **Autowright → Settings → COMMAND LINE**
-   and turn on "The `autowright` command" (installs to `~/.local/bin`, no password needed).
+   and turn on "The `autowright` command" (installs to `~/.local/bin` on macOS and Linux,
+   `%LOCALAPPDATA%\Autowright\bin` on Windows; no password needed).
    If the toggle is already on, the card shows either a **Reinstall** button (the command
    file is missing) or an **Add it to your PATH** row with a copyable command — the card
    shows the exact command for this machine, so have the user copy it from there rather

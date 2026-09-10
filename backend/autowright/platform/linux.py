@@ -29,9 +29,10 @@ UNIT_NAME = f"{LABEL}.service"
 
 SYSTEMCTL_TIMEOUT_S = 30
 _TIMED_OUT = "systemctl timed out"
-# The §3 active-state poll: 40 × 0.25 s = 10 s, the same window as launchd's
-# bootout wait.
-_POLL_TRIES = 40
+# The §3 active-state poll: a 10 s wall-clock deadline, the same window as
+# launchd's bootout wait — never a probe count, so a slow but answering
+# `systemctl` can't stretch one verb into minutes.
+_POLL_DEADLINE_S = 10.0
 _POLL_INTERVAL_S = 0.25
 
 
@@ -123,14 +124,16 @@ def _await_active(want: bool) -> str | None:
     `systemctl` invocation proves nothing — success is only ever the state
     systemd actually reports afterwards."""
     state = ""
-    for attempt in range(_POLL_TRIES):
-        if attempt:
-            time.sleep(_POLL_INTERVAL_S)
+    deadline = time.monotonic() + _POLL_DEADLINE_S
+    while True:
         state, err = _active_state()
         if err:
             return err
         if (state == "active") == want:
             return None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_POLL_INTERVAL_S)
     if want:
         return f"the unit is enabled but did not start (state {state})"
     return "the unit is still running"

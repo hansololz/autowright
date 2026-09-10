@@ -227,8 +227,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   execution directory aside under the store lock and removes the renamed tree outside it, so
   no `rmtree` ever runs under the lock — deleting an automation does the same with its whole
   tree, and so does every memory-tree removal (clearing memory, deleting or pruning a
-  snapshot, dropping the displaced tree on a restore, discarding a draft with its memory
-  copy) — and an aside dir a crash left behind, `.ad-tmp-deleted-*`, is swept at the next
+  snapshot, dropping the displaced tree on a restore — its crash leftovers included —
+  discarding a draft with its memory copy; the pending create-mode slot's children are
+  renamed aside *beside* the slot, since the emptied slot itself must vanish). One
+  process-wide reaper thread removes the aside trees — and an aside dir a crash left behind, `.ad-tmp-deleted-*`, is swept at the next
   startup reconcile), the backend evaluates
   every automation's §4.1 `overdue` state. An automation
   observed overdue at **two consecutive sweeps** gets one macOS notification — title the

@@ -710,6 +710,30 @@ def test_windows_missing_powershell_is_a_plain_failure_line(monkeypatch):
     assert service.result_code(out) == 1
 
 
+def test_windows_state_poll_is_bounded_by_a_wall_clock_deadline(monkeypatch,
+                                                                poll_clock):
+    """§3: the Running / not-Running poll is bounded by a 5 s wall-clock
+    deadline, never a probe count multiplied by the probe's own timeout — a
+    slow but answering PowerShell can't stretch one verb into minutes. The
+    deadline is checked after every probe, so a slow probe ends the loop
+    instead of extending it."""
+    clock = poll_clock(windows)
+    probes = []
+
+    def slow_query():
+        probes.append(clock.now)
+        clock.sleep(3)  # the PowerShell probe itself takes 3 s
+        return "Ready", None  # the task never reaches Running
+
+    monkeypatch.setattr(windows, "_query_state", slow_query)
+    err = windows._await_running(True)
+    # The unreached state still reads as the plain §3 not-started failure.
+    assert err == "the task is registered but did not start (state Ready)"
+    assert probes[-1] < windows._POLL_DEADLINE_S
+    assert clock.now >= windows._POLL_DEADLINE_S
+    assert 1 < len(probes) <= 3
+
+
 # ------------------------------------------------------ §3 Windows .cmd shim
 
 def test_windows_shim_paths_and_text(monkeypatch, tmp_path):
@@ -1053,6 +1077,27 @@ def test_linux_build_probes_the_host_tools(monkeypatch):
         "imessage": False, "notifications": False, "keepAwake": False,
         "service": False, "agentInstall": True}
     assert plat.service.install() == "install failed: not supported on Linux yet"
+
+
+def test_linux_active_poll_is_bounded_by_a_wall_clock_deadline(monkeypatch,
+                                                              poll_clock):
+    """§3: the active / inactive poll is bounded by a 10 s wall-clock deadline,
+    the same rule as Windows — a slow `systemctl is-active` ends the loop
+    instead of extending it."""
+    clock = poll_clock(linux)
+    probes = []
+
+    def slow_state():
+        probes.append(clock.now)
+        clock.sleep(3)  # the systemctl probe itself takes 3 s
+        return "activating", None  # the unit never reaches active
+
+    monkeypatch.setattr(linux, "_active_state", slow_state)
+    err = linux._await_active(True)
+    assert err == "the unit is enabled but did not start (state activating)"
+    assert probes[-1] < linux._POLL_DEADLINE_S
+    assert clock.now >= linux._POLL_DEADLINE_S
+    assert 1 < len(probes) <= 5
 
 
 # ---------------------------------------------------- §3 degraded service verbs

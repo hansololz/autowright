@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy policy - Autowright</title>
-<meta name="description" content="The privacy policy for Autowright, the free, open source Mac automation app: it collects nothing, everything stays on your Mac, and every network connection it can make is listed with its off switch.">
+<meta name="description" content="The privacy policy for Autowright, the free, open source desktop automation app: it collects nothing, everything stays on your computer, and every network connection it can make is listed with its off switch.">
 <meta name="theme-color" content="#090d14">
 <meta name="author" content="David Zhang">
 <meta name="robots" content="index, follow">
@@ -152,24 +152,24 @@
   <article>
     <div class="eyebrow">Legal</div>
     <h1>Privacy policy</h1>
-    <div class="updated">Last updated: 2026-08-28</div>
+    <div class="updated">Last updated: 2026-09-09</div>
 
     <p class="lede">Autowright collects nothing. There is no telemetry, no analytics, no crash reporting, no account, and no Autowright server. This page explains where your data lives and the few network connections the app can make - each one listed below, with its off switch.</p>
 
-    <h2>Everything stays on your Mac</h2>
+    <h2>Everything stays on your computer</h2>
     <ul>
-      <li><strong>Automations, versions, executions, settings</strong> are stored in <code>~/Library/Application Support/Autowright</code> (execution data location is changeable in Settings). Nothing is synced or uploaded.</li>
-      <li><strong>Secrets</strong> (passwords, API keys) are stored in the macOS Keychain. Secret values never appear in scripts, logs, or exported files, and are injected only at execution time.</li>
+      <li><strong>Automations, versions, executions, settings</strong> are stored in Autowright's data folder: <code>~/Library/Application Support/Autowright</code> on macOS, <code>%LOCALAPPDATA%\Autowright</code> on Windows, <code>~/.local/share/autowright</code> on Linux (execution data location is changeable in Settings). Nothing is synced or uploaded.</li>
+      <li><strong>Secrets</strong> (passwords, API keys) are stored in your operating system's secret store: the macOS Keychain, Windows Credential Manager, or the Linux Secret Service keyring. Secret values never appear in scripts, logs, or exported files, and are injected only at execution time.</li>
       <li><strong>Memory and logs</strong> stay in the same local folders. You can open, snapshot, or delete all of it at any time.</li>
     </ul>
 
     <h2>The AI you connect is your choice</h2>
-    <p>When you create or edit an automation, Autowright sends the drafting context - your description, the automation's spec, build instructions, and related step code - to the AI agent <strong>you</strong> connected (Claude Code, Gemini CLI, Codex, or OpenCode). That data is handled under that provider's own terms and privacy policy, using your own account. If you use OpenCode with a local Ollama model, drafting also stays entirely on your Mac.</p>
+    <p>When you create or edit an automation, Autowright sends the drafting context - your description, the automation's spec, build instructions, and related step code - to the AI agent <strong>you</strong> connected (Claude Code, Gemini CLI, Codex, or OpenCode). That data is handled under that provider's own terms and privacy policy, using your own account. If you use OpenCode with a local Ollama model, drafting also stays entirely on your computer.</p>
 
     <h2>Network connections Autowright itself makes</h2>
     <ul>
       <li><strong>Check for updates</strong> - once a day by default: one request to GitHub (raw.githubusercontent.com, where the update feed lives) to read the latest version number, nothing more. Turn off "Check for updates automatically" on the About page and Autowright never checks in the background - only when you press the button. Downloading an update - always started by you - also fetches it from GitHub. Those servers see your IP address, as with any web request.</li>
-      <li><strong>Installing an AI tool, a model, or a Python library</strong> - only when you ask during setup, or when an automation you save declares a library it needs. AI tools (Claude Code, Codex, Gemini CLI, OpenCode, and the Ollama app) download from each vendor's official source: the vendor's own installer script, npm for Gemini CLI, or ollama.com for the Ollama app. Local models download through Ollama from its model library (ollama.com). Python libraries download from PyPI (pypi.org) through pip as prebuilt wheels only, never built from source, into Autowright's own folder under Application Support; only the packages named in that automation's manifest, and only when one is missing or you press Update on its Packages card. Once installed, the Ollama app keeps itself up to date on its own, under Ollama's policy.</li>
+      <li><strong>Installing an AI tool, a model, or a Python library</strong> - only when you ask during setup, or when an automation you save declares a library it needs. AI tools (Claude Code, Codex, Gemini CLI, OpenCode, and the Ollama app) download from each vendor's official source: the vendor's own installer script, npm for Gemini CLI, or ollama.com for the Ollama app. Local models download through Ollama from its model library (ollama.com). Python libraries download from PyPI (pypi.org) through pip as prebuilt wheels only, never built from source, into Autowright's own data folder; only the packages named in that automation's manifest, and only when one is missing or you press Update on its Packages card. Once installed, the Ollama app keeps itself up to date on its own, under Ollama's policy.</li>
     </ul>
     <p>That is the complete list. Your automations' scripts can of course reach the network themselves - but only in the ways you reviewed and saved.</p>
 

@@ -306,7 +306,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   - Modals (shared `Modal` shell in `ui.tsx`: backdrop + card, used by the secret add/edit
     modal and `ConfirmModal`) animate both ways, and every dismissal path (backdrop click,
     Escape, Cancel, save/confirm) plays the exit before unmount; confirm actions fire after
-    the exit finishes. A modal may guard its escape paths (`guardClose`): Escape and a
+    the exit finishes. Keyboard focus is **trapped** in the open card: Tab on the card's last
+    focusable element wraps to its first and Shift+Tab wraps back, and a modal that opens
+    while focus sits outside its card moves focus onto the card, so no keypress ever
+    reaches the page underneath (the §9.3 overlay still wins, as for every shortcut). A modal may guard its escape paths (`guardClose`): Escape and a
     backdrop click first ask it whether the dismissal may proceed, so an editor holding
     unsaved text raises its discard confirm instead of closing — the confirm stacks above
     it and Escape closes only the top-most card. The one blocking exception is `BlockingOverlay` (the §4.9 reset

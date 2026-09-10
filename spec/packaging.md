@@ -263,7 +263,9 @@ the update bullets below).
     verification as macOS; `uninstall` = stop + `Unregister-ScheduledTask`; `status` =
     `Get-ScheduledTask` state line; `stop` = `Stop-ScheduledTask` only — the task stays
     registered and returns at next logon (mirrors the macOS "bootout only" rule); `restart`
-    = stop + start. Every verb answers a §3-style result line so `service.result_code`
+    = stop + start. The Running / not-Running state poll is bounded by a **5 s wall-clock
+    deadline** — never a probe count multiplied by the probe's own timeout, so a slow but
+    answering PowerShell can't stretch one verb into minutes. Every verb answers a §3-style result line so `service.result_code`
     keeps working, and every PowerShell invocation carries a timeout with a plain-word
     failure on expiry (the same never-hang rule as `launchctl`'s 30 s cap).
   - Log routing: Task Scheduler does not capture stdout/stderr the way launchd does — on
@@ -324,7 +326,9 @@ the update bullets below).
     discovery-port note) mapped to the same three states as macOS: `active (pid N)`,
     `stopped (unit present) — returns at next login or app launch` (exit 0 — stopped on
     purpose is not a failure), `not installed` (exit 1); `stop` = `systemctl --user stop`
-    only — the unit stays enabled and returns at next login (the "bootout only" rule) —
+    only — the unit stays enabled and returns at next login (the "bootout only" rule; the
+    active / inactive state poll is bounded by a 10 s wall-clock deadline, same rule as
+    Windows) —
     plus the §3 stray-process sweep; `restart` = `systemctl --user restart` + active poll.
   - Log routing: `StandardOutput=append:` / `StandardError=append:` to the §5 logs root's
     `backend.out.log` / `backend.err.log` — the same file capture as launchd, so the §9.3
@@ -393,7 +397,9 @@ the update bullets below).
   service stays registered regardless once onboarding completes.
   **One explicit exception:** the Settings page's "Quit Autowright entirely" action (§4.9 QUIT
   card). It runs `python -m autowright.service stop` and then quits the Electron app; the
-  plist and the CLI shim stay on disk. `stop` is bootout **plus a stray-process sweep**: after
+  plist and the CLI shim stay on disk. The wait for launchd to finish a bootout is bounded
+  by a 10 s wall-clock deadline (5 s for the second window after the sweep), never a poll
+  count. `stop` is bootout **plus a stray-process sweep**: after
   launchd deregisters the job (or the 10 s deregistration wait expires), the stop TERM-then-KILLs
   every remaining process whose command line carries an Autowright marker (the §2
   `kill_matching` primitive), always excluding the stop process itself and its own process

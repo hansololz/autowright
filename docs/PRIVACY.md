@@ -5,12 +5,13 @@ reporting, no account, and no Autowright server. This page explains where your
 data lives and the few network connections the app can make — each one listed
 below, with its off switch.
 
-## Everything stays on your Mac
+## Everything stays on your computer
 
 - **Automations, versions, executions, settings** are stored in
-  `~/Library/Application Support/Autowright` (execution data location is
-  changeable in Settings). Nothing is synced or uploaded.
-- **Secrets** (passwords, API keys) are stored in the macOS Keychain. Secret
+  Autowright's data folder: `~/Library/Application Support/Autowright` on macOS,
+  `%LOCALAPPDATA%\Autowright` on Windows, `~/.local/share/autowright` on Linux
+  (execution data location is changeable in Settings). Nothing is synced or uploaded.
+- **Secrets** (passwords, API keys) are stored in your operating system's secret store: the macOS Keychain, Windows Credential Manager, or the Linux Secret Service keyring. Secret
   values never appear in scripts, logs, or exported files, and are injected
   only at execution time.
 - **Memory and logs** stay in the same local folders. You can open, snapshot,
@@ -23,7 +24,7 @@ your description, the automation's spec, build instructions, and related step
 code — to the AI agent **you** connected (Claude Code, Gemini CLI, Codex, or
 OpenCode). That data is handled under that provider's own terms and privacy
 policy, using your own account. If you use OpenCode with a local Ollama model,
-drafting also stays entirely on your Mac.
+drafting also stays entirely on your computer.
 
 ## Network connections Autowright itself makes
 
@@ -41,7 +42,7 @@ drafting also stays entirely on your Mac.
   script, npm for Gemini CLI, or ollama.com for the Ollama app. Local models
   download through Ollama from its model library (ollama.com). Python libraries
   download from PyPI (pypi.org) through pip as prebuilt wheels only, never built
-  from source, into Autowright's own folder under Application Support; only the
+  from source, into Autowright's own data folder; only the
   packages named in that automation's manifest, and only when one is missing or
   you press Update on its Packages card. Once installed, the Ollama app keeps
   itself up to date on its own, under Ollama's policy.
@@ -54,4 +55,4 @@ network themselves — but only in the ways you reviewed and saved.
 This policy lives at the root of the repository; any change to it is visible in
 the project's git history.
 
-_Last updated: 2026-08-28_
+_Last updated: 2026-09-09_

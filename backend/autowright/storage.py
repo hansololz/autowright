@@ -279,6 +279,48 @@ def resolve_param_value(d: dict, values: dict, warn: list[str] | None = None) ->
     return param_default(d)
 
 
+# ---------- background reaper (§6: no rmtree ever runs under the lock) ----------
+# §6: ONE process-wide reaper thread removes the aside trees — the queue and the
+# thread live on the module, not on the Store, so a second Store (the §4.9
+# data-location reload builds one) reuses the same drainer instead of leaving a
+# thread behind per instance.
+_reap_queue: queue.Queue = queue.Queue()
+_reap_thread: threading.Thread | None = None
+_reap_start_lock = threading.Lock()
+
+
+def _reap_loop() -> None:
+    while True:
+        path = _reap_queue.get()
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        finally:
+            _reap_queue.task_done()
+
+
+def reap_later(path: Path) -> None:
+    """Hand an already-renamed-aside tree to the reaper thread. Every delete of
+    a potentially large tree (an execution dir, an automation dir, a memory dir,
+    a snapshot, a draft) renames it aside under the lock — O(1) — and queues the
+    aside path here, so the walk itself never stalls a firing or a live log
+    append. The thread starts on the first delete: a process that never deletes
+    never spawns it."""
+    global _reap_thread
+    with _reap_start_lock:
+        if _reap_thread is None:
+            _reap_thread = threading.Thread(target=_reap_loop, name="autowright-reaper",
+                                            daemon=True)
+            _reap_thread.start()
+    _reap_queue.put(path)
+
+
+def drain_reaper() -> None:
+    """Wait until every queued aside dir is gone. Nothing in the app needs to
+    know when the bytes are actually removed — this exists so tests can assert
+    on the disk after a delete."""
+    _reap_queue.join()
+
+
 class StoreUnwritableError(RuntimeError):
     """§5 read-only degradation: the target file failed to load this session,
     so writing it back would overwrite the user's data with the default."""
@@ -321,11 +363,6 @@ class Store:
         # §5 log line cap: (execution_id, file name) → lines written so far,
         # seeded from disk on first append (see append_log_line).
         self._log_counts: dict[tuple[str, str], int] = {}
-        # §6: the background reaper behind the "no rmtree ever runs under the
-        # lock" rule — aside dirs waiting for their rmtree, drained by one
-        # lazily started daemon thread (see _reap_later).
-        self._reap_queue: queue.Queue = queue.Queue()
-        self._reap_thread: threading.Thread | None = None
 
     # ---------- paths ----------
     def data_path(self) -> Path:
@@ -344,39 +381,23 @@ class Store:
 
     # ---------- background reaper (§6: no rmtree ever runs under the lock) ----------
     def _reap_later(self, path: Path) -> None:
-        """Hand an already-renamed-aside tree to the reaper thread. Every
-        delete of a potentially large tree (an execution dir, an automation
-        dir, a memory dir, a snapshot, a draft) renames it aside under the
-        lock — O(1) — and queues the aside path here, so the walk itself never
-        stalls a firing or a live log append. The thread starts on the first
-        delete: a Store that never deletes never spawns it."""
-        with self.lock:
-            if self._reap_thread is None:
-                self._reap_thread = threading.Thread(target=self._reap_loop, name="autowright-reaper",
-                                                     daemon=True)
-                self._reap_thread.start()
-        self._reap_queue.put(path)
-
-    def _reap_loop(self) -> None:
-        while True:
-            path = self._reap_queue.get()
-            try:
-                shutil.rmtree(path, ignore_errors=True)
-            finally:
-                self._reap_queue.task_done()
+        """Queue an already-renamed-aside tree on the process-wide reaper."""
+        reap_later(path)
 
     def drain_reaper(self) -> None:
-        """Wait until every queued aside dir is gone. Nothing in the app needs
-        to know when the bytes are actually removed — this exists so tests can
-        assert on the disk after a delete."""
-        self._reap_queue.join()
+        """Wait until every queued aside dir is gone (tests assert on disk)."""
+        drain_reaper()
 
-    def _remove_tree(self, d: Path) -> None:
+    def _remove_tree(self, d: Path, aside_parent: Path | None = None) -> None:
         """Delete a directory the way §6 requires: rename it aside (instant,
         so a caller holding store.lock keeps a constant-time hold), then reap
         the aside outside the lock. A crash between the two leaves a
-        `.ad-tmp-deleted-*` sibling, swept at the next load."""
-        aside = d.parent / f"{self.DELETED_PREFIX}{new_id()}"
+        `.ad-tmp-deleted-*` sibling, swept at the next load.
+
+        `aside_parent` puts the aside somewhere other than beside `d` — §6's
+        pending create-mode slot, whose children are renamed aside *beside the
+        slot* because the emptied slot itself must vanish."""
+        aside = (aside_parent or d.parent) / f"{self.DELETED_PREFIX}{new_id()}"
         try:
             d.rename(aside)
         except OSError:
@@ -387,6 +408,12 @@ class Store:
     def load_all(self) -> None:
         with self.lock:
             paths.ensure_dirs()
+            # §6: the twin of the executions/automations sweeps below — a crash
+            # between a delete's aside-rename and its reap. The app-support root
+            # holds the asides of the pending draft slot's children, which are
+            # renamed aside beside the slot.
+            for stale in paths.app_support().glob(f"{self.DELETED_PREFIX}*"):
+                shutil.rmtree(stale, ignore_errors=True)
             self._unreadable = set()
             self.settings = {**DEFAULT_SETTINGS, **self._load_toplevel_mapping(paths.settings_file())}
             # §4.7: an agent entry without its uuid can't be referenced (steps
@@ -1265,7 +1292,11 @@ class Store:
             if a is None:
                 for child in list(dd.iterdir()) if dd.exists() else ():
                     if child.name != "chat.jsonl":
-                        (shutil.rmtree(child, ignore_errors=True) if child.is_dir()
+                        # §6: a child dir can be as big as memory/ — renamed
+                        # aside beside the slot (not inside it, so the emptied
+                        # slot still vanishes below) and reaped outside the
+                        # lock; files are O(1) already.
+                        (self._remove_tree(child, aside_parent=dd.parent) if child.is_dir()
                          else child.unlink(missing_ok=True))
                 if dd.exists() and not any(dd.iterdir()):
                     dd.rmdir()  # no thread kept → the slot vanishes whole, as before
@@ -1770,8 +1801,16 @@ class Store:
                 return 0
             # §5 lenient read: `days` is hand-editable like every other numeric
             # setting — a non-numeric value falls back to the 90-day default
-            # rather than silently disabling the sweep for the session.
-            days = max(1, lenient_int(self.settings.get("days", 90)) or 90)
+            # rather than silently disabling the sweep for the session. A
+            # numeric value is only clamped to the §4.9 minimum of 1, so a
+            # hand-edited 0 sweeps at a one-day window instead of being read as
+            # "no value" (which is why this parses here rather than through
+            # lenient_int, whose 0 can't tell "zero" from "unreadable").
+            try:
+                n = int(self.settings.get("days", 90))
+            except (TypeError, ValueError):
+                n = None
+            days = max(1, n) if n is not None else 90
             cutoff = datetime.now().timestamp() - days * 86400
             doomed = []
             for h in self.execs.values():
@@ -2083,10 +2122,12 @@ class Store:
             # before anything else can delete it.
             if not mem.exists() and old.exists():
                 old.rename(mem)
+            # §6: crash leftovers included — a stale swap dir is as big as
+            # memory/, so it goes aside and is reaped outside the lock too.
             if tmp.exists():
-                shutil.rmtree(tmp)
+                self._remove_tree(tmp)
             if old.exists():
-                shutil.rmtree(old)
+                self._remove_tree(old)
         # `keep=sid` below: the prune must never delete the snapshot being
         # restored — §6.3 says restore is repeatable.
         pre = self.stage_snapshot(a, "pre-restore")

@@ -120,6 +120,77 @@ def test_restore_reaps_the_displaced_memory_tree(store):
     assert list(store.auto_dir(a).glob(f"{store.DELETED_PREFIX}*")) == []
 
 
+def test_one_reaper_thread_serves_every_store(store):
+    """§6: ONE process-wide reaper thread removes the aside trees — a second
+    Store (the §4.9 data-location reload builds one) reuses it instead of
+    leaving a thread behind per instance."""
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Reaped", None)
+    _write_memory(store, a)
+    store.clear_memory(a)
+    store.drain_reaper()
+    reapers = [t for t in threading.enumerate() if t.name == "autowright-reaper"]
+    assert len(reapers) == 1
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    _write_memory(s2, b)
+    s2.clear_memory(b)
+    s2.drain_reaper()
+    # the same thread object, not a second one wearing the same name
+    assert [t for t in threading.enumerate() if t.name == "autowright-reaper"] == reapers
+
+
+def test_pending_slot_children_are_reaped_beside_the_slot(store, home, monkeypatch):
+    """§6: the pending create-mode slot's children are renamed aside *beside*
+    the slot — the emptied slot itself must vanish — and reaped outside the
+    lock, so a draft carrying a memory copy never walks under it."""
+    store.save_draft(None, make_version(), name="Pending")
+    dd = paths.pending_draft_dir()
+    mem = dd / "memory"
+    mem.mkdir(parents=True, exist_ok=True)
+    (mem / "note.txt").write_text("x", encoding="utf-8")
+
+    seen = _rmtree_threads(monkeypatch)  # only the delete's own walks
+    main = threading.current_thread().name
+    store.delete_draft(None)
+    assert not dd.exists()  # no thread kept → the slot vanishes whole
+
+    assert main not in seen  # the walk never happened under the lock
+
+    store.drain_reaper()
+    assert not mem.exists()
+    assert list(home.glob(f"{store.DELETED_PREFIX}*")) == []
+
+
+def test_restore_reaps_stale_swap_leftovers(store, monkeypatch):
+    """§6: "its crash leftovers included" — the stale swap dirs a previous
+    restore died inside are as big as memory/, so they go aside and are reaped
+    outside the lock rather than walked under it."""
+    from autowright.storage import MEMORY_SWAP_OLD, MEMORY_SWAP_TMP
+
+    seen = _rmtree_threads(monkeypatch)
+    a = store.create_automation(make_version(), "Leftovers", None)
+    _write_memory(store, a, text="v: 1\n")
+    m = store.snapshot_memory(a, "manual")
+    _write_memory(store, a, text="v: 2\n")
+    leftovers = [store.auto_dir(a) / MEMORY_SWAP_TMP, store.auto_dir(a) / MEMORY_SWAP_OLD]
+    for stale in leftovers:
+        stale.mkdir()
+        (stale / "seen.yaml").write_text("v: 0\n", encoding="utf-8")
+
+    main = threading.current_thread().name
+    assert store.restore_snapshot(a, m["id"])["id"] == m["id"]
+    assert (store.auto_dir(a) / "memory" / "seen.yaml").read_text(encoding="utf-8") == "v: 1\n"
+    assert not any(stale.exists() for stale in leftovers)
+    assert main not in seen
+
+    store.drain_reaper()
+    assert list(store.auto_dir(a).glob(f"{store.DELETED_PREFIX}*")) == []
+
+
 def test_aside_directories_in_the_new_locations_are_swept_at_load(store, home):
     """§6: a crash between a rename and its reap must leave nothing behind —
     the load sweeps the automation dir and the snapshots dir too, not just
@@ -138,6 +209,21 @@ def test_aside_directories_in_the_new_locations_are_swept_at_load(store, home):
     s2.load_all()
     assert a["id"] in s2.autos
     assert not mem_aside.exists() and not snap_aside.exists()
+
+
+def test_an_aside_in_the_app_support_root_is_swept_at_load(store, home):
+    """§6: the pending slot's children go aside beside the slot, so the
+    app-support root needs the same crash sweep as executions/ and
+    automations/."""
+    from autowright.storage import Store
+
+    aside = paths.app_support() / f"{store.DELETED_PREFIX}slot"
+    aside.mkdir(parents=True)
+    (aside / "note.txt").write_text("x", encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    assert not aside.exists()
 
 
 # ---------- §5: the mapping-or-default read seam ----------
@@ -405,6 +491,23 @@ def test_retention_days_falls_back_to_the_default(store):
     store.settings["days"] = "ninety"
     assert store.retention_cleanup() == 1
     assert old["id"] not in store.execs and recent["id"] in store.execs
+
+
+def test_retention_days_zero_is_clamped_to_one_day(store):
+    """§4.9: `days` is >= 1 — a hand-edited 0 sweeps at a one-day window
+    instead of being read as "no value" and reset to the 90-day default."""
+    from datetime import datetime, timedelta
+
+    a = store.create_automation(make_version(), "Clamped", None)
+    old = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    old["started_at"] = (datetime.now() - timedelta(days=2)).isoformat(timespec="seconds")
+    store.update_execution(old)
+    fresh = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(fresh)
+
+    store.settings["days"] = 0
+    assert store.retention_cleanup() == 1
+    assert old["id"] not in store.execs and fresh["id"] in store.execs
 
 
 # ---------- §4.3: an unreadable one-shot `at` is malformed, not spent ----------

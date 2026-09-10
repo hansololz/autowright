@@ -133,6 +133,15 @@ version that writes the new shape, and the oldest shape still read.
   removed rather than migrated.) First version writing the new shape: the next release
   after 2026-08-26; oldest shape still read: v0.6.0 (key absent). Fixture test:
   `tests/test_storage.py::test_activity_chat_entry_without_durations_round_trips`.
+- **2026-09-09 - `executions.db` secondary indexes dropped (schema 8 → 10).** The three
+  `CREATE INDEX` statements (page / automation / status) were never queried — §5 loads the
+  whole table once and filters in memory — and each one taxed every header upsert on the
+  execution hot path. The DB is an index over the yaml truth, so the migration is the
+  existing schema-version drop-and-rebuild: a DB at `user_version` 8 (or the unreleased 9)
+  is dropped at open and the startup reconcile re-seeds it from `execution.yaml`. First
+  version writing the new shape: the next release after 2026-09-09; oldest shape still
+  read: v0.6.0 (any earlier `user_version` rebuilds the same way). Fixture test:
+  `tests/test_storage.py::test_execdb_schema_8_with_indexes_rebuilds`.
 - **2026-08-24 - `unresolved_references` added to automation.yaml.** The §5.1
   match-or-flag import stores the archive references it could not match as a top-level
   `unresolved_references` map (`{id: {kind, name, description}}`, §4.1) on the imported

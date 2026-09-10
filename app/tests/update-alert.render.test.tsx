@@ -210,7 +210,7 @@ describe('About LEGAL document rows (§9.4)', () => {
     render(<AboutPage />)
     fireEvent.click(viewButtonAfter('Privacy policy', 'Terms of service')!)
     expect(await screen.findByRole('heading', { level: 2, name: 'Privacy policy' })).toBeTruthy()
-    expect(await screen.findByText('Everything stays on your Mac')).toBeTruthy()
+    expect(await screen.findByText('Everything stays on your computer')).toBeTruthy()
     expect(screen.queryByText("Couldn't load the document.")).toBeNull()
   })
 

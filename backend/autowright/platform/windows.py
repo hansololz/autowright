@@ -239,8 +239,11 @@ _OK = "AWOK"  # printed by every mutating script that reached its end
 _STATE_PREFIX = "AWSTATE:"  # prefix of the single line the state query prints
 _ABSENT = "absent"  # the state query's word for "no such task"
 # Start/stop are asynchronous — poll the task's state briefly (§3: never claim
-# success for a task that is not registered or never started).
-_POLL_TRIES = 20
+# success for a task that is not registered or never started). The poll is
+# bounded by a wall-clock deadline, never a probe count multiplied by the
+# probe's own timeout, so a slow but answering PowerShell can't stretch one
+# verb into minutes (§3).
+_POLL_DEADLINE_S = 5.0
 _POLL_INTERVAL_S = 0.25
 
 
@@ -373,14 +376,16 @@ def _await_running(want: bool) -> str | None:
     accepted registration proves nothing — success is only ever the state Task
     Scheduler actually reports afterwards."""
     state = ""
-    for attempt in range(_POLL_TRIES):
-        if attempt:
-            time.sleep(_POLL_INTERVAL_S)
+    deadline = time.monotonic() + _POLL_DEADLINE_S
+    while True:
         state, err = _query_state()
         if err:
             return err
         if (state == "Running") == want:
             return None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_POLL_INTERVAL_S)
     if state == _ABSENT:
         return "the task is gone from Task Scheduler"
     if want:

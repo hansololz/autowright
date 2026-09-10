@@ -120,3 +120,107 @@ describe('Modal guardClose (§14)', () => {
     await waitFor(() => expect(onBackdrop).toHaveBeenCalledTimes(1))
   })
 })
+
+// §14: keyboard focus is trapped in the open card — it takes focus on open
+// (unless a child already holds it), Tab wraps at the ends, and only the
+// top-most card of a stack traps.
+describe('Modal focus trap (§14)', () => {
+  const card = () => screen.getByRole('dialog')
+
+  it('a card that opens while focus sits on the page takes focus', () => {
+    const outside = document.createElement('button')
+    outside.textContent = 'page button'
+    document.body.appendChild(outside)
+    outside.focus()
+    expect(document.activeElement).toBe(outside)
+
+    render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="Takes focus">
+        {() => <button>inside</button>}
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(card())
+    outside.remove()
+  })
+
+  it('a child that autofocuses its own input keeps the focus', () => {
+    render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="Autofocused">
+        {() => <input autoFocus aria-label="secret value" />}
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(screen.getByLabelText('secret value'))
+  })
+
+  it('Tab on the last element wraps to the first and Shift+Tab back', () => {
+    render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="Wrapping">
+        {() => (
+          <>
+            <button>first</button>
+            <button>middle</button>
+            <button>last</button>
+          </>
+        )}
+      </Modal>,
+    )
+    const first = screen.getByText('first')
+    const last = screen.getByText('last')
+
+    last.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(first)
+
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+
+  it('Shift+Tab off the card itself wraps to the last element', () => {
+    render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="From the card">
+        {() => (
+          <>
+            <button>first</button>
+            <button>last</button>
+          </>
+        )}
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(card())
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(screen.getByText('last'))
+  })
+
+  it('only the top-most card of a stack traps', () => {
+    render(
+      <>
+        <Modal onClose={vi.fn()} width={400} ariaLabel="Underneath">
+          {() => (
+            <>
+              <button>under first</button>
+              <button>under last</button>
+            </>
+          )}
+        </Modal>
+        <Modal onClose={vi.fn()} width={400} zIndex={90} ariaLabel="Stacked confirm">
+          {() => (
+            <>
+              <button>top first</button>
+              <button>top last</button>
+            </>
+          )}
+        </Modal>
+      </>,
+    )
+    // the confirm stacked above took focus, and Tab wraps inside it
+    screen.getByText('top last').focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByText('top first'))
+
+    // the card underneath never wraps to its own first element — the top card
+    // pulls the stray focus back inside itself instead
+    screen.getByText('under last').focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByText('top first'))
+  })
+})

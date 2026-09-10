@@ -51,6 +51,34 @@ for _st in (_sys.stdout, _sys.stderr):
 """
 
 
+class _PollClock:
+    """A `time` stand-in for the §3 service poll loops, which are bounded by a
+    `time.monotonic()` deadline: `sleep` advances this clock instead of
+    waiting, so a probe whose state never arrives ends the loop in test time
+    rather than after the real 5 s / 10 s deadline."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture()
+def poll_clock(monkeypatch):
+    """Swap a module's `time` for a _PollClock (the module reference is the
+    only one the poll loops read) and hand the clock back."""
+    def install(mod):
+        clock = _PollClock()
+        monkeypatch.setattr(mod, "time", clock)
+        return clock
+
+    return install
+
+
 def fake_cli(tmp_path, body, name="claude"):
     """A real, spawnable fake CLI whose body is `body` (Python source).
 
@@ -174,7 +202,7 @@ def home(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def task_scheduler(monkeypatch, tmp_path):
+def task_scheduler(monkeypatch, tmp_path, poll_clock):
     """§3 Windows ServiceManager double: `windows._powershell` replaced by a
     recorder that models Task Scheduler's state (the same shape as the launchd
     fake in tests/test_service.py), plus the §15 `AUTOWRIGHT_SHIM` knob pointed
@@ -215,7 +243,7 @@ def task_scheduler(monkeypatch, tmp_path):
         raise AssertionError(f"unmodeled PowerShell script: {script}")
 
     monkeypatch.setattr(windows, "_powershell", fake_ps)
-    monkeypatch.setattr(windows, "_POLL_INTERVAL_S", 0)  # no real poll waits
+    poll_clock(windows)  # no real poll waits, deadlines reached in test time
     shim = tmp_path / "shimbin" / "autowright.cmd"
     monkeypatch.setenv("AUTOWRIGHT_SHIM", str(shim))
     return SimpleNamespace(mod=windows, service=windows.WindowsService(),
@@ -223,7 +251,7 @@ def task_scheduler(monkeypatch, tmp_path):
 
 
 @pytest.fixture()
-def systemd(monkeypatch, tmp_path, home):
+def systemd(monkeypatch, tmp_path, home, poll_clock):
     """§3 Linux ServiceManager double: `linux._systemctl` replaced by a
     recorder that models the systemd user manager's state (the same shape as
     the Task Scheduler double above), the unit directory pointed into the
@@ -273,7 +301,7 @@ def systemd(monkeypatch, tmp_path, home):
         raise AssertionError(f"unmodeled systemctl verb: {args}")
 
     monkeypatch.setattr(linux, "_systemctl", fake_systemctl)
-    monkeypatch.setattr(linux, "_POLL_INTERVAL_S", 0)  # no real poll waits
+    poll_clock(linux)  # no real poll waits, deadlines reached in test time
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     shim = tmp_path / "shimbin" / "autowright"
     monkeypatch.setenv("AUTOWRIGHT_SHIM", str(shim))
