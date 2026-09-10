@@ -46,6 +46,17 @@ let winLoaded = false
 let pendingTarget = null
 let panel = null
 let tray = null
+// True from `before-quit` on — the app is on its way out (§3: the
+// update-install answer tells a real quit from an updater that refused one).
+let quitting = false
+// The 60 s tray-alert + shell-settings poll (§13/§4.9). Held so it can be
+// stopped at quit and at the §3 reset — a poll that outlives either one
+// fetches a backend that is going away and logs into a deleted logs root.
+let shellPoll = null
+
+function stopShellPoll() {
+  if (shellPoll) { clearInterval(shellPoll); shellPoll = null }
+}
 
 // One app process only: a second launch (login item racing a manual open,
 // `open -n`) would create a second tray and double-fire §6 app-start triggers.
@@ -77,7 +88,17 @@ function logsDir() {
     : plat.logsRootDefault()
 }
 
-function appLog(line) {
+// §3 reset step 4: the reset writes its own last line and then erases the logs
+// root, so from that point the writer is a no-op for every other caller (the
+// backend-up poll, the shell-settings interval, the service diagnostics) —
+// appLog re-creates the logs dir, so a late line would leave a fresh logs root
+// behind on every reset.
+let resetting = false
+
+// `force` is the one exception, reserved for the deletion's own failure lines:
+// a delete that failed left files there anyway.
+function appLog(line, { force = false } = {}) {
+  if (resetting && !force) return
   try {
     fs.mkdirSync(logsDir(), { recursive: true })
     fs.appendFileSync(path.join(logsDir(), 'app.log'), `${new Date().toISOString()} ${line}\n`)
@@ -208,7 +229,14 @@ const SERVICE_CHILD_OPTIONS = {
 }
 
 function runServiceInstall(py, cb) {
-  if (quittingAll) return
+  // §3: an install dropped because quit-all is already latched records that
+  // outcome — the status never latches on 'installing' for a run that was
+  // never made. Both callers (ensure-backend and the version sync) land here.
+  if (quittingAll) {
+    ensureStatus = { state: 'failed', detail: 'quitting' }
+    appLog('ensure-backend: install dropped — the app is quitting')
+    return
+  }
   serviceInstallDone = serviceInstallDone.then(() => new Promise((resolve) => {
     execFile(py, ['-m', 'autowright.service', 'install'], SERVICE_CHILD_OPTIONS, (err, stdout, stderr) => {
       try { cb(err, stdout, stderr) } finally { resolve() }
@@ -326,12 +354,22 @@ function docKey(url) {
   try { const u = new URL(url); return `${u.protocol}//${u.host}${u.pathname}` } catch { return null }
 }
 
+// A hand-off the OS refuses (no handler for the scheme, a locked-down desktop)
+// rejects the returned promise — logged and dropped, never an unhandled
+// rejection: opening a link is best-effort and must not take the app with it.
+function handOffFailed(url) {
+  return (e) => appLog(`open-external: couldn't open ${url}: ${String(e?.message || e)}`)
+}
+
 function openExternalSafely(url) {
   if (typeof url !== 'string') return
-  if (SETTINGS_DEEP_LINK && url.startsWith(SETTINGS_DEEP_LINK)) { shell.openExternal(url); return }
+  if (SETTINGS_DEEP_LINK && url.startsWith(SETTINGS_DEEP_LINK)) {
+    shell.openExternal(url).catch(handOffFailed(url))
+    return
+  }
   let scheme
   try { scheme = new URL(url).protocol } catch { return }
-  if (OPENABLE_SCHEMES.includes(scheme)) shell.openExternal(url)
+  if (OPENABLE_SCHEMES.includes(scheme)) shell.openExternal(url).catch(handOffFailed(url))
 }
 
 // §9.4: both windows deny popups (routing allowed URLs to the browser) and
@@ -522,7 +560,13 @@ function showApp(hash) {
   }
   // §9: an unloaded window stays hidden — it shows itself on the first
   // successful load (createWindow's guard), never as an empty frame.
-  if (winLoaded) { win.show(); win.focus() }
+  // §13: a minimized window is restored first — showing one without restoring
+  // it looks like a no-op (the same rule as the dock activate below).
+  if (winLoaded) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  }
 }
 
 // Each variant is decoded from disk once — the 60 s poll below asks for the
@@ -627,6 +671,11 @@ function applyShellSettings(s, { trusted = false } = {}) {
         // Destroy it; the next tray click builds a fresh one lazily.
         if (panel && !panel.isDestroyed()) panel.destroy()
         panel = null
+        // §13: a destroyed panel forgets its measured height and anchor — the
+        // next one opens at the 420 px default and re-anchors on its first
+        // measurement, never at the dead panel's grown height.
+        panelHeight = 420
+        panelAnchor = null
         // §9 close rule, re-evaluated here: on a platform with no dock the
         // tray was the only thing keeping a windowless app reachable. With
         // both gone there is nothing left to click, so quit rather than sit
@@ -901,6 +950,7 @@ ipcMain.handle('pick-folder', async (_e, defaultPath) => {
 })
 // §5.1 transfer archives: native save/open dialogs live in main; the renderer
 // moves the bytes to/from the backend itself (§19).
+const ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
 ipcMain.handle('save-file', async (_e, defaultName, data) => {
   // Both arguments cross the trust boundary: the name only ever names a file
   // inside the downloads dir (never a path of its own steering the dialog
@@ -923,7 +973,20 @@ ipcMain.handle('open-archive', async () => {
     filters: [{ name: 'Autowright automation', extensions: ['autowright'] }],
   })
   if (r.canceled || !r.filePaths[0]) return null
-  return { name: path.basename(r.filePaths[0]), data: await fs.promises.readFile(r.filePaths[0]) }
+  const p = r.filePaths[0]
+  try {
+    // §5.1: archives cap at 64 MB — a bigger file is refused up front rather
+    // than read into the main process to be rejected by the backend.
+    const { size } = await fs.promises.stat(p)
+    if (size > ARCHIVE_MAX_BYTES) return { error: 'The archive is larger than 64 MB.' }
+    return { name: path.basename(p), data: await fs.promises.readFile(p) }
+  } catch (e) {
+    // A file the user picked but we cannot read (permissions, a volume that
+    // went away mid-dialog) answers null — the renderer treats it like a
+    // cancel instead of hanging on a read that never lands.
+    appLog(`open-archive: couldn't read ${p}: ${e?.message || e}`)
+    return null
+  }
 })
 // §9.3 developer log overlay: tail of each existing log file. Polled by the
 // renderer while the overlay is open — no watchers, nothing runs while closed.
@@ -938,8 +1001,11 @@ ipcMain.handle('tail-logs', () => {
       const size = fs.fstatSync(fd).size
       const start = Math.max(0, size - 64 * 1024)
       const buf = Buffer.alloc(size - start)
-      fs.readSync(fd, buf, 0, buf.length, start)
-      let text = buf.toString('utf-8')
+      // Only what was really read: a file that shrank between the fstat and
+      // the read (a rotation) would otherwise stringify the buffer's unwritten
+      // tail as NUL padding into the overlay.
+      const read = fs.readSync(fd, buf, 0, buf.length, start)
+      let text = buf.subarray(0, read).toString('utf-8')
       if (start > 0) {
         const nl = text.indexOf('\n')
         if (nl !== -1) text = text.slice(nl + 1)
@@ -1037,6 +1103,12 @@ function recordAvailable(version) {
 // turn into a feed fetch, and electron-updater checks nothing until asked.
 let generic = null
 
+// §3: the updater's error stream — the message a refused install carries. The
+// NSIS/AppImage classes report a failed installer spawn (or nothing staged)
+// through `error` and then answer `quitAndInstall` with false, so the last
+// error is what the §9.4 card gets to render instead of a silent no-op.
+let lastUpdaterError = null
+
 function genericUpdater() {
   if (generic) return generic
   const { MacUpdater, NsisUpdater, AppImageUpdater } = require('electron-updater')
@@ -1065,6 +1137,9 @@ function genericUpdater() {
   if (plat.UPDATER === 'mac') u.disableDifferentialDownload = true
   const log = (m) => appLog(`update: ${String(m?.stack || m?.message || m)}`)
   u.logger = { info: log, warn: log, error: log, debug: () => {} }
+  // Registered once, here: an unlistened `error` on an EventEmitter throws,
+  // and the recorded message is what update-install answers with below.
+  u.on('error', (err) => { lastUpdaterError = String(err?.message || err) })
   // §3 determinate progress: percent on the update-progress IPC, or null
   // (indeterminate bar) when the server sent no total to divide by.
   u.on('download-progress', (p) => {
@@ -1191,7 +1266,24 @@ ipcMain.handle('update-install', async () => {
   // §3: the same busy-gated, user-initiated install on every platform — only
   // the machinery that performs the swap differs (ShipIt vs. the NSIS
   // installer vs. the AppImage swap electron-updater staged).
-  genericUpdater().quitAndInstall()
+  lastUpdaterError = null
+  let started
+  try {
+    started = genericUpdater().quitAndInstall()
+  } catch (err) {
+    appLog(`update: install failed: ${String(err?.message || err)}`)
+    return { error: String(err?.message || err) }
+  }
+  // §3: a quitAndInstall that returns without quitting (the NSIS/AppImage
+  // classes answer false when nothing is staged or the installer spawn fails)
+  // answers { error } with the updater's own message — the §9.4 card renders
+  // it, and a silent no-op is never an acceptable outcome. MacUpdater returns
+  // nothing and quits through Squirrel, so only an explicit false counts.
+  if (!quitting && started === false) {
+    const error = lastUpdaterError || 'the updater could not install this update'
+    appLog(`update: install refused: ${error}`)
+    return { error }
+  }
   return { ok: true }
 })
 
@@ -1296,7 +1388,9 @@ async function deletePath(target, label) {
       return
     } catch (e) {
       if (Date.now() >= deadline) {
-        appLog(`${label}: couldn't delete ${target}: ${e?.message || e}`)
+        // §3: the deletion's own failure lines are the one exception to the
+        // reset's log silence — a delete that failed left files there anyway.
+        appLog(`${label}: couldn't delete ${target}: ${e?.message || e}`, { force: true })
         return
       }
       await new Promise((r) => setTimeout(r, 500))
@@ -1352,7 +1446,7 @@ async function deleteAllData(dataPath, label) {
     await session.defaultSession.clearStorageData()
     await session.defaultSession.clearCache()
   } catch (e) {
-    appLog(`${label}: couldn't clear the browser profile: ${e?.message || e}`)
+    appLog(`${label}: couldn't clear the browser profile: ${e?.message || e}`, { force: true })
   }
 }
 
@@ -1384,6 +1478,10 @@ ipcMain.handle('reset-all', async () => {
   // Nothing may log past this point — deleteAllData's own failure lines are
   // the one exception, since a delete that failed left files there anyway.
   appLog('reset: erasing data, then quitting')
+  // Past this line the writer is a no-op for everyone else, and the 60 s poll
+  // that would otherwise re-create the logs root behind the deletion stops.
+  resetting = true
+  stopShellPoll()
   await deleteAllData(dataPath, 'reset')
   // §3 step 6: the app quits and stays quit. The next launch finds no
   // backend.json and an empty data root: ensure-backend re-registers and §10
@@ -1402,7 +1500,12 @@ app.whenReady().then(() => {
   // would block reopening from the Dock.
   // §9: a not-yet-loaded window stays hidden even on an explicit reopen — it
   // shows itself on the first successful load.
-  app.on('activate', () => { if (win === null) createWindow(); else if (winLoaded) { win.show(); win.focus() } })
+  // §13: a minimized window is restored before it is shown, the same rule the
+  // deep-link and second-instance paths follow.
+  app.on('activate', () => {
+    if (win === null) createWindow()
+    else if (winLoaded) { if (win.isMinimized()) win.restore(); win.show(); win.focus() }
+  })
   // Every OS-side step below is guarded on its own, the same way the tray is
   // further down: one that throws is logged and the chain carries on — none of
   // them is worth losing the window, the §6 app-start triggers or the §4.9
@@ -1447,7 +1550,7 @@ app.whenReady().then(() => {
   void notifyAppStarted()
   void refreshTrayAlert()
   void syncShellSettings()
-  setInterval(() => { void refreshTrayAlert(); void syncShellSettings() }, 60_000)
+  shellPoll = setInterval(() => { void refreshTrayAlert(); void syncShellSettings() }, 60_000)
   // Last resort: nothing in the chain above may die silently.
 }).catch((err) => appLog(`ready: startup failed: ${String(err?.message || err)}`))
 
@@ -1464,4 +1567,12 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (caps.dockIcon) return
   if (!tray) app.quit()
+})
+
+// The app is on its way out: the §3 update-install answer reads this to tell a
+// real quit from an updater that refused to start one, and the 60 s poll stops
+// here rather than firing a backend fetch (and an app.log line) mid-quit.
+app.on('before-quit', () => {
+  quitting = true
+  stopShellPoll()
 })

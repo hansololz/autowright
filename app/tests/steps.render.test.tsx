@@ -540,6 +540,28 @@ describe('find in script (§9.2)', () => {
     expect(counter()).toBe('1 of 2')
     expect(marks()).toEqual(['send:current', 'send:hit'])
   })
+
+  it('a highlighted line keys its wrappers apart from the untouched tokens', () => {
+    // §9.2: markLine rewraps only the matched tokens — its wrapper keys must
+    // not collide with the highlighter's own token keys on the same line
+    // (React's duplicate-key warning, raised on the flipped-to script).
+    const errors: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(' ')) })
+    render(
+      <StepList
+        variant="detail" steps={[step({ name: 'Finder', code: CODE }), step({ name: 'Other', code: 'send(1)\nsend(2)' })]}
+        agents={[AGENT]} secrets={[]} packages={[]} fallbackAgent="Cloud writer"
+      />,
+    )
+    fireEvent.click(screen.getAllByText('Finder')[0])
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    fireEvent.change(screen.getByPlaceholderText('Find in script'), { target: { value: 'send' } })
+    fireEvent.click(screen.getByLabelText('Next match'))
+    fireEvent.click(screen.getByLabelText('Next step'))
+    expect(marks().length).toBeGreaterThan(0)
+    expect(errors.filter((e) => e.includes('same key'))).toEqual([])
+    spy.mockRestore()
+  })
 })
 
 describe('navigator facts (§9.2 literal scans)', () => {

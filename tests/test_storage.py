@@ -1737,8 +1737,9 @@ def test_retention_skips_an_unreadable_settings_file(home):
 
 
 def test_delete_execution_leaves_no_aside_directory(store, home):
-    # §6 retention: the dir is renamed aside under the lock and rmtree'd after
-    # it — by the time the call returns nothing is left of either.
+    # §6 retention: the dir is renamed aside under the lock and handed to the
+    # reaper — the record is gone from disk the moment the call returns, and
+    # the aside follows on the background thread.
     a = store.create_automation(make_version(), "Deleter", None)
     h = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     store.update_execution(h)
@@ -1749,6 +1750,7 @@ def test_delete_execution_leaves_no_aside_directory(store, home):
 
     store.delete_execution(h["id"])
     assert not store.exec_dir(h["id"]).exists()
+    store.drain_reaper()
     assert list(store.executions_dir().glob(f"{store.DELETED_PREFIX}*")) == []
     assert h["id"] not in store.execs
     assert not any(k[0] == h["id"] for k in store._log_counts)
@@ -1761,6 +1763,7 @@ def test_delete_automation_leaves_no_aside_directory(store, home):
 
     store.delete_automation(a)
     assert not d.exists()
+    store.drain_reaper()
     assert list(paths.automations_dir().glob(f"{store.DELETED_PREFIX}*")) == []
     assert a["id"] not in store.autos
 

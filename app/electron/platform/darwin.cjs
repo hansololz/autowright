@@ -44,11 +44,14 @@ function panelAfterCreate(panel) {
   panel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
 }
 
-// §13 placement: centered under the cursor's menu-bar position, clamped to
-// the display's right edge, just below the (top) menu bar.
+// §13 placement: centered under the cursor's menu-bar position, clamped to the
+// display's work area on **both** x edges (a tray icon at the left of a
+// secondary display must not push the panel off-screen), just below the (top)
+// menu bar.
 function panelPosition(pt, display) {
-  const x = Math.min(pt.x - 167, display.bounds.x + display.bounds.width - 344)
-  return { x: Math.round(x), y: display.workArea.y + 6 }
+  const wa = display.workArea
+  const x = Math.max(wa.x + 6, Math.min(pt.x - 167, wa.x + wa.width - 344 - 6))
+  return { x: Math.round(x), y: wa.y + 6 }
 }
 
 // §13: red alert dot when any automation failed. The alert variant is a

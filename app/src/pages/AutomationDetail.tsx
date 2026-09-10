@@ -76,6 +76,18 @@ export default function AutomationDetail() {
   // §19: per-trigger next occurrences come from POST /triggers/preview — the
   // renderer holds no trigger math (must run before the early return: hooks).
   const trigPreviews = useTriggerPreview(auto?.triggers ?? [])
+  // §9.2 change badge: the current version's steps plus the stored history.
+  // Also above the early return: when a delete lands while the page is open,
+  // `auto` vanishes for one render and a hook below the return would make React
+  // throw "Rendered fewer hooks than expected" (caught only by the boundary).
+  const stepHistory = useMemo(
+    () => auto
+      ? [{ version: auto.version, steps: auto.steps ?? [] },
+         ...(auto.versions ?? []).filter((v) => v.version !== auto.version)
+           .map((v) => ({ version: v.version, steps: v.steps }))]
+      : [],
+    [auto?.version, auto?.steps, auto?.versions], // eslint-disable-line react-hooks/exhaustive-deps
+  )
 
   if (!auto) return null
 
@@ -185,11 +197,6 @@ export default function AutomationDetail() {
   const steps = auto.steps ?? []
   const spec = auto.spec ?? []
   const olderVersions = (auto.versions ?? []).filter((v) => v.version !== auto.version)
-  // §9.2 change badge: the current version's steps plus the stored history.
-  const stepHistory = useMemo(
-    () => [{ version: auto.version, steps: auto.steps ?? [] }, ...olderVersions.map((v) => ({ version: v.version, steps: v.steps }))],
-    [auto.version, auto.steps, auto.versions], // eslint-disable-line react-hooks/exhaustive-deps
-  )
   // §11 test executions are draft-scoped — never listed among real executions
   // §9.2: the card shows the 5 newest rows
   const recentExecs = autoExecs.filter((e) => !e.test).slice(0, 5)

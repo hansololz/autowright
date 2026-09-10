@@ -515,8 +515,11 @@ def main() -> int:
         if e.code is None or e.code == 0:
             return 0
         if isinstance(e.code, int):
-            msg = f"step exited with code {e.code}"
-            rc = e.code
+            # §6: clamped into 1-255 — POSIX keeps only the low byte, so
+            # sys.exit(256) must never come back as a success exit status
+            # (a bool rides here too: True exits 1, False took the branch above).
+            rc = e.code & 0xFF or 1
+            msg = f"step exited with code {rc}"
         else:
             msg = f"SystemExit: {e.code}"
             rc = 1

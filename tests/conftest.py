@@ -309,7 +309,12 @@ def devmode(home):
 
     save_yaml(paths.settings_file(), {"developerMode": True})
     reqlog._dev_cache["t"] = 0.0  # drop the 1 s cache so the write is seen now
+    # The HTTP middleware gates on the backend's in-memory settings (§4.9 —
+    # no file IO on the event loop); the executor subprocess keeps the file read.
+    from autowright import api
+    api.store.settings["developerMode"] = True
     yield
+    api.store.settings.pop("developerMode", None)
     reqlog._dev_cache["t"] = 0.0
 
 

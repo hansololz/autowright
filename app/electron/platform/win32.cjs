@@ -52,14 +52,16 @@ function panelAfterCreate(_panel) {}
 // default, so anchor the panel's bottom edge just above the work area's
 // bottom — at the panel's *real* height, which main.cjs re-anchors on every
 // resize-panel, never at the 640 px cap. Clamped to the work area's top so a
-// taskbar docked elsewhere still gets a fully on-screen panel. `height` is
-// optional (the panel's current height); the 640 px window cap stands in when
-// a caller has no measurement yet.
+// taskbar docked elsewhere still gets a fully on-screen panel, and to the work
+// area on **both** x edges — a tray icon at the left of a secondary display
+// must not push the panel off-screen. `height` is optional (the panel's
+// current height); the 640 px window cap stands in when a caller has no
+// measurement yet.
 function panelPosition(pt, display, height) {
   const h = Number.isFinite(height) ? height : 640
-  const x = Math.min(pt.x - 167, display.bounds.x + display.bounds.width - 344)
-  const y = Math.max(display.workArea.y + 6,
-    display.workArea.y + display.workArea.height - h - 6)
+  const wa = display.workArea
+  const x = Math.max(wa.x + 6, Math.min(pt.x - 167, wa.x + wa.width - 344 - 6))
+  const y = Math.max(wa.y + 6, wa.y + wa.height - h - 6)
   return { x: Math.round(x), y: Math.round(y) }
 }
 

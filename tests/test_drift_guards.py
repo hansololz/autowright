@@ -614,8 +614,12 @@ def test_macos_bundle_is_trimmed_before_signing():
     packager = src[src.index("npx electron-packager"):src.index('APP="$BUILD/pkg/')]
     assert "--ignore '^/(?!(electron|dist|node_modules|package\\.json)($|/))'" in packager, (
         "the packager must ignore every top-level entry outside the §3 allowlist")
-    assert '--ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\\$))"' in packager, (
-        "node_modules must still be filtered to the electron-updater closure")
+    assert ('--ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\\$)'
+            '${UPDATER_SCOPES:+|($UPDATER_SCOPES)\\$})"' in packager), (
+        "node_modules must still be filtered to the electron-updater closure, with each "
+        "scoped package's @scope directory allowed alongside it (§3)")
+    assert "UPDATER_SCOPES=" in src and "sed -n 's|^\\(@[^/]*\\)/.*$|\\1|p'" in src, (
+        "the @scope directories must be derived from the computed closure, not hand-pinned")
     assert packager.count("--ignore") == 2, "the packager ignore list is an allowlist, not a denylist"
 
     dmg = src[src.index("# ---- DMG (SPEC §3"):]
@@ -624,3 +628,28 @@ def test_macos_bundle_is_trimmed_before_signing():
     build = json.loads(_read("app/package.json"))["build"]
     assert build["electronLanguages"] == ["en", "en-US", "en-GB"], (
         "the Windows/Linux electron-builder legs must keep only the English locales (§3)")
+
+
+def test_packager_node_modules_ignore_allows_a_scope_directory():
+    """§3 asar allowlist: the packager's ignore filter prunes a directory before
+    descending into it, so a scoped package in the electron-updater closure only
+    ships if its own `@scope` directory survives the filter too. Evaluate the
+    pattern `prod.sh` renders for such a closure — the shell interpolation is
+    only exercised by a release build."""
+    packages = "electron-updater|@scope/pkg"
+    scopes = "@scope"
+    # exactly what "^/node_modules/(?!($UPDATER_PKGS)(/|\$)${UPDATER_SCOPES:+
+    # |($UPDATER_SCOPES)\$})" expands to for that closure
+    pattern = f"^/node_modules/(?!({packages})(/|$)|({scopes})$)"
+
+    def ignored(path):
+        return re.search(pattern, path) is not None
+
+    assert not ignored("/node_modules/@scope"), (
+        "the @scope directory must survive, or its package is never reached")
+    assert not ignored("/node_modules/@scope/pkg")
+    assert not ignored("/node_modules/electron-updater")
+    assert ignored("/node_modules/other"), "everything outside the closure is still pruned"
+    assert ignored("/node_modules/@scope/unrelated"), (
+        "only the @scope directory itself is allowed, not everything under it"
+    )

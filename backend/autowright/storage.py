@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import shutil
 import sqlite3
@@ -55,9 +56,20 @@ def trigger_label(kind: str | None) -> str:
 def exec_started_ms(h: dict) -> int:
     """§7 canonical sort key: the header's startedMs exactly as `exec_json`
     serializes it — shared so the §19 window/keyset sorts can order headers
-    without materializing the full row JSON for every execution ever held."""
-    dt = lenient_local(h["started_at"]) if h.get("started_at") else None
-    return int(dt.timestamp() * 1000) if dt else 0
+    without materializing the full row JSON for every execution ever held.
+
+    §19: derived once and cached beside the stored timestamp it came from,
+    recomputed only when that changes, so an uncapped read of a long history
+    parses each `started_at` once instead of once per query. The cache lives
+    in `_`-prefixed header keys: in-memory only, like `_pass_start` — every
+    serializer (`exec_json`, `write_exec_yaml`, `exec_header`, the DB upsert)
+    names its keys explicitly, so they never reach disk or a client."""
+    stored = h.get("started_at")
+    if "_started_ms" not in h or h.get("_started_ms_key") != stored:
+        dt = lenient_local(stored) if stored else None
+        h["_started_ms"] = int(dt.timestamp() * 1000) if dt else 0
+        h["_started_ms_key"] = stored
+    return h["_started_ms"]
 
 
 # §4.2: the resolved-value keys `merged_params` adds for the API shape. They
@@ -309,6 +321,11 @@ class Store:
         # §5 log line cap: (execution_id, file name) → lines written so far,
         # seeded from disk on first append (see append_log_line).
         self._log_counts: dict[tuple[str, str], int] = {}
+        # §6: the background reaper behind the "no rmtree ever runs under the
+        # lock" rule — aside dirs waiting for their rmtree, drained by one
+        # lazily started daemon thread (see _reap_later).
+        self._reap_queue: queue.Queue = queue.Queue()
+        self._reap_thread: threading.Thread | None = None
 
     # ---------- paths ----------
     def data_path(self) -> Path:
@@ -324,6 +341,47 @@ class Store:
 
     def exec_dir(self, execution_id: str) -> Path:
         return self.executions_dir() / execution_id
+
+    # ---------- background reaper (§6: no rmtree ever runs under the lock) ----------
+    def _reap_later(self, path: Path) -> None:
+        """Hand an already-renamed-aside tree to the reaper thread. Every
+        delete of a potentially large tree (an execution dir, an automation
+        dir, a memory dir, a snapshot, a draft) renames it aside under the
+        lock — O(1) — and queues the aside path here, so the walk itself never
+        stalls a firing or a live log append. The thread starts on the first
+        delete: a Store that never deletes never spawns it."""
+        with self.lock:
+            if self._reap_thread is None:
+                self._reap_thread = threading.Thread(target=self._reap_loop, name="autowright-reaper",
+                                                     daemon=True)
+                self._reap_thread.start()
+        self._reap_queue.put(path)
+
+    def _reap_loop(self) -> None:
+        while True:
+            path = self._reap_queue.get()
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+            finally:
+                self._reap_queue.task_done()
+
+    def drain_reaper(self) -> None:
+        """Wait until every queued aside dir is gone. Nothing in the app needs
+        to know when the bytes are actually removed — this exists so tests can
+        assert on the disk after a delete."""
+        self._reap_queue.join()
+
+    def _remove_tree(self, d: Path) -> None:
+        """Delete a directory the way §6 requires: rename it aside (instant,
+        so a caller holding store.lock keeps a constant-time hold), then reap
+        the aside outside the lock. A crash between the two leaves a
+        `.ad-tmp-deleted-*` sibling, swept at the next load."""
+        aside = d.parent / f"{self.DELETED_PREFIX}{new_id()}"
+        try:
+            d.rename(aside)
+        except OSError:
+            return  # nothing on disk to move
+        self._reap_later(aside)
 
     # ---------- startup walk (§5 load model) ----------
     def load_all(self) -> None:
@@ -405,6 +463,19 @@ class Store:
             log.warning("%s doesn't hold a mapping — using the defaults", path)
             return {}
         return {k: v for k, v in raw.items() if v is not None}
+
+    @staticmethod
+    def _load_mapping(path: Path, default: Any = None) -> Any:
+        """§5: every other YAML the store reads on a request path (a version's
+        `automation.yaml`, the draft slot's `test.yaml` and container files, a
+        snapshot's `snapshot.yaml`) is hand-editable too — a file whose root
+        isn't a mapping loads as the caller's default with a warning, never as
+        an attribute error that turns every read into a 500."""
+        raw = load_yaml(path, default)
+        if raw is None or isinstance(raw, dict):
+            return raw
+        log.warning("%s doesn't hold a mapping — reading it as absent", path)
+        return default
 
     def _load_toplevel_list(self, path: Path, key: str) -> list[dict]:
         raw = self._load_toplevel_mapping(path).get(key, [])
@@ -541,11 +612,20 @@ class Store:
             for vd in vdir.iterdir():
                 m = re.fullmatch(r"v(\d+)", vd.name)
                 if m and (vd / "automation.yaml").exists():
-                    a["versions"][int(m.group(1))] = self._load_version_folder(vd)
+                    ver = self._load_version_folder(vd)
+                    if ver is not None:
+                        a["versions"][int(m.group(1))] = ver
         # §6.3/§4.4: staged memory copies a crash abandoned mid-swap. Nothing is
         # staging at load, so anything still here is dead weight.
         for stale in list(d.glob(f"{self.SNAPSHOT_STAGE_PREFIX}*")) + \
                 list((d / "draft").glob(f"{DRAFT_MEM_STAGE_PREFIX}*")):
+            shutil.rmtree(stale, ignore_errors=True)
+        # §6: the twin of the executions/automations sweeps in load_all — a
+        # crash between a delete's aside-rename and its background reap. The
+        # automation dir holds the memory/ and draft/ asides, memory-snapshots/
+        # the snapshot ones.
+        for stale in list(d.glob(f"{self.DELETED_PREFIX}*")) + \
+                list((d / "memory-snapshots").glob(f"{self.DELETED_PREFIX}*")):
             shutil.rmtree(stale, ignore_errors=True)
         self._recover_draft_swap(d / "draft")  # §5: repair a half-finished save_draft swap
         self._recover_memory_swap(d)  # §6.3: repair a half-finished restore_snapshot swap
@@ -553,6 +633,13 @@ class Store:
             a["draft"] = self._load_version_folder(d / "draft" / "automation")
         if not a["versions"]:
             log.warning("automation %r at %s has no version folders — skipping it at load", a["name"], d)
+            return None
+        if a["current_version"] not in a["versions"]:
+            # §5: an unreadable manifest makes its version folder absent, and an
+            # automation that can't resolve its current version is skipped at
+            # load exactly like the empty-versions case above.
+            log.warning("automation %r at %s can't resolve its current version v%s — "
+                        "skipping it at load", a["name"], d, a["current_version"])
             return None
         return a
 
@@ -639,8 +726,15 @@ class Store:
                 log.warning("dropping malformed trigger %r", t)
         return out
 
-    def _load_version_folder(self, vd: Path) -> dict:
-        meta = load_yaml(vd / "automation.yaml", {}) or {}
+    def _load_version_folder(self, vd: Path) -> dict | None:
+        """None when the folder's manifest can't be read (unparsable, or a root
+        that isn't a mapping): §5 says such a version is absent, never an empty
+        version that would run zero steps and "succeed"."""
+        meta, ok = load_yaml_checked(vd / "automation.yaml")
+        if not ok or not isinstance(meta, dict):
+            log.warning("version folder %s has an unusable automation.yaml — "
+                        "treating the folder as absent", vd)
+            return None
         steps = []
         for s in meta.get("steps", []) or []:
             code = ""
@@ -684,13 +778,25 @@ class Store:
         `_latest` is kept current by create/update_execution so serialization
         never re-scans all executions per automation."""
         live: dict[str, set[str]] = {}
+        # §5 "filled by one startup query": one linear pass over every header
+        # fills both maps, instead of re-scanning the whole table once per
+        # automation (the per-automation `_latest_exec` stays for the
+        # incremental callers, which rescan a single automation).
+        latest_by_automation: dict[str, dict] = {}
         for h in self.execs.values():
             # §4.1 `live` is every in-progress execution, not just the newest —
             # maxParallel may allow several, and the startup sweep needs them all.
             if h["status"] == "executing" and not is_test(h):
                 live.setdefault(h["automation_id"], set()).add(h["id"])
+            if self.never_ran(h) or is_test(h):
+                continue
+            best = latest_by_automation.get(h["automation_id"])
+            # `>`, not `>=`: `max` keeps the first of equal keys in iteration
+            # order, and this pass must order identically.
+            if best is None or (h["started_at"] or "") > (best["started_at"] or ""):
+                latest_by_automation[h["automation_id"]] = h
         for a in self.autos.values():
-            latest = self._latest_exec(a["id"])
+            latest = latest_by_automation.get(a["id"])
             a["_latest"] = latest
             a["_last_status"] = latest["status"] if latest else "none"
             a["_last_exec_at"] = latest["started_at"] if latest else None
@@ -1138,8 +1244,11 @@ class Store:
             dd = paths.pending_draft_dir() / "automation"
             if not (dd / "automation.yaml").exists():
                 return None
-            meta = load_yaml(dd / "automation.yaml", {}) or {}
-            return {**self._load_version_folder(dd),
+            meta = self._load_mapping(dd / "automation.yaml", {}) or {}
+            ver = self._load_version_folder(dd)
+            if ver is None:
+                return None  # §5: an unreadable manifest reads as an empty slot
+            return {**ver,
                     "name": meta.get("name"), "description": meta.get("description", ""),
                     "agent_id": meta.get("agent_id"),
                     "triggers": meta.get("triggers", []) or []}
@@ -1161,7 +1270,9 @@ class Store:
                 if dd.exists() and not any(dd.iterdir()):
                     dd.rmdir()  # no thread kept → the slot vanishes whole, as before
             else:
-                shutil.rmtree(dd, ignore_errors=True)
+                # §6: the container carries the draft's memory/ copy — renamed
+                # aside here and reaped outside the lock, never walked under it.
+                self._remove_tree(dd)
                 a["draft"] = None
             self.delete_test_execs(a["id"] if a is not None else None)
 
@@ -1173,7 +1284,7 @@ class Store:
             dd = paths.pending_draft_dir() / "automation"
             if not (dd / "automation.yaml").exists():
                 return None
-            meta = load_yaml(dd / "automation.yaml", {}) or {}
+            meta = self._load_mapping(dd / "automation.yaml", {}) or {}
             return {"name": meta.get("name") or "New automation",
                     "updatedAt": meta.get("updated_at")}
 
@@ -1183,7 +1294,7 @@ class Store:
         keys (§5), an automation owner's rides its record."""
         with self.lock:
             if a is None:
-                meta = load_yaml(paths.pending_draft_dir() / "automation" / "automation.yaml", {}) or {}
+                meta = self._load_mapping(paths.pending_draft_dir() / "automation" / "automation.yaml", {}) or {}
                 agent_id = meta.get("agent_id")
             else:
                 agent_id = a.get("agent_id")
@@ -1275,7 +1386,7 @@ class Store:
                 aside = None  # nothing on disk to move
             self.autos.pop(a["id"], None)
         if aside is not None:
-            shutil.rmtree(aside, ignore_errors=True)
+            self._reap_later(aside)
         self.delete_test_execs(a["id"])  # §11 — real records stay (automationDeleted)
 
     # ---------- executions ----------
@@ -1362,6 +1473,12 @@ class Store:
         with self.lock:
             self.write_exec_yaml(h)
             self.execdb.upsert(h)
+            if h["status"] not in ("executing", "queued"):
+                # §5 log line cap: the counter lives in memory only while the
+                # execution is live, so a keepForever history never grows the
+                # resident set. An in-place retry re-seeds it from the file.
+                for k in [k for k in list(self._log_counts) if k[0] == h["id"]]:
+                    self._log_counts.pop(k, None)
             if h["status"] not in ("executing", "queued") and h["id"] in self.execs:
                 # §5 slim-on-finish: on a terminal transition the stored record
                 # demotes to the header projection the DB index uses — the body
@@ -1491,18 +1608,22 @@ class Store:
         log doesn't hold."""
         p = self.log_file(execution_id, name)
         key = (execution_id, name)
-        count = self._log_counts.get(key)
-        if count is None:
-            # The count lives in memory per file key; the one-time seed counts
-            # the existing file (mirrors the engine's `_log_seq` resume). A
-            # restart mid-execution just re-seeds from disk here.
-            try:
-                with open(p, encoding="utf-8") as f:
-                    count = sum(1 for _ in f)
-            except OSError:
-                count = 0
+        # Parallel steps of one execution append concurrently, so the read and
+        # the increment have to be one step or two writers take the same slot
+        # and the cap counts short. The write itself stays outside the hold.
+        with self.lock:
+            count = self._log_counts.get(key)
+            if count is None:
+                # The count lives in memory per file key; the one-time seed counts
+                # the existing file (mirrors the engine's `_log_seq` resume). A
+                # restart mid-execution just re-seeds from disk here.
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        count = sum(1 for _ in f)
+                except OSError:
+                    count = 0
+            self._log_counts[key] = count + 1 if count <= self.MAX_LOG_LINES else count
         if count > self.MAX_LOG_LINES:
-            self._log_counts[key] = count
             return False  # already truncated — the marker is the file's last line
         if count == self.MAX_LOG_LINES:
             line = {"timestamp": timefmt.now_iso(), "kind": "sys",
@@ -1512,7 +1633,6 @@ class Store:
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
-        self._log_counts[key] = count + 1
         return True
 
     def read_log(self, execution_id: str, step_idx: int | None = None,
@@ -1532,7 +1652,14 @@ class Store:
         if not p.exists():
             return []
         out = []
-        raw = p.read_text(encoding="utf-8").splitlines()
+        try:
+            # §5: reading a log back is best-effort — an undecodable byte run
+            # (a crash mid-append) is replaced rather than raising, and an
+            # unreadable file answers empty lines, never a 500 on a pane that
+            # polls at 1 Hz.
+            raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
         if tail is not None:
             raw = raw[-tail:]
         for ln in raw:
@@ -1598,8 +1725,8 @@ class Store:
                 aside = None  # no directory on disk (a header-only row)
             h = self.execs.pop(execution_id, None)
             self.execdb.delete(execution_id)
-            # list(): append_log_line inserts into _log_counts without the
-            # lock, so iterating the live mapping can raise mid-filter.
+            # list(): a copy of the keys, so the filter can't trip over a
+            # concurrent insert between the two lock acquisitions.
             for k in [k for k in list(self._log_counts) if k[0] == execution_id]:
                 self._log_counts.pop(k, None)
             # Keep `_latest` honest inside the mutator — no caller should have
@@ -1612,7 +1739,7 @@ class Store:
                     a["_last_status"] = latest["status"] if latest else "none"
                     a["_last_exec_at"] = latest["started_at"] if latest else None
         if aside is not None:
-            shutil.rmtree(aside, ignore_errors=True)
+            self._reap_later(aside)
 
     def delete_test_execs(self, automation_id: str | None) -> None:
         """§11: test executions live only as long as their draft container —
@@ -1624,9 +1751,10 @@ class Store:
             doomed = [h["id"] for h in self.execs.values()
                       if is_test(h) and h["automation_id"] == automation_id
                       and h["status"] != "executing"]
-        # Outside the hold: store.lock is an RLock, so deleting from inside one
-        # would put delete_execution's rmtree back under the lock — the very
-        # thing its aside-rename exists to avoid.
+        # Outside the hold, so the per-record work isn't serialized behind one
+        # long lock hold. (An API caller may already hold the RLock around the
+        # whole settle, which is why the aside dirs go to the §6 reaper rather
+        # than being rmtree'd here.)
         for eid in doomed:
             self.delete_execution(eid)
 
@@ -1640,7 +1768,10 @@ class Store:
                 return 0
             if self.settings.get("keepForever"):
                 return 0
-            days = max(1, int(self.settings.get("days", 90)))
+            # §5 lenient read: `days` is hand-editable like every other numeric
+            # setting — a non-numeric value falls back to the 90-day default
+            # rather than silently disabling the sweep for the session.
+            days = max(1, lenient_int(self.settings.get("days", 90)) or 90)
             cutoff = datetime.now().timestamp() - days * 86400
             doomed = []
             for h in self.execs.values():
@@ -1744,8 +1875,9 @@ class Store:
         # only copy of the pre-crash memory without anyone asking.
         self._recover_memory_swap(self.auto_dir(a))
         d = self.auto_dir(a) / "memory"
-        if d.exists():
-            shutil.rmtree(d)
+        # §6: a memory dir can be gigabytes — renamed aside (O(1)) and reaped
+        # on the background thread, never rmtree'd where a caller holds the lock.
+        self._remove_tree(d)
         d.mkdir(parents=True, exist_ok=True)
         self.invalidate_memory_stats(a)
 
@@ -1813,13 +1945,14 @@ class Store:
 
     def list_snapshots(self, a: dict) -> list[dict]:
         """§6.3: read from disk on demand, newest first; orphan dirs (no
-        snapshot.yaml) and damaged metadata skipped."""
+        snapshot.yaml), aside dirs awaiting the §6 reaper, and damaged metadata
+        skipped."""
         out = []
         root = self.snapshots_dir(a)
         if root.exists():
             for d in root.iterdir():
-                if d.is_dir():
-                    meta = load_yaml(d / "snapshot.yaml")
+                if d.is_dir() and not d.name.startswith(self.DELETED_PREFIX):
+                    meta = self._load_mapping(d / "snapshot.yaml")
                     if self._snapshot_meta_ok(meta):
                         out.append(meta)
                     elif meta:
@@ -1874,9 +2007,12 @@ class Store:
         with self.lock:
             root = self.snapshots_dir(a)
             root.mkdir(parents=True, exist_ok=True)
-            for d in root.iterdir():
-                if d.is_dir() and not (d / "snapshot.yaml").exists():
-                    shutil.rmtree(d, ignore_errors=True)
+            # list(): the sweep renames entries aside (§6 reaper), so the
+            # listing can't be a live generator over the directory.
+            for d in list(root.iterdir()):
+                if (d.is_dir() and not d.name.startswith(self.DELETED_PREFIX)
+                        and not (d / "snapshot.yaml").exists()):
+                    self._remove_tree(d)
             sid = new_id()
             staging.rename(root / sid)
             meta = {"id": sid, "name": name or None, "reason": reason,
@@ -1887,7 +2023,7 @@ class Store:
             unnamed = [m for m in self.list_snapshots(a) if not m.get("name")]
             for m in unnamed[5:]:
                 if m["id"] != keep:
-                    shutil.rmtree(root / m["id"], ignore_errors=True)
+                    self._remove_tree(root / m["id"])
             return meta
 
     def snapshot_memory(self, a: dict, reason: str, name: str | None = None,
@@ -1921,7 +2057,7 @@ class Store:
             d = self._snapshot_dir(a, sid)
             if not d or not (d / "snapshot.yaml").exists():
                 return False
-            shutil.rmtree(d)
+            self._remove_tree(d)
             return True
 
     def restore_snapshot(self, a: dict, sid: str) -> dict | None:
@@ -1976,7 +2112,9 @@ class Store:
             if mem.exists():
                 mem.rename(old)
             tmp.rename(mem)
-            shutil.rmtree(old, ignore_errors=True)
+            # §6: the displaced tree is as big as memory/ — reaped, not walked
+            # under the lock.
+            self._remove_tree(old)
             self.invalidate_memory_stats(a)
             return meta
 
@@ -2063,7 +2201,7 @@ class Store:
     def draft_test_json(self, container: Path) -> dict | None:
         """§11 last-test summary (`test.yaml` in the draft container, §5) —
         rides the draft payload as `test`; None when no test has finished."""
-        t = load_yaml(container / "test.yaml", None)
+        t = self._load_mapping(container / "test.yaml")
         if not t or not t.get("status"):
             return None
         when = ""

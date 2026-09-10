@@ -57,6 +57,8 @@ def step_timeout_for(s: dict) -> float | None:
 
 MAX_ATTEMPTS = 20  # §4.5: attempts retained per step — older ones prune with their log files
 
+REPLY_BUDGET = 100  # §6.1: replies one step attempt may send; the rest are dropped
+
 
 def step_retries_for(s: dict) -> int:
     """§4.1/§7: the step's automatic retry budget per execution pass — 0 when
@@ -388,12 +390,18 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                         if isinstance(g, int) and not isinstance(g, bool):
                             groups = state.setdefault("agent_pgids", set())
                             if op == "agent_group":
+                                # §4.5: persisted only when the set GAINS a
+                                # group — that is the write §3 recovery needs.
+                                # A retraction writes nothing: the step-end
+                                # write clears the list, and recovery re-checks
+                                # each pid before signalling it.
+                                added = g not in groups
                                 groups.add(g)
+                                persist = state.get("on_agent_groups")
+                                if added and persist:
+                                    persist(sorted(groups))
                             else:
                                 groups.discard(g)
-                            persist = state.get("on_agent_groups")
-                            if persist:
-                                persist(sorted(groups))
                 elif line.strip():
                     log("out", line)
         except ValueError:
@@ -1066,6 +1074,10 @@ class Engine:
                             notify_holder["error"] = {
                                 "message": msg,
                                 "reason": "No enabled agent can serve this step — enable one for this automation."}
+                            # §7: only step failures retry — an engine-level
+                            # failure is not an attempt and never re-runs (under
+                            # `infinite_retries` it would otherwise loop forever).
+                            notify_holder["non_retryable"] = True
                     if not (s.get("agent") and not agent_cfgs):
                         rc = self._execute_step(auto, ver, h, s, i + 1, vdir, params, secret_values,
                                                 secret_names, agent_cfgs, state, redactions,
@@ -1098,7 +1110,8 @@ class Engine:
                                                or f"step failed (exit code {rc})", redactions)
                         reason = (err or {}).get("reason") or failure_reason(rc, err)
                         attempt["error"] = {"message": message, "reason": reason}
-                        if forever or pass_tries < budget:
+                        if (forever or pass_tries < budget) and \
+                                not notify_holder.get("non_retryable"):
                             # §7 step retry: budget left — only the attempt keeps
                             # the error; the execution stays `executing` and never
                             # flickers terminal between attempts.
@@ -1148,8 +1161,9 @@ class Engine:
             # ---- finalize ----
             h["_cur_step"] = None
             h["_cur"] = None
-            h["duration_ms"] = (h["duration_ms"] or 0) + int((time.time() - state["pass_start"]) * 1000)
-            h["_pass_start"] = None  # the pass is over; §4.5 passStartedMs reads 0 from here
+            # §7: summed here too (not only in the finally) so the record's
+            # own write below carries this pass's time.
+            self._sum_pass(h, state)
             # §7: the cancel flag marks the record cancelled only when it
             # actually reached a step — at least one cancelled or left
             # non-terminal. A cancel landing after the last step already
@@ -1223,11 +1237,18 @@ class Engine:
                 h["error"] = {"step": h.get("_cur_step"),
                               "message": self._redact(h, f"engine error: {e}", redactions),
                               "reason": None}
+            # §7: a pass that ended in an engine error counts toward the
+            # record's total — summed before this write so the yaml carries it
+            # (the finally's call is then a no-op).
+            self._sum_pass(h, state)
             try:
                 self.store.update_execution(h)
             except Exception:  # noqa: BLE001
                 pass
         finally:
+            # §7: every exit path sums the pass — the engine-error path above
+            # summed it already, and this call is idempotent.
+            self._sum_pass(h, state)
             release_power()
             with self._lock:
                 self._live.pop(h["id"], None)
@@ -1262,6 +1283,17 @@ class Engine:
                 except Exception:  # noqa: BLE001
                     log.exception("queue drain failed")
 
+    def _sum_pass(self, h: dict, state: dict) -> None:
+        """§7 total duration: fold this pass's elapsed time into the record's
+        `duration_ms` — once per pass, on every exit path (a pass that ended in
+        an engine error counts too)."""
+        pass_start = state.get("pass_start")
+        if pass_start is None:
+            return
+        h["duration_ms"] = (h["duration_ms"] or 0) + int((time.time() - pass_start) * 1000)
+        state["pass_start"] = None
+        h["_pass_start"] = None  # the pass is over; §4.5 passStartedMs reads 0 from here
+
     def _agents_for_step(self, auto: dict, s: dict) -> list[dict]:
         agents = {a["id"]: a for a in self.store.agents}
         return agents_for_step(agents, auto["enabled_agents"], s)
@@ -1274,6 +1306,8 @@ class Engine:
             msg = f"step script {s.get('file')} is missing"
             self._log(h, "err", msg, redactions)
             notify_holder["error"] = {"type": "MissingScript", "message": msg}
+            # §7: an engine-level failure, not a step attempt — never retried.
+            notify_holder["non_retryable"] = True
             return 1
         # §6 secret scoping: a step only receives the secrets it declares in the
         # manifest plus those its own source references — all keyed by §4.8 id.
@@ -1318,9 +1352,22 @@ class Engine:
             },
         }
 
+        # §6.1 reply budget: counted per step attempt (this method runs once
+        # per attempt) — the delivery queue is shared by every listener, so a
+        # looping step must not grow it without bound.
+        replies = {"sent": 0}
+
         def on_reply(text: str) -> None:
             # §6.1: send back through the listener module — a failed send logs
             # an err line and never fails the step.
+            replies["sent"] += 1
+            if replies["sent"] > REPLY_BUDGET:
+                if replies["sent"] == REPLY_BUDGET + 1:
+                    # One err line for the whole overflow, then silence.
+                    self._log(h, "err",
+                              f"reply dropped — more than {REPLY_BUDGET} replies in one step",
+                              redactions)
+                return
             payload = h.get("trigger_payload") or {}
             # §6.1 last gate before the network: the executor already refuses a
             # reply carrying a secret value, but this is the point of no return
@@ -1362,9 +1409,12 @@ class Engine:
         """§6: at most one notification, at the end, per the §4.9 setting."""
         setting = self.store.settings.get("notifications", "attention")
         status = h["status"]
+        # §6: the notification follows the STORED chipStatus — a
+        # `result.status(...)` set without a chip stores nothing (§4.5) and must
+        # announce nothing, since the record cannot show that state.
         interesting = (
             status == "failed"
-            or (result or {}).get("status") in ("changes", "attention")
+            or h.get("chip_status") in ("changes", "attention")
         )
         if setting == "all" or interesting:
             body = notify_text or (result or {}).get("chip") or \

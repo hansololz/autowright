@@ -24,6 +24,10 @@ export const MODAL_TOOLBAR = 44
  * chips — and a wrapped pane header still keeps its padding. */
 export const PAGE_HEADER = 38
 
+// One frozen empty bucket — a fresh [] each render would re-run every memo and
+// effect keyed on `logs`.
+const NO_LOGS: LogLine[] = []
+
 const rowBase: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', cursor: 'pointer',
 }
@@ -205,7 +209,6 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   // Per-field selectors (UI-GUIDE): a bare useStore() would re-render on every
   // store write anywhere — including each execution.log event of every other
   // execution.
-  const execLogs = useStore((s) => s.execLogs)
   const loadExecLogs = useStore((s) => s.loadExecLogs)
   const copy = usePlatformCopy()
   const e = full ?? summary
@@ -249,9 +252,10 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
     void loadExecLogs(executionId, sel.step ?? undefined, sel.attempt ?? undefined)
   }, [executionId, sel]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const logs: LogLine[] = (sel !== null
-    ? execLogs[executionId]?.[logKey(sel.step, sel.attempt)]
-    : undefined) ?? []
+  // Only this execution's selected bucket: subscribing to the whole `execLogs`
+  // map would re-render the view on every other execution's log line.
+  const bucketKey = sel !== null ? logKey(sel.step, sel.attempt) : null
+  const logs: LogLine[] = useStore((s) => (bucketKey ? s.execLogs[executionId]?.[bucketKey] : undefined)) ?? NO_LOGS
   const liveSelected = executing && sel?.step === liveIdx && liveIdx >= 0
     && sel.attempt === latestN(steps[liveIdx])
   // §7 log cap: the store keeps only the last LOG_TAIL lines (fetched tail plus

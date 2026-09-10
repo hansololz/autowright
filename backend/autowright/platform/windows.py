@@ -518,11 +518,16 @@ def shim_paths() -> list[Path]:
 
 
 def shim_text() -> str:
-    """§3 batch shim for this interpreter, module form, CRLF (mirrors
+    """§3 batch shim for the console interpreter, module form, CRLF (mirrors
     `win32.cjs`'s `shimText`, byte for byte — the shell writes it, install
-    heals it, and a whole-file compare decides whether it needs healing)."""
+    heals it, and a whole-file compare decides whether it needs healing).
+    `paths.console_python()`, never `sys.executable`: the service runs the
+    backend under `pythonw.exe` (§3), and that is also what the shell writes
+    its shim from (`backend.json`'s `python` field) — the CLI needs a console,
+    and both halves must agree on one exec line or install would heal every
+    shim the shell wrote."""
     return (f"@echo off\r\n{SHIM_MARKER}\r\n"
-            f'"{sys.executable}" -m autowright.cli %*\r\n')
+            f'"{paths.console_python()}" -m autowright.cli %*\r\n')
 
 
 def _heal_one(p: Path) -> str | None:
@@ -544,7 +549,7 @@ def _heal_one(p: Path) -> str | None:
         return f"CLI at {p}"
     except OSError as e:
         return (f"CLI shim at {p} not rewritable ({e}) — "
-                f"use `{sys.executable} -m autowright.cli`")
+                f"use `{paths.console_python()} -m autowright.cli`")
 
 
 def _heal_shim() -> str:
@@ -554,7 +559,7 @@ def _heal_shim() -> str:
     in place — a user-owned file rewrites without a directory write."""
     notes = [n for n in (_heal_one(p) for p in shim_paths()) if n]
     if not notes:
-        return f"CLI not installed — use `{sys.executable} -m autowright.cli`"
+        return f"CLI not installed — use `{paths.console_python()} -m autowright.cli`"
     return " · ".join(notes)
 
 

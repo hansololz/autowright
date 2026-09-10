@@ -25,7 +25,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 - Before step 1 the engine ensures the version's declared packages (§6.2): the fast
   installed-check costs milliseconds when everything is present; anything missing installs with
   a sys log line ("installing packages: `pandas`…"). An install failure fails the
-  execution before any step with the package category below.
+  execution before any step with the package category below. A cancel that arrives while the
+  execution is waiting its turn for the process-wide pip lock (another install in progress)
+  is honored at once — it never waits out the other install.
 - Streaming: each step queued → executing → terminal status with duration. Executing a step
   appends an **attempt** (its `number` = the last attempt's `number` + 1 — monotonic per step,
   never re-derived from list length, since the §4.5 prune drops old entries) to that step; the
@@ -129,7 +131,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   re-executed and keep their attempts. Each executed step appends the next attempt. Same
   workspace (earlier steps' outputs are already there — nothing is copied), same result dir
   (a failed pass's stale result files may remain until steps overwrite them), accumulated
-  duration (`duration_ms` sums the passes; `started_at` never changes). `execution.finished` fires
+  duration (`duration_ms` sums the passes — a pass that ended in an engine error counts too;
+  `started_at` never changes). `execution.finished` fires
   again per pass, so the end-of-execution toast repeats — intended. Retry is allowed only on
   terminal `failed` executions and answers 409 when the automation is at `maxParallel`
   capacity (§6 — with a free slot a retry is admitted beside a live execution), when the
@@ -189,7 +192,7 @@ row never wraps: the automation name is a single line that shrinks with ellipsis
 its tooltip), so the actions always sit on the title line at the same height as every other
 page's header buttons (same rule as the §11 Review title);
 below the title a mono metadata line: full execution id (copyable) · trigger · version ·
-started · duration. A §4.5 `test` execution additionally shows a **"Draft test"** `MetaChip` in the
+started · duration (a draft test prints "Test" once — the same once-rule as the list row). A §4.5 `test` execution additionally shows a **"Draft test"** `MetaChip` in the
 title row, never shows the "(deleted)" marker (a create-mode test has no automation by
 design), and hides Retry and Execute again — iteration on a draft happens from the editor's
 TEST card and test-run modal; Cancel and Skip step still work while it is live. Body stacks top to bottom: the
@@ -351,7 +354,8 @@ Shift+Enter stepping, Escape closing the bar and clearing the query without clos
 arrow keys in the field never flipping the log, and the bar and query surviving log flips while
 the current match resets to the first on a new query or a new selection. While the field holds a
 query the live auto-scroll pauses (a jump to a match must not be yanked back to the tail); it
-resumes when the query clears. The find bar searches the kept tail only — the truncation notice
+resumes when the query clears. The pane scrolls to a match only when the current match
+changes — a streamed line re-runs the search but never moves the view. The find bar searches the kept tail only — the truncation notice
 still explains what is missing.
 The pane is **capped at the last 2000 lines** of the selected log, the same cap the §7 text
 preview uses: the lazy fetch asks the §19 logs endpoint for that tail (`tail`), and live WS
@@ -395,7 +399,8 @@ automation's; in create mode the draft's name, "New automation" fallback), never
 "Test" **once** — the §4.5 trigger and versionLabel labels are both "Test", and the row never prints
 the redundant pair (a mocked sender still appears between: "Test · Dave"). Test rows share
 the record's draft-scoped lifetime (§11 keep-latest): starting the next test replaces the
-previous row, and a settling draft removes its rows. Three sections, top to bottom —
+previous row, and a settling draft removes its rows — both through the §19 `execution.deleted`
+event, so the list never keeps a ghost row on the live path. Three sections, top to bottom —
 active work, then what it is holding up, then history: **Executing** (`executing` rows, newest
 start first), **Queued** (§6 firing-queue `queued` rows, oldest wait first — the drain order,
 so the next one to run reads top), **Finished** (newest start first, by §4.5 `startedMs`, id

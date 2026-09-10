@@ -82,8 +82,11 @@ can override it.
   file rule (two digits, gapless from `01`, then lowercase letters, digits, and hyphens
   only), the `note` as the §4.4 version note, the `test_values` policy (only values the
   SPEC states outright, never guessed, never secret-like), the optional `notes.md` block a
-  sync may return, and the fact that the validator drops unknown manifest and step keys
-  silently, so a misspelled key never errors and its setting never lands; the
+  sync may return, and the fact that the validator drops unknown manifest, step, **and
+  param** keys silently (a param entry is normalized to the §4.2 definition fields — `name`,
+  `kind`, `label`, `help`, `default`, `min`, `placeholder`, `validate` — so a misspelled key
+  never reaches a version file or a §5.1 archive), so a misspelled key never errors and its
+  setting never lands; the
   `autowright` SDK reference with worked examples (a typical memory-diff last step; a
   validated `agent.ask` call) — the reference covers the **whole** §6.1 surface, message-trigger
   names included (`execution.trigger_payload` is the message context and the only place
@@ -575,7 +578,9 @@ answer prose is extracted — the answer-only response, the prose before a round
 prose settles as the answer). A response containing a `===FILE:` marker parses per the §8 envelope
 rules; the allowed block names are exactly `spec.md`, `notes.md`,
 `actions.yaml` — anything else (a step file, or the retired `instructions.md`
-build-instructions rewrite) is a validation error; `spec.md`
+build-instructions rewrite) is a validation error on **both** delivery paths — the fenced
+stdout envelope and the file-writing scratch dir alike surface the stray document into the
+same check, so a file-writing harness never has a rewrite silently discarded; `spec.md`
 validates per the spec-document rules above; `actions.yaml` must parse as a yaml mapping matching the schema
 above; prose before the first marker becomes the payload's `answer`. The truncation rule
 and the failure policy's repair rounds (then build diagnosis) apply — and a chat repair
@@ -911,7 +916,8 @@ gets no resets and the window degrades to a fixed timeout. On top of the window 
 streaming still ends. Stream size is bounded too: one invocation's stdout is capped at
 50 MB of characters (the call is killed and fails non-retryably — no valid response is
 anywhere near that large, and a harness stuck in a tool loop must not push the whole hard
-cap's worth of output through backend memory and every log sink) and stderr is drained
+cap's worth of output through backend memory and every log sink; the cap is enforced on
+bounded reads, never per line, so one newline-free blob cannot buffer past it first) and stderr is drained
 into a 1 MB tail-keeping buffer (the decisive error lines come last). Both kills raise the
 same retryable timeout error; cancelling
 the job (Start over, or an edit that supersedes an in-flight steps call, §11) kills the harness

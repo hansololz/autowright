@@ -145,6 +145,8 @@ export default function Onboarding() {
 
   const timers = useRef<number[]>([])
   const ivals = useRef<number[]>([])
+  // §10 sign-in poll, one interval per provider (see pollSignin below)
+  const signinPolls = useRef<Record<string, number>>({})
   const t = (fn: () => void, ms: number) => { const id = window.setTimeout(fn, ms); timers.current.push(id); return id }
   const iv = (fn: () => void, ms: number) => { const id = window.setInterval(fn, ms); ivals.current.push(id); return id }
   const up = (fn: (o: Ob) => void) => { fn(ob); bump() }
@@ -152,6 +154,7 @@ export default function Onboarding() {
   useEffect(() => () => {
     timers.current.forEach((id) => clearTimeout(id))
     ivals.current.forEach((id) => clearInterval(id))
+    signinPolls.current = {}
   }, [])
 
   // ----- step 1: live self-check (prototype runSample timings) -----
@@ -275,8 +278,16 @@ export default function Onboarding() {
   // Sign-in help, only when necessary (§10): the backend opens the browser
   // (Codex) or Terminal (the rest); we poll until the sign-in rule flips.
   const pollSignin = (p: Det) => {
-    iv(() => {
-      if (card(p.id).phase !== 'signin') return
+    // One poll per provider: a second sign-in attempt replaces the first, and
+    // a phase that leaves sign-in stops it — otherwise every retry would leave
+    // another 2 s fetch loop running for the life of the page.
+    clearInterval(signinPolls.current[p.id])
+    signinPolls.current[p.id] = iv(() => {
+      if (card(p.id).phase !== 'signin') {
+        clearInterval(signinPolls.current[p.id])
+        delete signinPolls.current[p.id]
+        return
+      }
       void api.signinStatus(p.id).then((s) => {
         if (s.signedIn === true && card(p.id).phase === 'signin') startCheck(p)
       }).catch(() => { /* backend hiccup — keep polling */ })

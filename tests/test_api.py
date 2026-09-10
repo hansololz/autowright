@@ -4323,7 +4323,11 @@ def test_request_log_write_runs_off_the_event_loop(client, devmode, monkeypatch)
     import asyncio
 
     from autowright import api, reqlog
+    from autowright.storage import store
 
+    # §5: the gate itself reads the in-memory settings map (never settings.yaml,
+    # which the `devmode` fixture writes) — turn it on where the middleware looks.
+    monkeypatch.setitem(store.settings, "developerMode", True)
     on_loop = []
     real = reqlog.write_http
 

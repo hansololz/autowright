@@ -38,7 +38,7 @@ def start(engine: Engine, draft: dict, auto: dict | None,
                and h["status"] == "executing" for h in store.execs.values()):
             raise RuntimeError("a test is already executing — cancel it or wait for it to finish")
         # §11 keep-latest: one test record per draft container.
-        store.delete_test_execs(container_id)
+        superseded = store.delete_test_execs(container_id) or []
 
         # Same trust boundary as version writes: client `file` names are
         # sanitized before they hit the record's steps/ directory.
@@ -69,6 +69,11 @@ def start(engine: Engine, draft: dict, auto: dict | None,
         h = store.create_execution(shadow, "test", None, "test", rec_steps,
                                    params=store.merged_params(shadow, ver),
                                    trigger_payload=trigger_payload)
+
+    # §19 execution.deleted: the superseded test rows leave the §7 list live —
+    # published outside the lock, like every other event this module sends.
+    for superseded_id in superseded:
+        hub.publish("execution.deleted", executionId=superseded_id)
 
     # Any setup failure past this point must take the record with it: a
     # permanent "executing" test record trips the 409 above forever (and

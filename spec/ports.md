@@ -12,13 +12,6 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
 
 ## Shared (both OSes)
 
-- **`window-all-closed` never fires once the tray panel has been opened.** The panel
-  (`app/electron/main.cjs:625`) is a `closable: false` BrowserWindow that is only ever
-  hidden (`:612`, `:640`, `:745`, and `:548` when the tray icon is switched off — which
-  destroys the tray but only hides the panel), never closed or destroyed, so the residency
-  check at `main.cjs:1312-1315` is unreachable afterward. Scenario: open the tray panel
-  once, later disable `menuBarIcon` in Settings, close the main window — resident
-  invisible process with no quit path. Fix the panel teardown or the residency rule.
 - **Service-manager timeout multiplication — all three OSes.** Fixed poll counts multiply
   with per-probe subprocess timeouts instead of a wall-clock deadline:
   `platform/windows.py` `_await_running` 20 × a PowerShell probe blocking up to 30 s
@@ -59,13 +52,6 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   `win32.cjs:151` relies on it (`main.cjs:1274` gates `Menu.setApplicationMenu(null)` on
   `!caps.appMenu`). If a real build does draw it, ship the same one-line
   `appMenu: false` Linux got (Ctrl+C/V/X/A stay Blink-native).
-- **`shim_text()` uses `sys.executable` — live shim ping-pong.**
-  `platform/windows.py:520-525` emits `"{sys.executable}" -m autowright.cli %*`, which
-  under the Task Scheduler backend is `pythonw.exe` (`windows.py:397`), while the shell
-  writes its shim from `backendInfo().python` = `paths.console_python()`
-  (`app/electron/main.cjs:686,691,705`; `main.py:157`). The two texts differ
-  byte-for-byte, and each side's whole-file compare keeps rewriting the other's shim.
-  Use `console_python()` in `shim_text()`.
 - **`skills/autowright/SKILL.md:46-49` hardcodes the POSIX PATH help** (`~/.local/bin`,
   the zsh `~/.zprofile` one-liner) — wrong on Windows; needs per-OS wording before the
   skill is advertised to Windows users.

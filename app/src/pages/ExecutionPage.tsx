@@ -344,7 +344,9 @@ export default function ExecutionPage() {
       </PageTitle>
       <div style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-faint)', marginBottom: 20 }}>
         <span>{e.id}</span>
-        {` · ${e.trigger}`}{e.versionLabel ? ` · ${e.versionLabel}` : ''}
+        {/* §7: a test record's trigger and version labels are both "Test" —
+          * print it once, exactly as the executions list does. */}
+        {` · ${e.trigger}`}{e.versionLabel && e.versionLabel !== e.trigger ? ` · ${e.versionLabel}` : ''}
         {/* A queued record has not started and has no duration (§7) — it reports
           * when it was queued and how long it has been waiting instead. */}
         {queued

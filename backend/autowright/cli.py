@@ -66,7 +66,8 @@ class Client:
 
     def req(self, method: str, path: str, body: dict | None = None, timeout: int = 30):
         # §20 HTTP timeouts: 30 s default; the three legitimately long calls
-        # (package install, URL import, automation delete) override to 600 s.
+        # (package install, import in all three of its steps, and automation
+        # delete) override to 600 s.
         r = urllib.request.Request(
             self.base + path,
             data=json.dumps(body).encode() if body is not None else None,
@@ -85,7 +86,8 @@ class Client:
             sys.exit(f"backend isn't reachable at {self.base} ({e}) — restart it with "
                      "`autowright service restart` or `autowright-backend`")
 
-    def req_raw(self, method: str, path: str, data: bytes | None = None) -> bytes:
+    def req_raw(self, method: str, path: str, data: bytes | None = None,
+                timeout: int = 30) -> bytes:
         """Binary request — §5.1 archives and §7 result files go over the wire as raw bytes."""
         r = urllib.request.Request(
             self.base + path, data=data,
@@ -94,7 +96,7 @@ class Client:
             method=method,
         )
         try:
-            with _opener.open(r, timeout=30) as resp:
+            with _opener.open(r, timeout=timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
             _exit_http(e)
@@ -132,13 +134,16 @@ def find_automation(c: Client, ref: str) -> dict:
 
 
 def find_execution(c: Client, ref: str | None) -> dict:
+    if not ref:
+        # §20: the bare no-reference form means "the newest" — one row is all
+        # it needs, so it reads limit=1 rather than the whole list.
+        newest = c.req("GET", "/executions?limit=1")["executions"]
+        if newest:
+            return newest[0]
+        sys.exit("no execution found")
     # §19/§20: no limit — reference resolution reads the uncapped list, so
     # every short id the CLI ever printed resolves back (§20 reference rule).
     execs = c.req("GET", "/executions")["executions"]
-    if not ref:
-        if execs:
-            return execs[0]
-        sys.exit("no execution found")
     matches = [e for e in execs if e["id"].startswith(ref)]
     if len(matches) == 1:
         return matches[0]
@@ -155,14 +160,16 @@ def _pjson(data) -> None:
 def follow_exec(c: Client, execution_id: str) -> str:
     # Logs are lazy (§19): poll the record for step/attempt structure, then
     # fetch each attempt's log file and print lines past the last seen sequence.
-    # An attempt fetched once after it reached a terminal status can't grow —
-    # skip it on later polls instead of re-downloading its whole file forever.
+    # An attempt (or the execution log itself) fetched once after the record
+    # reached a terminal status can't grow — skip it on later polls instead of
+    # re-downloading its whole file forever.
     seen: dict[tuple, int] = {}   # (step index | None, attempt | None) → last printed sequence
     settled: set[tuple] = set()
     try:
         while True:
             e = c.req("GET", f"/executions/{execution_id}")
-            targets: list[tuple[int | None, int | None, bool]] = [(None, None, False)]  # the execution log
+            done = e["status"] not in ("executing", "queued")
+            targets: list[tuple[int | None, int | None, bool]] = [(None, None, done)]  # the execution log
             for i, s in enumerate(e.get("steps", [])):
                 for a in s.get("attempts") or []:
                     terminal = a.get("status") not in ("executing", "queued")
@@ -171,9 +178,15 @@ def follow_exec(c: Client, execution_id: str) -> str:
                 key = (step, attempt)
                 if key in settled:
                     continue
-                q = "" if step is None else f"?step={step}&attempt={attempt}"
-                lines = c.req("GET", f"/executions/{execution_id}/logs{q}").get("lines", [])
                 last = seen.get(key, 0)
+                # §20 follow semantics: each poll sends the §19 sinceSequence of
+                # the last line it printed for this target, so a long-running
+                # step's log crosses the loopback once, not once per second.
+                params = [] if step is None else [f"step={step}", f"attempt={attempt}"]
+                if last:
+                    params.append(f"sinceSequence={last}")
+                q = f"?{'&'.join(params)}" if params else ""
+                lines = c.req("GET", f"/executions/{execution_id}/logs{q}").get("lines", [])
                 for ln in lines:
                     if ln["sequence"] > last:
                         print(f"  {ln['time']} [{ln['kind']}] {ln['text']}")
@@ -740,7 +753,10 @@ def cmd_automation_import(c: Client, args) -> None:
         resolved = pr.get("preview", {}).get("resolvedUrl")
         if resolved and resolved != args.path.strip():
             print(f"resolved to {resolved}")
-        r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")})
+        # §20 HTTP timeouts: the confirm lands the archive — a large one on a
+        # slow volume must never report "backend isn't reachable" while it works.
+        r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
+                  timeout=600)
     else:
         try:
             with open(args.path, "rb") as f:
@@ -749,7 +765,8 @@ def cmd_automation_import(c: Client, args) -> None:
             # §20: an unreadable archive is a plain message on stderr, never a
             # raw OSError.
             sys.exit(f"can't read {args.path}: {e.strerror or e}")
-        r = json.loads(c.req_raw("POST", "/automations/import", data).decode() or "{}")
+        r = json.loads(c.req_raw("POST", "/automations/import", data,
+                                 timeout=600).decode() or "{}")
     s = r.get("summary", {})
     print(f"imported {r.get('automation', {}).get('name', '?')!r} [{r.get('automation', {}).get('id', '')[:8]}]")
     if s.get("renamedFrom"):
@@ -1061,7 +1078,24 @@ def _local_stamp_ms(text: str, *, end_of_day: bool) -> int:
     raise SystemExit(f"error: {text!r} is not a YYYY-MM-DD or YYYY-MM-DDTHH:MM local time")
 
 
+def _row_count(text: str) -> int:
+    """§20 `-n`: the count rides to the server as the §19 `limit`, so anything
+    below 1 is a usage error named with the flag's own word — never a server
+    422 quoting the wire parameter. (A non-number stays argparse's own usage
+    error.)"""
+    count = int(text)
+    if count < 1:
+        raise SystemExit(f"error: -n must be at least 1, not {count}")
+    return count
+
+
 def cmd_execution_list(c: Client, args) -> None:
+    # §20: an inverted range is a usage error named with the flags' own words,
+    # raised before anything crosses the wire.
+    since = _local_stamp_ms(args.since, end_of_day=False) if args.since else None
+    until = _local_stamp_ms(args.until, end_of_day=True) if args.until else None
+    if since is not None and until is not None and since > until:
+        raise SystemExit("error: --since is after --until — swap them")
     # §20: -n rides to the server as the §19 limit — only the printed rows
     # cross the wire.
     q = [f"limit={args.n}"]
@@ -1069,10 +1103,10 @@ def cmd_execution_list(c: Client, args) -> None:
         q.append(f"automation={find_automation(c, ref)['id']}")
     for value in args.status or []:
         q.append(f"status={value}")
-    if args.since:
-        q.append(f"startedFromMs={_local_stamp_ms(args.since, end_of_day=False)}")
-    if args.until:
-        q.append(f"startedToMs={_local_stamp_ms(args.until, end_of_day=True)}")
+    if since is not None:
+        q.append(f"startedFromMs={since}")
+    if until is not None:
+        q.append(f"startedToMs={until}")
     data = c.req("GET", "/executions?" + "&".join(q))
     if args.json:
         _pjson(data)
@@ -2109,8 +2143,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                     "  autowright execution list --automation report\n"
                     "  autowright execution list --status failed\n"
                     "  autowright execution list --since 2026-09-01 --until 2026-09-06")
-    p.add_argument("-n", type=int, default=20, metavar="COUNT",
-                   help="how many to print (default: 20)")
+    p.add_argument("-n", type=_row_count, default=20, metavar="COUNT",
+                   help="how many to print, at least 1 (default: 20)")
     p.add_argument("--automation", metavar="AUTOMATION", action="append",
                    help="only executions of this automation, named as anywhere else: its "
                         "name, a unique part of its name, its id, or an id prefix; repeat "

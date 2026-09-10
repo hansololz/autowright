@@ -36,7 +36,9 @@ applies unchanged; the chat pane never collapses.
 - **No header:** the pane has no header row — the thread starts at the top of the card
   and the composer carries the pane's identity (the drafting-agent picker below). No
   `CHAT` label anywhere; the thread and input make the pane self-evident.
-- **Thread:** scrolling body, newest at the bottom, auto-scrolled on new content. The
+- **Thread:** scrolling body, newest at the bottom, auto-scrolled on new content only while
+  the user is at (or near) the bottom — the near-bottom rule below governs every kind of
+  growth, a settling entry included. The
   thread reads as a user ↔ agent conversation: **user** entries are the only bubbles —
   quiet, right-aligned — and **every agent-side entry renders left-aligned in the
   Claude-output style**: full-width markdown/prose blocks, no bubbles, no centered text
@@ -457,7 +459,8 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
   entry's place — led by the final stage's **activity** entry, so the label and detail
   lines outlive the spinner, which settles into a
   same-size outcome glyph (entry kinds above). The thread
-  auto-pins to the bottom when the entry appears; while the feed grows it follows only
+  auto-pins to the bottom when the user's own message lands (the live entry appears
+  directly under it); from then on — the live entry included — it follows only
   when the user is already at (or near) the bottom — a user who scrolled up is never
   yanked back down. Meanwhile the composer keeps its two-row shape — the textarea stays
   visible but disabled, the agent picker stays in place — and in the toolbar row the send

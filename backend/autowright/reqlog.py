@@ -35,7 +35,13 @@ _lock = threading.Lock()
 _dev_cache = {"t": 0.0, "on": False}
 
 
-def enabled() -> bool:
+def enabled(settings=None) -> bool:
+    """`settings` is the backend's in-memory §5 settings mapping, passed by the
+    §19 HTTP middleware: it runs on the event loop once per request, and the
+    file-cached read below would put a stat + parse there every second. The
+    executor subprocess has no Store, so it passes nothing and reads the file."""
+    if settings is not None:
+        return bool(settings.get("developerMode"))
     now = time.monotonic()
     if now - _dev_cache["t"] > 1.0:
         _dev_cache["t"] = now

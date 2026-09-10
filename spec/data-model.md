@@ -372,7 +372,9 @@ true → the occurrence fires once on wake, exactly the §6 one-catch-up-per-wak
 false → the slept-through span is dropped, nothing fires, and the trigger simply waits for
 its next occurrence. The field covers sleep only: a backend that was not running when the
 moment passed never catches up whatever the value (§6 - no startup catch-up queue), and a
-past one-shot found on disk at load is consumed unfired either way. Storage: written to
+past one-shot found on disk at load is consumed unfired either way (only a *parsable* past `at`
+counts as spent — an unreadable `at`, such as an unquoted timestamp YAML loaded as a datetime,
+is dropped with the §5 malformed-trigger warning, never consumed silently). Storage: written to
 `automation.yaml` only when false - an absent key reads as true, so every trigger stored
 before the field existed keeps today's behavior (§21). The API serializes it explicitly on
 every cron/time trigger (`runIfMissed: true | false`) and accepts it on the same two kinds;

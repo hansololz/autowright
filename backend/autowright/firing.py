@@ -292,8 +292,14 @@ def _waited_s(h: dict) -> float:
         return 0.0
     try:
         queued = datetime.fromisoformat(q)
-    except ValueError:
+    except (TypeError, ValueError):
         # A damaged stored timestamp reads as just-queued rather than
-        # propagating out of drain_queue and wedging this queue forever.
+        # propagating out of drain_queue and wedging this queue forever
+        # (a hand-edited unquoted value loads from YAML as a datetime, which
+        # fromisoformat rejects with a TypeError, not a ValueError).
         return 0.0
+    if queued.tzinfo is None:
+        # §5: a hand-edited naive timestamp is local wall time — subtracting
+        # it from an aware `now` would raise TypeError.
+        queued = queued.astimezone()
     return (datetime.now(timezone.utc) - queued).total_seconds()

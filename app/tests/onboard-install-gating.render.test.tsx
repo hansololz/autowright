@@ -59,6 +59,39 @@ async function toStep2() {
 beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers() })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
+// §10 sign-in help: the card polls the §19 sign-in status every 2 s while it
+// waits — one interval per provider, never one per attempt.
+describe('§10 sign-in poll', () => {
+  it('a second sign-in attempt replaces the first poll instead of stacking one', async () => {
+    setup(true, [det({ id: 'gemini', name: 'Gemini CLI', installed: true, signedIn: false })])
+    await toStep2()
+
+    fireEvent.click(screen.getByText('Sign in'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('Waiting for you to sign in…')).toBeTruthy()
+    // back to idle, then sign in again — the first poll must not survive
+    fireEvent.click(screen.getByText('Cancel'))
+    fireEvent.click(screen.getByText('Sign in'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    ;(mockedApi.signinStatus as ReturnType<typeof vi.fn>).mockClear()
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    expect(mockedApi.signinStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaving the sign-in phase stops the poll for good', async () => {
+    setup(true, [det({ id: 'gemini', name: 'Gemini CLI', installed: true, signedIn: false })])
+    await toStep2()
+
+    fireEvent.click(screen.getByText('Sign in'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    fireEvent.click(screen.getByText('Cancel'))
+    ;(mockedApi.signinStatus as ReturnType<typeof vi.fn>).mockClear()
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
+    expect(mockedApi.signinStatus).not.toHaveBeenCalled()
+  })
+})
+
 describe('§10 step-2 cards — agentInstall gating', () => {
   it('agentInstall false: the suggestion card shows the manual line, no setup action', async () => {
     setup(false, [det({ id: 'codex', name: 'Codex' })])

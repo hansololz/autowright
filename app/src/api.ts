@@ -14,7 +14,7 @@ declare global {
       pickFolder(defaultPath?: string): Promise<string | null>
       resizePanel(h: number): Promise<void>
       saveFile(defaultName: string, data: ArrayBuffer): Promise<string | null>
-      openArchive(): Promise<{ name: string; data: Uint8Array } | null>
+      openArchive(): Promise<{ name: string; data: Uint8Array } | { error: string } | null>
       revealPath(p: string): Promise<void>
       // §9.5 report modal: OS details + bundle version for the info block
       platformInfo(): Promise<{ platform: string; osName?: string; release: string; arch: string; version: string; trayPanel?: boolean }>

@@ -446,3 +446,27 @@ describe('§9.2 PARAMETERS row writes', () => {
     expect(storeMod.useStore.getState().toast).toBe('backend is restarting')
   })
 })
+
+describe('§9.2 delete while the page is open', () => {
+  it('a vanished automation renders nothing without a hook-count error', async () => {
+    // The delete form of automation.changed empties `auto` for one render; every
+    // hook must already have run above the early return or React throws
+    // "Rendered fewer hooks than expected" (swallowed by the boundary, but a
+    // real render failure all the same).
+    const errors: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+    try {
+      seed(auto({ versions: [{ version: 1, note: null, createdAt: '', steps: [] }] } as Partial<Automation>))
+      const { container } = render(<AutomationDetail />)
+      expect(container.textContent).toContain('Job')
+      // What the delete form of automation.changed does to the row (store.ts patchAutomation).
+      storeMod.useStore.setState({ automations: [] })
+      await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
+      expect(errors.join('\n')).not.toMatch(/fewer hooks|Rendered more hooks|Minified React error #300/)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})

@@ -75,7 +75,10 @@ the update bullets below).
   into `app.log` and records a failed ensure-backend status. The renderer reads that status over
   the preload bridge (`backend-status` IPC: `{ state: 'idle'|'installing'|'ok'|'failed', detail }`)
   and the §9 boot splash shows the failure detail instead of waiting silently. The renderer keeps
-  retrying regardless — a late backend still connects.
+  retrying regardless — a late backend still connects. An install the shell drops because a
+  quit-all is already latched records that outcome too (`failed` with a "quitting" detail
+  plus an `app.log` line) — the status never latches on `installing` for a run that was
+  never made.
 - **Bundled Python (decided):** the app ships its own relocatable CPython (python-build-standalone
   builds) inside the bundle (`Contents/Resources/python/`; on Windows the packaged layout is
   `resources\python\` and the interpreter sits flat at `python\python.exe` — the
@@ -139,8 +142,9 @@ the update bullets below).
   after the pip install and before the copy into the bundle: the Tcl/Tk stack goes
   (`lib/tcl*`, `lib/tk*`, `lib/itcl*`, `lib/thread*`, `lib/libtcl*`, `lib/libtk*`,
   `lib/python3.X/tkinter`, `idlelib`, `turtledemo`, `turtle.py`, `lib-dynload/_tkinter*`: a
-  GUI toolkit; the backend and every step run headless under launchd), `ensurepip` goes (pip
-  is already installed and upgraded; nothing in the bundle creates venvs), the C-API build
+  GUI toolkit; the backend and every step run headless under launchd), `ensurepip` and
+  `venv` go (pip is already installed and upgraded; nothing in the bundle creates venvs —
+  `venv` cannot work without `ensurepip`, so the two go together), the C-API build
   scaffolding goes (`include/`, `share/`, `lib/pkgconfig`, `lib/python3.X/config-*`,
   `site-packages/lxml/includes`: §6.2 installs `--only-binary :all:`, so no extension is ever
   compiled against the bundled interpreter), and every fat Mach-O (`.so`/`.dylib`) is thinned
@@ -150,7 +154,9 @@ the update bullets below).
   runtime; without shipped bytecode the interpreter would try to write it into the bundle on
   every import), any curated package or any part of one (`lxml.objectify` included: the
   curated list is the user-facing step environment), and the stdlib beyond the modules named
-  above (`pydoc`, `unittest`, `venv`, `_pyrepl` stay: a step may reasonably use them).
+  above (`pydoc`, `unittest`, `_pyrepl` stay: a step may reasonably use them). Every stdlib
+  module the trim removes is also rejected by the §6.2 import allowlist in every mode, so
+  the trim can never create a works-in-dev, fails-in-release split.
   (2) **Electron locales:** the app is English-only, so every `*.lproj` other than
   `en*.lproj` is removed from both `Contents/Resources/` (the empty markers `@electron/packager`
   creates; they are what macOS reads to pick the app's localization) and
@@ -159,7 +165,9 @@ the update bullets below).
   unmatched. The Windows/Linux electron-builder legs get the same trim through
   `build.electronLanguages` (`en`, `en-US`, `en-GB`) in `app/package.json`. (3) **The asar:**
   `@electron/packager` packages an allowlist (`electron/`, `dist/`, `package.json`, and the
-  computed electron-updater `node_modules` closure) and ignores every other top-level entry
+  computed electron-updater `node_modules` closure — a scoped package in that closure
+  allows its `@scope` directory too, since the packager's ignore filter prunes a directory
+  before descending into it) and ignores every other top-level entry
   under `app/`, so a stray gitignored directory can never ride along again (through 0.11.2 the
   ignore list was a denylist, and vitest's `coverage/` report, the design-sync `.ds-css/` font
   cache, and `tsconfig.test.json` all shipped inside `app.asar`). (4) **DMG format:** `hdiutil
@@ -429,7 +437,9 @@ the update bullets below).
      session anyway.
   4. `service stop` through the same interpreter resolution and install-interlock as
      quit-all (the reset's last `app.log` line is written here, before step 5 deletes the
-     logs root — a line written after it would silently re-create the root). A stop failure aborts the reset with `{ error }` — the app stays up, and at
+     logs root — a line written after it would silently re-create the root, so from this
+     point the app-log writer is a no-op for every other caller: the backend-up poll, the
+     shell-settings interval, and the service diagnostics all go quiet). A stop failure aborts the reset with `{ error }` — the app stays up, and at
      that point nothing has been deleted beyond step 3's secrets. An absent registration
      with nothing running is **not** a failure (stop is idempotent, headless-mode stop
      bullet) — reset proceeds on a machine whose service was never registered.
@@ -642,7 +652,10 @@ the update bullets below).
     swapping the bundle mid-execution risks a step lazily importing mixed versions; an
     unreachable backend counts as idle. Otherwise it calls electron-updater's
     `quitAndInstall()` — Squirrel already staged during download, so this quits straight
-    into the swap.
+    into the swap. The updater's error stream is listened to, and a `quitAndInstall` that
+    returns without quitting (the NSIS/AppImage classes refuse when nothing is staged or
+    the installer spawn fails) answers `{ error }` with the updater's message — the §9.4
+    card renders it; a silent no-op is never an acceptable outcome.
     ShipIt swaps the bundle at the same path, so the LaunchAgent's absolute interpreter path
     stays valid. On a platform whose §2 module serves no update feed URL, **every** update
     path answers the same plain "Updates are not supported on this platform yet." line up

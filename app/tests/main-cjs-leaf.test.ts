@@ -5,7 +5,7 @@
 // no admin prompt exists, and nothing ever writes to the legacy
 // /usr/local/bin (the pre-08-15 bug was a silent best-effort write there).
 // main.cjs has no importable module structure, so the guard reads the source.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
@@ -243,6 +243,12 @@ interface UpdaterRecord {
   check: unknown
   checkError: Error | null
   downloadError: Error | null
+  // §3 install: what quitAndInstall answers (the NSIS/AppImage classes return
+  // false when they refuse), the error it dispatches on its way out, and the
+  // throw a broken installer produces instead.
+  installResult: unknown
+  installError: Error | null
+  installThrows: Error | null
   listeners: Map<string, (arg: unknown) => void>
 }
 
@@ -254,8 +260,15 @@ interface WinRecord {
   focuses: number
   loads: number
   destroys: number
+  // §13: restore() calls, and every setPosition the panel placement made.
+  restores: number
+  positions: [number, number][]
   fire: (event: string, ...args: unknown[]) => void
   close: () => void
+  // §13: put the window in the state the OS would (minimized), and drive the
+  // §9.4 will-navigate handler with a real event object.
+  minimize: () => void
+  navigate: (url: string) => boolean
 }
 
 interface MainStub {
@@ -263,6 +276,8 @@ interface MainStub {
   // Fire an app-level event main.cjs subscribed to (window-all-closed, …).
   emit: (event: string) => void
   opened: string[]
+  // §9.4 external hand-offs (shell.openExternal), in call order.
+  externals: string[]
   revealed: string[]
   windows: unknown[]
   wins: WinRecord[]
@@ -283,6 +298,8 @@ interface MainStub {
   // shell put up, and the app.log lines behind them.
   errors: [string, string][]
   log: () => string
+  // §3 reset: the exit codes app.exit was called with.
+  exits: number[]
 }
 
 const realRequire = createRequire(join(ELECTRON_DIR, 'main.cjs'))
@@ -305,13 +322,19 @@ interface LoadOptions {
   // §9: make the platform's dock-icon step throw, to prove the ready chain
   // survives an OS-side step that fails.
   dockIconThrows?: boolean
+  // §9.4: make every external hand-off the OS is asked for reject.
+  openExternalRejects?: boolean
   execFile?: ServiceChildStub
+  // Patch individual `fs` functions main.cjs sees (the §9.3 log-rotation race
+  // is otherwise unreachable from a single-threaded test).
+  fs?: Record<string, unknown>
 }
 
 function loadMain(options: LoadOptions = {}): MainStub {
   const handlers = new Map<string, (e: unknown, ...args: unknown[]) => unknown>()
   const appEvents = new Map<string, () => void>()
   const opened: string[] = []
+  const externals: string[] = []
   const revealed: string[] = []
   const windows: unknown[] = []
   const trays: unknown[] = []
@@ -325,6 +348,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
   }
   const trayEvents = new Map<string, () => void>()
   let quits = 0
+  const exits: number[] = []
   const home = mkdtempSync(join(tmpdir(), 'aw-main-'))
   process.env.AUTOWRIGHT_HOME = home
 
@@ -333,6 +357,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
     checks: 0, downloads: 0, installs: 0,
     check: { updateInfo: { version: '9.9.9' } },
     checkError: null, downloadError: null, listeners: new Map(),
+    installResult: undefined, installError: null, installThrows: null,
   }
 
   class FakeUpdater {
@@ -363,7 +388,14 @@ function loadMain(options: LoadOptions = {}): MainStub {
       return ['installer.exe']
     }
 
-    quitAndInstall() { updater.installs += 1 }
+    quitAndInstall() {
+      updater.installs += 1
+      // The real BaseUpdater dispatches the failure on its error stream and
+      // only then answers false.
+      if (updater.installError) updater.listeners.get('error')?.(updater.installError)
+      if (updater.installThrows) throw updater.installThrows
+      return updater.installResult
+    }
   }
 
   const wins: WinRecord[] = []
@@ -373,9 +405,16 @@ function loadMain(options: LoadOptions = {}): MainStub {
     listeners = new Map<string, (...a: unknown[]) => void>()
     destroyed = false
     record: WinRecord = {
-      shows: 0, focuses: 0, loads: 0, destroys: 0,
+      shows: 0, focuses: 0, loads: 0, destroys: 0, restores: 0, positions: [],
       fire: (event, ...args) => { this.wcListeners.get(event)?.({}, ...args) },
       close: () => { this.listeners.get('closed')?.() },
+      minimize: () => { this.minimized = true },
+      navigate: (url) => {
+        let prevented = false
+        this.wcListeners.get('will-navigate')?.(
+          { preventDefault: () => { prevented = true } }, url)
+        return prevented
+      },
     }
 
     webContents = {
@@ -389,8 +428,13 @@ function loadMain(options: LoadOptions = {}): MainStub {
     constructor(opts: unknown) { windows.push(opts); wins.push(this.record) }
     loadFile() { this.record.loads += 1 } loadURL() { this.record.loads += 1 }
     on(event: string, fn: (...a: unknown[]) => void) { this.listeners.set(event, fn) }
+    minimized = false
     show() { this.record.shows += 1 } focus() { this.record.focuses += 1 } hide() {}
-    setSize() {} setPosition() {} isVisible() { return false }
+    isMinimized() { return this.minimized }
+    restore() { this.minimized = false; this.record.restores += 1 }
+    setSize() {}
+    setPosition(x: number, y: number) { this.record.positions.push([x, y]) }
+    isVisible() { return false }
     setVisibleOnAllWorkspaces() {}
     destroy() { this.destroyed = true; this.record.destroys += 1 }
     isDestroyed() { return this.destroyed }
@@ -406,6 +450,8 @@ function loadMain(options: LoadOptions = {}): MainStub {
       on(event: string, fn: () => void) { appEvents.set(event, fn) },
       isReady: () => false,
       quit() { quits += 1 },
+      // §3 reset step 6: the app quits and stays quit.
+      exit(code: number) { exits.push(code) },
       whenReady: () => (options.ready ? Promise.resolve() : new Promise(() => {})),
       // §4.9 dev-harness guard: registration happens only from a packaged
       // run, so the leaf harness models one.
@@ -440,11 +486,24 @@ function loadMain(options: LoadOptions = {}): MainStub {
       },
     },
     nativeImage: { createFromPath: () => ({ setTemplateImage() {} }) },
+    // §3 reset step 5: the Chromium profile is cleared, never deleted.
+    session: {
+      defaultSession: {
+        clearStorageData: async () => {},
+        clearCache: async () => {},
+      },
+    },
     ipcMain: { handle: (name: string, fn: never) => { handlers.set(name, fn) } },
     shell: {
       openPath: (p: string) => { opened.push(p) },
       showItemInFolder: (p: string) => { revealed.push(p) },
-      openExternal() {},
+      // §9.4: the real one answers a promise, and the OS can refuse.
+      openExternal: (url: string) => {
+        externals.push(url)
+        return options.openExternalRejects
+          ? Promise.reject(new Error('no application knows how to open this'))
+          : Promise.resolve()
+      },
     },
     // §13 panel placement: the platform module reads a cursor point and the
     // display under it, so one fixed screen stands in for the real one.
@@ -464,6 +523,9 @@ function loadMain(options: LoadOptions = {}): MainStub {
       // One fake under all three class names — main.cjs picks by the §2 marker.
       if (id === 'electron-updater') {
         return { MacUpdater: FakeUpdater, NsisUpdater: FakeUpdater, AppImageUpdater: FakeUpdater }
+      }
+      if (id === 'fs' && options.fs) {
+        return { ...realRequire('fs') as object, ...options.fs }
       }
       if (id === 'child_process' && options.execFile) {
         return { ...realRequire('child_process') as object, execFile: options.execFile }
@@ -489,8 +551,8 @@ function loadMain(options: LoadOptions = {}): MainStub {
       if (!fn) throw new Error('no tray click handler')
       fn()
     },
-    opened, revealed, windows, wins, trays, loginItem, aumids, sent, updater, home, errors,
-    dialogs, dialogAnswer,
+    opened, externals, revealed, windows, wins, trays, loginItem, aumids, sent, updater,
+    home, errors, exits, dialogs, dialogAnswer,
     // AUTOWRIGHT_HOME points app.log at this test's own home (§15).
     log: () => {
       try { return readFileSync(join(home, 'logs', 'app.log'), 'utf-8') } catch { return '' }
@@ -802,6 +864,10 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
 // against whichever module this OS selects, and assert the capability's rule
 // rather than one platform's answer.
 
+type Point = { x: number, y: number }
+type Rect = { x: number, y: number, width: number, height: number }
+type Display = { bounds: Rect, workArea: Rect }
+
 const platMod = realRequire(join(PLATFORM_DIR, 'index.cjs')) as {
   capabilities: { trayPanel: boolean, loginItem: boolean, dockIcon: boolean, updates: boolean, appMenu: boolean, desktopEntry: boolean }
   UPDATER: string | null
@@ -809,6 +875,7 @@ const platMod = realRequire(join(PLATFORM_DIR, 'index.cjs')) as {
   bundledPythonPath: (resourcesPath: string) => string
   shimText: (python: string) => string
   applyLoginItem: (app: { isPackaged: boolean }, enabled: boolean, exec?: unknown) => void
+  panelPosition: (pt: Point, display: Display, height?: number) => { x: number, y: number }
 }
 const caps = platMod.capabilities
 // §3: every platform with a feed drives electron-updater against the generic
@@ -1310,5 +1377,279 @@ describe('main.cjs ready chain (§9)', () => {
       // Where there is a dock, the throw really happened and was logged.
       if (caps.dockIcon) expect(m.log()).toContain('setting the dock icon failed')
     })
+  })
+})
+
+// ---- §3 update install ------------------------------------------------------
+// The updater's error stream is listened to, and an install that returns
+// without quitting answers { error } with its message (§3, §9.4) — a silent
+// no-op leaves the card stuck on "Restart to update" forever.
+
+describe('main.cjs update-install refusals (§3)', () => {
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('a quitAndInstall that answers false reports the updater\'s own error', async () => {
+    if (!HAS_UPDATER) return // no feed here — the no-updates line is covered above
+    const m = loadMain()
+    // The NSIS/AppImage shape: the failure goes out on the error stream and
+    // quitAndInstall then answers false.
+    m.updater.installError = new Error('spawn Autowright Setup.exe ENOENT')
+    m.updater.installResult = false
+    expect(await m.invoke('update-install'))
+      .toEqual({ error: 'spawn Autowright Setup.exe ENOENT' })
+    expect(m.quits).toBe(0)
+    expect(m.log()).toContain('update: install refused: spawn Autowright Setup.exe ENOENT')
+  })
+
+  it('a refusal with nothing on the error stream still answers an error', async () => {
+    if (!HAS_UPDATER) return
+    const m = loadMain()
+    m.updater.installResult = false
+    expect(await m.invoke('update-install'))
+      .toEqual({ error: 'the updater could not install this update' })
+  })
+
+  it('a throwing install is answered, never left to reject the IPC', async () => {
+    if (!HAS_UPDATER) return
+    const m = loadMain()
+    m.updater.installThrows = new Error('ShipIt is missing')
+    expect(await m.invoke('update-install')).toEqual({ error: 'ShipIt is missing' })
+  })
+})
+
+// ---- §9.4 external hand-offs ------------------------------------------------
+
+describe('main.cjs external link hand-off (§9.4)', () => {
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('an openExternal the OS refuses is logged, not an unhandled rejection', async () => {
+    const m = loadMain({ openExternalRejects: true })
+    m.invoke('open-app', '/app')
+    // §9.4: a link out of the renderer is refused as a navigation and handed
+    // to the browser instead.
+    expect(m.wins[0].navigate('https://autowright.ai/docs')).toBe(true)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(m.externals).toEqual(['https://autowright.ai/docs'])
+    expect(m.log()).toContain("open-external: couldn't open https://autowright.ai/docs")
+  })
+})
+
+// ---- §5.1 open-archive ------------------------------------------------------
+
+describe('main.cjs open-archive hardening (§5.1)', () => {
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('a readable archive comes back as name + bytes', async () => {
+    const m = loadMain()
+    const file = join(m.home, 'ok.autowright')
+    writeFileSync(file, 'PK\u0003\u0004')
+    m.dialogAnswer.canceled = false
+    m.dialogAnswer.filePaths = [file]
+    const r = await m.invoke('open-archive') as { name: string, data: Buffer }
+    expect(r.name).toBe('ok.autowright')
+    expect(r.data.toString()).toBe('PK\u0003\u0004')
+  })
+
+  it('an unreadable pick answers null instead of throwing at the renderer', async () => {
+    const m = loadMain()
+    m.dialogAnswer.canceled = false
+    m.dialogAnswer.filePaths = [join(m.home, 'not-there.autowright')]
+    expect(await m.invoke('open-archive')).toBeNull()
+    expect(m.log()).toContain("open-archive: couldn't read")
+  })
+
+  it('an archive over the 64 MB cap is refused before it is read', async () => {
+    const m = loadMain()
+    const big = join(m.home, 'big.autowright')
+    writeFileSync(big, '')
+    truncateSync(big, 64 * 1024 * 1024 + 1) // sparse — no bytes on disk
+    m.dialogAnswer.canceled = false
+    m.dialogAnswer.filePaths = [big]
+    expect(await m.invoke('open-archive'))
+      .toEqual({ error: 'The archive is larger than 64 MB.' })
+  })
+})
+
+// ---- §9.3 log tail ----------------------------------------------------------
+
+describe('main.cjs tail-logs (§9.3)', () => {
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('stringifies only what was really read — no NUL padding', async () => {
+    const realFs = realRequire('fs') as typeof import('node:fs')
+    // The rotation race: fstat sees the file at its old size, so the buffer is
+    // bigger than anything the read can fill.
+    const m = loadMain({
+      fs: {
+        fstatSync: (fd: number) => {
+          const st = realFs.fstatSync(fd)
+          return { ...st, size: st.size + 200 }
+        },
+      },
+    })
+    mkdirSync(join(m.home, 'logs'), { recursive: true })
+    writeFileSync(join(m.home, 'logs', 'app.log'), 'one line\n')
+    const out = await m.invoke('tail-logs') as { name: string, text: string }[]
+    const tail = out.find((f) => f.name === 'app.log')
+    expect(tail?.text).toBe('one line\n')
+    expect(tail?.text).not.toContain('\u0000')
+  })
+})
+
+// ---- §13 panel placement + lifetime -----------------------------------------
+
+describe('main.cjs §13 panel placement and lifetime', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it("clamps the panel's x to the work area on both edges", () => {
+    // A secondary display to the left of the primary one: a tray icon at its
+    // very left edge used to push the panel off-screen.
+    const display: Display = {
+      bounds: { x: -1920, y: 0, width: 1920, height: 1080 },
+      workArea: { x: -1920, y: 0, width: 1920, height: 1032 },
+    }
+    for (const name of ['win32.cjs', 'darwin.cjs', 'linux.cjs']) {
+      const mod = realRequire(join(PLATFORM_DIR, name)) as { panelPosition: typeof platMod.panelPosition }
+      expect(mod.panelPosition({ x: -1918, y: 8 }, display, 420).x)
+        .toBe(display.workArea.x + 6)
+      expect(mod.panelPosition({ x: -10, y: 8 }, display, 420).x)
+        .toBe(display.workArea.x + display.workArea.width - 344 - 6)
+    }
+  })
+
+  it('a destroyed panel forgets its measured height', async () => {
+    if (!caps.trayPanel) return // §13: Linux ships no tray surface at all
+    const m = loadMain()
+    const place = vi.spyOn(platMod, 'panelPosition')
+    // The tray is the only way to the panel; the §4.9 setting creates it.
+    await m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    expect(place.mock.calls.at(-1)?.[2]).toBe(420)
+    // It grows with its content, re-anchoring at the real height (§13).
+    await m.invoke('resize-panel', 600)
+    expect(place.mock.calls.at(-1)?.[2]).toBe(600)
+    // Tray off destroys the panel; the next one opens at the default again.
+    await m.invoke('apply-settings', { menuBarIcon: false })
+    await m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    expect(place.mock.calls.at(-1)?.[2]).toBe(420)
+  })
+})
+
+// ---- §13 window restore -----------------------------------------------------
+
+describe('main.cjs minimized window restore (§13)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('a minimized window is restored before it is shown', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ ready: true })
+    await vi.advanceTimersByTimeAsync(0)
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    expect(w.shows).toBe(1)
+    // §13 row click: showing a minimized window without restoring it looks
+    // like a no-op — nothing comes to the front.
+    w.minimize()
+    await m.invoke('open-app', '/app?automation=a1')
+    expect(w.restores).toBe(1)
+    expect(w.shows).toBe(2)
+    // The dock/tray reopen follows the same rule.
+    w.minimize()
+    m.emit('activate')
+    expect(w.restores).toBe(2)
+    expect(w.shows).toBe(3)
+  })
+})
+
+// ---- §3 quit/reset log + status quiet ---------------------------------------
+
+describe('main.cjs quit and reset quiet the shell (§3)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('an install dropped because a quit-all latched records that outcome', async () => {
+    vi.useFakeTimers()
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = platMod.bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    // ensure-backend parks on the /health probe until the test releases it, so
+    // quit-all latches quittingAll while the install is still ahead of it.
+    let releaseHealth = () => {}
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/health')) {
+        return new Promise((resolve) => {
+          releaseHealth = () => resolve({ ok: false, status: 503 } as Response)
+        })
+      }
+      return Promise.reject(new Error('offline in tests'))
+    })
+    try {
+      const m = loadMain({ ready: true, execFile: (_py, _a, _o, cb) => { cb(null, 'stopped', '') } })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(await m.invoke('quit-all', {})).toEqual({ ok: true })
+      releaseHealth()
+      await vi.advanceTimersByTimeAsync(0)
+      // §3: never latched on 'installing' for a run that was never made.
+      expect(await m.invoke('backend-status')).toEqual({ state: 'failed', detail: 'quitting' })
+      expect(m.log()).toContain('ensure-backend: install dropped')
+    } finally {
+      fetchSpy.mockRestore()
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  it('nothing writes app.log once the reset has erased it', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('offline in tests'))
+    try {
+      const m = loadMain({ execFile: (_py, _a, _o, cb) => { cb(null, 'stopped', '') } })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+      expect(await m.invoke('reset-all')).toEqual({ ok: true })
+      expect(m.exits).toEqual([0])
+      expect(existsSync(join(m.home, 'logs'))).toBe(false)
+      // Any later caller is a no-op: appLog re-creates the logs root, and a
+      // reset that leaves a fresh one behind is the regression (§3 step 4).
+      m.dialogAnswer.canceled = false
+      m.dialogAnswer.filePaths = [join(m.home, 'not-there.autowright')]
+      expect(await m.invoke('open-archive')).toBeNull()
+      expect(existsSync(join(m.home, 'logs'))).toBe(false)
+      expect(m.log()).toBe('')
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 })

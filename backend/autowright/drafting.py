@@ -41,6 +41,10 @@ from .storage import AGENT_REF_RE, SECRET_REF_RE, step_json
 log = logging.getLogger("autowright.drafting")
 
 PARAM_KINDS = {"toggle", "list", "kv", "number", "text"}
+# §4.2 param definition fields — a drafted param entry is normalized to exactly
+# these (§8: every other key drops silently).
+PARAM_FIELDS = ("name", "kind", "label", "help", "default", "min",
+                "placeholder", "validate")
 # §8 envelope shape constants — canonical in harness.py (its recombiner and
 # scratch watcher need them, and harness never imports drafting); aliased
 # here for the parsers and progress scanners below.
@@ -947,8 +951,13 @@ def validate_chat_files(files: dict[str, str],
     bad: set[str] = set()
     extras = sorted(f for f in files if f not in CHAT_FILES)
     if extras:
+        # §8: name what actually arrived — a stray document (an
+        # `instructions.md` rewrite, a manifest) is not a step file, and the
+        # per-block repair has to know which block to drop.
         errors.append("a chat response may only return spec.md, notes.md, and "
-                      f"actions.yaml — never step files (got {extras})")
+                      + (f"actions.yaml — never step files (got {extras})"
+                         if all(STEP_FILE_RE.match(f) for f in extras)
+                         else f"actions.yaml — not {', '.join(extras)}"))
         bad.update(extras)
     payload: dict = {}
     if "spec.md" in files:
@@ -1028,6 +1037,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         return {}, ["manifest.yaml must be a mapping"]
 
     params = manifest.get("params") or []
+    norm_params: list[dict] = []
     for p in params:
         if not isinstance(p, dict) or "name" not in p or "kind" not in p:
             errors.append(f"param entry malformed: {p!r}")
@@ -1038,6 +1048,10 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             errors.append(f"param {p['name']}: missing default")
         if p["kind"] == "number" and "min" not in p:
             p["min"] = 0
+        # §8: unknown param keys drop silently, exactly as unknown manifest and
+        # step keys do — the entry is normalized to the §4.2 definition fields,
+        # so a misspelled key never reaches a version file or a §5.1 archive.
+        norm_params.append({k: p[k] for k in PARAM_FIELDS if k in p})
 
     # §8: optional best-effort draft-test values — keys must name manifest
     # params (a misremembered name is a repair-round error, never a silent
@@ -1309,7 +1323,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         # through the chat call's actions, so a manifest that smuggles them in
         # is ignored rather than forwarded.
         "note": manifest.get("note", ""),
-        "params": params,
+        "params": norm_params,
         "packages": norm_pkgs,
         "steps": norm_steps,
         "secretReferences": sorted({m for st in norm_steps for m in SECRET_REF_RE.findall(st["code"])}),

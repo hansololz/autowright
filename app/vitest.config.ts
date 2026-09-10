@@ -8,7 +8,7 @@ export default defineConfig({
   server: { fs: { allow: ['..'] } },
   test: {
     environment: 'happy-dom',
-    // §20: component renders run under React.StrictMode like the dev app
+    // §15: component renders run under React.StrictMode like the dev app
     setupFiles: ['tests/setup.ts'],
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
     // §15 line coverage, on demand (`npx vitest run --coverage`): code files

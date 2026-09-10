@@ -77,19 +77,20 @@ echo "· installing backend into bundled Python (pinned by backend/constraints.t
 
 # ---- trim the bundled Python (SPEC §3 bundle trimming) ----
 # Only what runs ships. Tcl/Tk goes (a GUI toolkit; the backend and every step
-# run headless under launchd), ensurepip goes (pip is installed and upgraded
-# above; nothing in the bundle creates venvs), and the C-API build scaffolding
+# run headless under launchd), ensurepip and venv go (pip is installed and
+# upgraded above; nothing in the bundle creates venvs, and venv cannot work
+# without ensurepip), and the C-API build scaffolding
 # goes (§6.2 installs --only-binary, so no extension is ever compiled against
 # this interpreter). pip, the rest of the stdlib, __pycache__ (the sealed tree
 # is read-only at runtime) and every curated package stay whole. The in-bundle
 # smoke check below runs on the trimmed tree.
-echo "· trimming bundled Python (Tcl/Tk, ensurepip, C-API scaffolding)"
+echo "· trimming bundled Python (Tcl/Tk, ensurepip, venv, C-API scaffolding)"
 PYLIB="$(echo "$PYSTAGE"/lib/python3.*)"
 rm -rf "$PYSTAGE"/lib/tcl* "$PYSTAGE"/lib/tk* "$PYSTAGE"/lib/itcl* "$PYSTAGE"/lib/thread* \
        "$PYSTAGE"/lib/libtcl* "$PYSTAGE"/lib/libtk* \
        "$PYLIB"/tkinter "$PYLIB"/idlelib "$PYLIB"/turtledemo "$PYLIB"/turtle.py \
        "$PYLIB"/lib-dynload/_tkinter* \
-       "$PYLIB"/ensurepip \
+       "$PYLIB"/ensurepip "$PYLIB"/venv \
        "$PYSTAGE"/include "$PYSTAGE"/share "$PYSTAGE"/lib/pkgconfig "$PYLIB"/config-* \
        "$PYLIB"/site-packages/lxml/includes
 # Universal2 wheels (lxml, charset-normalizer, ...) carry both Mach-O slices;
@@ -127,13 +128,20 @@ walk("electron-updater")
 process.stdout.write([...seen].sort().join("|"))
 ')"
 [ -n "$UPDATER_PKGS" ] || { echo "failed to compute the electron-updater dependency closure"; exit 1; }
+# A scoped package in that closure needs its own @scope directory allowed too:
+# the packager's ignore filter prunes a directory before descending into it, so
+# /node_modules/@scope must survive for /node_modules/@scope/pkg to be reached
+# at all. Only the directory itself is allowed, so an unrelated package sharing
+# the scope is still pruned.
+UPDATER_SCOPES="$(printf '%s' "$UPDATER_PKGS" | tr '|' '\n' \
+  | sed -n 's|^\(@[^/]*\)/.*$|\1|p' | sort -u | paste -sd '|' -)"
 echo "· packaging Autowright.app"
 (cd "$ROOT/app" && npx electron-packager . "Autowright" \
   --platform=darwin --arch="$EP_ARCH" --out "$BUILD/pkg" --overwrite \
   --icon "$BUILD/icon.icns" \
   --app-bundle-id ai.autowright.app \
   --ignore '^/(?!(electron|dist|node_modules|package\.json)($|/))' \
-  --ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\$))")
+  --ignore "^/node_modules/(?!($UPDATER_PKGS)(/|\$)${UPDATER_SCOPES:+|($UPDATER_SCOPES)\$})")
 
 APP="$BUILD/pkg/Autowright-darwin-$ARCH/Autowright.app"
 [ -d "$APP" ] || { echo "packaging failed: $APP missing"; exit 1; }

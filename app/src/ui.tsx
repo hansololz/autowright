@@ -5,6 +5,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createPortal } from 'react-dom'
 import type { ParamDef, Status, Step } from './types'
 import { useStore } from './store'
+import { devlogOverlayOpen } from './devlog'
 import awMark from '../electron/icon/icon.svg'
 
 export const P = {
@@ -952,6 +953,9 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
     const entry = { id: Symbol('modal'), z: zIndex }
     modalStack.push(entry)
     const onKey = (e: KeyboardEvent) => {
+      // §9.3: the developer-log overlay owns Escape while it is open — a modal
+      // open underneath yields to it, like every other shortcut.
+      if (devlogOverlayOpen()) return
       if (e.key === 'Escape' && topModal()?.id === entry.id) escape()
     }
     document.addEventListener('keydown', onKey)

@@ -144,8 +144,20 @@ function ImportModal({ onDone, onClose }: {
   }
   const chooseFile = async () => {
     if (busy) return
-    const f = await window.autowright?.openArchive()
+    // §5.1: the pick can fail (too large, unreadable) — the error goes on the
+    // modal's own line; a silent return would leave it looking dead.
+    let f
+    try {
+      f = await window.autowright?.openArchive()
+    } catch (e) {
+      setError({ msg: (e as Error).message, src: 'file' })
+      return
+    }
     if (!f) return
+    if ('error' in f) {
+      setError({ msg: f.error, src: 'file' })
+      return
+    }
     setBusy('file'); setError(null)
     try {
       const r = await api.importPreview(f.data)

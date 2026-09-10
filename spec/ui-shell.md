@@ -944,7 +944,8 @@ the execution, then deletes). Buttons Cancel / red "Delete automation".
 ### 9.3 Developer log overlay
 
 A low-priority debug surface, ComfyUI-style: with the §4.9 `developerMode` setting on, pressing
-`` ` `` (Backquote) in the main window toggles a full-window log overlay; Escape also closes it. The
+`` ` `` (Backquote) in the main window toggles a full-window log overlay; Escape also closes it
+(and only it — a modal open underneath yields to the overlay, like every other shortcut). The
 key is ignored while focus is in an editable element (input, textarea, contenteditable) and the
 whole feature is inert — no listener effect, overlay never renders — while `developerMode` is off
 (turning the setting off closes an open overlay). Main-window surfaces only, never the menu-bar
@@ -1064,7 +1065,10 @@ also open itself after an update (below) with the About page nowhere in sight.
   the button reverts to "Check for updates" (an unsigned dev build always lands
   here — same code path, real Squirrel error). "Restart to update" calls
   `update-install`; a `{ busy }` answer renders "An automation is executing. The
-  update installs when you restart after it finishes." and keeps the button;
+  update installs when you restart after it finishes." and keeps the button; an
+  `{ error }` answer (the updater refused to quit — nothing staged, a stale download, a
+  failed installer spawn) renders the same "Update failed: `<error>`" sub-line as a
+  download error and reverts the button, never a card stuck on "Restart to update";
   otherwise the app quits and relaunches updated (the backend restarts on the next
   launch's §3 version-compare flow). Idle sub-line follows the toggle below: off →
   "Updates are only checked when you ask. Nothing runs in the background."; on →
@@ -1565,7 +1569,7 @@ renderers alive (window closed, panel never opened), and a scheduled failure —
 automation quietly going overdue — in that state
 must still light the dot (and a later success must clear it). Panel: 334 px translucent
 (blur), height grows with content up to the 640 px window cap — past that the automation
-rows list scrolls (native overlay scrollbar, per the §14 no-custom-scrollbar rule) while the
+rows list scrolls (the §14 overlay thumb, like every other scrolling pane) while the
 header and footer stay pinned. The window tracks the panel's full rendered
 (border-box) height, rounded up, via a `ResizeObserver` — a content-only measure
 (`scrollHeight`) excludes the 1 px border, and a single measure at first render runs
@@ -1576,7 +1580,9 @@ pulsing while executing, name, mono sub-line colored by state: cyan "Executing n
 / accent for a result chip / faint otherwise, relative time right-aligned in a 56 px column, then
 the §9.1 square inline execute button (`.ad-btn-exec.small` — the §14 24 px/radius-6 variant that owns the size: solid accent with a play glyph →
 spinner + disabled while executing, tooltip explains) at the row's right edge — the same run
-button as the Automations list). Row click opens the app on that automation; execute
+button as the Automations list). Row click opens the app on that automation (a minimized
+main window is restored first — the same rule as the §3 second-instance focus and dock
+activate; showing a minimized window without restoring it looks like a no-op); execute
 button triggers a "Menu bar" execution. Footer: accent "Open Autowright" link + version. Click-outside
 closes. The panel renders its own `Toast` (the §9 toast, bottom-center of the panel): an
 execute that fails (e.g. the §7 409 no-free-slot) toasts the error message — a tray
@@ -1590,7 +1596,10 @@ Panel placement is per-OS (§2 `panelPosition`): macOS anchors under the menu-ba
 Windows anchors the panel's bottom edge just above the taskbar's work area and re-anchors
 on **every** `resize-panel` (the §13 height growth), so the panel hugs the taskbar at its
 real height instead of assuming the 640 px cap — a taskbar docked to another edge still
-gets a fully on-screen panel. The Windows tray icon uses real
+gets a fully on-screen panel. On every OS the panel's x is clamped to the display's
+work area on **both** edges (a tray icon at the left of a secondary display must not push
+the panel off-screen), and a panel destroyed by the tray toggle forgets its measured
+height — the next one opens at the 420 px default and re-anchors on its first measurement. The Windows tray icon uses real
 colored assets
 (`trayWin.png`/`@2x` and the alert variant — light glyph legible on the dark taskbar,
 rendered by `scripts/gen_tray_icon.py` beside the mac template PNGs), never the mac

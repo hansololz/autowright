@@ -167,14 +167,19 @@ export function ChatPanel({
   // bar (41px extent + 12px gap, mirroring the bottom gap), 46 elsewhere.
   const platformOs = useStore((s) => s.platformOs)
   const panelTop = platformOs === 'windows' ? 53 : 46
-  // §11 thread auto-scroll: newest at the bottom, scrolled on new content and
-  // when the transient progress entry appears (a job starts).
+  // §11 thread auto-scroll: newest at the bottom, scrolled on new content —
+  // and on the transient progress entry appearing (a job starts) — only while
+  // the user is at (or near) the bottom, the same 60 px rule the feed follow
+  // below uses. Sending is the one exception: the user's own bubble always
+  // pins the thread to the bottom.
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const chatLen = rev.chat.length
+  const ownMessageLast = rev.chat[chatLen - 1]?.kind === 'user'
   useEffect(() => {
     const el = chatScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [chatLen, anyJobBusy])
+    if (!el) return
+    if (ownMessageLast || el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight
+  }, [chatLen, anyJobBusy, ownMessageLast])
   // §11: while the progress entry's feed grows, follow it only when already at
   // (or near) the bottom — a user who scrolled up is never yanked back down.
   useEffect(() => {

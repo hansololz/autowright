@@ -211,7 +211,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   engine can't serialize a read-modify-write it can't see), and the reason raising `maxParallel`
   on an automation whose steps write memory carries the §9.2 caution. Steps that write the
   `memory/` path directly, rather than through `memory.save`, get no guarantee at all.
-- **Notifications & results** — exactly one result per execution; at most one notification, at the end;
+- **Notifications & results** — exactly one result per execution; at most one notification, at the end
+  (it follows the stored `chipStatus`: a `result.status('attention')` or `('changes')` set
+  without a chip stores no status, §4.5, and notifies nothing — a notification never
+  announces a state the record cannot show);
   notify only on changes (per the notifications setting). **Sender (decided):** the backend posts
   macOS notifications itself via `osascript -e 'display notification …'` — works headless with no
   UI process; the Electron app never posts.
@@ -223,7 +226,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   `runIfMissed: false` occurrence the Mac never slept through; each delete renames the
   execution directory aside under the store lock and removes the renamed tree outside it, so
   no `rmtree` ever runs under the lock — deleting an automation does the same with its whole
-  tree — and an aside dir a crash left behind, `.ad-tmp-deleted-*`, is swept at the next
+  tree, and so does every memory-tree removal (clearing memory, deleting or pruning a
+  snapshot, dropping the displaced tree on a restore, discarding a draft with its memory
+  copy) — and an aside dir a crash left behind, `.ad-tmp-deleted-*`, is swept at the next
   startup reconcile), the backend evaluates
   every automation's §4.1 `overdue` state. An automation
   observed overdue at **two consecutive sweeps** gets one macOS notification — title the
@@ -379,6 +384,10 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   Fire-and-forget: a failed send logs an
   err line ("reply failed — …") but never fails the step; a successful send logs a sys line
   naming the medium it actually went to (Discord channel or iMessage chat).
+  **Reply budget:** a step attempt may send at most 100 replies; the 101st and later are
+  dropped with one err line ("reply dropped — more than 100 replies in one step") and the
+  step continues — the delivery queue is shared by every listener, and a looping step must
+  not grow it without bound.
   Calling `reply` in an execution not started by a message trigger raises — a §11 test
   whose request carried a mocked payload (§19 `triggerMock`) counts as message-started:
   a Discord reply sends **for real** (the mock carries the trigger's real `channel` and
@@ -444,7 +453,8 @@ processes a step spawns can self-identify: `AUTOWRIGHT_AUTOMATION_ID`, `AUTOWRIG
 `AUTOWRIGHT_WORKSPACE`, `AUTOWRIGHT_MEMORY_DIR`, `AUTOWRIGHT_RESULT_DIR`. Param values, secret values,
 and agent config never enter the environment; the executor never reads env as input.
 `sys.exit()` in a step follows the CPython convention: no code / `0` is an ordinary early exit
-(the step succeeds), an integer fails the step with that exit code, and `sys.exit("message")`
+(the step succeeds), an integer fails the step with that exit code (clamped into 1–255 —
+POSIX keeps only the low byte, so `sys.exit(256)` must never read as success), and `sys.exit("message")`
 fails it with the author's message preserved as the error (`SystemExit: message`).
 
 ### 6.2 Curated & declared packages (decided)
@@ -452,7 +462,11 @@ fails it with the author's message preserved as the error (`SystemExit: message`
 Step scripts may import: Python stdlib, `autowright`, and the curated packages: `requests`, `httpx`,
 `beautifulsoup4` (`bs4`), `lxml`, `feedparser`, `python-dateutil` (`dateutil`), `PyYAML` (`yaml`).
 The curated list ships with the app (installed in the bundled interpreter) and is included
-verbatim in the §8 contract preamble.
+verbatim in the §8 contract preamble. Stdlib modules the §3 bundle trim removes (`tkinter`,
+`_tkinter`, `idlelib`, `turtle`, `turtledemo`, `ensurepip`, `venv`) are **rejected** by the
+same allowlist in every mode, so a step never works on a developer checkout and fails in the
+release — steps get libraries through declared packages, never by building environments of
+their own.
 
 **Declared packages.** When a task genuinely needs a library beyond the curated list (the
 task-solving ladder still prefers stdlib + curated first), the authoring agent declares it in
@@ -609,7 +623,9 @@ destructive moments recoverable.
   exact whenever a version's first execution runs alone (the default `maxParallel` 1).
 - **Retention** — at each creation, unnamed snapshots beyond the newest 5 are pruned. Named
   snapshots are never auto-deleted — naming pins one until the user deletes it (or the
-  automation is deleted). Renaming to empty returns a snapshot to the unnamed pool.
+  automation is deleted). Renaming to empty returns a snapshot to the unnamed pool. Every
+  snapshot mutation (create, restore, delete, rename) and clear-memory serialize on one
+  memory-operations lock, so a delete can never pull a tree out from under a restore's copy.
 - **Lifecycle** — snapshots live inside `automations/<uuid>/`, so deleting the automation
   removes them (the §9.2 delete copy — memory goes with it — already covers this). "Clear
   memory" empties `memory/` only; snapshots survive it by design.

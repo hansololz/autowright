@@ -299,7 +299,17 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None) -> list[dict
     results = check(entries)
     if all(r["status"] == "installed" for r in results):
         return results
-    with _pip_lock:
+    # §7: a cancel arriving while this ensure waits its turn for the
+    # process-wide lock is honored at once — the lock is taken in short slices
+    # instead of blocking out the other install's whole run.
+    while not _pip_lock.acquire(timeout=0.25):
+        if should_stop and should_stop():
+            for r in results:
+                if r["status"] != "installed":
+                    r["status"] = "failed"
+                    r["error"] = "cancelled"
+            return results
+    try:
         results = check(entries)  # re-check: another ensure may have run first
         for r in results:
             if r["status"] == "installed":
@@ -322,6 +332,8 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None) -> list[dict
             else:
                 r["status"] = "installed"
                 r["version"] = _installed_versions().get(_norm(r["pip"]))
+    finally:
+        _pip_lock.release()
     return results
 
 

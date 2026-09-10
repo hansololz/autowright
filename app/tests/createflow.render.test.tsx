@@ -7,7 +7,7 @@
 // payload assertions read the exact POST /drafts bodies.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { Agent, Automation, SecretMeta } from '../src/types'
+import type { Agent, Automation, ChatEntry, SecretMeta } from '../src/types'
 // §11 stale-outcome rule: the card's own hash, so the assertions never restate it
 import { stepsFingerprint } from '../src/pages/createflow/model'
 
@@ -59,6 +59,8 @@ vi.mock('../src/api', () => ({
 let storeMod: typeof import('../src/store')
 let CreateFlow: typeof import('../src/pages/CreateFlow').default
 let mockedApi: typeof import('../src/api').api
+let ChatPanel: typeof import('../src/pages/createflow/ChatPanel').ChatPanel
+let seedEmpty: typeof import('../src/pages/createflow/model').seedEmpty
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -68,6 +70,8 @@ beforeAll(async () => {
   storeMod = await import('../src/store')
   CreateFlow = (await import('../src/pages/CreateFlow')).default
   mockedApi = (await import('../src/api')).api
+  ChatPanel = (await import('../src/pages/createflow/ChatPanel')).ChatPanel
+  seedEmpty = (await import('../src/pages/createflow/model')).seedEmpty
 })
 
 const AGENTS: Agent[] = [
@@ -2825,5 +2829,49 @@ describe('CreateFlow BUILD INSTRUCTIONS card (§11)', () => {
     expect(within(card).getAllByText(EXPLAINER)).toHaveLength(2)
     expect(openCopies(card)).toHaveLength(1)
     expect(within(card).queryByText('Edit')).toBeNull()
+  })
+})
+
+// §11 Thread: new content pins the thread to the bottom only while the user is
+// at (or near) it — the same 60 px rule the progress feed follows. Sending is
+// the one exception: the user's own bubble always pins.
+describe('§11 chat thread auto-scroll', () => {
+  const entry = (id: string, kind: ChatEntry['kind'], text: string): ChatEntry => ({ id, kind, text })
+  const noop = () => {}
+  const panel = (chat: ChatEntry[]) => (
+    <ChatPanel
+      rev={{ ...seedEmpty(AGENTS, [MAIL_ID]), chat }}
+      agents={AGENTS} selAgent={AGENTS[0]} isEdit isCreateEmpty={false}
+      anyJobBusy={false} busyRewrite={false} testLive={false} viewingOld={false}
+      inputDisabled={false} outOfSync={false} syncDisabled={false}
+      lastRewriteId={undefined} chatText="" setChatText={noop} sendMessage={noop}
+      undoDraft={noop} runSync={noop} runDraftTest={noop} analyzeFailure={null}
+      patchEntry={noop} applyBlockersEntry={noop} clearChat={noop} cancelChat={noop}
+      cancelSync={noop} setAgentId={noop} up={noop} showToast={noop}
+    />
+  )
+  // happy-dom measures nothing — hand the thread a real scrolled-up geometry.
+  const scrolledUp = () => {
+    const el = screen.getByTestId('chat-thread')
+    Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(el, 'clientHeight', { value: 300, configurable: true })
+    el.scrollTop = 100
+    return el
+  }
+
+  it('a settled activity entry leaves a scrolled-up thread where it is', () => {
+    const chat = [entry('c1', 'user', 'do it')]
+    const { rerender } = render(panel(chat))
+    const el = scrolledUp()
+    rerender(panel([...chat, entry('c2', 'activity', 'Built the steps')]))
+    expect(el.scrollTop).toBe(100)
+  })
+
+  it("the user's own bubble pins the thread to the bottom", () => {
+    const chat = [entry('c1', 'activity', 'Built the steps')]
+    const { rerender } = render(panel(chat))
+    const el = scrolledUp()
+    rerender(panel([...chat, entry('c2', 'user', 'and again')]))
+    expect(el.scrollTop).toBe(1000)
   })
 })

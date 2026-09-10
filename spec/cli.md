@@ -62,8 +62,11 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   `--since` / `--until` take a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (`--until` with a
   bare date means the end of that day) and ride as the inclusive §19
   `startedFromMs` / `startedToMs` - a value in neither form is a usage error; `-n` rides to the server as the §19
-  `limit`, so only the printed rows cross the wire, while reference resolution still reads
-  the uncapped list — §19), `settings set` lists its keys with
+  `limit`, so only the printed rows cross the wire — `-n` below 1 and a `--since` after its
+  `--until` are usage errors named with the flags' own words, never a server 422 quoting
+  wire parameter names — while reference resolution still reads the uncapped list (§19;
+  the bare no-reference form of `execution show|tail|cancel|retry|skip|result` means "the
+  newest" and reads `limit=1`), `settings set` lists its keys with
   each one's value form, and `param set` lists the per-kind value forms. Every `<automation>`
   positional carries the compact reference forms from one shared helper (name · part of a name ·
   id · id prefix), and the full rule — case-insensitivity, and that every `[abcd1234]` the CLI
@@ -155,13 +158,16 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   error too, not a crash: it exits 1 after a plain `interrupted` line, never a
   `KeyboardInterrupt` traceback.
 - **HTTP timeouts:** every backend request runs with a 30 s timeout, except the three calls
-  that legitimately take long — package install (the §6.2 ensure runs pip), URL import (a
-  remote download rides the request), and automation delete (§19 waits for cancelled engine
-  threads) — which get 600 s.
+  that legitimately take long — package install (the §6.2 ensure runs pip), import (the
+  URL fetch, the file upload, *and* the confirm that lands the archive — a large archive
+  landing on a slow volume must never report "backend isn't reachable" while it succeeds),
+  and automation delete (§19 waits for cancelled engine threads) — which get 600 s.
 - **Follow semantics** (`execution tail`, `automation execute -f`): a `queued` record (§6
   firing queue) is not terminal — the follow loop keeps polling while the execution is
   `executing` **or** `queued`, so a followed queued firing is watched through promotion to
-  its real end (or its `skipped` settle), never reported the moment it is admitted.
+  its real end (or its `skipped` settle), never reported the moment it is admitted. Each
+  poll sends the §19 `sinceSequence` of the last line it printed per log target, so a
+  long-running step's log crosses the loopback once, not once per second.
 
 **Workdir (the authoring format).** `automation pull <ref> [dir]` materializes an automation
 into a directory (dir defaults to the automation's name); `automation push <ref> <dir>

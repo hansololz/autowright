@@ -8,6 +8,7 @@
 // api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { Profiler } from 'react'
 import type { Attempt, Automation, Execution, TriggerPayload } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -1026,6 +1027,36 @@ describe('execution page LOGS pane header controls + find in log (§7)', () => {
     fireEvent.keyDown(document, { key: 'f', metaKey: true })
     expect(screen.getByTestId('find-bar')).toBeTruthy()
   })
+
+  it('a streamed line re-runs the search but never moves the pane (§7)', () => {
+    seed()
+    // happy-dom measures nothing — hand the centering math a 20 px mark inside
+    // a zero-height scroller so every scroll the effect performs is +10.
+    vi.spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockReturnValue({ top: 0, height: 20, bottom: 20, left: 0, right: 0, width: 0, x: 0, y: 0, toJSON: () => ({}) })
+    render(<ExecutionPage />)
+    fireEvent.click(btn('Find in log'))
+    const field = screen.getByPlaceholderText('Find in log') as HTMLInputElement
+    fireEvent.change(field, { target: { value: 'mail' } })
+    const pane = screen.getByTestId('execution-log')
+    const scrolled = pane.scrollTop
+    expect(scrolled).toBeGreaterThan(0)
+
+    // a live line lands in the selected bucket: new matches array, same
+    // current match — the view must stay exactly where it is
+    act(() => {
+      storeMod.useStore.getState().applyEvent({
+        event: 'execution.log', executionId: 'e1', automationId: 'a1',
+        stepIndex: 2, attempt: 1, line: line(4, 'more mail'),
+      })
+    })
+    expect(screen.getByTestId('find-counter').textContent).toBe('1 of 3')
+    expect(pane.scrollTop).toBe(scrolled)
+
+    // stepping the current match scrolls again
+    fireEvent.keyDown(field, { key: 'Enter' })
+    expect(pane.scrollTop).toBeGreaterThan(scrolled)
+  })
 })
 
 // §7 the LOGS rail header's total timer: whole seconds ticking while executing
@@ -1299,6 +1330,56 @@ describe('execution page trigger message (§7)', () => {
 
 // §7/§11 header action gating: a draft test iterates from the editor, and a
 // deleted automation has nothing left to open or re-execute.
+// §7: the view subscribes to its own log bucket, never the whole map — a
+// chatty run elsewhere must not re-render an open execution.
+describe('execution view log subscription (§7)', () => {
+  const attempt = { number: 1, status: 'succeeded' as const, duration: '1s', startedMs: NOW }
+  const line = (sequence: number, text: string) => ({ sequence, time: '12:00:00', kind: 'out' as const, text })
+  const full = (id: string): Execution => ({
+    ...ex(id),
+    steps: [{ name: 'Fetch page', status: 'succeeded', duration: '1s', attempts: [attempt] }],
+    result: null,
+  })
+
+  it('a log line for another execution does not re-render the view', async () => {
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [ex('e1'), ex('e2')],
+      executionFull: { e1: full('e1'), e2: full('e2') },
+      execLogs: {
+        e1: { [storeMod.logKey(0, 1)]: [line(1, 'mine')] },
+        e2: { [storeMod.logKey(0, 1)]: [line(1, 'theirs')] },
+      },
+    })
+    const { ExecutionView } = await import('../src/executionView')
+    let commits = 0
+    render(
+      <Profiler id="execution-view" onRender={() => { commits += 1 }}>
+        <ExecutionView executionId="e1" full={full('e1')} summary={ex('e1')} layout="page" />
+      </Profiler>,
+    )
+    await act(async () => {})
+    const settled = commits
+
+    act(() => {
+      storeMod.useStore.getState().applyEvent({
+        event: 'execution.log', executionId: 'e2', automationId: 'a1',
+        stepIndex: 0, attempt: 1, line: line(2, 'theirs again'),
+      })
+    })
+    expect(commits).toBe(settled)
+
+    // the view's own bucket still moves it
+    act(() => {
+      storeMod.useStore.getState().applyEvent({
+        event: 'execution.log', executionId: 'e1', automationId: 'a1',
+        stepIndex: 0, attempt: 1, line: line(2, 'mine again'),
+      })
+    })
+    expect(commits).toBeGreaterThan(settled)
+    expect(screen.getByText('mine again')).toBeTruthy()
+  })
+})
+
 describe('execution page header action gating (§7)', () => {
   const seedRow = (over: Partial<Execution>) => {
     const row = ex('e1', over)
@@ -1326,5 +1407,39 @@ describe('execution page header action gating (§7)', () => {
     expect(screen.queryByRole('button', { name: 'Execute again' })).toBeNull()
     const title = screen.getByRole('heading', { level: 1 })
     expect(title.className).not.toContain('ad-link-title')
+  })
+
+  it('the §19 delete event stamps the open record — the actions go with it', () => {
+    seedRow({ status: 'failed', error: 'boom' })
+    storeMod.useStore.setState({
+      automations: [{ id: 'a1', name: 'Automation' } as unknown as Automation],
+    })
+    render(<ExecutionPage />)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(screen.queryByText('(deleted)')).toBeNull()
+
+    act(() => {
+      storeMod.useStore.getState().applyEvent({
+        event: 'automation.changed', automationId: 'a1', automation: null,
+      })
+    })
+    expect(screen.getByText('(deleted)')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Execute again' })).toBeNull()
+  })
+
+  it('a test record prints "Test" once on the metadata line (§7)', () => {
+    seedRow({ status: 'succeeded', test: true, trigger: 'Test', versionLabel: 'Test' })
+    render(<ExecutionPage />)
+    const meta = screen.getByText('e1').parentElement as HTMLElement
+    expect(meta.textContent).toContain('e1 · Test · started')
+    expect(meta.textContent!.match(/Test/g)).toHaveLength(1)
+  })
+
+  it('a non-test record still prints its version label after the trigger', () => {
+    seedRow({ status: 'succeeded', trigger: 'Manual', versionLabel: 'v3' })
+    render(<ExecutionPage />)
+    const meta = screen.getByText('e1').parentElement as HTMLElement
+    expect(meta.textContent).toContain('e1 · Manual · v3 · started')
   })
 })

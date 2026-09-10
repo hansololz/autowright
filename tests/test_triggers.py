@@ -519,3 +519,21 @@ def test_run_if_missed_validation_and_normalization():
          "secret": "9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34", "runIfMissed": False}])
     assert err is None
     assert all("runIfMissed" not in t for t in norm)
+
+
+def test_only_a_parsable_past_at_counts_as_spent():
+    """§4.3: a one-shot is consumed when its moment passed — but only when the
+    stored `at` actually reads as a time. An unreadable one (a `datetime` from
+    unquoted YAML, a number, a missing key) is malformed, not spent, so the
+    §5 load drops it with a warning instead of silently consuming it."""
+    from autowright.triggers import time_elapsed
+
+    past = (datetime.now() - timedelta(days=1)).isoformat(timespec="minutes")
+    future = (datetime.now() + timedelta(days=1)).isoformat(timespec="minutes")
+    assert time_elapsed({"kind": "time", "at": past}) is True
+    assert time_elapsed({"kind": "time", "at": future}) is False
+
+    for bad in (datetime.now() - timedelta(days=1), 20260101, "yesterday", None, ""):
+        assert time_elapsed({"kind": "time", "at": bad}) is False
+    assert time_elapsed({"kind": "time"}) is False
+    assert time_elapsed({"kind": "cron", "expression": "0 8 * * *"}) is False

@@ -423,7 +423,13 @@ log; a damaged file never bricks startup into a launchd crash loop. The same bac
 a hand-edited `execution.yaml`: every timestamp and id field is coerced to a string at the
 read seam (an unquoted ISO timestamp loads from YAML as a `datetime`, and one such record
 would otherwise make the latest-execution comparison raise at boot), and an unparsable one
-still skips the record with a warning. For the three top-level
+still skips the record with a warning. Every other YAML the store reads on a request path — a
+version's `automation.yaml`, the draft slot's `test.yaml` and container files, a snapshot's
+`snapshot.yaml` — goes through the same mapping-or-default seam: a file whose root is not a
+mapping loads as absent with a warning, never as an attribute error that turns every
+`GET /state` into a 500. A version folder whose manifest is unreadable is treated as absent
+(the automation skips at startup when that was its current version, per the versions rule
+above) — never loaded as an empty version that would run zero steps and "succeed". For the three top-level
 store files (`settings.yaml`, `agents.yaml`, `secrets.yaml`) the degradation is **read-only**:
 a file that failed to load (corrupt YAML, bad encoding, unreadable — a merely *absent* file is
 not a failure, it is a fresh install) is never saved back for the rest of the session. Any
@@ -448,7 +454,9 @@ Rules:
   DB schema wipe) and restores their header rows from `execution.yaml` — the yaml stays
   authoritative. Nothing exists only in memory.
 - Retention cleanup (§4.9 `days`) deletes execution directories and DB rows, then their
-  in-memory records. Records still `executing` or waiting in the §6 queue (`queued`) are
+  in-memory records. `days` is read leniently like every other numeric setting — a
+  non-numeric hand-edited value falls back to the 90-day default rather than silently
+  disabling the sweep for the session. Records still `executing` or waiting in the §6 queue (`queued`) are
   exempt — deleting a queued record would silently drop a firing that never ran.
 - Changing the data location (§4.9) closes the DB connection first, updates `dataPath`, then
   reloads everything from the new directory. Nothing is moved — execution state is wholly
@@ -457,7 +465,12 @@ Rules:
   tail/grep them directly. **Line cap:** a per-attempt log file stops appending at 10,000
   lines — one final `sys` marker line records the truncation, then nothing more lands in
   that file (the step itself keeps executing). `logs/execution.ndjson` has the same cap. A
-  runaway step can't fill the disk through its logs.
+  runaway step can't fill the disk through its logs. The per-file line counter behind the cap
+  lives in memory only while the execution is live: it is dropped at the terminal transition
+  and re-seeded from the file on a later append (an in-place retry), so a `keepForever`
+  history never grows the backend's resident set. Reading a log back is best-effort: an
+  undecodable byte run (a crash mid-append) is replaced, an unreadable file answers empty
+  lines — never a 500 on a pane that polls at 1 Hz.
 - Secret values never appear in any file — Keychain only, keyed by the secret's §4.8 id
   (the keyring account string), so metadata edits never touch the Keychain and the entry
   needs no rename path.
@@ -712,7 +725,9 @@ only matched records are granted.
   `*.autowright`; when the repo has no release with such an asset, the repo root's file
   listing, first `*.autowright` alphabetically. `github.com/{owner}/{repo}/releases/tag/{tag}`
   resolves against that release's assets. Public repos only — no token ever travels.
-- Download: `User-Agent: autowright/<version>`, 30-second timeout, streamed with the §5.1
+- Download: `User-Agent: autowright/<version>`, 30-second per-read timeout plus a 10-minute
+  whole-download deadline (a server trickling bytes must not pin a threadpool worker for
+  hours), streamed with the §5.1
   64 MB archive cap enforced during the read — an oversized or non-archive download is a 422,
   and the §5.1 decompression caps still apply after.
 

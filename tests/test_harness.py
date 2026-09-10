@@ -42,23 +42,24 @@ class _FakeStdin(io.StringIO):
 
 class _FakeStdout:
     """Reply stream that yields nothing until the prompt has been delivered,
-    so the §8 writer thread can never lose its race with the read loop."""
+    so the §8 writer thread can never lose its race with the read loop. Read
+    through bounded `readline(limit)` calls, exactly as the real pipe is."""
 
     def __init__(self, proc, text="ok"):
         self._proc = proc
-        self._text = text
-        self._sent = False
+        self._rest = text
 
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self._sent:
-            raise StopIteration
+    def readline(self, limit=-1):
+        if not self._rest:
+            return ""
         assert self._proc.prompt_written.wait(10), \
             "the §8 Windows prompt-writer thread never wrote to stdin"
-        self._sent = True
-        return self._text
+        nl = self._rest.find("\n")
+        end = len(self._rest) if nl < 0 else nl + 1
+        if limit is not None and limit >= 0:
+            end = min(end, limit)
+        out, self._rest = self._rest[:end], self._rest[end:]
+        return out
 
     def close(self):
         pass
@@ -1445,14 +1446,17 @@ def test_scratch_watcher_ignores_everything_but_response_documents(tmp_path):
     real.write_text("# real\n", encoding="utf-8")
     if os.name != "nt":  # symlinks need extra privileges on Windows
         (tmp_path / "notes.md").symlink_to(real)
-    # §21.4: instructions.md is retired — no longer a response document either
+    # §21.4/§8: instructions.md is retired, but a written one is COLLECTED, not
+    # ignored — it has to reach the validator, which fails the response the same
+    # way the fenced envelope does (see the audit test for the whole path).
     (tmp_path / "instructions.md").write_text("- keep it short\n", encoding="utf-8")
     for name in ("actions.yaml", "manifest.yaml", "02-send.py"):
         (tmp_path / name).write_text(f"{name}\n", encoding="utf-8")
     watcher._poll()
-    assert [n for n, _ in ev.files] == ["02-send.py", "actions.yaml", "manifest.yaml"]
+    assert [n for n, _ in ev.files] == ["02-send.py", "actions.yaml",
+                                        "instructions.md", "manifest.yaml"]
     assert [n for n, _ in watcher.documents()] == ["02-send.py", "actions.yaml",
-                                                   "manifest.yaml"]
+                                                   "instructions.md", "manifest.yaml"]
 
 
 def test_scratch_watcher_stop_does_a_final_sweep(tmp_path):

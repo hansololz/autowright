@@ -551,6 +551,9 @@ export type WsEvent =
       // the owning automation's list row (null on §4.5 test executions and
       // when the automation is already gone) — clients patch it in place
       automation: Automation | null }
+  // §19: a §4.5 test record superseded by the next test or removed by its
+  // draft settling — clients drop the row and decrement executionsTotal
+  | { event: 'execution.deleted'; executionId: string }
   | { event: 'execution.step'
       executionId: string; automationId: string | null; index: number
       step: NonNullable<Execution['steps']>[number] }

@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -306,11 +307,19 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024        # the upload itself
 _MAX_MEMBER_BYTES = 32 * 1024 * 1024        # one member, decompressed
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024        # whole archive, decompressed
+_MAX_ENTRIES = 1000                         # members in the archive
 
 
 def _check_sizes(z: zipfile.ZipFile) -> None:
+    infos = z.infolist()
+    # §5.1: the central directory is materialized before any size check can
+    # run, so a zip padded with a million empty members costs memory no cap
+    # above can bound — a real archive holds a handful of documents plus one
+    # file per step.
+    if len(infos) > _MAX_ENTRIES:
+        raise TransferError("the archive holds far more files than any real automation")
     total = 0
-    for info in z.infolist():
+    for info in infos:
         if info.file_size > _MAX_MEMBER_BYTES:
             raise TransferError(f"{info.filename} in the archive is unreasonably large")
         total += info.file_size
@@ -1083,6 +1092,7 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
 
 # ---------- URL import (§5.2) ----------
 FETCH_TIMEOUT = 30                          # seconds, connect + read
+FETCH_DEADLINE_S = 600                      # §5.2 whole-download wall clock
 _FETCH_CHUNK = 256 * 1024
 
 _GH_REPO_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?(?:/releases/latest)?$")
@@ -1169,8 +1179,15 @@ def fetch_archive(url: str) -> tuple[bytes, str]:
             # §5.2 HTTPS-only rule, so re-check the landing URL.
             if urlsplit(r.geturl()).scheme != "https":
                 raise TransferError("the download redirected off https")
+            # §5.2: the per-read timeout can't catch a server trickling bytes
+            # forever — only a whole-download deadline can, and this runs on a
+            # threadpool worker the backend needs back.
+            deadline = time.monotonic() + FETCH_DEADLINE_S
             chunks, total = [], 0
             while chunk := r.read(_FETCH_CHUNK):
+                if time.monotonic() > deadline:
+                    raise TransferError(
+                        f"the download timed out after {FETCH_DEADLINE_S // 60} minutes")
                 total += len(chunk)
                 if total > MAX_ARCHIVE_BYTES:
                     raise TransferError("the download is larger than the 64 MB import limit")

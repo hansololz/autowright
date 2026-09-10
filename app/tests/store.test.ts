@@ -120,6 +120,29 @@ describe('applyEvent', () => {
     expect(store.useStore.getState().executions.map((e) => e.id)).toEqual(['e2', 'e3', 'e1'])
   })
 
+  it('exec.deleted drops the row, its caches, and one from the total (§19)', () => {
+    // §4.5: a test record superseded by the next test, or removed by its
+    // draft settling.
+    store.useStore.setState({
+      executions: [ex('e1', 100, { test: true }), ex('e2', 90)],
+      executionsTotal: 2,
+      executionFull: { e1: ex('e1', 100, { test: true }) },
+      execLogs: { e1: { 'x.0': [line(1)] } },
+    })
+    store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'e1' })
+    const m = store.useStore.getState()
+    expect(m.executions.map((e) => e.id)).toEqual(['e2'])
+    expect(m.executionsTotal).toBe(1)
+    expect(m.executionFull.e1).toBeUndefined()
+    expect(m.execLogs.e1).toBeUndefined()
+  })
+
+  it('exec.deleted floors the total at zero', () => {
+    store.useStore.setState({ executions: [], executionsTotal: 0 })
+    store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'gone' })
+    expect(store.useStore.getState().executionsTotal).toBe(0)
+  })
+
   it('re-trims the §19 window: live rows all stay, only the 50 newest finished do', () => {
     // 60 finished rows in the window (the list arrives sorted newest first)
     // plus two live ones far down the list by start time
@@ -367,6 +390,21 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     store.useStore.setState({ automations: [auto('a1'), auto('a2')] })
     store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'a1', automation: null })
     expect(store.useStore.getState().automations.map((a) => a.id)).toEqual(['a2'])
+  })
+
+  it('the delete form stamps automationDeleted on every held row for that id (§19)', () => {
+    // Exactly what a fresh /state would serialize — so Retry / Execute again
+    // never stay offered on an orphaned row.
+    store.useStore.setState({
+      automations: [auto('a1'), auto('a2')],
+      executions: [ex('e1', 100), ex('e2', 90, { automationId: 'a2' }), ex('e3', 80)],
+      executionFull: { e1: ex('e1', 100) },
+    })
+    store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'a1', automation: null })
+    const m = store.useStore.getState()
+    expect(m.executions.map((e) => [e.id, e.automationDeleted])).toEqual([['e1', true], ['e2', false], ['e3', true]])
+    // the open page reads the full record first — it is stamped too
+    expect(m.executionFull.e1.automationDeleted).toBe(true)
   })
 
   it('bare event and unknown-id entity both fall back to a full refresh', () => {

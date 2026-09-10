@@ -66,7 +66,9 @@ remain plain dicts (§2).
   `memory/` after the rmtree (a half-recreated directory with no `versions/` would be
   invisible to the UI forever). The admission window closes first: the automation stays
   registered while its executions are cancelled and awaited, so before anything else the
-  delete flags the record in memory and `engine.start` refuses admissions for it — a
+  delete flags the record in memory (and clears the flag again if the delete fails partway,
+  so a transient write error never leaves an automation silently refusing every firing)
+  and `engine.start` refuses admissions for it — a
   scheduler tick, listener dispatch, or app-start firing landing mid-delete would otherwise
   escape the wait set and re-create the tree after the rmtree (the scheduler's own
   one-shot consumption carries the same registered-object guard for the same reason).
@@ -279,12 +281,15 @@ remain plain dicts (§2).
   archive first; any failure answers
   422 with the reason and writes nothing (import writes only the new automation — never
   the agents or secrets stores). Size caps (untrusted input): the upload itself is
-  capped at 64 MB (413), one member at 32 MB decompressed and the whole archive at 256 MB
-  decompressed (422) — a crafted archive can't balloon into memory
+  capped at 64 MB (413), one member at 32 MB decompressed, the whole archive at 256 MB
+  decompressed, and the entry count at 1,000 members (422; a real archive holds a handful of
+  documents plus one file per step, and the central directory is materialized before any
+  size check can run) — a crafted archive can't balloon into memory
 - `POST /automations/import/preview` — raw archive body exactly like `/automations/import`
   (same caps) → `{ token, preview }`: validates fully, writes nothing into the store, parks the
   bytes under the one-time `token` (§5.2 — spooled to a file under `import-spool/`, not held in
-  memory; 15-minute expiry; at most 4 archives are parked at once, and
+  memory; 15-minute expiry, with expired spool files swept on every preview *and* every
+  confirm — never left on disk until the next preview; at most 4 archives are parked at once, and
   a 5th preview evicts the oldest — a confirm against an evicted token answers 404 exactly
   like an expired one; a spool file that can't be written answers 507 with the reason, and one
   that has vanished by confirm time answers the same 404 as an expired token). `preview` is `{ name, landsAs, description, steps: [{name,
@@ -347,7 +352,8 @@ remain plain dicts (§2).
   and every payload surface fill like a real message execution, and §6.1 `reply()` becomes
   callable (§6.1 mocked-payload rules). Progress, logs, and the result flow over the ordinary `execution.*` events and
   `/executions/*` endpoints; cancel and skip-step are `POST /executions/{id}/cancel` and
-  `/skip-step` like any execution (retry answers 409 — the draft may have changed). A
+  `/skip-step` like any execution (retry answers 409 for **every** test record, edit-mode
+  included — the draft may have changed). A
   failed execution is **not** analyzed automatically — and there is no analysis endpoint:
   failure analysis is an ordinary `chat` drafting job whose §8 RECENT EXECUTIONS context carries
   the run's error and log tails (the §11 canned analyze messages; Fix-with-AI names the
@@ -461,7 +467,10 @@ remain plain dicts (§2).
   naming the vocabulary, never an empty list. `limit` (optional int ≥ 1; anything lower
   answers 422) caps the returned rows; omitted means every match - §20 reference resolution
   reads the uncapped list, while the §7 page always sends 50. `total` counts every match
-  regardless of `limit` and cursor - it is what sizes the §7 pager readout.
+  regardless of `limit` and cursor - it is what sizes the §7 pager readout. The matched
+  headers are copied under the store lock and serialized outside it, and each header's
+  `startedMs` is derived once (cached beside its stored timestamp, recomputed only when
+  that changes), so an uncapped read of a long history never stalls the engine.
   `beforeStartedMs` + `beforeId` are the §7 keyset cursor: only rows strictly after that
   `(startedMs, id)` position in sort order, so a page stays stable while new executions land
   above it; one without the other answers 422 (never a silent default - the same rule as the
@@ -475,7 +484,11 @@ remain plain dicts (§2).
   other answers 422 (never a silent default), a missing file
   answers empty lines. `tail` (optional int ≥ 1; anything lower answers 422) keeps only the
   last `tail` lines of the selected log, same response shape - the §7 log views send it so a
-  multi-thousand-line file never has to cross the wire whole ·
+  multi-thousand-line file never has to cross the wire whole. `sinceSequence` (optional int
+  ≥ 0; anything lower answers 422) keeps only lines whose `sequence` is greater — the §20
+  follow loop sends the last sequence it printed, so a polled live attempt never re-downloads
+  what it already showed; `tail` applies after it. An undecodable byte run in the file (a
+  crash mid-append) is replaced, never a 500 ·
   `GET /executions/{id}/result/{name}` (raw result-dir file for the §7 file views; plain
   filenames only — no path traversal) ·
   `POST /executions/{id}/cancel` (a running execution is killed per §7; a §6 `queued` one leaves
@@ -602,7 +615,12 @@ remain plain dicts (§2).
 - Ollama: `GET /ollama/status` → `{ ready, installed,
   models, version }` (`version` from Ollama's `/api/version` when the server answers, else
   null — the §19 Claude Code local-model check gates on it), `POST /ollama/pull` — streams
-  `ollama.pull` WS events `{ model, line, percent?, done, ok? }`. The pull rides the
+  `ollama.pull` WS events `{ model, line, percent?, done, ok? }`. One pull per model at a
+  time: a second request for a model already pulling answers 409 ("already pulling"); a
+  pull runs under a 30-minute wall-clock cap (past it the child is killed and the terminal
+  event is `ok: false` with a "pull timed out" line), and a CLI-mode pull child is
+  registered with the §3 shutdown sweep so quit-all and reset never leave a multi-GB
+  download running. The pull rides the
   **server's `/api/pull` HTTP stream whenever the server answers** — never the CLI in that
   case. `/ollama/status` reports installed/active from the server answering, so a pull must
   succeed in exactly that state even when no `ollama` binary is resolvable (server reachable
@@ -713,7 +731,10 @@ already neutralize. The provider config and
   event, it publishes the ordinary `execution.started` for the same id), `execution.step`
   (status change; carries the full step incl. its attempts), `execution.log` (one NDJSON line with
   `stepIndex`/`attempt` — null for execution-level lines — and the per-file `sequence` for
-  fetch-vs-stream dedupe), `execution.finished`, `automation.changed`, `agents.changed`,
+  fetch-vs-stream dedupe), `execution.finished`, `execution.deleted` (`{ executionId }` — a
+  §4.5 test record superseded by the next test or removed by its draft settling; clients
+  drop the row and decrement `executionsTotal`; the §6 retention sweep publishes nothing,
+  its rows fall off at the next fetch), `automation.changed`, `agents.changed`,
   `secrets.changed`, `settings.changed`, `draft.changed` (the §4.4 pending slot was kept
   or discarded — clients re-`GET /state`; §11 test executions stream over the
   ordinary `execution.*` events), `draftjob.changed` (`{ owner, jobId, status, mode }` —
@@ -748,7 +769,10 @@ already neutralize. The provider config and
   `executing`, but it announces that through `execution.started`, which this rule leaves alone. `automation.changed` carries `automationId` plus
   `automation` — the changed automation in list shape, or `null` when it was deleted —
   whenever exactly one automation changed; clients patch that one row in place by **merging**
-  it over the stored record, never replacing it. The list shape lacks the full-record fields
+  it over the stored record, never replacing it; the delete form also stamps
+  `automationDeleted` on every execution row the client holds for that id — exactly what a
+  fresh `/state` would serialize, so Retry / Execute again never stay offered on orphaned
+  rows. The list shape lacks the full-record fields
   (`params`/`steps`/`latest`/`memory`/`snapshots`/`spec`/`packages`/`versions`/`draft`), so a replace
   would blank those fields on an open detail page — its sections unmount and remount around
   the follow-up full fetch, which reads as a page-refresh flicker, drops input focus

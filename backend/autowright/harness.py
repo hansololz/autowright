@@ -358,11 +358,16 @@ def blocked_mark_outside_fences(text: str) -> re.Match | None:
 # build residue an agent leaves behind (__pycache__, helper scripts) never
 # reaches the feed or the recombined reply.
 _DOCUMENT_NAMES = ("spec.md", "notes.md", "manifest.yaml", "actions.yaml")
+# §8: names no delivery path accepts, collected anyway so the validator sees
+# them and fails the response the same way the fenced envelope does — a
+# rewrite an agent wrote to the scratch dir is never silently discarded.
+_REJECTED_DOCUMENT_NAMES = ("instructions.md",)
 _SCRATCH_POLL_S = 0.3
 
 
 def _is_document_name(name: str) -> bool:
-    return name in _DOCUMENT_NAMES or bool(STEP_FILE_RE.match(name))
+    return (name in _DOCUMENT_NAMES or name in _REJECTED_DOCUMENT_NAMES
+            or bool(STEP_FILE_RE.match(name)))
 
 
 class ProgressSink:
@@ -941,6 +946,9 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
     watchdog = threading.Thread(target=_watch, daemon=True)
     watchdog.start()
     err_parts: list[str] = []
+    # The drain thread appends and pops while this thread reads the tail after
+    # a join that may have timed out — one lock covers both sides.
+    err_lock = threading.Lock()
 
     def _drain_stderr() -> None:
         # Bounded, tail-keeping: an unbounded read() holds however much a
@@ -952,10 +960,11 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
                 chunk = proc.stderr.read(65536)  # type: ignore[union-attr]
                 if not chunk:
                     return
-                err_parts.append(chunk)
-                total += len(chunk)
-                while total > STDERR_CAP_CHARS and len(err_parts) > 1:
-                    total -= len(err_parts.pop(0))
+                with err_lock:
+                    err_parts.append(chunk)
+                    total += len(chunk)
+                    while total > STDERR_CAP_CHARS and len(err_parts) > 1:
+                        total -= len(err_parts.pop(0))
         except (OSError, ValueError):
             # The cleanup below closed our read end mid-read — normal end.
             pass
@@ -980,7 +989,14 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         try:
             out_total = 0
             try:
-                for line in proc.stdout:
+                while True:
+                    # §8: size-capped readline, the same shape the engine's
+                    # step-process loop uses — the cap is enforced on bounded
+                    # reads, never per line, so one newline-free blob arrives
+                    # as bounded chunks instead of buffering past it first.
+                    line = proc.stdout.readline(2_000_000)  # type: ignore[union-attr]
+                    if line == "":
+                        break
                     _reset_idle()
                     out_total += len(line)
                     if out_total > STDOUT_CAP_CHARS:
@@ -1028,7 +1044,8 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
                                retryable=True)
         raw = "".join(raw_parts)
         if proc.returncode != 0:
-            err = "".join(err_parts) or raw
+            with err_lock:
+                err = "".join(err_parts) or raw
             # The TAIL of stderr, not the head: CLIs print banners first and
             # the decisive ERROR line last (verified with Codex).
             tail = "\n".join(err.strip().splitlines()[-3:])

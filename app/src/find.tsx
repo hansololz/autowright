@@ -42,14 +42,17 @@ export function markLine(nodes: React.ReactNode[], ranges: { start: number; end:
       if (e <= 0 || s >= text.length || s >= e || s < pos) continue
       if (s > pos) parts.push(text.slice(pos, s))
       parts.push(
-        <mark key={key++} data-match={r.current ? 'current' : 'hit'} style={r.current ? MARK_CURRENT : MARK}>{text.slice(s, e)}</mark>,
+        <mark key={`f${key++}`} data-match={r.current ? 'current' : 'hit'} style={r.current ? MARK_CURRENT : MARK}>{text.slice(s, e)}</mark>,
       )
       pos = e
     }
     if (pos === 0) out.push(node)
     else {
       if (pos < text.length) parts.push(text.slice(pos))
-      out.push(el ? <span key={key++} style={el.props.style}>{parts}</span> : <React.Fragment key={key++}>{parts}</React.Fragment>)
+      // `f`-prefixed keys: the highlighted line mixes these wrappers with the
+      // untouched tokens, whose own keys are plain line-wide numbers — a bare
+      // counter here collides with them (React's duplicate-key warning).
+      out.push(el ? <span key={`f${key++}`} style={el.props.style}>{parts}</span> : <React.Fragment key={`f${key++}`}>{parts}</React.Fragment>)
     }
     offset += text.length
   }
@@ -87,6 +90,11 @@ export function useFind(lines: React.ReactNode[][], scroller: React.RefObject<HT
   }
   const close = () => { setOpen(false); setQuery('') }
   const step = (d: 1 | -1) => { if (matches.length) setCur((c) => (c + d + matches.length) % matches.length) }
+  // The scroll is keyed on the current match's identity, never on the matches
+  // array: a streamed line re-runs the search and hands back a new array, and
+  // the pane must only move when the current match itself changes (§7).
+  const at = matches[cur]
+  const matchKey = at ? `${at.line}:${at.start}:${at.end}` : ''
   useEffect(() => {
     const sc = scroller.current
     const mark = sc?.querySelector<HTMLElement>('mark[data-match="current"]')
@@ -94,10 +102,22 @@ export function useFind(lines: React.ReactNode[][], scroller: React.RefObject<HT
     const r = mark.getBoundingClientRect()
     const box = sc.getBoundingClientRect()
     sc.scrollTop += r.top - box.top - sc.clientHeight / 2 + r.height / 2
-  }, [cur, matches, resetKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [matchKey, resetKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const marked = useMemo(() => {
     if (!matches.length) return lines
-    return lines.map((ln, n) => markLine(ln, matches.map((m, k) => ({ ...m, current: k === cur })).filter((m) => m.line === n)))
+    // Bucket the matches by line once — a per-line scan over every match is
+    // quadratic on a long log with a common query.
+    const byLine = new Map<number, { start: number; end: number; current: boolean }[]>()
+    matches.forEach((m, k) => {
+      const r = { start: m.start, end: m.end, current: k === cur }
+      const bucket = byLine.get(m.line)
+      if (bucket) bucket.push(r)
+      else byLine.set(m.line, [r])
+    })
+    return lines.map((ln, n) => {
+      const ranges = byLine.get(n)
+      return ranges ? markLine(ln, ranges) : ln
+    })
   }, [lines, matches, cur])
   const counter = matches.length ? `${cur + 1} of ${matches.length}` : query ? 'No matches' : ''
   return { open, query, setQuery, matches, input, show, close, step, marked, counter }

@@ -243,6 +243,7 @@ class _FollowClient:
     def __init__(self):
         self.poll = 0
         self.step_log_fetches = 0
+        self.log_paths = []  # every /logs path, query string included
 
     @staticmethod
     def _ln(seq, text):
@@ -257,15 +258,17 @@ class _FollowClient:
                 "duration": "2s",
                 "steps": [{"attempts": [{"number": 1, "status": "ok"}]}],  # terminal
             }
-        if path == "/executions/e1/logs":
+        if path.startswith("/executions/e1/logs"):
+            self.log_paths.append(path)
+            if "step=" in path:
+                self.step_log_fetches += 1
+                return {"lines": [self._ln(1, "step line")]}
             if self.poll == 1:
                 return {"lines": [self._ln(1, "alpha"), self._ln(2, "beta")]}
-            # poll 2 re-serves seqs 1-2 plus the new 3 — dedupe must hold
+            # poll 2 re-serves seqs 1-2 plus the new 3 — the client-side dedupe
+            # must hold even when the server ignores the sinceSequence it sent
             return {"lines": [self._ln(1, "alpha"), self._ln(2, "beta"),
                               self._ln(3, "gamma")]}
-        if path == "/executions/e1/logs?step=0&attempt=1":
-            self.step_log_fetches += 1
-            return {"lines": [self._ln(1, "step line")]}
         raise AssertionError(f"unexpected request: {path}")
 
 
@@ -286,6 +289,24 @@ def test_follow_exec_dedupes_seqs_and_settles_terminal_attempts(monkeypatch, cap
     assert out.count("  T1 [log] alpha") == 1  # overlapping seqs printed once
     # terminal attempt settled after its first fetch — never re-downloaded
     assert c.step_log_fetches == 1
+
+
+def test_follow_exec_polls_with_since_sequence(monkeypatch, capsys):
+    """§20 follow semantics: each poll sends the §19 sinceSequence of the last
+    line it printed for that target, so a long-running step's log crosses the
+    loopback once rather than once per second."""
+    from autowright import cli
+
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    c = _FollowClient()
+    cli.follow_exec(c, "e1")
+    assert c.log_paths == [
+        "/executions/e1/logs",                      # poll 1: nothing printed yet
+        "/executions/e1/logs?step=0&attempt=1",
+        "/executions/e1/logs?sinceSequence=2",      # poll 2: past the last printed
+    ]
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == len(set(out))  # nothing printed twice
 
 
 class _StatusScriptClient:
@@ -663,7 +684,7 @@ def test_import_installs_declared_packages(tmp_path, capsys):
 
     c = _WorkdirClient(install_result=[
         {"pip": "pandas", "import": "pandas", "status": "installed", "version": "2.2.0"}])
-    c.req_raw = lambda method, path, data=None: json.dumps(
+    c.req_raw = lambda method, path, data=None, timeout=30: json.dumps(
         {"automation": {"name": "Shared", "id": "abcd1234-0000"},
          "summary": {"packages": [{"pip": "pandas", "import": "pandas"}]}}).encode()
     f = tmp_path / "x.autowright"
@@ -985,10 +1006,14 @@ def test_client_exits_cleanly_when_the_backend_drops_the_connection(home, monkey
 class _ExecListClient:
     def __init__(self, execs):
         self.execs = execs
+        self.paths = []
 
     def req(self, method, path, body=None):
-        assert (method, path) == ("GET", "/executions")
-        return {"executions": self.execs, "total": len(self.execs)}
+        # §20: limit=1 for the bare "newest" form, uncapped for prefix matching
+        assert method == "GET" and path in ("/executions", "/executions?limit=1")
+        self.paths.append(path)
+        rows = self.execs[:1] if path.endswith("?limit=1") else self.execs
+        return {"executions": rows, "total": len(self.execs)}
 
 
 EXECS = [{"id": "e1111111-a", "automationName": "Daily Report", "status": "succeeded",
@@ -1003,6 +1028,20 @@ def test_find_execution_defaults_to_latest():
     from autowright.cli import find_execution
 
     assert find_execution(_ExecListClient(EXECS), None)["id"] == "e1111111-a"
+
+
+def test_find_execution_bare_form_reads_limit_1():
+    """§20: the bare no-reference form means "the newest", so it reads
+    limit=1 — only prefix matching needs the uncapped list."""
+    from autowright.cli import find_execution
+
+    c = _ExecListClient(EXECS)
+    assert find_execution(c, None)["id"] == "e1111111-a"
+    assert c.paths == ["/executions?limit=1"]
+
+    c = _ExecListClient(EXECS)
+    assert find_execution(c, "f3")["id"] == "f3333333-c"
+    assert c.paths == ["/executions"]
 
 
 def test_find_execution_no_executions_exits():
@@ -1053,8 +1092,9 @@ class _RouteClient:
         self.timeouts.append((method, path, timeout))
         return self.reply
 
-    def req_raw(self, method, path, data=None):
+    def req_raw(self, method, path, data=None, timeout=30):
         self.calls.append((method, path, data))
+        self.timeouts.append((method, path, timeout))
         return self.raw
 
 
@@ -1064,6 +1104,13 @@ AUTO_ID = FULL_AUTO["id"]
 def _auto_gets(auto=None, **extra):
     a = auto or FULL_AUTO
     return {"/automations": [a], f"/automations/{a['id']}": a, **extra}
+
+
+def _exec_gets(*execs):
+    """§20: the bare execution reference reads limit=1, a prefix reads the
+    uncapped list — a table answering both serves either form."""
+    rows = {"executions": list(execs), "total": len(execs)}
+    return {"/executions": rows, "/executions?limit=1": rows}
 
 
 def _run(client, *argv):
@@ -1549,11 +1596,27 @@ def test_cmd_automation_import_url_confirms_immediately(capsys):
         ("POST", "/automations/import/url", {"url": "https://github.com/alice/watcher"}),
         ("POST", "/automations/import/confirm", {"token": "tok1"}),
     ]
-    # §20: the remote download rides the url call — 600 s; confirm stays 30 s
-    assert [t for _, _, t in c.timeouts] == [600, 30]
+    # §20: the remote download and the confirm that lands the archive both
+    # take the long timeout — 600 s
+    assert [t for _, _, t in c.timeouts] == [600, 600]
     out = capsys.readouterr().out
     assert "resolved to https://gh/dl/watcher.autowright" in out
     assert "imported 'Web' [cafebabe]" in out
+
+
+def test_cmd_automation_import_file_upload_gets_the_long_timeout(tmp_path, capsys):
+    """§20 HTTP timeouts: a large archive landing on a slow volume must never
+    report "backend isn't reachable" while it succeeds — the file upload runs
+    at 600 s like the URL fetch and the confirm."""
+    src = tmp_path / "watcher.autowright"
+    src.write_bytes(b"ZIPDATA")
+    raw = json.dumps({"automation": {"name": "Web", "id": "cafebabe-2"},
+                      "summary": {"secretsMatched": [], "agentsMatched": [],
+                                  "unresolved": [], "packages": []}}).encode()
+    c = _RouteClient(raw=raw)
+    _run(c, "automation", "import", str(src))
+    assert c.timeouts == [("POST", "/automations/import", 600)]
+    assert "imported 'Web' [cafebabe]" in capsys.readouterr().out
 
 
 def test_cmd_automation_import_missing_file_exits():
@@ -1958,8 +2021,33 @@ def test_cmd_execution_list_rejects_a_malformed_since():
     assert "YYYY-MM-DD" in str(ei.value.code) and "YYYY-MM-DDTHH:MM" in str(ei.value.code)
 
 
+def test_cmd_execution_list_rejects_a_count_below_1():
+    """§20: -n below 1 is a usage error named with the flag's own word, never
+    a server 422 quoting the wire parameter `limit`."""
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(), "execution", "list", "-n", "0")
+    assert ei.value.code != 0 and ei.value.code != 2  # 2 stays the follow signal
+    assert "-n must be at least 1" in str(ei.value.code)
+
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(), "execution", "list", "-n", "-5")
+    assert "-n must be at least 1" in str(ei.value.code)
+
+
+def test_cmd_execution_list_rejects_an_inverted_range():
+    """§20: a --since after its --until is a usage error named with the flags'
+    own words, raised before anything crosses the wire."""
+    c = _RouteClient()  # an empty GET table: any request would assert
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "execution", "list", "--automation", "Daily Report",
+             "--since", "2026-09-06", "--until", "2026-09-01")
+    assert ei.value.code != 0 and ei.value.code != 2
+    assert "--since is after --until" in str(ei.value.code)
+    assert c.calls == []  # nothing crossed the wire, not even the lookup
+
+
 def test_cmd_execution_show_prints_trigger_message_error_and_result(capsys):
-    gets = {"/executions": {"executions": [FULL_EXEC], "total": 1},
+    gets = {**_exec_gets(FULL_EXEC),
             f"/executions/{FULL_EXEC['id']}": FULL_EXEC}
     _run(_RouteClient(gets), "execution", "show")  # no ref → latest
     out = capsys.readouterr().out
@@ -1977,7 +2065,7 @@ def test_cmd_execution_show_payload_fallbacks(capsys):
     e = dict(FULL_EXEC, triggerPayload={
         "kind": "imessage", "sender": "+15551234567", "messageId": "g1",
         "chat": "iMessage;-;+15551234567", "at": "08:00", "text": "hi"})
-    gets = {"/executions": {"executions": [e], "total": 1}, f"/executions/{e['id']}": e}
+    gets = {**_exec_gets(e), f"/executions/{e['id']}": e}
     _run(_RouteClient(gets), "execution", "show")
     out = capsys.readouterr().out
     assert "trigger message: +15551234567 · 08:00" in out and "  hi" in out
@@ -1985,7 +2073,7 @@ def test_cmd_execution_show_payload_fallbacks(capsys):
     # Discord with no cached names falls back to the raw channel id
     e = dict(FULL_EXEC, triggerPayload=dict(
         FULL_EXEC["triggerPayload"], channelName=None, guildName=None))
-    gets = {"/executions": {"executions": [e], "total": 1}, f"/executions/{e['id']}": e}
+    gets = {**_exec_gets(e), f"/executions/{e['id']}": e}
     _run(_RouteClient(gets), "execution", "show")
     assert "trigger message: dave · 42 · 08:00" in capsys.readouterr().out
 
@@ -2006,14 +2094,15 @@ def test_cmd_execution_tail_follows_and_exits_by_status(monkeypatch, capsys):
             self.polls = 0
 
         def req(self, method, path, body=None, timeout=30):
-            if path == "/executions":
+            if path in ("/executions", "/executions?limit=1"):
                 return {"executions": [FULL_EXEC], "total": 1}
             if path == f"/executions/{FULL_EXEC['id']}":
                 self.polls += 1
                 # one live poll first, so the loop really iterates
                 return {"status": "executing" if self.polls == 1 else self.status,
                         "duration": "3s", "steps": []}
-            assert path == f"/executions/{FULL_EXEC['id']}/logs"
+            # the §19 sinceSequence rides along from the second poll on
+            assert path.startswith(f"/executions/{FULL_EXEC['id']}/logs")
             return {"lines": [{"sequence": self.polls, "time": f"T{self.polls}",
                                "kind": "log", "text": f"line {self.polls}"}]}
 
@@ -2030,7 +2119,7 @@ def test_cmd_execution_tail_follows_and_exits_by_status(monkeypatch, capsys):
 
 
 def test_cmd_execution_cancel_and_retry(capsys):
-    gets = {"/executions": {"executions": [FULL_EXEC], "total": 1}}
+    gets = _exec_gets(FULL_EXEC)
     c = _RouteClient(gets)
     _run(c, "execution", "cancel", "e12")
     assert c.calls == [("POST", f"/executions/{FULL_EXEC['id']}/cancel", None)]
@@ -2045,14 +2134,14 @@ def test_cmd_execution_cancel_and_retry(capsys):
 def test_cmd_execution_skip_targets_first_executing_step(capsys):
     running = dict(FULL_EXEC, steps=[{"name": "A", "status": "succeeded"},
                                      {"name": "B", "status": "executing"}])
-    gets = {"/executions": {"executions": [running], "total": 1},
+    gets = {**_exec_gets(running),
             f"/executions/{running['id']}": running}
     c = _RouteClient(gets)
     _run(c, "execution", "skip")
     assert c.calls == [("POST", f"/executions/{running['id']}/skip-step", {"index": 1})]
     assert "skipping step 2" in capsys.readouterr().out
 
-    gets = {"/executions": {"executions": [FULL_EXEC], "total": 1},
+    gets = {**_exec_gets(FULL_EXEC),
             f"/executions/{FULL_EXEC['id']}": FULL_EXEC}
     with pytest.raises(SystemExit) as ei:
         _run(_RouteClient(gets), "execution", "skip")
@@ -2060,12 +2149,12 @@ def test_cmd_execution_skip_targets_first_executing_step(capsys):
 
 
 def test_cmd_execution_result_lists_then_streams(capsysbinary):
-    gets = {"/executions": {"executions": [FULL_EXEC], "total": 1},
+    gets = {**_exec_gets(FULL_EXEC),
             f"/executions/{FULL_EXEC['id']}": FULL_EXEC}
     _run(_RouteClient(gets), "execution", "result")
     assert b"report.md (2 KB)" in capsysbinary.readouterr().out
 
-    c = _RouteClient({"/executions": {"executions": [FULL_EXEC], "total": 1}},
+    c = _RouteClient(_exec_gets(FULL_EXEC),
                      raw=b"\x00binary bytes")
     _run(c, "execution", "result", "e12", "report.md")
     assert c.calls == [("GET", f"/executions/{FULL_EXEC['id']}/result/report.md", None)]
@@ -2308,7 +2397,7 @@ MEMORY_FILES = [{"name": "seen.yaml", "size": 7, "updated": "Today"}]
                   f"/automations/{AUTO_ID}/memory/files": {"files": MEMORY_FILES}},
                  MEMORY_FILES, id="memory-show"),
     pytest.param(("execution", "show"),
-                 {"/executions": {"executions": [FULL_EXEC], "total": 1},
+                 {**_exec_gets(FULL_EXEC),
                   f"/executions/{FULL_EXEC['id']}": FULL_EXEC},
                  FULL_EXEC, id="execution-show"),
     pytest.param(("secret", "list"), {"/secrets": JSON_SECRETS},

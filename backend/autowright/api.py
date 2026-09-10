@@ -24,8 +24,8 @@ from .engine import Engine, kill_orphan_agent_group, kill_orphan_group
 from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
-from .storage import (LiveExecutionError, StoreUnwritableError, _kind_ok, is_test,
-                      exec_started_ms, iter_file_stats, new_id, size_label, store,
+from .storage import (SECRET_REF_RE, LiveExecutionError, StoreUnwritableError, _kind_ok,
+                      is_test, exec_started_ms, iter_file_stats, new_id, size_label, store,
                       strip_param_values)
 from . import testexec
 
@@ -105,6 +105,9 @@ async def _lifespan(_: FastAPI):
     # §3: drafting harnesses die with it too — a stopping backend must never
     # leave an agent harness session group running with nobody to collect it.
     draft_jobs.kill_all_building()
+    # §19: and a CLI-mode Ollama pull child — quit-all and reset must never
+    # leave a multi-GB download running with nobody watching it.
+    _kill_pull_procs()
     # §3: main()'s registered cleanup (guard thread, backend.json unlink) —
     # error-tolerant, a failing callback must not keep the next one from
     # running.
@@ -145,7 +148,11 @@ class _RequestLogMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not reqlog.enabled():
+        # §5: the gate reads the in-memory settings map, never settings.yaml —
+        # this runs on the event loop once per request, and a file read there
+        # stalls every other request. The executor subprocess (no Store) keeps
+        # the file-cached read.
+        if scope["type"] != "http" or not reqlog.enabled(store.settings):
             await self.app(scope, receive, send)
             return
         ts = reqlog.stamp()
@@ -366,8 +373,9 @@ def _validate_draft_steps(d: dict, a: dict | None = None) -> None:
     manifest = {"steps": man_steps, "params": d.get("params") or [],
                 "packages": d.get("packages") or []}
     files["manifest.yaml"] = yaml.safe_dump(manifest, sort_keys=False)
-    grants = {"agents": [{"id": g["id"], "name": harness.grant_name(g)} for g in store.agents],
-              "secrets": [{"id": s["id"], "name": s["name"]} for s in store.secrets]}
+    with store.lock:  # same rule as _check_agent_refs: never walk a store collection unlocked
+        grants = {"agents": [{"id": g["id"], "name": harness.grant_name(g)} for g in store.agents],
+                  "secrets": [{"id": s["id"], "name": s["name"]} for s in store.secrets]}
     _, errors = drafting.validate_steps(
         files, grants, unresolved=(a or {}).get("unresolved_references"))
     if errors:
@@ -421,11 +429,29 @@ def _settings_json() -> dict:
     return s
 
 
+def _secret_usage_index() -> dict[str, list[dict]]:
+    """§4.8 usedBy for every secret at once: one pass over the automations'
+    current-version steps, one `SECRET_REF_RE` scan per step. `secret_used_by`
+    answers the same question for one secret, and running it per secret would
+    re-scan every step once per stored secret. Caller holds store.lock."""
+    index: dict[str, list[dict]] = {}
+    for a in store.autos.values():
+        cur = a["versions"].get(a["current_version"], {})
+        referenced: set[str] = set()
+        for s in cur.get("steps", []):
+            referenced |= {e["id"] for e in s.get("secrets", []) or [] if e.get("id")}
+            referenced |= set(SECRET_REF_RE.findall(s.get("code", "")))
+        for secret_id in referenced:
+            index.setdefault(secret_id, []).append({"id": a["id"], "name": a["name"]})
+    return index
+
+
 def _secrets_json() -> list[dict]:
     with store.lock:
+        used_by = _secret_usage_index()
         return [{"id": s["id"], "name": s["name"], "description": s.get("description") or "",
                  "set": bool(s.get("set", True)),
-                 "usedBy": store.secret_used_by(s["id"])}
+                 "usedBy": used_by.get(s["id"], [])}
                 for s in sorted(store.secrets, key=lambda s: s["name"])]
 
 
@@ -632,6 +658,21 @@ def delete_auto(automation_id: str) -> dict:
         # refuses while this flag is set.
         a["_deleting"] = True
         live = list(a.get("_live") or ())
+    try:
+        _delete_auto(a, automation_id, live)
+    except BaseException:
+        # §19: a delete that fails partway (a write error, a kill that raised)
+        # must not leave the record silently refusing every firing forever —
+        # the flag goes back before the failure reaches the client.
+        with store.lock:
+            a.pop("_deleting", None)
+        raise
+    # §19: the deleted row travels as automation=None — clients drop it in place.
+    hub.publish("automation.changed", automationId=automation_id, automation=None)
+    return {"ok": True}
+
+
+def _delete_auto(a: dict, automation_id: str, live: list[str]) -> None:
     for eid in live:
         engine.cancel(eid)
     # §19: delete settles the draft work too - a live §11 test or building §8
@@ -653,9 +694,14 @@ def delete_auto(automation_id: str) -> dict:
         logging.getLogger(__name__).warning(
             "delete %s: an execution thread outlived the kill grace — removing anyway", automation_id)
     store.delete_automation(a)
-    # §19: the deleted row travels as automation=None — clients drop it in place.
-    hub.publish("automation.changed", automationId=automation_id, automation=None)
-    return {"ok": True}
+
+
+def _publish_execs_deleted(execution_ids) -> None:
+    """§19 `execution.deleted`: one event per §4.5 test record a settling draft
+    took with it, so the §7 list drops the row live instead of at the next
+    fetch. Published outside store.lock, like every other event."""
+    for execution_id in execution_ids or []:
+        hub.publish("execution.deleted", executionId=execution_id)
 
 
 def _draft_to_version(d: dict) -> dict:
@@ -717,7 +763,7 @@ def create_auto(body: models.AutomationCreate) -> dict:
     store.append_chat_marker(a, "Created as v1.")
     # §4.4: Create consumes the pending create-mode slot — settled drafts are
     # never resurrected.
-    store.delete_draft(None)
+    _publish_execs_deleted(store.delete_draft(None))
     hub.publish("draft.changed")
     _publish_auto_changed(a)
     return _auto_json_locked(a)
@@ -777,11 +823,12 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
             patch.update(body.concurrency.model_dump(exclude_unset=True))
         if patch:
             store.patch_automation(a, patch)
-        store.delete_draft(a)
+        settled_execs = store.delete_draft(a)
         # §4.4 boundary marker: saving settles the draft — the thread stays,
         # split so the settled session never reaches a later chat's agent.
         store.append_chat_marker(a, f"Draft saved as v{n}." if minted
                                  else "Changes saved — no new version.")
+    _publish_execs_deleted(settled_execs)
     if triggers is not None:
         # §6: same rule as the PATCH — the saved version's trigger list may have
         # dropped or disabled the trigger some waiting entry came from.
@@ -900,11 +947,12 @@ def delete_draft_container(owner: str) -> dict:
     with store.lock:
         if a is not None:
             _reject_live_draft_exec(a)
-        store.delete_draft(a)
+        settled_execs = store.delete_draft(a)
         # §4.4 thread lifetime: discarding settles the draft but keeps the
         # thread — behind the boundary marker, appended server-side so a
         # settled session never reaches a later chat's agent.
         store.append_chat_marker(a, "Draft discarded.")
+    _publish_execs_deleted(settled_execs)
     _publish_draft_changed(a)
     return {"ok": True}
 
@@ -1050,6 +1098,16 @@ def _clear_import_spool() -> None:
             log.warning("couldn't remove stale import spool file %s", p)
 
 
+def _sweep_parked() -> None:
+    """§5.2: drop every expired parked archive and its spool file. Run on every
+    preview *and* every confirm — an expired file must never sit on disk until
+    the next preview happens to come along."""
+    now = time.time()
+    with _import_lock:
+        for k in [k for k, (t, _) in _import_parked.items() if now - t > _IMPORT_TTL]:
+            _drop_parked(k)
+
+
 def _park_archive(data: bytes) -> str:
     now = time.time()
     token = pysecrets.token_hex(16)
@@ -1062,9 +1120,8 @@ def _park_archive(data: bytes) -> str:
         p.unlink(missing_ok=True)  # a half-written spool file never survives
         raise HTTPException(
             507, f"couldn't hold the archive for review: {e.strerror or e}") from e
+    _sweep_parked()
     with _import_lock:
-        for k in [k for k, (t, _) in _import_parked.items() if now - t > _IMPORT_TTL]:
-            _drop_parked(k)
         while len(_import_parked) >= _IMPORT_SLOTS:
             _drop_parked(min(_import_parked, key=lambda k: _import_parked[k][0]))
         _import_parked[token] = (now, p)
@@ -1103,6 +1160,7 @@ def import_url(body: models.ImportUrl) -> dict:
 
 @app.post("/automations/import/confirm", dependencies=[Depends(auth)])
 def import_confirm(body: models.ImportConfirm) -> dict:
+    _sweep_parked()  # §5.2: expired spool files go on every confirm, not just previews
     with _import_lock:
         slot = _import_parked.pop(body.token, None)
     if slot is None:
@@ -1273,12 +1331,13 @@ def post_test(body: models.TestStart) -> dict:
     # §19: grant arrays as in /drafts — create mode (no automationId) defaults to
     # ALL agents/secrets when the arrays are absent, edit mode to the
     # automation's grants.
-    enabled = body.enabledAgents
-    if enabled is None:
-        enabled = auto["enabled_agents"] if auto else [g["id"] for g in store.agents]
-    allowed = body.allowedSecrets
-    if allowed is None:
-        allowed = auto["allowed_secrets"] if auto else [s["id"] for s in store.secrets]
+    with store.lock:  # never walk a store collection unlocked (see _agent_or_404)
+        enabled = body.enabledAgents
+        if enabled is None:
+            enabled = auto["enabled_agents"] if auto else [g["id"] for g in store.agents]
+        allowed = body.allowedSecrets
+        if allowed is None:
+            allowed = auto["allowed_secrets"] if auto else [s["id"] for s in store.secrets]
     try:
         execution_id = testexec.start(engine, d, auto, enabled, allowed,
                                  body.paramValues or {}, trigger_payload=payload,
@@ -1414,7 +1473,10 @@ def create_snapshot(automation_id: str, body: models.SnapshotCreate | None = Non
 @app.patch("/automations/{automation_id}/memory/snapshots/{snapshot_id}", dependencies=[Depends(auth)])
 def rename_snapshot(automation_id: str, snapshot_id: str, body: models.SnapshotRename | None = None) -> dict:
     a = _auto_or_404(automation_id)
-    meta = store.rename_snapshot(a, snapshot_id, body.name if body else None)
+    # §6.3: every snapshot mutation serializes on the memory-operations lock —
+    # a rename must not race the delete/restore that moves the same tree.
+    with store.memory_ops:
+        meta = store.rename_snapshot(a, snapshot_id, body.name if body else None)
     if meta is None:
         raise HTTPException(404, "snapshot not found")
     _publish_auto_changed(a)
@@ -1442,7 +1504,11 @@ def restore_snapshot(automation_id: str, snapshot_id: str) -> dict:
 @app.delete("/automations/{automation_id}/memory/snapshots/{snapshot_id}", dependencies=[Depends(auth)])
 def delete_snapshot(automation_id: str, snapshot_id: str) -> dict:
     a = _auto_or_404(automation_id)
-    if not store.delete_snapshot(a, snapshot_id):
+    # §6.3: same memory-operations lock as create/restore/clear — a delete must
+    # never pull a tree out from under a restore's copy.
+    with store.memory_ops:
+        gone = store.delete_snapshot(a, snapshot_id)
+    if not gone:
         raise HTTPException(404, "snapshot not found")
     _publish_auto_changed(a)
     return {"ok": True}
@@ -1454,8 +1520,13 @@ def post_draft(body: models.DraftJobStart) -> dict:
     mode = body.mode
     if mode == "chat" and not (body.text or "").strip():
         raise HTTPException(422, "chat mode needs a nonempty text")
-    agent = _agent_or_404(body.agentId or store.default_agent_id
-                          or (store.agents[0]["id"] if store.agents else ""))
+    # §19: the explicit agentId, else the default pointer — 404 when neither
+    # resolves (the zero-agents case included). No first-agent fallback here:
+    # the §5 load path already repoints a dangling/absent stored default at the
+    # first agent, so a live default is the only thing left to honor.
+    with store.lock:
+        agent_id = body.agentId or store.default_agent_id or ""
+    agent = _agent_or_404(agent_id)
     # §19: an automationId that doesn't resolve answers 404 (like the
     # stale-automationId 404 on /tests) — never a silent fall-back to the
     # no-automation grant defaults below.
@@ -1499,22 +1570,23 @@ def post_draft(body: models.DraftJobStart) -> dict:
     # camelCase step flags to snake_case.)
     # §8/§19: in-editor grant arrays in the body win over the stored automation's —
     # the editor's live toggles are the truth while a draft is being worked on.
-    enabled_ids = body.enabledAgents
-    if enabled_ids is None:
-        # §19: with an automation, fall back to the stored grants; without one
-        # (a fresh create-flow draft), every configured agent — the same
-        # all-enabled seed the Review page starts from.
-        enabled_ids = auto["enabled_agents"] if auto else [a["id"] for a in store.agents]
-    allowed = body.allowedSecrets
-    if allowed is None:
-        # no automation defaults to every stored secret — the same all-on seed
-        # the Review page's secrets card starts from
-        allowed = auto["allowed_secrets"] if auto else [s["id"] for s in store.secrets]
-    grants = {
-        "agents": [_agent_grant(g) for g in store.agents if g["id"] in enabled_ids],
-        # a dangling allowed id grants nothing (the secret was deleted)
-        "secrets": [e for e in (_secret_grant(secret_id) for secret_id in allowed) if e],
-    }
+    with store.lock:  # never walk a store collection unlocked (see _agent_or_404)
+        enabled_ids = body.enabledAgents
+        if enabled_ids is None:
+            # §19: with an automation, fall back to the stored grants; without one
+            # (a fresh create-flow draft), every configured agent — the same
+            # all-enabled seed the Review page starts from.
+            enabled_ids = auto["enabled_agents"] if auto else [a["id"] for a in store.agents]
+        allowed = body.allowedSecrets
+        if allowed is None:
+            # no automation defaults to every stored secret — the same all-on seed
+            # the Review page's secrets card starts from
+            allowed = auto["allowed_secrets"] if auto else [s["id"] for s in store.secrets]
+        grants = {
+            "agents": [_agent_grant(g) for g in store.agents if g["id"] in enabled_ids],
+            # a dangling allowed id grants nothing (the secret was deleted)
+            "secrets": [e for e in (_secret_grant(secret_id) for secret_id in allowed) if e],
+        }
     executions = pkg_state = None
     if mode == "chat":
         # §8/§19: the backend assembles the RECENT EXECUTIONS and PACKAGES context —
@@ -1622,8 +1694,11 @@ def list_execs(automation: list[str] | None = Query(None), status: list[str] | N
             keyed = [(ms, h) for ms, h in keyed
                      if ms < before_started_ms
                      or (ms == before_started_ms and h["id"] > before_id)]
-        return {"executions": [store.exec_json(h) for _, h in keyed[:limit]],
-                "total": total}
+        # §19: the page's headers are copied under the lock and serialized
+        # outside it — exec_json is pure formatting, and paying it here would
+        # hold the lock against the engine for the whole page.
+        page = [dict(h) for _, h in keyed[:limit]]
+    return {"executions": [store.exec_json(h) for h in page], "total": total}
 
 
 @app.get("/executions/{execution_id}", dependencies=[Depends(auth)])
@@ -1637,16 +1712,27 @@ def get_exec(execution_id: str) -> dict:
 
 @app.get("/executions/{execution_id}/logs", dependencies=[Depends(auth)])
 def get_exec_logs(execution_id: str, step: int | None = None, attempt: int | None = None,
-                  tail: int | None = Query(None, ge=1)) -> dict:
+                  tail: int | None = Query(None, ge=1),
+                  since_sequence: int | None = Query(None, ge=0, alias="sinceSequence")) -> dict:
     """§19: lazy per-step-attempt log — no params selects the execution log.
-    `tail` keeps only the last N lines of the selected log (same shape)."""
+    `tail` keeps only the last N lines of the selected log (same shape).
+    `sinceSequence` keeps only lines past that per-file sequence — the §20
+    follow loop sends the last one it printed; `tail` applies after it."""
     if execution_id not in store.execs:
         raise HTTPException(404, "execution not found")
     if (step is None) != (attempt is None):
         # §19: the pair travels together — half a selector would silently
         # resolve to attempt 1 and read as the wrong file.
         raise HTTPException(422, "step and attempt go together — send both or neither")
-    lines = store.read_log(execution_id, step, attempt, tail=tail)
+    # The read-side tail is the fast path, but it must not run before the
+    # sequence filter — a tail taken first would hand back fewer new lines than
+    # the caller asked for (or none at all).
+    lines = store.read_log(execution_id, step, attempt,
+                           tail=None if since_sequence is not None else tail)
+    if since_sequence is not None:
+        lines = [l for l in lines if l.get("sequence", 0) > since_sequence]
+        if tail is not None:
+            lines = lines[-tail:]
     return {"lines": [{"time": l.get("time", ""), "kind": l.get("kind", "out"),
                        "sequence": l.get("sequence", 0), "text": l.get("text", "")} for l in lines]}
 
@@ -1675,10 +1761,10 @@ def retry_exec(execution_id: str) -> dict:
     h = store.execs.get(execution_id)
     if not h:
         raise HTTPException(404, "execution not found")
-    if h["automation_id"] is None:
-        # §4.5 create-mode test records have no automation to resolve — retry
-        # answers the §19 test rule's 409 (the draft may have changed), not a
-        # 404 for a record that plainly exists.
+    if is_test(h):
+        # §4.5 test records are never retried — the draft they ran has moved on,
+        # so retry answers the §19 test rule's 409 (execute a new test instead),
+        # not a 404 for a record that plainly exists.
         raise HTTPException(409, "the draft may have changed — execute a new test from the editor")
     a = _auto_or_404(h["automation_id"])
     try:
@@ -1955,11 +2041,33 @@ class _PullProgress:
         return self.percent
 
 
+PULL_DEADLINE_S = 30 * 60  # §19: wall-clock cap on one pull, both paths
+# §19 one-pull-per-model: the models with a pull in flight, plus the CLI-mode
+# children the §3 shutdown sweep kills. Both under one lock — a pull thread
+# and the sweep touch them from different threads.
+_pull_lock = threading.Lock()
+_pulling: set[str] = set()
+_pull_procs: set = set()
+
+
+def _kill_pull_procs() -> None:
+    """§3 shutdown: hard-kill every tracked CLI-mode pull child by group."""
+    with _pull_lock:
+        procs = list(_pull_procs)
+        _pull_procs.clear()
+    for proc in procs:
+        try:
+            platform.current().processes.signal_group(proc)
+        except Exception:  # noqa: BLE001 — a dead child must not break the sweep
+            pass
+
+
 def _ollama_pull_http(model: str) -> None:
     """§19: pull through the server's `/api/pull` stream — no CLI involved."""
     prog = _PullProgress()
     ok = False
     err = ""
+    deadline = time.monotonic() + PULL_DEADLINE_S
     try:
         req = urllib.request.Request(
             f"{harness.OLLAMA_URL}/api/pull",
@@ -1967,6 +2075,11 @@ def _ollama_pull_http(model: str) -> None:
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as r:
             for raw in r:
+                if time.monotonic() > deadline:
+                    # §19: the per-read timeout can't catch a server dribbling
+                    # progress lines for hours — the wall clock can.
+                    ok, err = False, "pull timed out"
+                    break
                 try:
                     msg = json.loads(raw.decode())
                 except ValueError:
@@ -2005,14 +2118,31 @@ def _ollama_pull_cli(model: str) -> None:
                                 env=harness.spawn_env(binpath),
                                 # §2 spawn policy (hidden console on Windows)
                                 **platform.current().processes.session_kwargs())
-        prog = _PullProgress()
-        for line in proc.stdout:  # type: ignore[union-attr]
-            stripped = line.strip()
-            pct = prog.update(stripped)
-            extra = {} if pct is None else {"percent": pct}
-            hub.publish("ollama.pull", model=model, line=stripped, done=False, **extra)
-        proc.wait()
-        ok = proc.returncode == 0
+        # §3: tracked for the shutdown sweep from the moment it exists.
+        with _pull_lock:
+            _pull_procs.add(proc)
+        try:
+            prog = _PullProgress()
+            deadline = time.monotonic() + PULL_DEADLINE_S
+            timed_out = False
+            for line in proc.stdout:  # type: ignore[union-attr]
+                if time.monotonic() > deadline:
+                    # §19 wall-clock cap: the child goes with it, or a stuck
+                    # multi-GB download keeps running with nobody watching.
+                    timed_out = True
+                    platform.current().processes.signal_group(proc)
+                    break
+                stripped = line.strip()
+                pct = prog.update(stripped)
+                extra = {} if pct is None else {"percent": pct}
+                hub.publish("ollama.pull", model=model, line=stripped, done=False, **extra)
+            proc.wait()
+        finally:
+            with _pull_lock:
+                _pull_procs.discard(proc)
+        ok = proc.returncode == 0 and not timed_out
+        if timed_out:
+            line = "pull timed out"
     except FileNotFoundError:
         line = "Ollama isn't running"
     except Exception as e:  # noqa: BLE001
@@ -2029,6 +2159,13 @@ def ollama_pull(body: models.OllamaPull) -> dict:
     # Never let a model name parse as an option to `ollama pull`.
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", model):
         raise HTTPException(422, "invalid model name")
+    # §19 one pull per model at a time: a second request for a model already
+    # pulling answers 409 — two `ollama pull` children on the same blob
+    # interleave their progress lines into one nonsense bar.
+    with _pull_lock:
+        if model in _pulling:
+            raise HTTPException(409, "already pulling")
+        _pulling.add(model)
 
     def pull() -> None:
         # §19: /ollama/status reads installed/active from the server answering,
@@ -2040,6 +2177,8 @@ def ollama_pull(body: models.OllamaPull) -> dict:
             else:
                 _ollama_pull_cli(model)
         finally:
+            with _pull_lock:
+                _pulling.discard(model)
             # §19: the agents list refreshes even when the pull path raised —
             # a model that did land before the failure must not stay invisible
             # until the next reload.
@@ -2257,9 +2396,10 @@ def set_data_path(body: models.DataPath) -> dict:
         store.settings["dataPath"] = str(target)
         store.save_settings()
         store.load_all()
-        # The new location may hold records a crashed backend left "executing" —
-        # repair them here too, or the automation would be wedged in 409s.
-        _repair_stale_executing()
+    # The new location may hold records a crashed backend left "executing" —
+    # repair them here too, or the automation would be wedged in 409s. Outside
+    # the swap's lock block: the repair's orphan kills read the process table.
+    _repair_stale_executing()
     _data_size_cache = None
     hub.publish("settings.changed")
     hub.publish("automation.changed")
@@ -2311,8 +2451,13 @@ def _repair_stale_executing() -> None:
     anything else (backend restart, a data-path switch onto a crashed tree) is
     marked interrupted. A leftover §6 `queued` record is swept too: the in-memory
     queue died with the process and the sender stopped waiting long ago, so it
-    finishes `skipped` rather than executing minutes or days late. Callers hold
-    store.lock (RLock, re-entry is fine)."""
+    finishes `skipped` rather than executing minutes or days late.
+
+    Three passes, because the orphan kills shell out to the process table (a
+    `ps` per group, §3 pid-reuse guard) and that must never run under
+    store.lock: collect the stale records under the lock, kill outside it, then
+    re-take the lock to write the repairs. Callers must NOT hold store.lock."""
+    stale: list[dict] = []
     with store.lock:
         for h in list(store.execs.values()):
             if h["status"] not in ("queued", "executing"):
@@ -2332,17 +2477,28 @@ def _repair_stale_executing() -> None:
                 store.execs[full["id"]] = full
                 finish_never_ran(store, full, "backend restarted before this ran")
                 continue
-            # §3: the previous backend's step group may still be running —
-            # kill it before freeing the slot, or the next cron tick starts
-            # a second copy writing the same memory/ dir.
-            if full.get("pgid"):
-                kill_orphan_group(full["pgid"])
+            stale.append(full)
+        store._refresh_exec_derived()
+    if not stale:
+        return
+    # §3: the previous backend's step group may still be running — kill it
+    # before freeing the slot, or the next cron tick starts a second copy
+    # writing the same memory/ dir. §4.5 agentPgids: an agent call in flight at
+    # the crash left its own-session harness CLI behind — swept with the same
+    # pid-reuse care.
+    for full in stale:
+        if full.get("pgid"):
+            kill_orphan_group(full["pgid"])
+        for g in full.get("agent_pgids") or []:
+            kill_orphan_agent_group(g)
+    with store.lock:
+        for full in stale:
+            current = store.execs.get(full["id"])
+            if current is None or current["status"] != "executing":
+                # An engine thread adopted or finished the record while the
+                # kills ran — its truth wins, never this snapshot's.
+                continue
             full["pgid"] = None
-            # §4.5 agentPgids: an agent call in flight at the crash left its
-            # own-session harness CLI behind — sweep it with the same
-            # pid-reuse care.
-            for g in full.get("agent_pgids") or []:
-                kill_orphan_agent_group(g)
             full["agent_pgids"] = []
             full["status"] = "interrupted"
             full["note"] = full["note"] or "backend restarted mid-execution"

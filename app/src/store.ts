@@ -399,7 +399,25 @@ export const useStore = create<Model>((set, get) => ({
     // server knows list ordering for a brand-new row).
     const patchAutomation = (id: string, row: Automation | null) => {
       const cur = get().automations
-      if (row === null) set({ automations: cur.filter((a) => a.id !== id) })
+      if (row === null) {
+        // §19: the delete form also stamps `automationDeleted` on every held
+        // execution row for that id — exactly what a fresh /state would
+        // serialize, so Retry / Execute again never stay offered on orphans.
+        const held = get().executions
+        const fullRecords = get().executionFull
+        const orphanedFull = Object.values(fullRecords).filter((e) => e.automationId === id && !e.automationDeleted)
+        set({
+          automations: cur.filter((a) => a.id !== id),
+          executions: held.some((e) => e.automationId === id && !e.automationDeleted)
+            ? held.map((e) => (e.automationId === id ? { ...e, automationDeleted: true } : e))
+            : held,
+          // the open page reads the full record first — stamp it too, or its
+          // Retry / Execute again would outlive the automation
+          ...(orphanedFull.length
+            ? { executionFull: { ...fullRecords, ...Object.fromEntries(orphanedFull.map((e) => [e.id, { ...e, automationDeleted: true }])) } }
+            : {}),
+        })
+      }
       else if (cur.some((a) => a.id === id)) set({ automations: cur.map((a) => (a.id === id ? { ...a, ...row } : a)) })
       else { void m.refresh(); return }
       updateTrayAlert(get().automations)
@@ -455,6 +473,25 @@ export const useStore = create<Model>((set, get) => ({
             : aj?.resultChip ? `${name} finished — ${aj.resultChip}.` : `${name} finished.`)
         }
       }
+      return
+    }
+    if (msg.event === 'execution.deleted') {
+      // §7/§19: a test record superseded by the next test, or removed by its
+      // draft settling — drop the row and every cache keyed on it, and take
+      // the pill's total down with it (floored: the window may never have
+      // counted this id).
+      const { executionId } = msg
+      const executionFull = { ...m.executionFull }
+      const execLogs = { ...m.execLogs }
+      delete executionFull[executionId]
+      delete execLogs[executionId]
+      executionRefetched.delete(executionId)
+      set({
+        executions: m.executions.filter((e) => e.id !== executionId),
+        executionsTotal: Math.max(0, m.executionsTotal - 1),
+        executionFull,
+        execLogs,
+      })
       return
     }
     if (msg.event === 'execution.step') {

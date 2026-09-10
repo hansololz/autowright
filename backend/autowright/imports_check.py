@@ -1,13 +1,20 @@
 """Curated-import allowlist (§6.2), shared by draft-time validation and the
-runtime executor. Step scripts may import the Python stdlib, the curated
-packages, and the version's declared §6.2 packages — nothing else."""
+runtime executor. Step scripts may import the Python stdlib (minus the modules
+the §3 bundle trim removes), the curated packages, and the version's declared
+§6.2 packages — nothing else."""
 from __future__ import annotations
 
 import ast
 import sys
 from typing import Iterable
 
-ALLOWED_IMPORTS = set(sys.stdlib_module_names) | {
+# §6.2: stdlib modules the §3 bundle trim removes from the shipped interpreter.
+# Rejected by the allowlist in every mode, so a step never works on a developer
+# checkout and fails in the release.
+TRIMMED_STDLIB = {"tkinter", "_tkinter", "idlelib", "turtle", "turtledemo",
+                  "ensurepip", "venv"}
+
+ALLOWED_IMPORTS = (set(sys.stdlib_module_names) - TRIMMED_STDLIB) | {
     "autowright", "requests", "httpx", "bs4", "lxml", "feedparser", "dateutil", "yaml",
 }
 

@@ -136,6 +136,10 @@ export default function AboutPage() {
     // running; the update installs on a later restart attempt.
     const r = await window.autowright?.updateInstall()
     if (r && 'busy' in r) setUpd({ state: 'downloaded', version: v, busy: true })
+    // §9.4: the updater refused to quit (nothing staged, a stale download, a
+    // failed installer spawn) — the same "Update failed" sub-line and button
+    // revert as a download error, never a card stuck on "Restart to update".
+    else if (r && 'error' in r) setUpd({ state: 'failed', error: r.error })
   }
 
   // §9.4: a failed chunk load must not strand "Loading…" — record the failure

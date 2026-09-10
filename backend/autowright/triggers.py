@@ -506,7 +506,10 @@ def time_elapsed(t: dict, now: datetime | None = None) -> bool:
     try:
         at = datetime.fromisoformat(t["at"])
     except (KeyError, TypeError, ValueError):
-        return True  # unreadable stored `at` — spent, drop it
+        # §4.3: only a *parsable* past `at` counts as spent. An unreadable one
+        # — an unquoted timestamp YAML loaded as a datetime, say — is dropped
+        # with the §5 malformed-trigger warning, never consumed silently.
+        return False
     zone = zone_of(t)
     if zone:
         at = _to_local(at, zone)
