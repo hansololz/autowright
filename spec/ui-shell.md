@@ -530,7 +530,8 @@ Sections top to bottom:
   state (dashed
   card): "No executions yet / Press Execute now — the first result will appear right here."
 - **TRIGGERS** card — one row per trigger (kind icon — fa-clock for
-  cron, fa-calendar-day for time, fa-rocket for app start, fa-brands fa-discord for discord,
+  cron, fa-stopwatch for interval, fa-calendar-day for time, fa-rocket for app start,
+  fa-brands fa-discord for discord,
   fa-comment for imessage;
   §4.3 `label`, followed by a muted **NO CATCH-UP** `MiniBadge` (the §9.1 OFF-badge treatment) when
   the trigger's §4.3 `runIfMissed` is false; a fa-pen **edit** button — every kind except app start, which has nothing to
@@ -549,17 +550,31 @@ Sections top to bottom:
   the checked-by-default for new triggers); the submit button reads **Save** instead of Add,
   and saving replaces the trigger in place — `id` and on/off state kept — via the same §19
   PATCH, toast "Trigger updated — `<short>`."; Cancel restores the row unchanged. A cron
+  or interval
   added or edited here lands `source: user` (§4.3 — hand-set schedules survive later
   syncs). The
   editor:
-  kind picker (Cron / One time / App start / Discord / iMessage — each chip leads with the
+  kind picker (Cron / Interval / One time / App start / Discord / iMessage — each chip leads with the
   same kind icon its trigger row uses; the iMessage chip renders only while the §9 store's
   `capabilities.imessage` is true — absent, not disabled, on every other platform) then
   either a
   cron-expression input
   with a live preview line (the humanized label
   when simple, plus "next: `<time>`"; an invalid expression gets the red input border and
-  blocks Add) or the One time pair: a native date input (Chromium's calendar popup — date
+  blocks Add), or the **Interval pair**: a muted "Every" word, then a **number input**
+  (`ad-input`-styled, the shared 30 px height, mono, digits only, an integer ≥ 1;
+  aria-label "interval amount"; pre-filled `1` for a new trigger) beside a **unit picker** —
+  the app's standard popover pattern (an `ad-btn-pill` trigger button showing the chosen
+  unit's word — seconds / minutes / hours / days — and fa-caret-down, opening a `PopMenu`
+  with the four units, the current one marked active; picking closes the menu; `hours` for
+  a new trigger). The pair composes the §4.3 `every` (`PT<n>S` / `PT<n>M` / `PT<n>H` /
+  `P<n>D`), and an edit swap decomposes the stored canonical form back into amount and
+  unit (canonical is single-component by construction, so it always fits). Its live
+  preview line is the §4.3 interval label plus "next: `<time>`" (the §19 preview's
+  now-plus-`every`); an empty or zero amount reddens the input and blocks Add with no
+  preview text (nothing is sent to the preview, like an empty cron expression), and a
+  duration the preview rejects (under 15 seconds, over 365 days) reddens the input, shows
+  the §19 `/triggers/preview` error verbatim, and blocks Add. Or the One time pair: a native date input (Chromium's calendar popup — date
   only, so no AM/PM field) beside a **segmented 24-hour time group** — one `ad-input`-styled
   box holding three two-digit mono fields with colon separators (muted placeholders
   HH/MM/SS; aria-labels hours/minutes/seconds; seconds pre-filled `00` for a new trigger).
@@ -574,8 +589,9 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   with preview "Hours go 0–23, minutes and seconds 0–59"; a complete pair in the past
   reddens date and group, and the preview shows the §19 `/triggers/preview` error verbatim —
   the copy comes from the backend: "the time must be in the future";
-  either state blocks Add. Both the cron and One time forms end with the timezone picker,
-  then a **"Catch up if missed"** checkbox (the §14 checkbox, a native input in a `<label>`
+  either state blocks Add. Both the cron and One time forms end with the timezone picker
+  (the Interval form has none — §4.3, an interval has no wall clock — and goes straight
+  on), then — cron, Interval, and One time alike — a **"Catch up if missed"** checkbox (the §14 checkbox, a native input in a `<label>`
   that hugs its content like the Discord mention box; the §4.3 `runIfMissed` field; checked by
   default for a new trigger, the stored value on an edit swap) and, under it, one muted
   note line flush with the form's left edge (the §3 sleep disclaimer, same muted-hint style

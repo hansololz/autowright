@@ -353,7 +353,7 @@ Keychain in every mode, so e2e only ever creates §4.8 placeholder secrets (blan
 name + description, no Keychain write); value-setting is covered by the unit tier's in-memory
 keychain. Trigger math has **one** implementation (backend `triggers.py`; the editors
 preview through §19 `POST /triggers/preview`), so there is no cross-language parity fixture
-to maintain — the backend pytest suite covers the cron/one-shot cases (DST gap and
+to maintain — the backend pytest suite covers the cron/interval/one-shot cases (DST gap and
 fall-back included) directly. Testability knobs (configuration only, release
 behavior unchanged): `Scheduler` accepts an injectable `clock` callable (defaults to
 `datetime.now`) so tick-loop policies (coalescing, catch-up, one-shot consumption) are

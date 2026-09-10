@@ -30,7 +30,7 @@ Or build from source - see §18 in [SPEC.md](SPEC.md).
   nothing executes until you approve it.
 - **Use your own agent** - Claude Code, Gemini CLI, Codex, or OpenCode; OpenCode can drive
   a local Ollama model for fully offline drafting.
-- **Real scheduling** - cron with per-trigger timezones, one-shot triggers, run-on-app-start,
+- **Real scheduling** - cron with per-trigger timezones, intervals ("every 6 hours since the last run"), one-shot triggers, run-on-app-start,
   and manual "Execute now". Runs even with the app closed (background service), with a
   missed-run policy for sleep and downtime. Works best on an always-on Mac like a Mac mini
   or Mac Studio. A MacBook that is asleep would not trigger automations.

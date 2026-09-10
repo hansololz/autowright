@@ -1,4 +1,4 @@
-// §9.2 Add-trigger editor (kind picker → cron expression / one-shot time)
+// §9.2 Add-trigger editor (kind picker → cron expression / interval pair / one-shot time)
 // plus its widgets: permission checklist, setup guides, segmented time entry,
 // timezone and bot-token-secret pickers.
 import React, { useEffect, useRef, useState } from 'react'
@@ -12,11 +12,12 @@ import { useTriggerPreview } from '../../triggers'
 
 const TZ_LIST: string[] = Intl.supportedValuesOf('timeZone')
 
-type AddableKind = 'cron' | 'time' | 'app_start' | 'discord' | 'imessage'
+type AddableKind = 'cron' | 'interval' | 'time' | 'app_start' | 'discord' | 'imessage'
 
 // §9.2: one icon per kind — the picker chips and the trigger rows share it
 const KIND_META: Array<{ kind: AddableKind; icon: string; label: string }> = [
   { kind: 'cron', icon: 'fa-solid fa-clock', label: 'Cron' },
+  { kind: 'interval', icon: 'fa-solid fa-stopwatch', label: 'Interval' },
   { kind: 'time', icon: 'fa-solid fa-calendar-day', label: 'One time' },
   { kind: 'app_start', icon: 'fa-solid fa-rocket', label: 'App start' },
   { kind: 'discord', icon: 'fa-brands fa-discord', label: 'Discord' },
@@ -197,6 +198,59 @@ function TimeParts({ parts, invalid, onChange }: {
   )
 }
 
+/** §9.2 Interval pair — the §4.3 `every` duration entered as an amount and a
+ *  unit word. The pair composes the canonical single-component form, and an
+ *  edit swap decomposes the stored one back into it. */
+const INTERVAL_UNITS = ['seconds', 'minutes', 'hours', 'days'] as const
+type IntervalUnit = typeof INTERVAL_UNITS[number]
+const UNIT_SECONDS: Record<IntervalUnit, number> = {
+  days: 86400, hours: 3600, minutes: 60, seconds: 1,
+}
+const composeEvery = (amount: string, unit: IntervalUnit): string =>
+  unit === 'days' ? `P${amount}D`
+    : `PT${amount}${unit === 'hours' ? 'H' : unit === 'minutes' ? 'M' : 'S'}`
+
+// §4.3: the stored form carries exactly one component, so the single non-empty
+// group is the pair. A hand-written multi-component duration still decomposes —
+// its total goes in the largest unit that divides it exactly, as the backend
+// canonicalizes it anyway.
+function decomposeEvery(every: string): { amount: string; unit: IntervalUnit } {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(every.trim())
+  const groups = m
+    ? (['days', 'hours', 'minutes', 'seconds'] as IntervalUnit[])
+        .map((unit, i) => ({ unit, raw: m[i + 1] }))
+        .filter((g) => g.raw != null)
+    : []
+  if (groups.length === 0) return { amount: '1', unit: 'hours' }
+  if (groups.length === 1) return { amount: String(Number(groups[0].raw)), unit: groups[0].unit }
+  const total = groups.reduce((sum, g) => sum + Number(g.raw) * UNIT_SECONDS[g.unit], 0)
+  const unit = INTERVAL_UNITS.slice().reverse().find((u) => total % UNIT_SECONDS[u] === 0)!
+  return { amount: String(total / UNIT_SECONDS[unit]), unit }
+}
+
+/** Interval unit picker — the app's standard popover pattern; four fixed units,
+ *  so no filter input (§9.2). */
+function UnitPick({ unit, onPick }: { unit: IntervalUnit; onPick: (u: IntervalUnit) => void }) {
+  const [open, setOpen, ref] = usePopover()
+  return (
+    <div ref={ref} style={{ position: 'relative', flex: 'none' }}>
+      <button
+        className="ad-btn-pill"
+        onClick={() => setOpen(!open)}
+        title="The unit the interval counts in"
+      >
+        <span>{unit}</span>
+        <i className="fa-solid fa-caret-down" style={{ color: 'var(--text-faint)', fontSize: 10 }} />
+      </button>
+      <PopMenu show={open} style={{ top: 'calc(100% + 6px)', left: 0, minWidth: 140 }}>
+        {INTERVAL_UNITS.map((u) => (
+          <MenuRow key={u} active={u === unit} onClick={() => { setOpen(false); onPick(u) }}>{u}</MenuRow>
+        ))}
+      </PopMenu>
+    </div>
+  )
+}
+
 /** Timezone picker — the app's standard popover pattern, filterable (§9.2). */
 function TzPick({ timezone, onPick }: { timezone: string; onPick: (z: string) => void }) {
   const [open, setOpen, ref] = usePopover()
@@ -319,7 +373,8 @@ function SecretPick({ secrets, selected, onPick }: {
 // caller adds id/off. A flat field bag exists only inside the editor's state.
 export type TriggerDraft = TriggerKindFields
 type TriggerFieldBag = {
-  kind?: AddableKind; expression?: string; at?: string; timezone?: string; runIfMissed?: boolean
+  kind?: AddableKind; expression?: string; every?: string; at?: string; timezone?: string
+  runIfMissed?: boolean
   channel?: string; secret?: string; pattern?: string; mention?: boolean; author?: string[]
   from?: string
 }
@@ -340,6 +395,11 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
   const init: TriggerFieldBag = initial ?? {}
   const [kind, setKind] = useState<AddableKind>(init.kind ?? 'cron')
   const [expression, setExpr] = useState(init.expression ?? '')
+  // §9.2 Interval pair: amount + unit compose the §4.3 `every`; an edit swap
+  // decomposes the stored canonical duration back into them
+  const initInterval = decomposeEvery(init.every ?? '')
+  const [amount, setAmount] = useState(initInterval.amount)
+  const [unit, setUnit] = useState<IntervalUnit>(initInterval.unit)
   // §9.2 One time: date and segmented 24-hour time entered apart, combined
   // into `at`; seconds pre-fill 00 so only hour + minute need typing
   const [date, setDate] = useState(init.at ? init.at.slice(0, 10) : '')
@@ -369,14 +429,22 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
   // §19: the live preview reads from POST /triggers/preview — no local trigger
   // math. Half-typed entries go to the endpoint as-is (an invalid one is a
   // `valid: false` result with a plain-word error, never a 422).
+  // §4.3 interval dialect: an integer of at least 1, composed with the unit
+  const amountOk = /^[0-9]+$/.test(amount) && Number(amount) >= 1
+  const every = amountOk ? composeEvery(amount, unit) : ''
   const previewEntry: object[] = kind === 'cron'
     ? (expression.trim() ? [{ kind, expression, source: 'user', ...(timezone ? { timezone } : {}) }] : [])
+    : kind === 'interval'
+    ? (every ? [{ kind, every, source: 'user' }] : [])
     : kind === 'time'
     ? (at ? [{ kind, at, ...(timezone ? { timezone } : {}) }] : [])
     : []
   const [pv] = useTriggerPreview(previewEntry)
   const exprOk = kind === 'cron' && !!expression.trim() && !!pv?.valid
   const exprBad = kind === 'cron' && !!expression.trim() && !!pv && !pv.valid
+  const everyOk = kind === 'interval' && !!every && !!pv?.valid
+  // §9.2: an empty or zero amount reddens the input just like a rejected duration
+  const everyBad = kind === 'interval' && (!amountOk || (!!pv && !pv.valid))
   const atOk = kind === 'time' && !!at && !!pv?.valid
   const atBad = kind === 'time' && !!at && !!pv && !pv.valid
   const channelOk = /^[0-9]+$/.test(channel)
@@ -390,11 +458,15 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
   const fromOk = from.includes('@')
     ? !!from.trim() && !/\s/.test(from.trim())
     : /^\+[0-9]{3,15}$/.test(fromNorm)
-  const canAdd = kind === 'cron' ? exprOk : kind === 'time' ? atOk
+  const canAdd = kind === 'cron' ? exprOk : kind === 'interval' ? everyOk : kind === 'time' ? atOk
     : kind === 'discord' ? channelOk && !!secret && authorOk
     : kind === 'imessage' ? fromOk : true
   const preview = kind === 'cron'
     ? (!expression.trim() || !pv ? ''
+      : pv.valid ? `${pv.label}${pv.nextLabel ? ` · next: ${pv.nextLabel}` : ''}`
+      : pv.error ?? '')
+    : kind === 'interval'
+    ? (!every || !pv ? ''
       : pv.valid ? `${pv.label}${pv.nextLabel ? ` · next: ${pv.nextLabel}` : ''}`
       : pv.error ?? '')
     : kind === 'time'
@@ -474,6 +546,21 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
           spellCheck={false}
           style={{ width: '100%' }}
         />
+      ) : kind === 'interval' ? (
+        // §9.2 Interval pair: the muted "Every" word, the amount, the unit pill
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontSize: 11.5, color: 'var(--text-muted)', flex: 'none' }}>Every</span>
+          <input
+            className={`ad-input compact mono${everyBad ? ' invalid' : ''}`}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ''))}
+            inputMode="numeric"
+            spellCheck={false}
+            aria-label="interval amount"
+            style={{ width: 64, flex: 'none' }}
+          />
+          <UnitPick unit={unit} onPick={setUnit} />
+        </div>
       ) : kind === 'time' ? (
         <div style={{ display: 'flex', gap: 8 }}>
           <input
@@ -565,7 +652,7 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
         </div>
       ) : null}
       {(kind === 'cron' || kind === 'time') && <TzPick timezone={timezone} onPick={setTz} />}
-      {(kind === 'cron' || kind === 'time') && (
+      {(kind === 'cron' || kind === 'interval' || kind === 'time') && (
         // §9.2 "Catch up if missed": the §4.3 runIfMissed field (§6 wake catch-up)
         <label style={{
           display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, width: 'fit-content',
@@ -575,7 +662,7 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
           Catch up if missed
         </label>
       )}
-      {(kind === 'cron' || kind === 'time') && (
+      {(kind === 'cron' || kind === 'interval' || kind === 'time') && (
         // §9.2 / §3 sleep disclaimer, one note: the first sentence follows the checkbox
         <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.45, marginTop: 6 }}>
           If this {copy.machine} sleeps through a scheduled time,{' '}
@@ -604,6 +691,10 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
                   kind, from: fromNorm,
                   ...(pattern.trim() ? { pattern: pattern.trim() } : {}),
                 }
+              // §4.3: a hand-set interval is user-sourced too, and carries no
+              // timezone — a duration has no wall clock
+              : kind === 'interval'
+                ? { kind, every, source: 'user' as const, ...(runIfMissed ? {} : { runIfMissed: false }) }
               // §4.3 provenance: a hand-set cron is user-sourced — it
               // survives later syncs' cron-subset replace
               : {

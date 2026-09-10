@@ -186,13 +186,14 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
   scheduling reality instead — its claim that scheduled moments passed with no run is
   checked against the execution record, so the chip still never cries wolf. Kinds,
   in serialized order (each `label` is the exact UI copy):
-  - `overdue` — the schedule is being missed: some **enabled cron** trigger has had **two
-    consecutive occurrences** pass since its baseline with no real run. The baseline is
+  - `overdue` — the schedule is being missed: some **enabled cron or interval** trigger has
+    had **two consecutive occurrences** pass since its baseline with no real run. The baseline is
     **per trigger**: the later of the automation's run baseline - the latest real
     execution's start (the `lastStatus` population: `skipped`/`queued`/test records
     excluded), falling back to the automation's `created_at` if it never ran - and that
     trigger's §4.3 `enabledAt` stamp; overdue iff the second §4.3 next-occurrence after
-    that baseline (the same DST-aware math as `nextAtMs`) is already in the past. The stamp
+    that baseline (the same DST-aware math as `nextAtMs`; for an interval the baseline *is*
+    its §4.3 anchor, so overdue iff `anchor + 2 × every` has passed) is already in the past. The stamp
     is what keeps a re-enable honest: occurrences that passed while the trigger was off
     are ignored even after it comes back on, so turning a cron on again after a week
     away (or adding a cron to an automation created long ago) starts counting from that
@@ -201,9 +202,9 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
     the run baseline alone, exactly as before (§4.3 - no compat shim, nothing healed).
     Two missed moments, not one, is the grace:
     a single occurrence legitimately skipped (§6 busy-skip, a restart at the wrong
-    minute) never flags. Cron triggers only — one-shots are consumed by the §4.3 spent
-    rule, and app-start/message triggers have no schedule; disabled triggers never count,
-    and neither does a cron with `runIfMissed: false` (§4.3): a sleeping Mac is the one
+    minute) never flags. Cron and interval triggers only — one-shots are consumed by the
+    §4.3 spent rule, and app-start/message triggers have no schedule; disabled triggers never
+    count, and neither does a cron or interval with `runIfMissed: false` (§4.3): a sleeping Mac is the one
     way an awake-and-running scheduler misses a moment, and that trigger opted out of
     chasing exactly those, so its misses are chosen, not a problem - the §6 drop record
     already shows each one.
@@ -295,27 +296,32 @@ An automation carries an ordered list of **triggers** — independent conditions
 an execution. Triggers are user-owned operational state (§5): editing them on the detail page
 never mints a version and never involves the AI. In the §11 editor the chat can edit the
 **editor's** trigger list through §8 `triggers` ops (add/edit/enable/remove) — staged like
-any editor trigger change, landing only when the draft saves. **Cron provenance
-(`source`)**: a cron trigger carries `source: "spec" | "user"` — **required**: `spec` for
-crons the §8 sync derived from the spec (and §5.1 imports — the archive travels with its
-spec), `user` for crons the user minted directly (the §9.2 detail-page editor, a §8 chat
-`triggers` op, §20 `trigger add`). A cron without the field is invalid — the API answers
-422 (§19) and a stored one is dropped at load like any malformed trigger (§5 lenient
-load). Only cron triggers carry `source`; the field round-trips through the API and drafts
-like any stored field. The list additionally follows the spec via
+any editor trigger change, landing only when the draft saves. **Schedule provenance
+(`source`)**: a cron or interval trigger — the two **schedule kinds**, the ones the §8
+sync derives from the spec's words — carries `source: "spec" | "user"` — **required**:
+`spec` for entries the §8 sync derived from the spec (and §5.1 imports — the archive
+travels with its spec), `user` for entries the user minted directly (the §9.2 detail-page
+editor, a §8 chat `triggers` op, §20 `trigger add`). A schedule entry without the field is
+invalid — the API answers 422 (§19) and a stored one is dropped at load like any malformed
+trigger (§5 lenient load). Only cron and interval triggers carry `source`; the field
+round-trips through the API and drafts like any stored field. The list additionally
+follows the spec via
 the **§4.3 trigger merge** — saving an edit (§4.4) merges the draft's spec-derived triggers
 (§8 rule 9) into the stored list:
 
-- **Crons replace the spec-sourced cron subset**: a drafted cron matching a stored one
-  (either source) on (`expression`, `timezone`)
+- **Schedule entries (cron and interval) replace the spec-sourced schedule subset**: a
+  drafted cron matching a stored cron (either source) on (`expression`, `timezone`), or a
+  drafted interval matching a stored interval on (`every`, compared in the canonical form
+  below),
   keeps that trigger's `id`, `enabled` state, `source`, and `runIfMissed` — except on a §20
   CLI push, where the workdir manifest round-trips `run_if_missed` explicitly, so a matched
-  cron takes the manifest entry's value (absent = true) instead of keeping the stored one
+  entry takes the manifest entry's value (absent = true) instead of keeping the stored one
   (§20 push rules); the §8 sync manifest never carries the key, so the app's merge always
   keeps the stored value; other drafted
-  crons arrive enabled with fresh ids, `source: spec`, and the default `runIfMissed`; **`source: spec`** crons the draft no longer
-  derives are dropped, while **`source: user`** crons always survive — a schedule the user
-  set by hand (detail page, chat op, CLI) is never silently removed by a sync.
+  schedule entries arrive enabled with fresh ids, `source: spec`, and the default `runIfMissed`; **`source: spec`** crons and intervals the draft no longer
+  derives are dropped, while **`source: user`** ones always survive — a schedule the user
+  set by hand (detail page, chat op, CLI) is never silently removed by a sync. A cron never
+  matches an interval and vice versa: the kinds are distinct identities.
 - **Message and app-start entries are additive**: a drafted `discord`/`imessage`/`app_start`
   entry matching a stored trigger of the same kind on its identity fields (discord:
   `channel`, `secret`, `pattern`, `mention`, `author`; imessage: `from`, `pattern`; app_start: the kind
@@ -336,6 +342,7 @@ strings `label` and `short`. The backend assigns `id` to entries that arrive wit
 | kind | fields | fires | label / short |
 |---|---|---|---|
 | `cron` | `expression`: 5-field cron expression · optional `timezone` · optional `runIfMissed`: bool, default true (below) · `source`: `"spec"` \| `"user"` (provenance, above; required) | at every match | humanized when simple (below), else the raw expression in mono |
+| `interval` | `every`: ISO-8601 duration (the interval dialect below; stored canonical, e.g. `PT6H`, `PT90S`, `P1D`) · optional `runIfMissed`: bool, default true (below) · `source`: `"spec"` \| `"user"` (provenance, above; required) · no `timezone` | every `every` **since the last run** (interval semantics below) | "Every 6 hours" / "Every 6h" (interval labels below) |
 | `time` | `at`: wall-clock ISO timestamp ("2026-07-20T15:00"), seconds allowed ("2026-07-20T15:00:15") · optional `timezone` · optional `runIfMissed`: bool, default true (below) | once, then the trigger is consumed | "Once at Jul 20, 3:00 PM" / "Once Jul 20 15:00"; non-zero seconds append to the time in both strings: "Once at Jul 20, 3:00:15 PM" / "Once Jul 20 15:00:15" |
 | `app_start` | — | at every desktop-app launch (§6 firing path) | "On app start" / "App start" |
 | `discord` | `channel`: Discord channel id (ASCII digits) · `secret`: id of the §4.8 secret holding the bot token (a secret uuid) · optional `pattern`: text filter · optional `mention`: bool · optional `author`: sender filter, a list of Discord user ids (ASCII digits) | at every matching Discord message (rules below) | "Discord · `<channel>`" (+ " · “`<pattern>`”" when set) / "Discord" |
@@ -357,7 +364,8 @@ the field keeps the plain baseline (§5 lenient load) - never stamped on load or
 compat shim; an unreadable value reads as absent.
 
 **Timezone (`timezone`)** — optional IANA zone name (e.g. `Asia/Tokyo`) on `cron` and `time`
-triggers. Absent → the machine's local time (labels unchanged). Present → `expression` matches and
+triggers (never on `interval` — a duration has no wall clock; sent on one, it is ignored and
+never stored, like on the other kinds). Absent → the machine's local time (labels unchanged). Present → `expression` matches and
 `at` reads as wall clock **in that zone** (DST rules below apply in that zone); occurrences
 convert to local time for `nextAtMs`, countdowns, and the scheduler. An unknown zone name is
 rejected at the API (422), never stored. When `timezone` is set, both display strings append the
@@ -365,8 +373,8 @@ zone's city — the last `/` segment of the IANA name, `_` → space — in pare
 "Daily at 8:00 (Tokyo)" / "Daily 8:00 (Tokyo)"; the raw-expression fallback and one-shot
 labels get the same suffix.
 
-**Run if missed (`runIfMissed`)** - optional bool on `cron` and `time` triggers, **default
-true**. It decides what happens when the scheduler notices an occurrence late because the
+**Run if missed (`runIfMissed`)** - optional bool on `cron`, `interval`, and `time` triggers,
+**default true**. It decides what happens when the scheduler notices an occurrence late because the
 Mac slept through it (the §6 missed-executions rule; the backend was alive but suspended):
 true → the occurrence fires once on wake, exactly the §6 one-catch-up-per-wake behavior;
 false → the slept-through span is dropped, nothing fires, and the trigger simply waits for
@@ -377,16 +385,69 @@ counts as spent — an unreadable `at`, such as an unquoted timestamp YAML loade
 is dropped with the §5 malformed-trigger warning, never consumed silently). Storage: written to
 `automation.yaml` only when false - an absent key reads as true, so every trigger stored
 before the field existed keeps today's behavior (§21). The API serializes it explicitly on
-every cron/time trigger (`runIfMissed: true | false`) and accepts it on the same two kinds;
+every cron/interval/time trigger (`runIfMissed: true | false`) and accepts it on the same
+three kinds;
 a non-boolean value answers 422, and on any other kind it is ignored and never stored,
 exactly like `timezone`. The §4.3 trigger merge carries it like `enabled` (a matched cron
-keeps it; a freshly derived cron gets the default), the §8 `triggers` `edit` op keeps it
+or interval keeps it; a freshly derived one gets the default), the §8 `triggers` `edit` op keeps it
 like `id` and `enabled` (the rule-9 dialect cannot set it - it is the user's operational
 choice, set on the §9.2 editor or the §20 CLI), and it rides the §5.1 archive and the §20
 manifest as `run_if_missed: false` (absent = true).
 
 `pubsub` is a reserved kind only: the API rejects writing it with 422; the UI does not
 surface it. Nothing else about it is specified yet.
+
+**Interval dialect** (`interval.every`, implemented in `triggers.py` beside the cron
+dialect — the one trigger-math implementation): an ISO-8601 duration restricted to the
+calendar-free units — `P[nD][T[nH][nM][nS]]`, each `n` a non-negative integer (no
+fractions), in that order, at least one component present and the total non-zero; **no**
+weeks, months, or years (their length depends on the calendar, and an interval is a fixed
+number of seconds), and the `T` appears only when a time component follows. The total must
+be **at least 15 seconds** (one §6 scheduler tick at the default `AUTOWRIGHT_TICK_S`, §15 —
+nothing can fire more often than the tick, so a shorter floor would only promise what the
+loop can't keep) and **at most 365 days**. Any accepted spelling is reduced to
+seconds and **stored in the canonical form**: exactly one component, in the largest unit
+that divides the total exactly — `PT360M` stores as `PT6H`, `PT24H` as `P1D`, `PT1H30M` as
+`PT90M`, `PT90S` stays `PT90S`. The canonical string is what the API serializes, what the
+§4.3 trigger merge compares, and what the §5.1 archive and the §20 manifest carry, so
+two spellings of one duration are one trigger. Invalid values are rejected at the API
+(422) and by §19 `/triggers/preview` (`valid: false`), never stored — plain-word reasons:
+"an interval needs an ISO-8601 duration like PT6H (days, hours, minutes, seconds)", "an
+interval must be at least 15 seconds", "an interval can be at most 365 days".
+
+**Interval labels** — from the canonical form, `N` and its unit: `label` "Every N
+seconds/minutes/hours/days" ("Every 6 hours", "Every 90 seconds", "Every 36 hours"), and
+when `N` is 1 the bare unit ("Every minute", "Every hour", "Every day"); `short` "Every
+N<u>" with `u` ∈ s/m/h/d ("Every 6h", "Every 90s", "Every 1d"). No timezone suffix — an
+interval has none.
+
+**Interval semantics** — an interval fires `every` after the automation's **last run**,
+not on a wall-clock grid. Each enabled interval trigger has an **anchor**: the later of
+its §4.3 `enabledAt` stamp and the automation's **run baseline** — the start of the
+latest real execution (the §4.1 `lastStatus` population: `skipped`, `queued`, and test
+records excluded; a run in progress counts; the run's trigger doesn't matter — a manual
+start, another trigger's firing, or this trigger's own last firing all reset the cadence),
+falling back to the automation's `created_at` if it never ran; a trigger stored without the
+stamp (hand-edited disk) anchors at the run baseline alone, like the §4.1 overdue rule. Its
+occurrences are `anchor + n × every` for `n ≥ 1`; because a firing starts a run, the anchor
+moves to that run's start and the next occurrence is one `every` after it — "every 6 hours
+since the last run". Consequences, all following from the anchor rule: a manual Execute
+now (or the menu bar, the CLI, or a message firing) pushes the next interval occurrence
+back by a full `every`; a run that lasts longer than `every` has its `anchor + every`
+moment fall while it is still executing, where the §6 one-execution-at-a-time skip writes
+the usual `skipped` record and the trigger waits for `anchor + 2 × every` (the anchor is
+that run's *start*, so a long run never fires back-to-back); re-enabling a trigger after a
+week off re-stamps `enabledAt`, so the first occurrence is one `every` after the re-enable,
+never a backlog; editing `every` on a live trigger keeps the anchor (§4.3 enable stamp:
+not a re-enable) and re-derives the grid from it. The §6 scheduler fires the first
+occurrence at or after the moment it last looked, exactly as for a cron; the §6
+missed-executions rule and its `runIfMissed` grace window apply unchanged (an occurrence
+slept through fires once on wake, or with `runIfMissed: false` the span is dropped and the
+trigger waits for the next grid point after `now`). `nextAtMs` for a stored interval is the
+first occurrence strictly after now (the anchor read from the live execution record). §19
+`/triggers/preview`, a pure function with no execution state, **anchors at the request
+moment**: its `nextAtMs` for an interval is `now + every` — exactly what a freshly added
+trigger will do, since its `enabledAt` is minted at save.
 
 **Discord triggers** — the user supplies their own Discord bot: an application created in the
 Discord developer portal with the **Message Content intent** enabled, invited to the server
@@ -511,7 +572,8 @@ survives an edit save (the §4.3 trigger merge never drops it — a drafted `app
 matches the stored one).
 
 **Next occurrence:** each enabled (`enabled: true`) trigger computes its own next time — cron: the
-next expression match strictly after now; time: `at`. The automation's `nextAtMs` is the minimum
+next expression match strictly after now; interval: the first `anchor + n × every` strictly
+after now (interval semantics above); time: `at`. The automation's `nextAtMs` is the minimum
 across them, null when no enabled trigger has one. The countdown renders "next in Xd Xh" /
 "Xh Xm" and refreshes every 30 s.
 
@@ -733,11 +795,11 @@ version: int | null — the executed version number; null unless kind is `versio
   (§7) but are excluded from the detail page's RECENT EXECUTIONS and an automation's
   execution-derived display state (lastStatus / latest result / live); deleted when the
   draft settles and by starting the next test — the list row disappears with the record
-trigger: manual | menubar | cron | time | app_start | discord | imessage | test (future:
-  pubsub) — the machine kind of what started the execution; stored as data, never the UI
+trigger: manual | menubar | cron | interval | time | app_start | discord | imessage | test
+  (future: pubsub) — the machine kind of what started the execution; stored as data, never the UI
   copy. The serialized `trigger` is the derived display label (manual → "Manual",
   menubar → "Menu bar" on macOS and "Tray" on Windows and Linux (the §9 per-OS copy rule —
-  the one label that names a platform surface), cron → "Cron", time → "Once", app_start → "App start",
+  the one label that names a platform surface), cron → "Cron", interval → "Interval", time → "Once", app_start → "App start",
   discord → "Discord", imessage → "iMessage", test → "Test", and the reserved
   pubsub → "Pub/Sub" — present in the backend label map for §4.3's reserved kind only; the
   API refuses to store pubsub triggers, so no record ever carries it and the renderer's

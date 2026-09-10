@@ -68,6 +68,22 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-09 - `interval` trigger kind added to automation.yaml.** The §4.3 trigger
+  list gains a new kind, `interval` (`every`: an ISO-8601 duration in the §4.3 canonical
+  form, beside the cron-style `source`, `runIfMissed`, and `enabledAt`). Additive: no
+  existing key changes shape, and data written before this date holds no such entry, so
+  nothing migrates and every old shape loads exactly as before; recognition is structural
+  (the `kind` value). Loading stays §5 lenient - an interval whose `every` is unparsable
+  or out of range, or that lacks `source`, drops with the malformed-trigger warning like
+  any other bad entry. Downgrade note (outside the forward-only §21 promise, recorded for
+  diagnosis): a release before this one reads an interval as an unknown kind and drops it
+  at load with the §5 warning; the file is untouched until that old build next saves the
+  automation's trigger list, which rewrites it without the entry. The §5.1 archive and the
+  §20 manifest carry the additive `every` entry (archives are outside the promise). First
+  version writing the new shape: the next release after 2026-09-09; oldest shape still
+  read: v0.6.0. Fixture test:
+  `tests/test_storage.py::test_interval_trigger_round_trips_and_malformed_drops`.
+
 - **2026-09-07 - per-automation `instructions.md` retired.** Build instructions became an
   app-shipped document (§8 `build-instructions.md`, overridable by the spec). The §4.1
   `instructions` field, the version folder's `instructions.md`, the §5.1 archive member

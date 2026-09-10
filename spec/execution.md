@@ -152,7 +152,7 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 - Trigger labels (derived at serialization from the stored §4.5 kinds): Manual, Menu bar
   (Tray on Windows and Linux — the §9 per-OS copy rule; the app reads the label off the
   machine that serializes it),
-  Cron, Once, App start, Discord, iMessage. `interrupted` covers e.g. "Mac went to sleep" — applied
+  Cron, Interval, Once, App start, Discord, iMessage. `interrupted` covers e.g. "Mac went to sleep" — applied
   by startup recovery when a restarted backend finds stale `executing` executions; recovery
   first SIGKILLs the record's persisted step process group (`pgid`, §4.5) when that group
   still exists, so an orphaned step can't keep executing beside the record it lost. A sleep the

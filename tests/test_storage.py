@@ -2326,3 +2326,121 @@ def test_damaged_created_at_drops_the_overdue_audit(store):
     cur = b["versions"][b["current_version"]]
     assert all(p["kind"] != "overdue" for p in s2.problems_json(b, cur))
     assert isinstance(s2.auto_json(b), dict)  # nothing raises downstream either
+
+
+# ---------- §4.3 interval triggers on disk ----------
+
+def test_interval_trigger_round_trips_and_malformed_drops(store, home, caplog):
+    """§21.4 (2026-09-09) fixture: an `interval` entry loads with its `every`
+    re-canonicalized and its source/runIfMissed/enabledAt intact, and survives
+    a later top-level write. Loading stays §5 lenient: an out-of-range, an
+    unparsable, a source-less, and a non-string `every` each drop with the
+    malformed-trigger warning while a sibling cron survives."""
+    import logging
+
+    from autowright.storage import Store
+    from autowright.yamlio import load_yaml, save_yaml
+
+    cron = {"id": "keep", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+            "source": "user"}
+    a = store.create_automation(make_version(), "Intervalled", None, triggers=[cron])
+    top_file = store.auto_dir(a) / "automation.yaml"
+    data = load_yaml(top_file)
+    data["triggers"] = [
+        # a hand-written spelling: stored canonical at the read seam (§4.3)
+        {"id": "iv", "kind": "interval", "enabled": True, "every": "PT360M",
+         "source": "user", "runIfMissed": False,
+         "enabledAt": "2026-07-01T08:00:00+00:00"},
+        cron,
+        {"id": "weeks", "kind": "interval", "enabled": True, "every": "P1W", "source": "user"},
+        {"id": "tiny", "kind": "interval", "enabled": True, "every": "PT10S", "source": "user"},
+        {"id": "srcless", "kind": "interval", "enabled": True, "every": "PT6H"},
+        {"id": "notstr", "kind": "interval", "enabled": True, "every": 360, "source": "user"},
+    ]
+    save_yaml(top_file, data)
+
+    with caplog.at_level(logging.WARNING, logger="autowright.storage"):
+        s2 = Store()
+        s2.load_all()
+    trigs = s2.autos[a["id"]]["triggers"]
+    assert [t["id"] for t in trigs] == ["iv", "keep"]
+    assert trigs[0] == {"id": "iv", "kind": "interval", "enabled": True, "every": "PT6H",
+                        "source": "user", "runIfMissed": False,
+                        "enabledAt": "2026-07-01T08:00:00+00:00"}
+    for bad in ("weeks", "tiny", "srcless", "notstr"):
+        assert any("malformed trigger" in rec.message and bad in rec.message
+                   for rec in caplog.records)
+
+    # the loaded shape round-trips through the next top-level write
+    b = s2.autos[a["id"]]
+    s2.patch_automation(b, {"name": "Intervalled again"})
+    assert load_yaml(top_file)["triggers"][0] == trigs[0]
+
+
+def test_interval_trigger_json_and_label(store):
+    """§4.3/§4.5: `trigger_json` carries the interval's display strings and
+    serializes `runIfMissed` explicitly, and the §4.5 execution-trigger label
+    map names the kind."""
+    from autowright.storage import TRIGGER_LABELS, trigger_label
+
+    trig = {"id": "iv", "kind": "interval", "enabled": True, "every": "PT6H",
+            "source": "user"}
+    j = store.trigger_json(trig)
+    assert (j["label"], j["short"]) == ("Every 6 hours", "Every 6h")
+    assert j["runIfMissed"] is True  # the absent stored key, serialized explicitly
+    assert j["every"] == "PT6H" and j["source"] == "user"
+    assert store.trigger_json({**trig, "runIfMissed": False})["runIfMissed"] is False
+
+    assert TRIGGER_LABELS["interval"] == "Interval"
+    assert trigger_label("interval") == "Interval"
+
+
+def test_interval_next_at_ms_uses_the_run_baseline(store):
+    """§4.3: an automation's `nextAtMs` for an interval is one `every` past the
+    anchor — created_at while it has never run, the enable stamp when that is
+    later, and the latest real execution's start once it has run."""
+    from datetime import datetime, timedelta
+
+    def next_at(a):
+        return datetime.fromtimestamp(store.auto_json(a)["nextAtMs"] / 1000)
+
+    now = datetime.now()
+    a = store.create_automation(make_version(), "Six hourly", None, triggers=[
+        {"id": "iv", "kind": "interval", "enabled": True, "every": "PT6H",
+         "source": "user"}])
+    a["created_at"] = (now - timedelta(hours=1)).isoformat()
+    a["triggers"][0]["enabledAt"] = (now - timedelta(hours=3)).isoformat()
+    assert abs(next_at(a) - (now + timedelta(hours=5))) < timedelta(seconds=5)
+
+    # a stamp later than created_at wins — the anchor is the re-enable
+    a["triggers"][0]["enabledAt"] = (now - timedelta(minutes=30)).isoformat()
+    assert abs(next_at(a) - (now + timedelta(hours=5, minutes=30))) < timedelta(seconds=5)
+
+    # once it has run, the run's start is the anchor
+    a["_last_exec_at"] = (now - timedelta(minutes=10)).isoformat()
+    assert abs(next_at(a) - (now + timedelta(hours=5, minutes=50))) < timedelta(seconds=5)
+
+
+def test_interval_overdue_after_two_missed_occurrences(store):
+    """§4.1: an interval automation is overdue once anchor + 2 × every has
+    passed with no run — and not before."""
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    a = store.create_automation(make_version(), "Lapsed", None, triggers=[
+        {"id": "iv", "kind": "interval", "enabled": True, "every": "PT1H",
+         "source": "user"}])
+    cur = a["versions"][a["current_version"]]
+
+    def anchor(delta):
+        a["created_at"] = (now - delta).isoformat()
+        a["triggers"][0]["enabledAt"] = a["created_at"]
+
+    anchor(timedelta(minutes=110))  # 1.83 × every: one missed moment is the grace
+    assert not store.overdue(a)
+    assert all(p["kind"] != "overdue" for p in store.problems_json(a, cur))
+    anchor(timedelta(hours=2, minutes=1))
+    assert store.overdue(a)
+    assert store.problems_json(a, cur)[0] == {
+        "kind": "overdue",
+        "label": "Scheduled executions are being missed — it has never run."}

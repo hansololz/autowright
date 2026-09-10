@@ -537,3 +537,148 @@ def test_only_a_parsable_past_at_counts_as_spent():
         assert time_elapsed({"kind": "time", "at": bad}) is False
     assert time_elapsed({"kind": "time"}) is False
     assert time_elapsed({"kind": "cron", "expression": "0 8 * * *"}) is False
+
+
+# ---------- §4.3 interval triggers: dialect, labels, semantics ----------
+
+def test_interval_dialect_canonicalizes_every_accepted_spelling():
+    """§4.3 interval dialect: any accepted spelling reduces to seconds and
+    stores as one component in the largest unit that divides the total."""
+    from autowright.triggers import canonical_duration, parse_duration
+
+    for text, canonical in (("PT6H", "PT6H"), ("PT360M", "PT6H"), ("PT24H", "P1D"),
+                            ("PT1H30M", "PT90M"), ("PT90S", "PT90S"),
+                            ("pt6h", "PT6H")):  # case-insensitive
+        assert canonical_duration(parse_duration(text)) == canonical
+
+
+def test_interval_dialect_rejects_out_of_range_and_unsupported_forms():
+    """§4.3: under 15 seconds, over 365 days, and everything outside the
+    calendar-free grammar — each with its own plain-word reason."""
+    from autowright.triggers import (
+        INTERVAL_FORMAT_ERROR, INTERVAL_MAX_ERROR, INTERVAL_MIN_ERROR,
+        IntervalError, parse_duration,
+    )
+
+    for every, message in (("PT10S", INTERVAL_MIN_ERROR),
+                           ("P366D", INTERVAL_MAX_ERROR),
+                           ("P1W", INTERVAL_FORMAT_ERROR),   # no weeks — calendar units
+                           ("PT", INTERVAL_FORMAT_ERROR),    # a bare T, no component
+                           ("6h", INTERVAL_FORMAT_ERROR),
+                           ("PT1.5H", INTERVAL_FORMAT_ERROR),  # no fractions
+                           ("", INTERVAL_FORMAT_ERROR),
+                           (None, INTERVAL_FORMAT_ERROR)):
+        with pytest.raises(IntervalError) as e:
+            parse_duration(every)
+        assert str(e.value) == message
+
+
+def test_interval_labels():
+    """§4.3 interval labels — from the canonical form; a count of 1 reads as
+    the bare unit, and there is never a timezone suffix."""
+    from autowright.triggers import interval_display
+
+    assert interval_display("PT6H") == ("Every 6 hours", "Every 6h")
+    assert interval_display("PT90S") == ("Every 90 seconds", "Every 90s")
+    assert interval_display("PT1H") == ("Every hour", "Every 1h")
+    assert interval_display("P1D") == ("Every day", "Every 1d")
+    assert interval_display("PT90M") == ("Every 90 minutes", "Every 90m")
+
+
+def test_interval_validation_and_normalization():
+    """§4.3: `source` is required like a cron's, `runIfMissed` must be a bool,
+    `timezone` is ignored (a duration has no wall clock), and `every` stores
+    canonical."""
+    from autowright.triggers import RUN_IF_MISSED_ERROR
+
+    base = {"kind": "interval", "every": "PT6H", "source": "user"}
+    assert validate_trigger(base) is None
+    err = validate_trigger({"kind": "interval", "every": "PT6H"})
+    assert err and "source" in err
+    assert validate_trigger({**base, "source": "wat"}) is not None
+    assert validate_trigger({**base, "runIfMissed": "no"}) == RUN_IF_MISSED_ERROR
+
+    norm, err = normalize_triggers([{**base, "every": "PT360M", "timezone": "Asia/Tokyo"},
+                                    {**base, "runIfMissed": False},
+                                    {**base, "runIfMissed": True}])
+    assert err is None
+    assert [t["every"] for t in norm] == ["PT6H", "PT6H", "PT6H"]
+    assert all(t["source"] == "user" for t in norm)
+    assert "timezone" not in norm[0]  # §4.3: never stored on an interval
+    # stored only when false — true is the absent pre-field shape (§21)
+    assert [t.get("runIfMissed", "absent") for t in norm] == ["absent", False, "absent"]
+
+
+def test_interval_next_anchors_on_the_run_baseline():
+    """§4.3 interval semantics: occurrences are `anchor + n × every` for n ≥ 1,
+    the anchor being the later of the enable stamp and the run baseline — and
+    the request moment for a caller with neither (the §19 preview)."""
+    every6h = {"kind": "interval", "enabled": True, "every": "PT6H", "source": "user"}
+    now = datetime(2026, 7, 10, 12, 0)
+
+    # no baseline, no stamp: the preview anchor — now + every
+    assert trigger_next(every6h, after=now) == datetime(2026, 7, 10, 18, 0)
+
+    # a run baseline before `after`: the first grid point strictly after it
+    baseline = datetime(2026, 7, 10, 3, 0)
+    assert trigger_next(every6h, after=now, run_baseline=baseline) == datetime(2026, 7, 10, 15, 0)
+    assert trigger_next(every6h, after=datetime(2026, 7, 10, 15, 0),
+                        run_baseline=baseline) == datetime(2026, 7, 10, 21, 0)
+
+    # a later enable stamp wins over the run baseline
+    stamped = {**every6h, "enabledAt": "2026-07-10T09:00:00"}
+    assert trigger_next(stamped, after=now, run_baseline=baseline) == datetime(2026, 7, 10, 15, 0)
+    late = {**every6h, "enabledAt": "2026-07-10T11:30:00"}
+    assert trigger_next(late, after=now, run_baseline=baseline) == datetime(2026, 7, 10, 17, 30)
+
+    # `after` before the anchor (a run that started after the last look):
+    # the first occurrence is one `every` past the anchor, never before it
+    assert trigger_next(every6h, after=datetime(2026, 7, 10, 1, 0),
+                        run_baseline=baseline) == datetime(2026, 7, 10, 9, 0)
+
+
+def test_next_at_passes_the_run_baseline_to_intervals():
+    """§4.3 nextAtMs: the minimum across enabled triggers, with the interval
+    anchored on the automation's run baseline."""
+    trigs = [{"id": "iv", "kind": "interval", "enabled": True, "every": "PT6H",
+              "source": "user"},
+             {"id": "c", "kind": "cron", "enabled": True, "expression": "0 20 * * *",
+              "source": "user"}]
+    now = datetime(2026, 7, 10, 12, 0)
+    baseline = datetime(2026, 7, 10, 3, 0)
+    assert next_at(trigs, after=now, run_baseline=baseline) == datetime(2026, 7, 10, 15, 0)
+    # without a baseline the interval anchors at `after` itself (the §19 preview)
+    assert next_at(trigs, after=now) == datetime(2026, 7, 10, 18, 0)
+    # a disabled interval contributes nothing
+    off = [{**trigs[0], "enabled": False}]
+    assert next_at(off, after=now, run_baseline=baseline) is None
+
+
+def test_is_overdue_two_missed_interval_occurrences():
+    """§4.1: an interval is overdue once `anchor + 2 × every` has passed with
+    no run — one missed occurrence is the grace, two is the problem."""
+    from autowright.triggers import is_overdue
+
+    base = datetime(2026, 7, 10, 12, 0)
+    trig = [{"id": "iv", "kind": "interval", "enabled": True, "every": "PT1H",
+             "source": "user"}]
+    assert not is_overdue(trig, base, datetime(2026, 7, 10, 13, 30))  # 1.5 × every
+    assert is_overdue(trig, base, datetime(2026, 7, 10, 14, 0, 1))    # past the second
+
+    # §4.1/§4.3: a trigger that opted out of the wake catch-up chose its misses
+    opted_out = [{**trig[0], "runIfMissed": False}]
+    assert not is_overdue(opted_out, base, datetime(2026, 7, 12, 0, 0))
+    off = [{**trig[0], "enabled": False}]
+    assert not is_overdue(off, base, datetime(2026, 7, 12, 0, 0))
+
+    # a later enable stamp moves the anchor, so the count restarts from it
+    stamped = [{**trig[0], "enabledAt": "2026-07-10T13:30:00"}]
+    assert not is_overdue(stamped, base, datetime(2026, 7, 10, 15, 0))
+    assert is_overdue(stamped, base, datetime(2026, 7, 10, 15, 31))
+
+    # mixed with a cron: either kind can flag on its own
+    mixed = [{"id": "c", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+              "source": "user"}, *trig]
+    assert not is_overdue(mixed, base, datetime(2026, 7, 10, 13, 30))
+    assert is_overdue(mixed, base, datetime(2026, 7, 10, 14, 0, 1))    # the interval
+    assert is_overdue(mixed[:1], base, datetime(2026, 7, 12, 8, 1))    # the cron

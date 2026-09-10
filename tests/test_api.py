@@ -4603,3 +4603,110 @@ def test_ollama_login_answers_409_because_it_needs_no_account(client):
     has no account to sign in to."""
     r = client.post("/agents/login", json={"id": "ollama"})
     assert r.status_code == 409 and r.json()["detail"] == "Ollama needs no sign-in"
+
+
+# ---------- §4.3 interval triggers across the API surface ----------
+
+def test_patch_automation_interval_trigger(client):
+    """§19/§4.3: an interval PATCH stores the canonical `every`, stamps the
+    enable moment, serializes `runIfMissed` explicitly, and silently drops a
+    `timezone` — a duration has no wall clock."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Every six", "mock")
+    r = client.patch(f"/automations/{a['id']}", json={"triggers": [
+        {"kind": "interval", "every": "PT360M", "enabled": True, "source": "user"}]})
+    assert r.status_code == 200
+    j = r.json()
+    t = j["triggers"][0]
+    assert t["every"] == "PT6H"  # canonical, whatever spelling arrived
+    assert (t["label"], t["short"]) == ("Every 6 hours", "Every 6h")
+    assert t["source"] == "user" and t["runIfMissed"] is True and t["enabledAt"]
+    assert j["triggerChip"] == "Every 6h"
+    assert store.autos[a["id"]]["triggers"][0]["every"] == "PT6H"
+
+    # a bad duration and a missing source are 422s carrying the plain-word reason
+    r = client.patch(f"/automations/{a['id']}", json={"triggers": [
+        {"kind": "interval", "every": "PT10S", "enabled": True, "source": "user"}]})
+    assert r.status_code == 422
+    assert r.json()["detail"] == "an interval must be at least 15 seconds"
+    r = client.patch(f"/automations/{a['id']}", json={"triggers": [
+        {"kind": "interval", "every": "P1W", "enabled": True, "source": "user"}]})
+    assert r.status_code == 422
+    assert "ISO-8601 duration" in r.json()["detail"]
+    r = client.patch(f"/automations/{a['id']}", json={"triggers": [
+        {"kind": "interval", "every": "PT6H", "enabled": True}]})
+    assert r.status_code == 422 and "source" in r.json()["detail"]
+    assert store.autos[a["id"]]["triggers"][0]["every"] == "PT6H"  # nothing stored
+
+    # §4.3: a sent `timezone` is ignored, not refused
+    r = client.patch(f"/automations/{a['id']}", json={"triggers": [
+        {"kind": "interval", "every": "P1D", "enabled": True, "source": "user",
+         "timezone": "Asia/Tokyo", "runIfMissed": False}]})
+    assert r.status_code == 200
+    t = r.json()["triggers"][0]
+    assert t["every"] == "P1D" and t["label"] == "Every day"
+    assert "timezone" not in t and t["runIfMissed"] is False
+    assert "timezone" not in store.autos[a["id"]]["triggers"][0]
+
+
+def test_triggers_preview_interval_anchors_at_the_request_moment(client):
+    """§19/§4.3: the preview has no execution state, so an interval's next
+    occurrence is `now + every`; an out-of-range duration is a `valid: false`
+    result carrying the plain-word reason, never a 422."""
+    import time
+
+    before = time.time()
+    r = client.post("/triggers/preview", json={"triggers": [
+        {"kind": "interval", "every": "PT6H", "source": "user"},
+        {"kind": "interval", "every": "PT10S", "source": "user"},
+    ]})
+    assert r.status_code == 200
+    good, bad = r.json()["triggers"]
+
+    assert good["valid"] is True and "error" not in good
+    assert (good["label"], good["short"]) == ("Every 6 hours", "Every 6h")
+    assert abs(good["nextAtMs"] / 1000 - (before + 6 * 3600)) < 60
+    assert good["nextLabel"]
+
+    assert bad["valid"] is False
+    assert bad["error"] == "an interval must be at least 15 seconds"
+    assert bad["nextAtMs"] is None
+    # best-effort display: an under-a-minute duration has no label to show
+    assert bad["label"] == "" and bad["short"] == ""
+
+
+def test_create_and_save_version_apply_draft_interval_triggers(client):
+    """§4.3/§19: a drafted interval lands like a drafted cron — stored
+    canonical by the create, and by the save that replaces the list."""
+    from autowright.storage import store
+
+    r = client.post("/automations", json={
+        "draft": make_version(triggers=[{"kind": "interval", "every": "PT24H",
+                                         "enabled": True, "source": "spec"}]),
+        "name": "Drafted interval", "agentId": "mock",
+    })
+    assert r.status_code == 200
+    a = store.autos[r.json()["id"]]
+    assert a["triggers"][0]["every"] == "P1D"  # PT24H canonicalized
+    assert a["triggers"][0]["source"] == "spec" and a["triggers"][0]["enabledAt"]
+
+    r = client.post(f"/automations/{a['id']}/versions", json={"draft": {
+        **make_version(notes="second"),
+        "triggers": [{"id": a["triggers"][0]["id"], "kind": "interval",
+                      "every": "P1D", "enabled": True, "source": "spec"},
+                     {"kind": "interval", "every": "PT1H30M", "enabled": True,
+                      "source": "user"}],
+    }})
+    assert r.status_code == 200
+    trigs = r.json()["automation"]["triggers"]
+    assert [t["every"] for t in trigs] == ["P1D", "PT90M"]
+    assert [t["short"] for t in trigs] == ["Every 1d", "Every 90m"]
+
+    # an out-of-range drafted interval 422s and mints no version
+    r = client.post(f"/automations/{a['id']}/versions", json={"draft": {
+        **make_version(), "triggers": [{"kind": "interval", "every": "P400D",
+                                        "enabled": True, "source": "spec"}]}})
+    assert r.status_code == 422
+    assert r.json()["detail"] == "an interval can be at most 365 days"
+    assert store.autos[a["id"]]["current_version"] == 2

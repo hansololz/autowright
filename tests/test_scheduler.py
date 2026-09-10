@@ -1303,3 +1303,154 @@ def test_firing_in_the_delete_window_leaves_no_record(store):
     with pytest.raises(RuntimeError, match="being deleted"):
         queue_manual(store, engine, a, "manual")
     assert store.execs == {}
+
+
+# ---------- §4.3 interval triggers: every `every` since the last run ----------
+
+def _interval_auto(store, name, *, every="PT1H", created="2026-07-10T12:00:00", **fields):
+    """An automation with one enabled interval trigger anchored at `created` —
+    both the §4.1 run baseline and the §4.3 enable stamp, pinned to the fake
+    clock's timeline rather than the wall clock the write paths stamp."""
+    from conftest import make_version
+
+    a = store.create_automation(make_version(), name, None, triggers=[
+        {"id": "t1", "kind": "interval", "enabled": True, "every": every,
+         "source": "user", **fields}])
+    a["created_at"] = created
+    a["triggers"][0]["enabledAt"] = created
+    return a
+
+
+def test_interval_fires_every_span_since_the_last_run(store, monkeypatch):
+    """§4.3 interval semantics: an automation that never ran anchors at its
+    created_at, fires one `every` later, and then re-anchors on that run's
+    start — never back on the created_at grid."""
+    from datetime import datetime
+
+    clock = _Clock(datetime(2026, 7, 10, 12, 0))
+    engine, sched = _mk_clocked(store, clock)
+    fires = _record_fires(monkeypatch)
+    a = _interval_auto(store, "Hourly")
+
+    sched._tick()  # baseline 12:00 — created_at, nothing due
+    assert fires == []
+    clock.now = datetime(2026, 7, 10, 12, 59, 59)
+    sched._tick()
+    assert fires == []  # nothing before created_at + every
+    clock.now = datetime(2026, 7, 10, 13, 0, 20)  # the 13:00 occurrence
+    sched._tick()
+    assert len(fires) == 1
+    sched._tick()
+    assert len(fires) == 1  # the baseline advanced — it never re-fires
+
+    # that firing started a run: the anchor moves to its start, so the next
+    # occurrence is one `every` after S — not created_at + 2 × every
+    a["_last_exec_at"] = "2026-07-10T13:00:20"
+    clock.now = datetime(2026, 7, 10, 14, 0)  # created_at + 2 × every
+    sched._tick()
+    assert len(fires) == 1
+    clock.now = datetime(2026, 7, 10, 14, 0, 20)  # S + every
+    sched._tick()
+    assert len(fires) == 2
+
+
+def test_a_manual_run_pushes_the_next_interval_occurrence_back(store, monkeypatch):
+    """§4.3: the run baseline is the latest real execution whatever started it
+    — a manual Execute now pushes the next interval occurrence back a full
+    `every`."""
+    from datetime import datetime
+
+    clock = _Clock(datetime(2026, 7, 10, 12, 0))
+    engine, sched = _mk_clocked(store, clock)
+    fires = _record_fires(monkeypatch)
+    a = _interval_auto(store, "Manual push")
+    sched._tick()  # baseline 12:00
+
+    h = store.create_execution(a, "version", a["current_version"], "manual", steps=[])
+    # the record is stamped from the wall clock — re-stamp it onto the fake
+    # clock's timeline, the one the tick reasons about
+    h["started_at"] = "2026-07-10T12:30:00"
+    a["_last_exec_at"] = h["started_at"]
+
+    clock.now = datetime(2026, 7, 10, 13, 0)  # created_at + every, but S + 30 min
+    sched._tick()
+    assert fires == []
+    clock.now = datetime(2026, 7, 10, 13, 30)  # S + every
+    sched._tick()
+    assert len(fires) == 1
+
+
+def test_interval_occurrence_during_a_long_run_is_skipped_until_the_next(store):
+    """§4.3/§6: a run longer than `every` has its next occurrence fall while it
+    is still executing — the one-execution-at-a-time skip writes the usual
+    record, and the trigger waits for anchor + 2 × every."""
+    from datetime import datetime
+
+    clock = _Clock(datetime(2026, 7, 10, 12, 0))
+    engine, sched = _mk_clocked(store, clock)
+    a = _interval_auto(store, "Long run")
+    # a run in progress since 12:00 — the anchor is its start (§4.3)
+    h = store.create_execution(a, "version", a["current_version"], "manual", steps=[])
+    h["started_at"] = "2026-07-10T12:00:00"
+    a["_last_exec_at"] = h["started_at"]
+    assert a["_live"] == {h["id"]}
+
+    sched._tick()  # baseline 12:00
+    assert _drop_records(store, a["id"]) == []
+    clock.now = datetime(2026, 7, 10, 13, 0)  # anchor + every, still executing
+    sched._tick()
+    skips = _drop_records(store, a["id"])
+    assert len(skips) == 1
+    assert skips[0]["note"] == "previous execution still in progress"
+    assert skips[0]["trigger"] == "interval"  # §4.5: the stored machine kind
+
+    clock.now = datetime(2026, 7, 10, 13, 59)
+    sched._tick()
+    assert len(_drop_records(store, a["id"])) == 1  # nothing between the grid points
+    clock.now = datetime(2026, 7, 10, 14, 0)  # anchor + 2 × every
+    sched._tick()
+    assert len(_drop_records(store, a["id"])) == 2
+
+
+def test_run_if_missed_off_drops_a_slept_through_interval_span(store, monkeypatch):
+    """§6/§4.3: an interval with runIfMissed false never fires late — the
+    slept-through span is dropped with the usual record, and the trigger waits
+    for the next grid point after the wake."""
+    from datetime import datetime
+
+    from autowright.scheduler import drop_note
+
+    clock = _Clock(datetime(2026, 7, 10, 12, 0))
+    engine, sched = _mk_clocked(store, clock)
+    fires = _record_fires(monkeypatch)
+    a = _interval_auto(store, "No catch-up", every="PT3H", runIfMissed=False)
+
+    sched._tick()  # baseline 12:00
+    clock.now = datetime(2026, 7, 10, 17, 0)  # slept through 15:00, woke two hours late
+    sched._tick()
+    assert fires == []
+    recs = _drop_records(store, a["id"])
+    assert len(recs) == 1
+    assert recs[0]["note"] == drop_note() and recs[0]["trigger"] == "interval"
+
+    clock.now = datetime(2026, 7, 10, 18, 0)  # anchor + 2 × every — a live moment
+    sched._tick()
+    assert len(fires) == 1
+    assert len(_drop_records(store, a["id"])) == 1  # no second drop
+
+
+def test_run_if_missed_true_catches_a_slept_through_interval_up_once(store, monkeypatch):
+    """§6: the default keeps the one-catch-up-per-wake behavior for an interval
+    exactly as for a cron — one execution, no drop record."""
+    from datetime import datetime
+
+    clock = _Clock(datetime(2026, 7, 10, 12, 0))
+    engine, sched = _mk_clocked(store, clock)
+    fires = _record_fires(monkeypatch)
+    a = _interval_auto(store, "Catch-up", every="PT3H")
+
+    sched._tick()  # baseline 12:00
+    clock.now = datetime(2026, 7, 10, 17, 0)  # the same slept-through span
+    sched._tick()
+    assert len(fires) == 1
+    assert _drop_records(store, a["id"]) == []

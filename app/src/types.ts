@@ -133,8 +133,10 @@ export interface ChatEntry {
 // pubsub is a reserved kind the API refuses to store ("coming soon").
 export type TriggerKindFields =
   // §4.3 runIfMissed: the §6 wake catch-up opt-out; the backend serializes it
-  // explicitly on every cron/time trigger; a draft carries it only when false
+  // explicitly on every cron/interval/time trigger; a draft carries it only when false
   | { kind: 'cron'; expression: string; timezone?: string; runIfMissed?: boolean; source: 'spec' | 'user' } // §4.3 provenance: required
+  // §4.3 interval: `every` is the canonical ISO-8601 duration (one component); no timezone
+  | { kind: 'interval'; every: string; runIfMissed?: boolean; source: 'spec' | 'user' } // §4.3 provenance: required
   | { kind: 'time'; at: string; timezone?: string; runIfMissed?: boolean }         // one-shot wall-clock ISO timestamp
   | { kind: 'app_start' }
   // §4.3: `secret` is the token secret's §4.8 id — displays resolve it to the live name
@@ -257,7 +259,7 @@ export interface Execution {
   automationDeleted: boolean
   versionLabel: string
   status: Status
-  trigger: 'Manual' | 'Menu bar' | 'Tray' | 'Cron' | 'Once' | 'App start' | 'Discord' | 'iMessage' | 'Test'  // §4.5 labels ('Tray' = menubar on Windows/Linux, §9)
+  trigger: 'Manual' | 'Menu bar' | 'Tray' | 'Cron' | 'Interval' | 'Once' | 'App start' | 'Discord' | 'iMessage' | 'Test'  // §4.5 labels ('Tray' = menubar on Windows/Linux, §9)
   triggerSender: string | null  // §4.5 — payload sender on every row ("Discord · Dave · v3")
   test: boolean  // §4.5 test executions — §11 draft tests
   duration: string
@@ -344,7 +346,7 @@ export interface ImportPreview {
   description: string
   steps: { name: string; description: string; agent: boolean }[]
   params: { name: string; kind: string }[]
-  triggers: { kind: 'cron' | 'app_start' | 'discord' | 'imessage'; expression?: string; timezone?: string; channel?: string; from?: string; pattern?: string }[]
+  triggers: { kind: 'cron' | 'interval' | 'app_start' | 'discord' | 'imessage'; expression?: string; every?: string; timezone?: string; channel?: string; from?: string; pattern?: string }[]
   packages: PackageDep[]
   agents: { name: string; harness: string; mode: string; model: string | null; matchedTo: string | null; matchedBy: MatchedBy | null }[]
   secrets: { name: string; description: string; matchedTo: string | null; matchedBy: MatchedBy | null }[]
@@ -409,7 +411,7 @@ export interface DraftPayload {
   steps?: Step[]
   spec: SpecBlock[] | null
   notes?: string             // §4.1 notes doc — rides drafts and §8 chat/sync payloads
-  triggers?: DraftTrigger[]  // §8: cron-only in drafts
+  triggers?: DraftTrigger[]  // §8: the rule-9 drafted triggers (cron and interval schedules included)
   secretReferences?: string[] // §8: code-referenced secret ids
   // §4.4: grant selections carried by the draft snapshot (agent / secret uuids)
   stepAgents?: string[]

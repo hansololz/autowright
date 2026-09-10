@@ -184,8 +184,8 @@ create take the workdir as a required positional; only pull's is optional. Files
   the save, so a manifest edit takes effect like any other workdir edit. An absent or
   blank value leaves the stored one unchanged (clearing a description is the §19 PATCH's
   affair, never push's). The remaining keys: `note`, `triggers`
-  (the §8 rule-9 dialect — cron / imessage / discord / app_start entries; `pull` writes the
-  stored crons only), `params` (full §4.2 definitions with
+  (the §8 rule-9 dialect — cron / interval (`every`) / imessage / discord / app_start
+  entries; `pull` writes the stored crons and intervals only), `params` (full §4.2 definitions with
   defaults, **value fields stripped** — values are user-owned operational state, set via
   `param set`, never round-tripped through versions), `packages`, `steps` (file, name, description,
   `agent`/`why`/`agents`, `secrets`, `packages`, `timeout`/`no_timeout`,
@@ -283,17 +283,21 @@ this rule.
 
 **Trigger semantics on push** — the §4.3 trigger merge, performed client-side exactly
 like the editor: the manifest's cron entries are matched against the stored list on
-(`expression`, `timezone`) — matches keep their `id`, `enabled` state, and `source`, and
+(`expression`, `timezone`) and its `every` entries against the stored intervals on the
+canonical `every` — matches keep their `id`, `enabled` state, and `source`, and
 take the manifest entry's `run_if_missed` (absent = true, §4.3), new
 entries arrive enabled with `source: spec`, stored
-**spec-sourced** crons the manifest no longer lists are dropped (`source: user` crons
-always survive, §4.3); the manifest's `discord`/`imessage`/
+**spec-sourced** crons and intervals the manifest no longer lists are dropped (`source: user`
+ones always survive, §4.3); the manifest's `discord`/`imessage`/
 `app_start` entries add only when no stored trigger matches their §4.3 identity fields; and
-stored non-cron triggers always survive untouched. `pull` writes the stored crons into the
-manifest (`cron`, `timezone` when set, `run_if_missed: false` when off), so an untouched
+stored non-schedule triggers always survive untouched. `pull` writes the stored crons and
+intervals into the
+manifest (`cron`, `timezone` when set, or `every`; `run_if_missed: false` when off), so an untouched
 manifest round-trips the schedule unchanged. Between pushes, `trigger add` (cron by default,
-`--at` for a §4.3 one-shot — both take `--timezone <zone>`, an IANA zone, stored on the
-entry, and `--no-run-if-missed`, storing §4.3 `runIfMissed: false`; the flag with any other
+`--every <duration>` for a §4.3 interval (the interval dialect; the stored canonical form
+is what `trigger list` labels), `--at` for a §4.3 one-shot — cron and `--at` take `--timezone <zone>`, an IANA zone, stored on the
+entry (`--timezone` with `--every` exits 1 - an interval has no zone), and all three take
+`--no-run-if-missed`, storing §4.3 `runIfMissed: false`; that flag with any other
 trigger kind exits 1 - `--app-start`, `--discord <channel> --secret <name>
 [--pattern <text>] [--mention] [--author <user-id>[,<user-id>…]]…` for a §4.3 discord
 trigger (`--secret` takes the secret's **name** — the human surface, like the grant
@@ -307,8 +311,8 @@ empty-list line names the §13 surface per the §9 per-OS copy rule — "… or 
 on macOS, "… or the tray" on Windows, and no surface clause on Linux — and which appends
 " (no catch-up)" to a row whose `runIfMissed` is false, after the " (off)" marker when both
 apply) via the §19
-PATCH; a cron minted by `trigger add` lands `source: user` (§4.3 — user-minted crons
-survive later syncs and pushes).
+PATCH; a cron or interval minted by `trigger add` lands `source: user` (§4.3 — user-minted
+schedules survive later syncs and pushes).
 
 **Param values** — `param set <ref> NAME=VALUE …` PATCHes `paramValues`, parsed by the
 definition's kind: toggle `on|off|true|false` → bool · number → int · text → string · list →

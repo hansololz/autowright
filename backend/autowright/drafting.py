@@ -199,6 +199,7 @@ packages:                              # PyPI packages beyond the allowed list; 
   - { pip: pandas, import: pandas, why: one line — what the steps use the package for }
 triggers:                              # see Triggers above; omit the whole key when the automation needs none
   - cron: "0 8 * * *"
+  - every: "PT6H"                      # an interval: that long after the automation's last run
   - { discord: "1234567890", secret: 9b2f4e12-8c3d-4f6a-9e01-2b7c5d8a1f34 }   # details from the SPEC only
 steps:                                 # ordered; every key is described in the Manifest section above
   - { file: 01-fetch.py, name: ..., description: ..., timeout: 60,
@@ -256,6 +257,7 @@ test_values: { url: "…" }   # parameter values for that test only (name → va
 param_values: { url: "…" }  # stage stored values (same names rule) — they apply when the user saves
 triggers:                   # stage trigger edits — applied when the user saves; ops touch only what they name
   - add: { cron: "0 9 * * *" }             # a Triggers-dialect entry; { time: "2026-07-20T15:00" } allowed here
+  - add: { every: "PT6H" }                 # an interval: that long after the automation's last run
   - edit: { index: 1, cron: "30 8 * * *" } # replace entry 1's fields (id and on/off state kept)
   - enable: { index: 2, enabled: false }   # flip an entry on/off
   - remove: { index: 3 }                   # delete an entry (indexes from CURRENT triggers)
@@ -267,7 +269,7 @@ undo: true                  # restore the draft to before the last request — e
 
 - A change missing something only the user can supply (a channel id, a sender handle, which secret holds a token, which account or folder is meant) → ask for it in plain prose beginning with ===QUESTION=== on its own line, leading with the ask itself — any explanation follows the question; no file blocks, no actions, no blocker. Never guess the missing piece; ask for everything missing in one message, and the user's next message completes the request.
 
-Only the keys shown are valid in actions.yaml; include only what the request calls for, and omit the block when no action is needed. When the user asks you to fix, change and verify, or "make it work" and the automation itself is at fault, prefer returning the rewrite together with `sync: true` (and `test: true` when a test would prove it) so the user doesn't have to press the buttons. Use `param_values` only for a value the user explicitly stated — never guessed, and never a password or token (those belong in secrets — say so in prose). Use `triggers` ops only on an explicit trigger request; before an `add`, check CURRENT triggers — if a matching trigger already exists, answer in prose with no op (if it exists but is off, return the `enable` op instead). A pure schedule change is a `triggers` op alone — no spec rewrite, no sync; message-trigger details (channel id, which secret holds the token, sender handle) may come from the spec or from what the user typed in this conversation, never invented — a discord op's `secret` is that secret's id, copied exactly from the grants yaml (never its name). Use `concurrency` only when the user explicitly asks for parallel runs or queueing ("let two run at once", "queue messages when it's busy") — never speculatively; the defaults (max_parallel 1, max_queued 0) stay unless the user names different numbers or words you can map to them ("a couple at once" → 2). Staged values, trigger edits, and concurrency changes land when the user saves — say so ("staged — takes effect when you save"); for immediate effect point at the automation page. When the user asks to undo or revert your last change ("undo that", "put it back"), return `undo: true` ALONE — no other action keys and no rewrite blocks (an accompanying prose message is fine); the editor restores the draft exactly, and tells the user when there is nothing left to undo — never hand-rewrite the documents back from memory instead. You cannot enable agents or secrets, and you cannot save or create the automation — suggest those in prose; the user does them.
+Only the keys shown are valid in actions.yaml; include only what the request calls for, and omit the block when no action is needed. When the user asks you to fix, change and verify, or "make it work" and the automation itself is at fault, prefer returning the rewrite together with `sync: true` (and `test: true` when a test would prove it) so the user doesn't have to press the buttons. Use `param_values` only for a value the user explicitly stated — never guessed, and never a password or token (those belong in secrets — say so in prose). Use `triggers` ops only on an explicit trigger request; before an `add`, check CURRENT triggers — if a matching trigger already exists, answer in prose with no op (if it exists but is off, return the `enable` op instead). A pure schedule change (cron or interval) is a `triggers` op alone — no spec rewrite, no sync; message-trigger details (channel id, which secret holds the token, sender handle) may come from the spec or from what the user typed in this conversation, never invented — a discord op's `secret` is that secret's id, copied exactly from the grants yaml (never its name). Use `concurrency` only when the user explicitly asks for parallel runs or queueing ("let two run at once", "queue messages when it's busy") — never speculatively; the defaults (max_parallel 1, max_queued 0) stay unless the user names different numbers or words you can map to them ("a couple at once" → 2). Staged values, trigger edits, and concurrency changes land when the user saves — say so ("staged — takes effect when you save"); for immediate effect point at the automation page. When the user asks to undo or revert your last change ("undo that", "put it back"), return `undo: true` ALONE — no other action keys and no rewrite blocks (an accompanying prose message is fine); the editor restores the draft exactly, and tells the user when there is nothing left to undo — never hand-rewrite the documents back from memory instead. You cannot enable agents or secrets, and you cannot save or create the automation — suggest those in prose; the user does them.
 
 - A failure the user can't fix by changing the automation → when the RECENT EXECUTIONS show the failure comes from the user's {{MACHINE}}, not the steps — a missing desktop app, a daemon that isn't running (a pre-flight error, ConnectionRefusedError to a local service, "command not found") — do NOT rewrite the automation. Return a `kind: user-action` blocker: what to install or start, why the automation needs it, a markdown download link, and an offer of step-by-step install instructions.
 
@@ -494,6 +496,8 @@ def _trigger_ref(t: dict) -> dict:
     k = t.get("kind")
     if k == "cron":
         d = {"cron": t.get("expression"), **({"timezone": t["timezone"]} if t.get("timezone") else {})}
+    elif k == "interval":
+        d = {"every": t.get("every")}
     elif k == "imessage":
         d = {"imessage": t.get("from"),
              **({"pattern": t["pattern"]} if t.get("pattern") else {})}
@@ -725,8 +729,8 @@ CHAT_FILES = ("spec.md", "notes.md", "actions.yaml")
 def parse_dialect_entry(t, allow_time: bool = False, *,
                         cron_source: str) -> tuple[dict | None, str | None]:
     """One §8 rule-9 dialect entry → (normalized §4.3 stored trigger, None) or
-    (None, error). Shared by the manifest's `triggers` key (crons land
-    `source: spec`) and the chat call's `triggers` ops (crons land
+    (None, error). Shared by the manifest's `triggers` key (schedules land
+    `source: spec`) and the chat call's `triggers` ops (schedules land
     `source: user`; `allow_time` admits the `{ time: at }` form the user may
     ask for directly — never drafted by judgment, §8 rule 9). `cron_source`
     is required — §4.3 provenance is stamped at every ingest."""
@@ -744,6 +748,17 @@ def parse_dialect_entry(t, allow_time: bool = False, *,
             triggerlib.parse_cron(entry["expression"])
         except triggerlib.CronError as e:
             return None, f"triggers: {e}"
+        return entry, None
+    if keys == {"every"}:
+        # §4.3 interval: a duration, no timezone. Canonicalized HERE, not
+        # only at store time: the draft payload rides to the renderer's §4.3
+        # trigger merge, which compares `every` strings — a manifest PT360M
+        # must match a stored PT6H as one trigger.
+        entry = {"kind": "interval", "every": str(t["every"]).strip(), "enabled": True,
+                 "source": cron_source}
+        if err := triggerlib.validate_trigger(entry):
+            return None, f"triggers: {err}"
+        entry["every"] = triggerlib.canonical_duration(triggerlib.parse_duration(entry["every"]))
         return entry, None
     if allow_time and "time" in keys and keys <= {"time", "timezone"}:
         entry = {"kind": "time", "at": str(t["time"]).strip(), "enabled": True,
@@ -774,6 +789,7 @@ def parse_dialect_entry(t, allow_time: bool = False, *,
         return {"kind": "app_start", "enabled": True}, None
     return None, (
         f"triggers entry {t!r} must be {{ cron: expression[, timezone] }}, "
+        "{ every: duration }, "
         + ("{ time: local-ISO-timestamp[, timezone] }, " if allow_time else "")
         + "{ imessage: handle[, pattern] }, "
         "{ discord: channel-id, secret: <granted secret id>[, pattern, mention, author] }, "
@@ -876,8 +892,8 @@ def _validate_trigger_ops(raw, count: int) -> tuple[list[dict], list[str]]:
     """§8 `triggers` action — a list of single-op mappings (add / edit /
     enable / remove), indexes 1-based over the CURRENT triggers list. Returns
     the ops with their dialect entries normalized to the §4.3 stored shape
-    (crons land `source: user` — user-asked schedules survive later syncs,
-    §4.3), or the validation errors that feed the repair round."""
+    (crons and intervals land `source: user` — user-asked schedules survive
+    later syncs, §4.3), or the validation errors that feed the repair round."""
     if not isinstance(raw, list) or not raw:
         return [], ["actions.yaml: triggers must be a nonempty list of "
                     "add/edit/enable/remove ops"]
@@ -1294,9 +1310,10 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         errors.append("triggers must be a list of trigger entries (see the Triggers section)")
     else:
         for t in trigs:
-            # §8 rule 9 dialect: cron / imessage / discord / app_start —
-            # one-shot `time` triggers are never drafted; drafted crons land
-            # `source: spec` (§4.3 provenance — the merge's replaceable subset).
+            # §8 rule 9 dialect: cron / interval / imessage / discord /
+            # app_start — one-shot `time` triggers are never drafted; drafted
+            # schedules land `source: spec` (§4.3 provenance — the merge's
+            # replaceable subset).
             entry, err = parse_dialect_entry(t, cron_source="spec")
             if err:
                 errors.append(err)

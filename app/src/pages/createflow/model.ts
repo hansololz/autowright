@@ -361,10 +361,11 @@ export function holdsDraftEdits(r: Rev, a: Automation): boolean {
   return r.viewing === a.version && r.touched
 }
 
-// §4.3 trigger merge: a sync's drafted crons take over the cron subset — an
-// entry matching an existing cron on (expression, timezone) keeps its id and enabled state.
-// Drafted message/app-start entries add only when no existing trigger matches
-// their identity fields; existing non-cron triggers always survive.
+// §4.3 trigger merge: a sync's drafted schedules take over the schedule subset
+// (cron and interval) — an entry matching an existing cron on
+// (expression, timezone), or an existing interval on `every`, keeps its id and
+// enabled state. Drafted message/app-start entries add only when no existing
+// trigger matches their identity fields; existing non-schedule triggers always survive.
 // The §4.3 stored fields only — a stored Trigger's derived label/short/connection
 // must not leak into a draft snapshot (§4.4 draft-only `triggers` key).
 export function stripTrigger(t: Trigger | DraftTrigger): DraftTrigger {
@@ -372,6 +373,8 @@ export function stripTrigger(t: Trigger | DraftTrigger): DraftTrigger {
   switch (t.kind) {
     // §4.3 runIfMissed rides a draft only when false (absent = true)
     case 'cron': return { ...base, kind: 'cron', expression: t.expression, ...(t.timezone ? { timezone: t.timezone } : {}), ...(t.runIfMissed === false ? { runIfMissed: false } : {}), source: t.source }
+    // §4.3 interval: the canonical `every`, no timezone
+    case 'interval': return { ...base, kind: 'interval', every: t.every, ...(t.runIfMissed === false ? { runIfMissed: false } : {}), source: t.source }
     case 'time': return { ...base, kind: 'time', at: t.at, ...(t.timezone ? { timezone: t.timezone } : {}), ...(t.runIfMissed === false ? { runIfMissed: false } : {}) }
     case 'app_start': return { ...base, kind: 'app_start' }
     case 'discord': return {
@@ -385,7 +388,18 @@ export function stripTrigger(t: Trigger | DraftTrigger): DraftTrigger {
     }
   }
 }
-const isCron = (t: DraftTrigger): t is Extract<DraftTrigger, { kind: 'cron' }> => t.kind === 'cron'
+// §4.3 schedule kinds — the subset a sync derives and replaces
+const isSchedule = (t: DraftTrigger): t is Extract<DraftTrigger, { kind: 'cron' | 'interval' }> =>
+  t.kind === 'cron' || t.kind === 'interval'
+// §4.3 schedule identity: crons match on (expression, timezone), intervals on
+// the canonical `every`. A cron never matches an interval — distinct identities.
+function sameSchedule(a: DraftTrigger, b: DraftTrigger): boolean {
+  if (a.kind === 'cron' && b.kind === 'cron') {
+    return a.expression === b.expression && (a.timezone ?? '') === (b.timezone ?? '')
+  }
+  if (a.kind === 'interval' && b.kind === 'interval') return a.every === b.every
+  return false
+}
 // §4.3 discord `author` normalization (mirrors the backend's normalize_authors):
 // trimmed, deduped, sorted — element order must never distinguish two triggers.
 const normalizedAuthors = (raw: string[] | undefined) =>
@@ -403,20 +417,21 @@ function sameNonCron(a: DraftTrigger, b: DraftTrigger): boolean {
   return false
 }
 export function mergeDraftTriggers(cur: DraftTrigger[], drafted: DraftTrigger[]): DraftTrigger[] {
-  const crons = cur.filter(isCron)
+  const schedules = cur.filter(isSchedule)
   const used = new Set<number>()
-  const next = drafted.filter(isCron).map((d) => {
-    const i = crons.findIndex((c, j) => !used.has(j) && c.expression === d.expression && (c.timezone ?? '') === (d.timezone ?? ''))
+  const next = drafted.filter(isSchedule).map((d) => {
+    const i = schedules.findIndex((c, j) => !used.has(j) && sameSchedule(c, d))
     if (i < 0) return { ...d, enabled: true }
     used.add(i)
-    return crons[i]
+    return schedules[i]
   })
-  // §4.3 provenance: only spec-sourced crons are the sync's replaceable subset —
-  // an unmatched `source: user` cron (detail page, chat op, CLI) always survives.
-  const userCrons = crons.filter((c, j) => !used.has(j) && c.source === 'user')
+  // §4.3 provenance: only spec-sourced schedules are the sync's replaceable
+  // subset — an unmatched `source: user` cron or interval (detail page, chat
+  // op, CLI) always survives.
+  const userSchedules = schedules.filter((c, j) => !used.has(j) && c.source === 'user')
   const added = drafted.filter((d) =>
-    d.kind !== 'cron' && d.kind !== 'time' && !cur.some((c) => sameNonCron(c, d)))
-  return [...next, ...userCrons, ...cur.filter((t) => t.kind !== 'cron'), ...added.map((d) => ({ ...d, enabled: true }))]
+    !isSchedule(d) && d.kind !== 'time' && !cur.some((c) => sameNonCron(c, d)))
+  return [...next, ...userSchedules, ...cur.filter((t) => !isSchedule(t)), ...added.map((d) => ({ ...d, enabled: true }))]
 }
 
 /** §11 stale-outcome rule: an opaque fingerprint of the draft's steps (files +
@@ -508,7 +523,7 @@ export function sameTriggerList(a: unknown, b: unknown): boolean {
   const xs = Array.isArray(a) ? a : []
   const ys = Array.isArray(b) ? b : []
   const key = (t: Record<string, unknown>) => JSON.stringify([
-    t.id ?? null, t.kind ?? null, t.expression ?? null, t.at ?? null,
+    t.id ?? null, t.kind ?? null, t.expression ?? null, t.every ?? null, t.at ?? null,
     t.timezone ?? null, t.from ?? null, t.channel ?? null, t.secret ?? null,
     t.pattern ?? null, t.mention ?? null, t.author ?? null, t.enabled !== false,
     t.runIfMissed !== false,
@@ -527,7 +542,7 @@ export function sameTriggerList(a: unknown, b: unknown): boolean {
 // §11 chip wording only — fixed display words per kind, never §4.3 label math
 // (labels still come from §19 `/triggers/preview`).
 const TRIGGER_KIND_WORD: Record<string, string> = {
-  cron: 'Cron', time: 'One-time', app_start: 'App-start',
+  cron: 'Cron', interval: 'Interval', time: 'One-time', app_start: 'App-start',
   discord: 'Discord', imessage: 'iMessage',
 }
 const triggerNoun = (kind: string): string =>
@@ -538,6 +553,7 @@ export function applyTriggerOps(triggers: DraftTrigger[], ops: TriggerOp[]): { t
     if (a.kind === 'cron' && b.kind === 'cron') {
       return a.expression === b.expression && (a.timezone ?? '') === (b.timezone ?? '')
     }
+    if (a.kind === 'interval' && b.kind === 'interval') return a.every === b.every
     if (a.kind === 'time' && b.kind === 'time') {
       return a.at === b.at && (a.timezone ?? '') === (b.timezone ?? '')
     }
@@ -563,8 +579,9 @@ export function applyTriggerOps(triggers: DraftTrigger[], ops: TriggerOp[]): { t
     if (op.op === 'edit') {
       // §8: an edit keeps id, enabled, and the §4.3 runIfMissed choice; the
       // dialect cannot set it, so the user's opt-out survives a schedule change
-      const keptOptOut = (target.kind === 'cron' || target.kind === 'time') && target.runIfMissed === false
-        && (op.trigger.kind === 'cron' || op.trigger.kind === 'time')
+      const keptOptOut = (target.kind === 'cron' || target.kind === 'interval' || target.kind === 'time')
+        && target.runIfMissed === false
+        && (op.trigger.kind === 'cron' || op.trigger.kind === 'interval' || op.trigger.kind === 'time')
       const edited = {
         ...op.trigger, ...(target.id ? { id: target.id } : {}), enabled: target.enabled,
         ...(keptOptOut ? { runIfMissed: false } : {}),

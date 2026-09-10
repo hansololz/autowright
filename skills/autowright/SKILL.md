@@ -11,7 +11,7 @@ description: >
 Autowright runs the user's personal automations on a schedule, entirely on this computer. Each
 automation is: a **spec** (plain-markdown description of what it does), ordered **step
 scripts** (Python, executed by Autowright's engine), **parameters** (user-editable values),
-**triggers** (cron / one-shot / on-app-start), per-automation **memory** (files kept between
+**triggers** (cron / interval / one-shot / on-app-start), per-automation **memory** (files kept between
 executions), and versioned history. You interact through the `autowright` CLI — every
 operation the app's UI offers is available there.
 
@@ -75,6 +75,7 @@ resolve); executions and snapshots by id prefix.
      description: Checks followed manga for new chapters
      triggers:                    # omit if the automation needs no trigger
        - cron: "0 8 * * *"        # optional timezone: Asia/Tokyo
+       - every: "PT6H"            # an interval, measured from the automation's last run
        # also: { imessage: "+15551234567" } / { discord: "<channel>", secret: <secret uuid> }
        # (details from the spec only; the discord secret is the token secret's id from
        # `autowright secret list --json`; optional pattern) / app_start: true
@@ -123,8 +124,9 @@ autowright automation execute <name> -f
 
 Pull/push round-trips faithfully: param *definitions* travel in the manifest (values are
 user state — see Parameters), and the manifest's triggers merge into the stored list: crons
-replace the stored crons (matching entries keep their on/off state), message/app-start
-entries add only when not already present, and stored non-cron triggers always survive.
+and intervals replace the stored schedules (matching entries keep their on/off state),
+message/app-start entries add only when not already present, and stored non-schedule
+triggers always survive.
 Mistake in a new version? `autowright automation restore <name> v3` brings any old version
 back as the next version.
 
@@ -154,6 +156,7 @@ autowright automation param set <name> sources='["https://…"]' notify=on retri
     # kv: JSON object or k=v,k=v
 autowright automation trigger list <name>
 autowright automation trigger add <name> "0 8 * * *" [--timezone Asia/Tokyo]
+autowright automation trigger add <name> --every PT6H              # interval, since the last run
 autowright automation trigger add <name> --at 2026-08-01T09:00     # one-shot
 autowright automation trigger add <name> --app-start
 autowright automation trigger add <name> --discord <channel> --secret NAME

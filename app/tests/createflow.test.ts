@@ -220,6 +220,41 @@ describe('mergeDraftTriggers', () => {
   })
 })
 
+describe('mergeDraftTriggers — interval schedules (§4.3)', () => {
+  const cron = (over: Partial<DraftTrigger>): DraftTrigger =>
+    ({ kind: 'cron', enabled: true, source: 'spec', ...over } as DraftTrigger)
+  const interval = (over: Partial<DraftTrigger>): DraftTrigger =>
+    ({ kind: 'interval', enabled: true, source: 'spec', ...over } as DraftTrigger)
+
+  it('a drafted interval matching a stored `every` keeps id, enabled and the opt-out', () => {
+    const cur: DraftTrigger[] = [
+      interval({ id: 'i1', every: 'PT6H', enabled: false, source: 'user', runIfMissed: false }),
+    ]
+    expect(mergeDraftTriggers(cur, [interval({ every: 'PT6H' })])).toEqual([cur[0]])
+  })
+
+  it('a spec-sourced interval the draft no longer derives is dropped; a user one survives', () => {
+    const cur: DraftTrigger[] = [
+      interval({ id: 'i1', every: 'PT6H', source: 'spec' }),
+      interval({ id: 'i2', every: 'P1D', source: 'user', enabled: false }),
+    ]
+    const merged = mergeDraftTriggers(cur, [interval({ every: 'PT90M' })])
+    expect(merged).toEqual([
+      { kind: 'interval', enabled: true, every: 'PT90M', source: 'spec' },
+      cur[1], // the user interval survives, enabled state intact
+    ])
+  })
+
+  it('a cron never matches an interval — the two schedule kinds are distinct identities', () => {
+    const cur: DraftTrigger[] = [cron({ id: 'c1', expression: '0 8 * * *' })]
+    expect(mergeDraftTriggers(cur, [interval({ every: 'PT6H' })]))
+      .toEqual([{ kind: 'interval', enabled: true, every: 'PT6H', source: 'spec' }])
+    const curInterval: DraftTrigger[] = [interval({ id: 'i1', every: 'PT6H' })]
+    expect(mergeDraftTriggers(curInterval, [cron({ expression: '0 8 * * *' })]))
+      .toEqual([{ kind: 'cron', enabled: true, expression: '0 8 * * *', source: 'spec' }])
+  })
+})
+
 describe('applyTriggerOps (§8 chat trigger ops)', () => {
   const cron = (over: Partial<DraftTrigger>): DraftTrigger =>
     ({ kind: 'cron', enabled: true, ...over } as DraftTrigger)
@@ -269,6 +304,33 @@ describe('applyTriggerOps (§8 chat trigger ops)', () => {
       [cron({ id: 'c1', expression: '0 8 * * *', source: 'spec', runIfMissed: false })],
       [{ op: 'edit', index: 1, trigger: { kind: 'discord', channel: '9', secret: 'S', enabled: true } }])
     expect(swapped.triggers[0]).not.toHaveProperty('runIfMissed')
+  })
+
+  it('an interval op carries the §4.3 `every` identity and its own kind word', () => {
+    const stored: DraftTrigger[] = [
+      { id: 'i1', kind: 'interval', every: 'PT6H', source: 'spec', enabled: false, runIfMissed: false },
+    ]
+    // an add matching the stored `every` is the no-op backstop
+    const dup = applyTriggerOps(stored, [
+      { op: 'add', trigger: { kind: 'interval', every: 'PT6H', source: 'user', enabled: true } },
+    ])
+    expect(dup.triggers).toEqual(stored)
+    expect(dup.chips).toEqual(['That trigger already exists.'])
+
+    const added = applyTriggerOps(stored, [
+      { op: 'add', trigger: { kind: 'interval', every: 'P1D', source: 'user', enabled: false } },
+    ])
+    expect(added.triggers[1]).toEqual({ kind: 'interval', every: 'P1D', source: 'user', enabled: true })
+    expect(added.chips).toEqual(['Interval trigger added.'])
+
+    // an edit keeps id, enabled, and the runIfMissed opt-out the dialect cannot set
+    const edited = applyTriggerOps(stored, [
+      { op: 'edit', index: 1, trigger: { kind: 'interval', every: 'P1D', source: 'user', enabled: true } },
+    ])
+    expect(edited.triggers).toEqual([{
+      kind: 'interval', every: 'P1D', source: 'user', id: 'i1', enabled: false, runIfMissed: false,
+    }])
+    expect(edited.chips).toEqual(['Interval trigger 1 updated.'])
   })
 
   it('enable flips on/off; remove deletes; ops run in order over the evolving list', () => {
@@ -420,8 +482,13 @@ describe('stripTrigger (§4.4 draft-only trigger shape)', () => {
     expect(stripTrigger({
       id: 't2', enabled: true, kind: 'time', at: '2026-08-09T09:00:00', label: 'L', short: 'S',
     } as Trigger)).toEqual({ id: 't2', enabled: true, kind: 'time', at: '2026-08-09T09:00:00' })
-    expect(stripTrigger({ id: 't3', enabled: false, kind: 'app_start', label: 'L', short: 'S' } as Trigger))
-      .toEqual({ id: 't3', enabled: false, kind: 'app_start' })
+    expect(stripTrigger({
+      id: 't3', enabled: false, kind: 'app_start', label: 'L', short: 'S',
+    } as Trigger)).toEqual({ id: 't3', enabled: false, kind: 'app_start' })
+    expect(stripTrigger({
+      id: 't4', enabled: true, kind: 'interval', every: 'PT6H', source: 'spec',
+      label: 'Every 6 hours', short: 'Every 6h',
+    } as Trigger)).toEqual({ id: 't4', enabled: true, kind: 'interval', every: 'PT6H', source: 'spec' })
   })
   it('§4.3 runIfMissed rides a draft only when false: true is the absent default', () => {
     const stored = {
@@ -698,6 +765,11 @@ describe('sameTriggerList — the §11/§19 re-attach trigger guard', () => {
     expect(sameTriggerList(
       [{ kind: 'discord', channel: '1', secret: 's1', enabled: true }],
       [{ kind: 'discord', channel: '2', secret: 's1', enabled: true }],
+    )).toBe(false)
+    // §4.3 interval: the `every` duration is part of the projection
+    expect(sameTriggerList(
+      [{ kind: 'interval', every: 'PT6H', enabled: true }],
+      [{ kind: 'interval', every: 'P1D', enabled: true }],
     )).toBe(false)
   })
   it('§4.3 runIfMissed false and the absent default are different lists', async () => {

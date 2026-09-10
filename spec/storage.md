@@ -113,9 +113,9 @@ automations/<uuid>/
                                # thereafter),
                                # current_version (pointer: current = versions/v<N>/),
                                # triggers [{id, kind, enabled, enabledAt?,
-                               #            runIfMissed? (cron/time, written only
+                               #            runIfMissed? (cron/interval/time, written only
                                #            when false; absent = true, §4.3),
-                               #            expression | at | channel+secret…}]
+                               #            expression | every | at | channel+secret…}]
                                # (§4.3 stored fields per kind; never the derived
                                # label/short/connection), agent_id,
                                # enabled_agents (§4.7 agent uuids), allowed_secrets
@@ -520,15 +520,15 @@ manifest.yaml                # format_version: 2 (import rejects any other with 
                              #   — never a rejection),
                              # agent: the authoring agent's REF - the agents.yaml entry the
                              #   imported agent_id resolves through (absent when none),
-                             # triggers: [{kind, expression? | timezone? | run_if_missed? | channel+secret… | from…}] —
-                             #   (`run_if_missed: false` only when a cron opted out, §4.3;
-                             #   absent = true)
-                             #   cron, app_start, discord, and imessage (§4.3 stored
+                             # triggers: [{kind, expression? | every? | timezone? | run_if_missed? | channel+secret… | from…}] —
+                             #   (`run_if_missed: false` only when a cron or interval
+                             #   opted out, §4.3; absent = true)
+                             #   cron, interval, app_start, discord, and imessage (§4.3 stored
                              #   fields; the token itself never travels, and a discord
                              #   entry's `secret` is the secrets.yaml REF - export
                              #   assigns it, import resolves it through the §5.1 match
                              #   ladders); no local ids,
-                             #   no enabled state, no cron `source` (import stamps
+                             #   no enabled state, no cron/interval `source` (import stamps
                              #   `source: spec` — the archive travels with its spec,
                              #   §4.3); one-shot `time` triggers are moments
                              #   in time and are never exported,

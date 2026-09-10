@@ -330,6 +330,46 @@ def test_export_writes_run_if_missed_only_for_an_opted_out_cron(store):
         {"kind": "cron", "expression": "0 9 * * *"}]
 
 
+def test_interval_triggers_round_trip(store):
+    """§5.1/§4.3: an interval travels as { kind: interval, every } - the
+    canonical duration, `run_if_missed: false` only when it opted out, no id,
+    no source, no enabled state. Import lands it off with `source: spec`."""
+    ver = {"description": "", "params": [], "packages": [],
+           "steps": [{"name": "Only", "description": "", "code": "print('x')\n"}],
+           "spec": [{"kind": "h1", "text": "T"}]}
+    a = store.create_automation(
+        ver, name="Ticker", agent_id=None,
+        triggers=[{"id": new_id(), "kind": "interval", "enabled": True,
+                   "every": "PT6H", "source": "user", "runIfMissed": False},
+                  {"id": new_id(), "kind": "interval", "enabled": True,
+                   "every": "PT90S", "source": "spec"}])
+    data = transfer.export_automation(store, a)
+    z = zipfile.ZipFile(io.BytesIO(data))
+    assert yaml.safe_load(z.read("manifest.yaml"))["triggers"] == [
+        {"kind": "interval", "every": "PT6H", "run_if_missed": False},
+        {"kind": "interval", "every": "PT90S"}]
+    b, _ = transfer.import_automation(store, data)
+    assert [{k: v for k, v in t.items() if k != "id"} for t in b["triggers"]] == [
+        {"kind": "interval", "every": "PT6H", "enabled": False, "source": "spec",
+         "runIfMissed": False},
+        {"kind": "interval", "every": "PT90S", "enabled": False, "source": "spec"}]
+
+
+def test_import_stores_the_canonical_interval_and_rejects_a_bad_one(store):
+    """§4.3 interval dialect: any accepted spelling stores canonical, and an
+    unusable duration is a rejected archive with the plain-word reason."""
+    a, _ = transfer.import_automation(store, _archive(triggers=[
+        {"kind": "interval", "every": "PT360M"}]))
+    assert a["triggers"][0]["every"] == "PT6H"
+    before = len(store.autos)
+    with pytest.raises(transfer.TransferError,
+                       match="invalid trigger in the archive: an interval needs an "
+                             "ISO-8601 duration"):
+        transfer.import_automation(store, _archive(triggers=[
+            {"kind": "interval", "every": "P1W"}]))
+    assert len(store.autos) == before
+
+
 def test_export_rejects_dangling_reference_but_allows_odd_agent_names(store):
     """§5.1: an id no stored record holds must be repaired before the
     automation can travel (there is no record to carry it). A name with quotes

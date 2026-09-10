@@ -273,15 +273,16 @@ def validate_workdir(c: Client, d: Path) -> dict:
     else:
         errors.append("spec.md is missing")
     step_files = {n: t for n, t in files.items() if n not in ("spec.md", "notes.md")}
-    # §20: the manifest's cron entries may carry `run_if_missed` (§4.3), a key
-    # the §8 rule-9 dialect does not know; lifted out before validation and
-    # stamped back onto the drafted crons by (expression, timezone).
+    # §20: the manifest's cron and every entries may carry `run_if_missed`
+    # (§4.3), a key the §8 rule-9 dialect does not know; lifted out before
+    # validation and stamped back onto the drafted schedules by their identity
+    # (a cron's (expression, timezone), an interval's canonical `every`).
     step_files, opted_out, errs = _lift_run_if_missed(step_files)
     errors += errs
     draft, errs = drafting.validate_steps(step_files, _all_grants(c))
     errors += errs
     for t in draft.get("triggers") or []:
-        if t["kind"] == "cron" and (t["expression"], t.get("timezone")) in opted_out:
+        if _schedule_key(t) in opted_out:
             t["runIfMissed"] = False
     if errors:
         print(f"{d} doesn't validate:", file=sys.stderr)
@@ -304,11 +305,34 @@ def validate_workdir(c: Client, d: Path) -> dict:
     return draft
 
 
+def _canonical_every(every) -> str:
+    """§4.3 interval identity: the canonical duration string both sides of a
+    match compare on. An unparsable value comes back as it arrived — the
+    drafting validator is what reports it, never this helper."""
+    from . import triggers as triggerlib
+
+    try:
+        return triggerlib.canonical_duration(triggerlib.parse_duration(every))
+    except triggerlib.IntervalError:
+        return str(every)
+
+
+def _schedule_key(t: dict) -> tuple | None:
+    """§4.3 schedule identity, kind-tagged so a cron key never collides with an
+    interval one: a cron's (expression, timezone), an interval's canonical
+    `every`. None for every other kind."""
+    if t.get("kind") == "cron":
+        return ("cron", t.get("expression"), t.get("timezone"))
+    if t.get("kind") == "interval":
+        return ("interval", _canonical_every(t.get("every")))
+    return None
+
+
 def _lift_run_if_missed(step_files: dict[str, str]) -> tuple[dict[str, str], set, list[str]]:
-    """Strip `run_if_missed` from the manifest's cron entries, returning the
-    files to validate, the (expression, timezone) keys that opted out, and any
-    errors (a non-boolean value). A manifest without the key passes through
-    byte-for-byte."""
+    """Strip `run_if_missed` from the manifest's cron and every entries,
+    returning the files to validate, the §4.3 schedule keys that opted out
+    (_schedule_key), and any errors (a non-boolean value). A manifest without
+    the key passes through byte-for-byte."""
     import yaml
 
     text = step_files.get("manifest.yaml")
@@ -328,12 +352,16 @@ def _lift_run_if_missed(step_files: dict[str, str]) -> tuple[dict[str, str], set
         if not isinstance(t, dict) or "run_if_missed" not in t:
             continue
         v = t.pop("run_if_missed")
-        if "cron" not in t:
-            errors.append("triggers: run_if_missed applies to cron entries only")
+        if "cron" not in t and "every" not in t:
+            errors.append("triggers: run_if_missed applies to cron and every entries only")
         elif not isinstance(v, bool):
             errors.append("triggers: run_if_missed must be true or false")
+        elif v is False and "cron" in t:
+            opted_out.add(_schedule_key(
+                {"kind": "cron", "expression": str(t["cron"]).strip(),
+                 "timezone": str(t["timezone"]) if t.get("timezone") else None}))
         elif v is False:
-            opted_out.add((str(t["cron"]).strip(), str(t["timezone"]) if t.get("timezone") else None))
+            opted_out.add(_schedule_key({"kind": "interval", "every": t["every"]}))
     return {**step_files, "manifest.yaml": yaml.safe_dump(manifest, sort_keys=False)}, opted_out, errors
 
 
@@ -380,12 +408,18 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     written = ["spec.md", "manifest.yaml"]
     (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
     manifest: dict = {"name": auto["name"], "description": auto.get("description", "")}
-    crons = [{"cron": t["expression"], **({"timezone": t["timezone"]} if t.get("timezone") else {}),
-              # §4.3 `run_if_missed`: written only when the cron opted out (absent = true)
-              **({"run_if_missed": False} if t.get("runIfMissed") is False else {})}
-             for t in auto.get("triggers") or [] if t["kind"] == "cron"]
-    if crons:
-        manifest["triggers"] = crons
+    # §20: pull writes the stored schedules — crons and intervals — so an
+    # untouched manifest round-trips them through push unchanged.
+    schedules = [{**({"cron": t["expression"],
+                      **({"timezone": t["timezone"]} if t.get("timezone") else {})}
+                     if t["kind"] == "cron" else {"every": t["every"]}),
+                  # §4.3 `run_if_missed`: written only when the schedule opted
+                  # out (absent = true)
+                  **({"run_if_missed": False} if t.get("runIfMissed") is False else {})}
+                 for t in auto.get("triggers") or []
+                 if t["kind"] in ("cron", "interval")]
+    if schedules:
+        manifest["triggers"] = schedules
     params = [{k: v for k, v in p.items() if k not in PARAM_VALUE_KEYS}
               for p in auto.get("params") or []]
     if params:
@@ -414,15 +448,17 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
 
 
 def merge_draft_triggers(stored: list[dict], drafted: list[dict]) -> list[dict]:
-    """§4.3 trigger merge, client-side like the editor: drafted crons replace
-    the spec-sourced cron subset ((expression, timezone) matches keep id, enabled
+    """§4.3 trigger merge, client-side like the editor: drafted schedules (cron
+    and interval) replace the spec-sourced schedule subset (identity matches —
+    a cron's (expression, timezone), an interval's canonical `every`, and a
+    cron never matches an interval — keep id, enabled
     state, and source and take the manifest entry's run_if_missed, new entries
     arrive enabled with source: spec, unmatched
-    spec-sourced stored crons drop — `source: user` crons always survive);
+    spec-sourced stored schedules drop — `source: user` ones always survive);
     drafted message/app-start
     entries add only when no stored trigger matches their identity fields;
-    stored non-cron triggers always survive."""
-    def same_non_cron(a: dict, b: dict) -> bool:
+    stored non-schedule triggers always survive."""
+    def same_non_schedule(a: dict, b: dict) -> bool:
         if a["kind"] != b["kind"]:
             return False
         if a["kind"] == "app_start":
@@ -437,11 +473,11 @@ def merge_draft_triggers(stored: list[dict], drafted: list[dict]) -> list[dict]:
                     and (a.get("author") or []) == (b.get("author") or []))
         return False
 
-    out = [t for t in stored if t["kind"] != "cron" or t.get("source") == "user"]
+    out = [t for t in stored
+           if _schedule_key(t) is None or t.get("source") == "user"]
     for d in drafted:
-        if d["kind"] == "cron":
-            kept = next((t for t in stored if t["kind"] == "cron"
-                         and t["expression"] == d["expression"] and t.get("timezone") == d.get("timezone")), None)
+        if (key := _schedule_key(d)) is not None:
+            kept = next((t for t in stored if _schedule_key(t) == key), None)
             if kept is None:
                 out.append(d)
             else:
@@ -452,9 +488,9 @@ def merge_draft_triggers(stored: list[dict], drafted: list[dict]) -> list[dict]:
                 i = next((i for i, x in enumerate(out) if x is kept), None)
                 if i is None:
                     out.append(merged)
-                else:  # a matched user cron already survived above
+                else:  # a matched user schedule already survived above
                     out[i] = merged
-        elif d["kind"] != "time" and not any(same_non_cron(t, d) for t in stored):
+        elif d["kind"] != "time" and not any(same_non_schedule(t, d) for t in stored):
             out.append(d)
     return out
 
@@ -950,19 +986,27 @@ def cmd_trigger_add(c: Client, args) -> None:
         entry = {"kind": "app_start", "enabled": True}
     elif args.at:
         entry = {"kind": "time", "at": args.at, "enabled": True}
+    elif args.every:
+        # §4.3: a hand-added interval is user-sourced, like a hand-added cron.
+        entry = {"kind": "interval", "every": args.every, "enabled": True,
+                 "source": "user"}
     elif args.expression:
         # §4.3: a hand-added cron is user-sourced — it survives later syncs/pushes.
         entry = {"kind": "cron", "expression": args.expression, "enabled": True,
                  "source": "user"}
     else:
-        sys.exit("give a cron expression, --at for a one-shot, --app-start, "
-                 "--discord for a Discord message trigger, or --imessage for "
-                 "an iMessage trigger")
+        sys.exit("give a cron expression, --every for a repeating interval, "
+                 "--at for a one-shot, --app-start, --discord for a Discord "
+                 "message trigger, or --imessage for an iMessage trigger")
     if args.timezone:
+        if entry["kind"] == "interval":
+            # §4.3: an interval is a duration, not a wall-clock moment.
+            sys.exit("--timezone doesn't apply to --every: an interval has no timezone")
         entry["timezone"] = args.timezone
     if getattr(args, "no_run_if_missed", False):
-        if entry["kind"] not in ("cron", "time"):
-            sys.exit("--no-run-if-missed applies to a cron schedule or --at one-shot only")
+        if entry["kind"] not in ("cron", "interval", "time"):
+            sys.exit("--no-run-if-missed applies to a cron schedule, --every "
+                     "interval, or --at one-shot only")
         entry["runIfMissed"] = False  # §4.3: stored only when false
     triggers = _stored_triggers(c, a["id"]) + [entry]
     r = c.req("PATCH", f"/automations/{a['id']}", {"triggers": triggers})
@@ -1749,8 +1793,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "on the automation's edit page in the app."
                          "\n\n"
                          "The manifest's schedules replace the stored ones, matched on the "
-                         "expression and timezone so an untouched manifest round-trips "
-                         "unchanged. Message and app-start triggers, and anything you added "
+                         "cron expression and timezone or on the interval, so an untouched "
+                         "manifest round-trips unchanged. Message and app-start triggers, and anything you added "
                          "with `trigger add`, survive a push untouched. Packages the saved "
                          "version declares are installed afterwards, and an install that "
                          "fails warns without failing the save.",
@@ -1935,9 +1979,9 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                    help="one or more parameter assignments, as printed by `param list`")
 
     tg = _sub(ag, "trigger", None, "list and edit what makes an automation execute",
-              description="Triggers are what start an automation on their own: a schedule, a "
-                          "one-off time, every app launch, or an incoming Discord or iMessage "
-                          "message. An automation with no triggers executes only when you ask "
+              description="Triggers are what start an automation on their own: a cron "
+                          "schedule, a repeating interval, a one-off time, every app launch, "
+                          "or an incoming Discord or iMessage message. An automation with no triggers executes only when you ask "
                           "it to. The verbs below take the 1-based numbers `trigger list` "
                           "prints.").add_subparsers(dest="verb2", required=False,
                                                     metavar="VERB")
@@ -1952,14 +1996,16 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     _ref(p)
     p = _sub(tg, "add", cmd_trigger_add, "add a trigger",
              description="Add a trigger. With no flags, the argument is a cron expression and "
-                         "you get a repeating schedule. --at makes it happen once at a given "
-                         "time, --app-start every time the app launches, and --discord / "
-                         "--imessage make an incoming message start it."
+                         "you get a repeating schedule. --every repeats on a plain interval "
+                         "measured from the automation's last run, --at makes it happen once "
+                         "at a given time, --app-start every time the app launches, and "
+                         "--discord / --imessage make an incoming message start it."
                          "\n\n"
                          "New triggers arrive switched on, so an automation can start "
-                         "executing as soon as this returns. Schedules and one-off times run "
-                         "in this machine's timezone unless --timezone says otherwise, and a "
-                         "one-off time in the past is refused."
+                         "executing as soon as this returns. Cron schedules and one-off times "
+                         "run in this machine's timezone unless --timezone says otherwise, and "
+                         "a one-off time in the past is refused. An interval has no timezone, "
+                         "so --timezone with --every is refused."
                          "\n\n"
                          "A trigger added here belongs to you, not to the automation's "
                          "version: pushing a new version leaves it alone, where a schedule "
@@ -1970,6 +2016,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                     "  autowright automation trigger add report \"0 8 * * 1-5\" "
                     "--timezone Europe/Berlin\n"
                     "      weekdays at 08:00 Berlin time\n"
+                    "  autowright automation trigger add report --every PT6H\n"
+                    "      six hours after every run, over and over\n"
                     "  autowright automation trigger add report --at 2026-09-01T09:00\n"
                     "      once, then never again\n"
                     "  autowright automation trigger add report --app-start\n"
@@ -1984,6 +2032,10 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p.add_argument("expression", nargs="?", metavar="cron",
                    help='a cron expression for a repeating schedule, like "0 8 * * *" for '
                         "every day at 08:00 (leave it out when using one of the flags below)")
+    p.add_argument("--every", metavar="DURATION",
+                   help="run this long after the automation's last run, over and over, as an "
+                        "ISO-8601 duration like PT6H (6 hours), PT45M (45 minutes), PT90S "
+                        "(90 seconds), or P1D (a day), from 15 seconds to 365 days")
     p.add_argument("--at", metavar="TIME",
                    help='run once at this local time, then never again — "2026-09-01T09:00"')
     p.add_argument("--app-start", action="store_true",
@@ -2005,11 +2057,12 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                    help="with --discord: only run for these senders, by numeric user id like "
                         "234567890123456789 (repeat the flag, or comma-separate several)")
     p.add_argument("--timezone", metavar="ZONE",
-                   help='which timezone the schedule or one-off time is in, as an IANA zone '
-                        'like "Europe/Berlin" (default: this machine\'s timezone)')
+                   help='which timezone the cron schedule or one-off time is in, as an IANA '
+                        'zone like "Europe/Berlin" (default: this machine\'s timezone; never '
+                        'with --every)')
     p.add_argument("--no-run-if-missed", action="store_true",
-                   help="with a cron schedule or --at: if this machine sleeps through the "
-                        "scheduled time, skip it instead of running once on wake "
+                   help="with a cron schedule, --every, or --at: if this machine sleeps "
+                        "through the scheduled time, skip it instead of running once on wake "
                         "(default: run once on wake)")
     p = _sub(tg, "on", cmd_trigger_toggle, "switch a trigger back on",
              description="Switch a trigger back on, so it starts firing again. The trigger "

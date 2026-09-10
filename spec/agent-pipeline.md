@@ -131,14 +131,16 @@ can override it.
   and the **system-tools rule** (the SYSTEM TOOLS section lists CLIs probed on the user's
   machine — the prompt names it with the §9 per-OS machine noun — a listed tool is really
   installed and an unlisted tool may still exist), the parameter kinds table (§4.2, `kv`
-  rows as `{ key, value }`), the trigger dialect (cron fields, `timezone`, the imessage /
+  rows as `{ key, value }`), the trigger dialect (cron fields, `timezone`, the interval
+  form — `every`, an ISO-8601 duration, and the cron-vs-interval choice rule 9 states —
+  the imessage /
   discord / app_start forms — `pattern` a case-insensitive substring, `author` a numeric
   id or a list, at most one `app_start` entry — the merge semantics on edit, never a
   one-shot `time` entry in a
   manifest — a chat `triggers` op may carry one — and the hard rule that a message
   trigger's identifying details come from the SPEC, never invented: absent, the trigger is
-  omitted and the steps are written against `execution.trigger_payload`), the cron- and
-  time-only `runIfMissed` option as a user knob the agent never emits, the timeout and retry
+  omitted and the steps are written against `execution.trigger_payload`), the
+  cron/interval/time-only `runIfMissed` option as a user knob the agent never emits, the timeout and retry
   mechanics (`timeout` / `no_timeout`, the 900 s default; `retries` 1–10 /
   `infinite_retries`, ≥ 1 s spacing for infinite, attempts pruned past 20; every retry
   re-runs the script from the top; an in-place retry keeps the workspace and result dir and
@@ -490,7 +492,7 @@ test: true                  # start a §11 draft test once the workflow is in sy
 test_values: { url: "…" }   # §19 paramValues for that test only (param name → value)
 param_values: { url: "…" }  # stage stored values (§4.2 — applied when the user saves)
 triggers:                   # stage trigger edits (§4.3 — applied when the user saves)
-  - add: { cron: "0 9 * * *" }        # a rule-9 dialect entry; `time` allowed here
+  - add: { cron: "0 9 * * *" }        # a rule-9 dialect entry ({ every: "PT6H" } too); `time` allowed here
   - edit: { index: 1, cron: "30 8 * * *" }   # replace entry 1's fields (id, enabled, runIfMissed kept)
   - enable: { index: 2, enabled: false }     # flip an entry on/off
   - remove: { index: 3 }                     # delete an entry
@@ -562,8 +564,8 @@ triggers list: when a matching entry (§4.3 identity fields) already exists, ans
 prose with no op — unless it exists but is off, where the right response is the `enable`
 op the user actually wants. A **pure schedule change** ("9 instead of 8") is a `triggers`
 op alone — no spec rewrite, no sync, no steps rebuild (§4.3 `source: user` keeps the
-edited cron safe from later syncs); rewrite the spec's schedule words only when the
-request also changes behavior, and then let the sync derive the crons as usual.
+edited cron or interval safe from later syncs); rewrite the spec's schedule words only when the
+request also changes behavior, and then let the sync derive the schedule entries as usual.
 
 Chat-call validation, by response shape: a valid blocker envelope settles the job `blocked`
 (`blockedAt: chat`), its optional `notes.md` (Blocker response below) riding `draft.notes`; a response with no `===FILE:` marker is an **answer** — the raw
@@ -794,6 +796,15 @@ notes rewrite (§11).
 9. `triggers` is optional. The drafted dialect, one entry per trigger:
    - `{ cron: expression }` / `{ cron: expression, timezone: zone }` — expression valid per the §4.3 dialect,
      `timezone` a known IANA zone included only when the spec names one.
+   - `{ every: duration }` — an `interval` trigger, `duration` valid per the §4.3 interval
+     dialect (`PT6H`, `PT90S`, `P1D`; 15 seconds to 365 days; stored canonical). **Cron or
+     interval:** words that name a wall-clock moment ("every morning at 8", "Mondays at 9",
+     "on the hour", "at :30") are a cron; a plain cadence with no moment ("every 6 hours",
+     "every 20 minutes", "every 90 seconds", "twice a day" when no times are given) is an
+     interval — it fires that long after the automation's *last run* (§4.3 interval
+     semantics: a manual run resets the cadence), which is what such words mean; a cadence
+     no cron can express (90 seconds, 45 minutes, 6 hours since the last run) is always an
+     interval. No `timezone` on an interval.
    - `{ imessage: handle }` (+ optional `pattern`) — `handle` a §4.3-valid sender (E.164
      phone or email), mapped to the stored `from` field.
    - `{ discord: channel-id, secret: <id> }` (+ optional `pattern`, `mention`, `author`) —

@@ -81,14 +81,17 @@ remain plain dicts (§2).
   stored - §4.1 uniqueness; a case-only rename of the same automation is allowed), description (blank clears it — the description is
   optional, §4.1), triggers (the §4.3 list, replaced
   whole; entries keep their `id`, new entries get one assigned;
-  cron/time/app_start/discord/imessage
-  kinds — a reserved kind (pubsub), an invalid cron expression, an unknown `timezone`, a
-  non-boolean `runIfMissed` (§4.3; ignored on kinds other than cron/time), a
+  cron/interval/time/app_start/discord/imessage
+  kinds — a reserved kind (pubsub), an invalid cron expression, an invalid or out-of-range
+  interval `every` (§4.3 interval dialect; `timezone` on an interval is ignored, never
+  stored), an unknown `timezone`, a
+  non-boolean `runIfMissed` (§4.3; ignored on kinds other than cron/interval/time), a
   past `time`, a `time` whose `at` carries a UTC offset (the zone belongs in `timezone`; naive
   local ISO only), a second `app_start`, or a discord/imessage entry failing the §4.3 field
   rules
-  answers 422 and nothing is stored; a cron entry's §4.3 `source` is required and must be `"spec"`
-  or `"user"` (422 otherwise — absent included) and is stored as sent;
+  answers 422 and nothing is stored; a cron or interval entry's §4.3 `source` is required and must be `"spec"`
+  or `"user"` (422 otherwise — absent included) and is stored as sent; an interval's `every`
+  is stored in the §4.3 canonical form, whatever spelling arrived;
   serialized discord and imessage triggers carry the
   derived §4.3
   `connection` state), param
@@ -105,12 +108,13 @@ remain plain dicts (§2).
   fields, `timezone` where relevant) with the same `triggers.py` code that gates the PATCH,
   answering one result per request entry in order. `valid` says whether the entry would
   store; `error` is the plain-word reason otherwise ("a cron expression needs 5 fields
-  (minute hour day month weekday)", the
+  (minute hour day month weekday)", "an interval must be at least 15 seconds", the
   §4.3 field rules) — an invalid entry is a `valid: false` result, never a 422 (the editors
   preview half-typed state); only a body that isn't a list of trigger dicts gets the
   ordinary 422. `label`/`short` are the §4.3 display strings; `nextAtMs` the next-occurrence
   epoch ms (null when the kind has no computable next — app_start and message triggers —
-  or the entry is invalid or elapsed) and `nextLabel` its "Jul 20, 3:00 PM"-style moment
+  or the entry is invalid or elapsed; for an interval, `now + every` — the endpoint has no
+  execution state, so it anchors at the request moment, §4.3) and `nextLabel` its "Jul 20, 3:00 PM"-style moment
   label. The renderer keeps **no local trigger-math mirror**: the §9.2 Add-trigger editor's
   live preview line, the §11 draft-trigger chips, and every "next trigger" label read from
   this endpoint — trigger math exists once, in `triggers.py`.

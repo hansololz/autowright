@@ -7,7 +7,11 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 - **Scheduling & triggers** — an automation runs at most `maxParallel` executions at once
   (§4.1, default 1; the API answers 409 when a manual start finds every slot taken, and the
   toast copy is client UI). Enabled triggers fire independently; occurrences due at the same
-  moment coalesce into one execution. A firing that finds every slot taken is **queued** when it
+  moment coalesce into one execution. An `interval` trigger's occurrences come from its
+  §4.3 anchor — the scheduler hands the trigger math the automation's run baseline (the
+  latest real execution's start, else `created_at`: the same baseline §4.1 `overdue`
+  uses), nothing about the anchor is stored, and every rule below treats an interval
+  exactly like a cron. A firing that finds every slot taken is **queued** when it
   came from a message trigger and `maxQueued` (§4.1) allows it, and **skipped** otherwise — see
   *Firing queue* below (a one-shot `time` trigger is still consumed by that skip, §4.3).
   **There is no automatic execution-level retry:** a failed execution stays failed until the
@@ -95,7 +99,7 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 - **Firing queue** — a message firing that finds every `maxParallel` slot taken waits instead of
   vanishing, up to `maxQueued` entries (§4.1). Two kinds of entry queue: message firings, and
   **manual starts the user chose to queue** (§19 `queue: true` — the §9.2 capacity popup's
-  Queue action; trigger label Manual). A cron, one-shot, or
+  Queue action; trigger label Manual). A cron, interval, one-shot, or
   app-start occurrence that arrives late is worse than one that never ran, so those keep the
   skip. A queued firing is a **real execution record** with status `queued` (§4.6) carrying its
   §4.5 `triggerPayload` (a manual entry carries none) — it appears in Executions immediately
@@ -114,7 +118,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     turned it away, plus the §6 busy notice), never an entry already admitted and
     answered. Setting `maxQueued: 0` restores pure skip-on-busy, and its refusals keep the
     plain "previous execution still in progress" note — nothing was queued, so nothing was
-    full. Same note for every firing that cannot queue at all (cron, one-shot, app-start).
+    full. Same note for every firing that cannot queue at all (cron, interval, one-shot,
+    app-start).
     A **manual** queue request past the cap is refused with a 409 ("the queue is full
     (N waiting)") and **no record** — the user is present to decide, unlike a message sender
     (the §9.2 popup normally prevents the call; the 409 covers the race).
@@ -157,14 +162,15 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   running when the moment passed, that occurrence is skipped entirely — no catch-up queue at
   startup; the next occurrence proceeds normally. At most one catch-up execution fires per wake
   regardless of how many occurrences — across all triggers — were slept through.
-  **Opting out (`runIfMissed: false`, §4.3):** a cron or one-shot with the field off never
-  fires late. The scheduler tells "late" from "just now" with a **grace window** of
+  **Opting out (`runIfMissed: false`, §4.3):** a cron, interval, or one-shot with the field
+  off never fires late. The scheduler tells "late" from "just now" with a **grace window** of
   `max(60, 4 × AUTOWRIGHT_TICK_S)` seconds (60 s at the default tick, §15 - no knob of its
   own): the trigger fires only when an occurrence landed within the last grace-window
   seconds (`trigger_next` after `now − grace` is at or before `now` - O(1), no walk through
   the slept span), so a Mac that wakes 30 s after a 9:00 cron still fires it, while one that
-  wakes three hours later drops the whole span and advances the trigger's baseline to `now`.
-  A dropped one-shot is consumed unfired (§4.3 spent rule). **Drop record:** when the drop
+  wakes three hours later drops the whole span and advances the trigger's baseline to `now`
+  (an interval then waits for the first §4.3 grid point after `now` — its anchor is
+  untouched, since nothing ran). A dropped one-shot is consumed unfired (§4.3 spent rule). **Drop record:** when the drop
   leaves an automation with nothing firing in that tick, the scheduler writes one `skipped`
   execution record for it (trigger kind = the dropped trigger's, note "missed while this
   Mac was asleep (run if missed is off for this trigger)" - "Mac" is the §9 per-OS machine

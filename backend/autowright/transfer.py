@@ -199,8 +199,8 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
         drafting = next((g for g in store.agents if g["id"] == a["agent_id"]), None)
         if drafting:
             manifest["agent"] = refs.agent_ref_by_id[drafting["id"]]
-        # §5.1: cron, app_start, discord, and imessage — one-shot `time`
-        # triggers are moments in time; no ids, no enabled state. A discord
+        # §5.1: cron, interval, app_start, discord, and imessage — one-shot
+        # `time` triggers are moments in time; no ids, no enabled state. A discord
         # trigger's §4.3 secret id becomes the token secret's secrets.yaml
         # REF (the archive reference format) — never the value.
         triggers = []
@@ -209,6 +209,11 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
                 triggers.append({"kind": "cron", "expression": t["expression"],
                                  **({"timezone": t["timezone"]} if t.get("timezone") else {}),
                                  # §4.3: additive, written only when the cron opted out
+                                 **({"run_if_missed": False}
+                                    if t.get(triggerlib.RUN_IF_MISSED) is False else {})})
+            elif t["kind"] == "interval":
+                # §4.3: the canonical duration, the one string the archive carries.
+                triggers.append({"kind": "interval", "every": t["every"],
                                  **({"run_if_missed": False}
                                     if t.get(triggerlib.RUN_IF_MISSED) is False else {})})
             elif t["kind"] == "app_start":
@@ -407,10 +412,11 @@ def _validate(z: zipfile.ZipFile) -> dict:
         raise TransferError("manifest triggers must be a list")
     triggers = []
     for t in triggers_in:
-        if not isinstance(t, dict) or t.get("kind") not in ("cron", "app_start",
+        if not isinstance(t, dict) or t.get("kind") not in ("cron", "interval", "app_start",
                                                             "discord", "imessage"):
             raise TransferError(f"unsupported trigger in the archive: {t!r} — "
-                                "only cron, app_start, discord, and imessage travel")
+                                "only cron, interval, app_start, discord, and "
+                                "imessage travel")
         if t["kind"] == "app_start" and any(x["kind"] == "app_start" for x in triggers):
             raise TransferError("the archive holds more than one app_start trigger")
         if t["kind"] == "discord":
@@ -432,21 +438,31 @@ def _validate(z: zipfile.ZipFile) -> dict:
                  else {"kind": "imessage", "from": t.get("from"),
                        "pattern": t.get("pattern")}
                  if t["kind"] == "imessage"
+                 else {"kind": "interval", "every": t.get("every"), "source": "spec",
+                       **({triggerlib.RUN_IF_MISSED: t["run_if_missed"]}
+                          if "run_if_missed" in t else {})}
+                 if t["kind"] == "interval"
                  else {"kind": t["kind"], "expression": t.get("expression"),
                        "timezone": t.get("timezone"), "source": "spec",
                        **({triggerlib.RUN_IF_MISSED: t["run_if_missed"]}
                           if "run_if_missed" in t else {})})
         if err := triggerlib.validate_trigger(probe):
             raise TransferError(f"invalid trigger in the archive: {err}")
-        # §5.1: archives carry no cron `source` — import stamps `spec` (the
+        # §5.1: archives carry no schedule `source` — import stamps `spec` (the
         # archive travels with its spec, §4.3), so the §4.3 merge treats the
         # imported schedule as spec-derived.
         triggers.append({"kind": t["kind"],
                          **({"expression": t["expression"], "source": "spec"}
                             if t["kind"] == "cron" else {}),
+                         # §4.3: stored canonical, whatever spelling travelled.
+                         **({"every": triggerlib.canonical_duration(
+                                 triggerlib.parse_duration(t["every"])),
+                             "source": "spec"}
+                            if t["kind"] == "interval" else {}),
                          **({"timezone": t["timezone"]} if t.get("timezone") and t["kind"] == "cron" else {}),
                          **({triggerlib.RUN_IF_MISSED: False}
-                            if t["kind"] == "cron" and t.get("run_if_missed") is False else {}),
+                            if t["kind"] in triggerlib.SCHEDULE_KINDS
+                            and t.get("run_if_missed") is False else {}),
                          **({"channel": t["channel"].strip(), "secret": t["secret"].strip(),
                              **({"pattern": t["pattern"].strip()} if t.get("pattern") else {}),
                              **({"mention": True} if t.get("mention") else {}),

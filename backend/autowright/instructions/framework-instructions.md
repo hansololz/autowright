@@ -175,8 +175,8 @@ memory                    # persistent dir handle: open(memory / "cache.bin") an
 execution                 # read-only metadata: .automation_id / .automation_name /
                           #   .id / .step_index (1-based) / .step_name / .trigger (a
                           #   label string only, one of "Manual", "Menu bar" ("Tray" on
-                          #   Windows and Linux), "Cron", "Once", "App start", "Discord",
-                          #   "iMessage", "Test"; never the message)
+                          #   Windows and Linux), "Cron", "Interval", "Once", "App start",
+                          #   "Discord", "iMessage", "Test"; never the message)
 execution.trigger_payload # message-trigger context as a dict, None otherwise; the ONLY
                           #   place message details live. Discord: {kind, text, sender,
                           #   channel, channelName (None on a DM or cache miss), guildName
@@ -359,6 +359,16 @@ timezone, add `timezone` with the IANA zone name (`- { cron: "0 9 * * 1",
 timezone: Asia/Tokyo }`); otherwise omit `timezone` and times read as the
 {{MACHINE}}'s local time.
 
+A plain cadence with no moment in it is an interval instead: `- every: "PT6H"`,
+an ISO-8601 duration built from days, hours, minutes, and seconds (`P1D`,
+`PT6H`, `PT45M`, `PT90S`), from 15 seconds to 365 days, with no `timezone`.
+Words that name a wall-clock moment ("every morning at 8", "Mondays at 9", "on
+the hour", "at :30") are a cron; words that name a cadence and nothing else
+("every 6 hours", "every 20 minutes", "every 90 seconds") are an interval, and
+a cadence no cron can express (90 seconds, 45 minutes) is always an interval.
+An interval fires that long after the automation's LAST run, so a manual run
+resets the cadence.
+
 Message and app-start triggers can be drafted too:
 
 - `- { imessage: "+15551234567" }`: the sender handle (E.164 phone or email);
@@ -383,12 +393,13 @@ trigger will deliver, added on the automation page or through an editing-session
 `triggers` op once the user supplies the details. Never emit one-shot (`time`)
 triggers in a manifest (an editing-session `triggers` op may carry one, because the
 user asked for it directly). When the automation needs no trigger at all, omit the
-`triggers` key entirely. Cron and one-shot triggers also carry a "run if missed"
-setting the user controls on the automation page; never emit it.
+`triggers` key entirely. Cron, interval, and one-shot triggers also carry a "run
+if missed" setting the user controls on the automation page; never emit it.
 
-On an edit, drafted triggers merge safely into the user's stored list: crons
-replace the previous drafted schedule, message/app-start entries only add when
-not already present, and triggers the user added themselves always survive.
+On an edit, drafted triggers merge safely into the user's stored list: crons and
+intervals replace the previous drafted schedule, message/app-start entries only
+add when not already present, and triggers the user added themselves always
+survive.
 
 ## Parameters
 

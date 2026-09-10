@@ -41,7 +41,7 @@ log = logging.getLogger("autowright.storage")
 # label that names a platform surface, so it resolves per-OS through
 # paths.tray_trigger_label (§9) rather than this static map.
 TRIGGER_LABELS = {
-    "manual": "Manual", "menubar": "Menu bar", "cron": "Cron", "time": "Once",
+    "manual": "Manual", "menubar": "Menu bar", "cron": "Cron", "interval": "Interval", "time": "Once",
     "app_start": "App start", "discord": "Discord", "imessage": "iMessage",
     "test": "Test", "pubsub": "Pub/Sub",
 }
@@ -722,6 +722,11 @@ class Store:
                             "enabled": bool(t.get("enabled", True)),
                             **({"expression": t["expression"], "source": t["source"]}
                                if t["kind"] == "cron" else
+                               # §4.3: re-canonicalized on load, so a hand-edited
+                               # spelling never survives to the merge or the API.
+                               {"every": triggerlib.canonical_duration(triggerlib.parse_duration(t["every"])),
+                                "source": t["source"]}
+                               if t["kind"] == "interval" else
                                {"at": t["at"]} if t["kind"] == "time" else
                                {"channel": t["channel"], "secret": t["secret"],
                                 **({"pattern": t["pattern"]} if t.get("pattern") else {}),
@@ -736,7 +741,7 @@ class Store:
                             # §4.3 `runIfMissed`: stored only when false; an
                             # absent key is the pre-field shape and reads true (§21).
                             **({triggerlib.RUN_IF_MISSED: False}
-                               if t["kind"] in ("cron", "time") and t.get(triggerlib.RUN_IF_MISSED) is False else {}),
+                               if t["kind"] in ("cron", "interval", "time") and t.get(triggerlib.RUN_IF_MISSED) is False else {}),
                             # §4.3 enable stamp — loaded as stored; a trigger
                             # written before the field existed stays without it
                             # (never healed, §4.1 falls back to the run baseline).
@@ -1387,9 +1392,9 @@ class Store:
     def trigger_json(self, t: dict) -> dict:
         label, short = triggerlib.trigger_display(t)
         out = {**t, "label": label, "short": short}
-        if t["kind"] in ("cron", "time"):
-            # §4.3: serialized explicitly on every cron/time trigger, so no
-            # client ever guesses the default (stored only when false).
+        if t["kind"] in ("cron", "interval", "time"):
+            # §4.3: serialized explicitly on every cron/interval/time trigger,
+            # so no client ever guesses the default (stored only when false).
             out[triggerlib.RUN_IF_MISSED] = triggerlib.run_if_missed(t)
         if t["kind"] == "discord":
             # §4.3 `connection` — the listener manager's state for the trigger's
@@ -2286,20 +2291,28 @@ class Store:
         a["_latest_result"] = (key, result)
         return result
 
-    def overdue(self, a: dict, now: datetime | None = None) -> bool:
-        """§4.1 overdue, shared by problems_json and the §6 scheduler sweep:
-        two consecutive enabled-cron occurrences passed since the last real
-        run (or since created_at if it never ran) with no execution. Each
-        trigger counts from that run baseline or its own §4.3 enable stamp,
-        whichever is later, so a re-enable never false-fires on moments that
-        passed while it was off. Derived from the execution index, the stored
-        stamp, and the clock — the verdict itself is never stored."""
+    def run_baseline(self, a: dict) -> datetime | None:
+        """§4.1 run baseline as local naive trigger-math time: the latest real
+        execution's start (the lastStatus population — skipped/queued/test
+        excluded, a run in progress included), else created_at. It anchors
+        §4.3 interval triggers and seeds the §4.1 overdue audit; None only
+        when even created_at is unreadable (§5 lenient)."""
         base = (lenient_local(a.get("_last_exec_at")) if a.get("_last_exec_at") else None) \
             or lenient_local(a.get("created_at"))
+        return base.astimezone().replace(tzinfo=None) if base else None
+
+    def overdue(self, a: dict, now: datetime | None = None) -> bool:
+        """§4.1 overdue, shared by problems_json and the §6 scheduler sweep:
+        two consecutive enabled cron/interval occurrences passed since the
+        last real run (or since created_at if it never ran) with no execution.
+        Each trigger counts from that run baseline or its own §4.3 enable
+        stamp, whichever is later, so a re-enable never false-fires on moments
+        that passed while it was off. Derived from the execution index, the
+        stored stamp, and the clock — the verdict itself is never stored."""
+        base = self.run_baseline(a)
         if base is None:  # §5 lenient: a damaged created_at drops the audit, never 500s
             return False
-        # trigger math runs on local naive datetimes (triggers.trigger_next)
-        return triggerlib.is_overdue(a["triggers"], base.astimezone().replace(tzinfo=None), now)
+        return triggerlib.is_overdue(a["triggers"], base, now)
 
     def problems_json(self, a: dict, cur: dict) -> list[dict]:
         """§4.1 `problems` — the would-this-fire-successfully audit, derived at
@@ -2426,7 +2439,7 @@ class Store:
         elif latest_h and latest_h["status"] == "failed":
             chip = "Needs attention"
             chip_status = "attention"
-        nxt = triggerlib.next_at(a["triggers"])
+        nxt = triggerlib.next_at(a["triggers"], run_baseline=self.run_baseline(a))
         when = a["versions"].get(a["current_version"], {}).get("when")
         spec_meta = f"v{a['current_version']}"
         if when and (dt := lenient_local(when)):

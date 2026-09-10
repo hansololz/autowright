@@ -1,5 +1,6 @@
-"""Trigger math and display strings (§4.1, §4.3): the cron dialect, one-shot
-times, next occurrences, humanized labels, and trigger validation."""
+"""Trigger math and display strings (§4.1, §4.3): the cron dialect, the
+interval dialect, one-shot times, next occurrences, humanized labels, and
+trigger validation."""
 from __future__ import annotations
 
 import re
@@ -31,6 +32,85 @@ _SEARCH_DAYS = 366 * 5
 
 class CronError(ValueError):
     pass
+
+
+# ---------- interval dialect (§4.3): P[nD][T[nH][nM][nS]], 1 min .. 365 days ----------
+
+SCHEDULE_KINDS = ("cron", "interval")  # §4.3: the kinds the §8 sync derives; carry `source`
+INTERVAL_MIN_S = 15  # §4.3: one scheduler tick at the default cadence (§15)
+INTERVAL_MAX_S = 365 * 86400
+INTERVAL_FORMAT_ERROR = ("an interval needs an ISO-8601 duration like PT6H "
+                         "(days, hours, minutes, seconds)")
+INTERVAL_MIN_ERROR = "an interval must be at least 15 seconds"
+INTERVAL_MAX_ERROR = "an interval can be at most 365 days"
+_DURATION_RE = re.compile(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$")
+# Canonical units, largest first: the stored form is one component in the
+# largest unit that divides the total exactly (§4.3 interval dialect).
+_UNITS = (("D", 86400, "day", "d"), ("H", 3600, "hour", "h"),
+          ("M", 60, "minute", "m"), ("S", 1, "second", "s"))
+
+
+class IntervalError(ValueError):
+    pass
+
+
+def parse_duration(every: object) -> int:
+    """§4.3 interval dialect → total seconds. Raises IntervalError with the
+    plain-word reason (format, under 15 seconds, over 365 days)."""
+    if not isinstance(every, str):
+        raise IntervalError(INTERVAL_FORMAT_ERROR)
+    m = _DURATION_RE.match(every.strip().upper())
+    if not m or not any(m.groups()) or every.strip().upper().endswith("T"):
+        raise IntervalError(INTERVAL_FORMAT_ERROR)
+    d, h, mi, sec = (int(g) if g else 0 for g in m.groups())
+    total = d * 86400 + h * 3600 + mi * 60 + sec
+    if total == 0:
+        raise IntervalError(INTERVAL_FORMAT_ERROR)
+    if total < INTERVAL_MIN_S:
+        raise IntervalError(INTERVAL_MIN_ERROR)
+    if total > INTERVAL_MAX_S:
+        raise IntervalError(INTERVAL_MAX_ERROR)
+    return total
+
+
+def _canonical_parts(seconds: int) -> tuple[int, tuple[str, int, str, str]]:
+    for unit in _UNITS:
+        if seconds % unit[1] == 0:
+            return seconds // unit[1], unit
+    raise AssertionError("seconds always divide by 1")
+
+
+def canonical_duration(seconds: int) -> str:
+    """§4.3 canonical form: exactly one component, the largest unit that
+    divides the total — PT360M → PT6H, PT24H → P1D, PT1H30M → PT90M."""
+    n, (letter, _, _, _) = _canonical_parts(seconds)
+    return f"P{n}D" if letter == "D" else f"PT{n}{letter}"
+
+
+def interval_display(every: str) -> tuple[str, str]:
+    """§4.3 interval labels: "Every 6 hours" / "Every 6h"; a count of 1 reads
+    as the bare unit ("Every hour" / "Every 1h"). No timezone suffix."""
+    n, (_, _, word, short) = _canonical_parts(parse_duration(every))
+    long = f"Every {word}" if n == 1 else f"Every {n} {word}s"
+    return long, f"Every {n}{short}"
+
+
+def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime) -> datetime:
+    """§4.3 interval semantics: the later of the trigger's enable stamp and
+    the automation's run baseline; `fallback` (the request moment) when the
+    caller has neither — the §19 preview, which anchors at now."""
+    cands = [x for x in (enabled_since(t), run_baseline) if x is not None]
+    return max(cands) if cands else fallback
+
+
+def interval_next(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
+    """First `anchor + n × every` (n ≥ 1) strictly after `after`."""
+    every = timedelta(seconds=parse_duration(t["every"]))
+    anchor = interval_anchor(t, run_baseline, after)
+    if after < anchor:
+        return anchor + every
+    n = int((after - anchor) / every) + 1
+    return anchor + n * every
 
 
 # ---------- cron dialect (§4.3): 5 fields, numbers only, * , - / ----------
@@ -217,7 +297,7 @@ def normalize_authors(raw: list) -> list[str]:
     return sorted({str(a).strip() for a in raw})
 
 
-RUN_IF_MISSED = "runIfMissed"  # §4.3: cron/time only, stored only when false
+RUN_IF_MISSED = "runIfMissed"  # §4.3: cron/interval/time only, stored only when false
 RUN_IF_MISSED_ERROR = "run if missed must be true or false"
 
 
@@ -291,6 +371,18 @@ def validate_trigger(t: dict, allow_past: bool = False) -> str | None:
         except CronError as e:
             return str(e)
         return None
+    if kind == "interval":
+        # §4.3 provenance: required, like a cron. No timezone — a duration has
+        # no wall clock; a sent one is ignored and never stored.
+        if t.get("source") not in ("spec", "user"):
+            return 'an interval trigger\'s source must be "spec" or "user"'
+        if RUN_IF_MISSED in t and not isinstance(t[RUN_IF_MISSED], bool):
+            return RUN_IF_MISSED_ERROR
+        try:
+            parse_duration(t.get("every"))
+        except IntervalError as e:
+            return str(e)
+        return None
     if kind == "time":
         if RUN_IF_MISSED in t and not isinstance(t[RUN_IF_MISSED], bool):
             return RUN_IF_MISSED_ERROR
@@ -342,6 +434,11 @@ def normalize_triggers(raw: list,
         if t["kind"] == "cron":
             n["expression"] = t["expression"].strip()
             n["source"] = t["source"]  # §4.3: required, stored as sent
+        elif t["kind"] == "interval":
+            # §4.3: stored canonical, whatever spelling arrived — one trigger
+            # per duration, so the merge and the archive compare one string.
+            n["every"] = canonical_duration(parse_duration(t["every"]))
+            n["source"] = t["source"]
         elif t["kind"] == "time":
             n["at"] = t["at"]
         elif t["kind"] == "discord":
@@ -364,9 +461,9 @@ def normalize_triggers(raw: list,
         # any other kind, so keeping it here would survive only until restart.
         if t["kind"] in ("cron", "time") and t.get("timezone"):
             n["timezone"] = t["timezone"]
-        # §4.3 `runIfMissed`: cron/time only, stored only when false (absent =
-        # true, the pre-field shape, §21); ignored on every other kind.
-        if t["kind"] in ("cron", "time") and t.get(RUN_IF_MISSED) is False:
+        # §4.3 `runIfMissed`: cron/interval/time only, stored only when false
+        # (absent = true, the pre-field shape, §21); ignored on every other kind.
+        if t["kind"] in ("cron", "interval", "time") and t.get(RUN_IF_MISSED) is False:
             n[RUN_IF_MISSED] = False
         out.append(n)
     return out, None
@@ -439,6 +536,8 @@ def time_display(at: str, timezone: str | None = None) -> tuple[str, str]:
 def trigger_display(t: dict) -> tuple[str, str]:
     if t["kind"] == "cron":
         return cron_display(t["expression"], t.get("timezone"))
+    if t["kind"] == "interval":
+        return interval_display(t["every"])
     if t["kind"] == "app_start":
         return "On app start", "App start"
     if t["kind"] == "discord":
@@ -456,13 +555,20 @@ def trigger_display(t: dict) -> tuple[str, str]:
     return time_display(t["at"], t.get("timezone"))
 
 
-def trigger_next(t: dict, after: datetime | None = None) -> datetime | None:
+def trigger_next(t: dict, after: datetime | None = None,
+                 run_baseline: datetime | None = None) -> datetime | None:
     """Next occurrence of one trigger strictly after `after`, both local naive.
-    A `timezone` trigger is evaluated on its zone's wall clock (the enabled flag is the caller's concern)."""
+    A `timezone` trigger is evaluated on its zone's wall clock (the enabled flag
+    is the caller's concern). `run_baseline` — the automation's latest real
+    execution start, else its created_at, local naive — anchors an `interval`
+    (§4.3 interval semantics); callers without automation context (the §19
+    preview) pass none, and the interval anchors at `after`."""
     if t["kind"] in ("app_start", "discord", "imessage"):
         return None  # §4.3: no computable next occurrence
-    zone = zone_of(t)
     base = after or datetime.now()
+    if t["kind"] == "interval":
+        return interval_next(t, base, run_baseline)
+    zone = zone_of(t)
     if t["kind"] == "cron":
         if not zone:
             # Same non-monotonicity as the zoned path, on the system zone: a
@@ -520,35 +626,40 @@ def time_elapsed(t: dict, now: datetime | None = None) -> bool:
     return at <= (now or datetime.now())
 
 
-def next_at(triggers: list[dict], after: datetime | None = None) -> datetime | None:
-    """§4.3 nextAtMs: minimum over enabled triggers, None when nothing is coming."""
-    nxts = [n for t in triggers if t["enabled"] if (n := trigger_next(t, after))]
+def next_at(triggers: list[dict], after: datetime | None = None,
+            run_baseline: datetime | None = None) -> datetime | None:
+    """§4.3 nextAtMs: minimum over enabled triggers, None when nothing is coming.
+    `run_baseline` anchors interval triggers (trigger_next)."""
+    nxts = [n for t in triggers if t["enabled"] if (n := trigger_next(t, after, run_baseline))]
     return min(nxts) if nxts else None
 
 
 def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = None) -> bool:
-    """§4.1 overdue: some enabled cron trigger has had two consecutive
-    occurrences pass since its baseline with no run — two, not one, so a single
-    legitimately skipped moment (§6 busy-skip, a restart at the wrong minute)
-    never flags. The baseline is per trigger: the later of `baseline` (the
-    automation's run baseline, local naive like every trigger_next time) and
-    the trigger's §4.3 enable stamp, so occurrences that passed while it was
-    off never count — a re-enable, or a cron added to an old automation, starts
-    counting from that moment, exactly as the §6 scheduler fires. Cron only:
-    one-shots are consumed by the §4.3 spent rule, and app-start/message
-    triggers have no schedule."""
+    """§4.1 overdue: some enabled cron or interval trigger has had two
+    consecutive occurrences pass since its baseline with no run — two, not one,
+    so a single legitimately skipped moment (§6 busy-skip, a restart at the
+    wrong minute) never flags. The baseline is per trigger: the later of
+    `baseline` (the automation's run baseline, local naive like every
+    trigger_next time) and the trigger's §4.3 enable stamp, so occurrences that
+    passed while it was off never count — a re-enable, or a schedule added to
+    an old automation, starts counting from that moment, exactly as the §6
+    scheduler fires. For an interval that per-trigger baseline is its §4.3
+    anchor, so it is overdue once `anchor + 2 × every` has passed. Cron and
+    interval only: one-shots are consumed by the §4.3 spent rule, and
+    app-start/message triggers have no schedule."""
     now = now or datetime.now()
     for t in triggers:
-        if t.get("kind") != "cron" or not t.get("enabled"):
+        if t.get("kind") not in SCHEDULE_KINDS or not t.get("enabled"):
             continue
         if not run_if_missed(t):
-            # §4.1: a cron that opted out of the §6 wake catch-up chose its
+            # §4.1: a schedule that opted out of the §6 wake catch-up chose its
             # misses: a sleeping Mac is the one way a live scheduler misses a
             # moment, and the §6 drop record already shows each one.
             continue
         since = enabled_since(t)  # None for a trigger stored without the stamp
-        first = trigger_next(t, after=max(baseline, since) if since else baseline)
-        second = trigger_next(t, after=first) if first else None
+        first = trigger_next(t, after=max(baseline, since) if since else baseline,
+                             run_baseline=baseline)
+        second = trigger_next(t, after=first, run_baseline=baseline) if first else None
         if second is not None and second < now:
             return True
     return False

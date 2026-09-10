@@ -565,10 +565,45 @@ def test_workdir_run_if_missed_round_trip(tmp_path):
     assert "run_if_missed" not in yaml.safe_load((d2 / "manifest.yaml").read_text())["triggers"][0]
 
 
+def test_workdir_interval_round_trip(tmp_path):
+    """§20/§4.3: pull writes a stored interval as `every` beside the crons, the
+    §8 dialect validates it, and an untouched push merges it back onto the same
+    stored entry - id, enabled state, and source unchanged. `run_if_missed`
+    rides an `every` entry like a cron's."""
+    import yaml
+
+    from autowright import cli
+
+    auto = {**FULL_AUTO,
+            "triggers": [*FULL_AUTO["triggers"],
+                         {"id": "t3", "kind": "interval", "every": "PT6H",
+                          "enabled": False, "source": "spec", "runIfMissed": False,
+                          "label": "Every 6 hours", "short": "Every 6h"},
+                         {"id": "t4", "kind": "interval", "every": "PT90S",
+                          "enabled": True, "source": "user",
+                          "label": "Every 90 seconds", "short": "Every 90s"}]}
+    d = tmp_path / "wd"
+    cli.write_workdir(d, auto)
+    assert yaml.safe_load((d / "manifest.yaml").read_text())["triggers"] == [
+        {"cron": "0 8 * * *", "timezone": "Asia/Tokyo"},
+        {"every": "PT6H", "run_if_missed": False},
+        {"every": "PT90S"}]
+
+    draft = cli.validate_workdir(_WorkdirClient(auto), d)
+    assert [(t["kind"], t.get("every"), t.get("runIfMissed", "absent"))
+            for t in draft["triggers"] if t["kind"] == "interval"] == [
+        ("interval", "PT6H", False), ("interval", "PT90S", "absent")]
+    merged = cli.merge_draft_triggers(auto["triggers"], draft["triggers"])
+    kept = {t["id"]: t for t in merged if t["kind"] == "interval"}
+    assert kept["t3"]["enabled"] is False and kept["t3"]["runIfMissed"] is False
+    assert kept["t4"]["source"] == "user" and "runIfMissed" not in kept["t4"]
+
+
 def test_lift_run_if_missed_strips_the_key_and_reports_misuse():
-    """§20: `run_if_missed` is lifted out of the manifest's cron entries before
-    the §8 rule-9 validator sees them - keyed by (expression, timezone) - and a
-    manifest without the key passes through untouched."""
+    """§20: `run_if_missed` is lifted out of the manifest's cron and every
+    entries before the §8 rule-9 validator sees them - keyed by the §4.3
+    schedule identity - and a manifest without the key passes through
+    untouched."""
     import yaml
 
     from autowright import cli
@@ -587,18 +622,26 @@ def test_lift_run_if_missed_strips_the_key_and_reports_misuse():
         {"cron": "0 10 * * *", "run_if_missed": True},
         {"cron": "0 11 * * *"}]))
     assert errors == []
-    assert opted_out == {("0 8 * * *", None), ("0 9 * * *", "Asia/Tokyo")}
+    assert opted_out == {("cron", "0 8 * * *", None), ("cron", "0 9 * * *", "Asia/Tokyo")}
     manifest = yaml.safe_load(lifted["manifest.yaml"])
     assert all("run_if_missed" not in t for t in manifest["triggers"])
     assert [t["cron"] for t in manifest["triggers"]] == [
         "0 8 * * *", "0 9 * * *", "0 10 * * *", "0 11 * * *"]
     assert lifted["01-x.py"] == "print('x')\n"
 
+    # §4.3: an `every` entry opts out too, keyed by the canonical duration
+    lifted, opted_out, errors = cli._lift_run_if_missed(files([
+        {"every": "PT360M", "run_if_missed": False},
+        {"every": "PT90S"}]))
+    assert errors == [] and opted_out == {("interval", "PT6H")}
+    assert yaml.safe_load(lifted["manifest.yaml"])["triggers"] == [
+        {"every": "PT360M"}, {"every": "PT90S"}]
+
     _, opted_out, errors = cli._lift_run_if_missed(files([
         {"cron": "0 8 * * *", "run_if_missed": "no"},
         {"app_start": True, "run_if_missed": False}]))
     assert errors == ["triggers: run_if_missed must be true or false",
-                      "triggers: run_if_missed applies to cron entries only"]
+                      "triggers: run_if_missed applies to cron and every entries only"]
     assert opted_out == set()
 
 
@@ -771,6 +814,69 @@ def test_merge_draft_triggers_takes_the_manifest_run_if_missed():
     assert merged == [{**stored[0], "source": "user", "runIfMissed": False}]
 
 
+def test_trigger_add_interval():
+    """§20 --every: a hand-added §4.3 interval, user-sourced like a hand-added
+    cron. --timezone with it exits 1 (an interval has no zone), and
+    --no-run-if-missed rides it like a cron."""
+    from types import SimpleNamespace
+
+    from autowright import cli
+
+    def args(**over):
+        return SimpleNamespace(**{"automation": "Daily Report", "discord": None,
+                                  "secret": None, "pattern": None, "mention": False,
+                                  "author": None, "imessage": None, "app_start": False,
+                                  "at": None, "every": None, "expression": None,
+                                  "timezone": None, **over})
+
+    c = _WorkdirClient()
+    cli.cmd_trigger_add(c, args(every="PT6H"))
+    method, path, body = c.posted[-1]
+    assert (method, path) == ("PATCH", f"/automations/{FULL_AUTO['id']}")
+    assert body["triggers"][-1] == {"kind": "interval", "every": "PT6H",
+                                    "enabled": True, "source": "user"}
+    cli.cmd_trigger_add(c, args(every="PT6H", no_run_if_missed=True))
+    assert c.posted[-1][2]["triggers"][-1] == {
+        "kind": "interval", "every": "PT6H", "enabled": True, "source": "user",
+        "runIfMissed": False}
+    sent_before = len(c.posted)
+    with pytest.raises(SystemExit, match="an interval has no timezone"):
+        cli.cmd_trigger_add(c, args(every="PT6H", timezone="Asia/Tokyo"))
+    assert len(c.posted) == sent_before
+
+
+def test_merge_draft_triggers_intervals():
+    """§4.3 trigger merge, CLI side: drafted intervals match stored intervals
+    on the canonical `every` (a cron never matches one), matches keep id /
+    enabled / source, spec-sourced intervals the manifest no longer lists drop,
+    and user-sourced ones always survive."""
+    from autowright import cli
+
+    stored = [{"id": "i1", "kind": "interval", "every": "PT6H", "enabled": False,
+               "source": "spec"},
+              {"id": "i2", "kind": "interval", "every": "PT90S", "enabled": True,
+               "source": "spec"},
+              {"id": "i3", "kind": "interval", "every": "P1D", "enabled": True,
+               "source": "user"},
+              {"id": "t1", "kind": "cron", "expression": "0 8 * * *", "enabled": True,
+               "source": "spec"}]
+    # PT360M is PT6H spelled long — the canonical form is what matches (§4.3)
+    merged = cli.merge_draft_triggers(stored, [
+        {"kind": "interval", "every": "PT360M", "enabled": True, "source": "spec"},
+        {"kind": "interval", "every": "PT30M", "enabled": True, "source": "spec"}])
+    assert [(t.get("id"), t["kind"], t.get("every") or t.get("expression")) for t in merged] == [
+        ("i3", "interval", "P1D"),            # user-sourced: always survives
+        ("i1", "interval", "PT6H"),           # matched: keeps id, enabled, source
+        (None, "interval", "PT30M")]          # new: arrives as drafted
+    kept = next(t for t in merged if t.get("id") == "i1")
+    assert kept["enabled"] is False and kept["source"] == "spec"
+    # a cron never matches an interval: both land side by side
+    merged = cli.merge_draft_triggers(
+        [{"id": "i1", "kind": "interval", "every": "PT6H", "enabled": True, "source": "spec"}],
+        [{"kind": "cron", "expression": "0 8 * * *", "enabled": True, "source": "spec"}])
+    assert [(t.get("id"), t["kind"]) for t in merged] == [(None, "cron")]
+
+
 def test_trigger_add_discord():
     from types import SimpleNamespace
 
@@ -781,7 +887,7 @@ def test_trigger_add_discord():
     cli.cmd_trigger_add(c, SimpleNamespace(
         automation="Daily Report", discord="123", secret="API_TOKEN",
         pattern="go", mention=True, author=["777,888", "999"], imessage=None,
-        app_start=False, at=None, expression=None, timezone=None))
+        app_start=False, at=None, every=None, expression=None, timezone=None))
     method, path, body = c.posted[-1]
     assert (method, path) == ("PATCH", f"/automations/{FULL_AUTO['id']}")
     # repeated --author flags and comma-separated values collect into one list
@@ -794,14 +900,14 @@ def test_trigger_add_discord():
         cli.cmd_trigger_add(c, SimpleNamespace(
             automation="Daily Report", discord="123", secret=None, pattern=None,
             mention=False, author=None, imessage=None, app_start=False,
-            at=None, expression=None, timezone=None))
+            at=None, every=None, expression=None, timezone=None))
     # an unknown secret name exits with the candidate list, nothing sent
     sent_before = len(c.posted)
     with pytest.raises(SystemExit, match="no stored secret named"):
         cli.cmd_trigger_add(c, SimpleNamespace(
             automation="Daily Report", discord="123", secret="NOPE", pattern=None,
             mention=False, author=None, imessage=None, app_start=False,
-            at=None, expression=None, timezone=None))
+            at=None, every=None, expression=None, timezone=None))
     assert len(c.posted) == sent_before
 
 
@@ -814,7 +920,7 @@ def test_trigger_add_imessage():
     cli.cmd_trigger_add(c, SimpleNamespace(
         automation="Daily Report", discord=None, secret=None,
         pattern="deploy", mention=False, imessage="+15551234567",
-        app_start=False, at=None, expression=None, timezone=None))
+        app_start=False, at=None, every=None, expression=None, timezone=None))
     method, path, body = c.posted[-1]
     assert (method, path) == ("PATCH", f"/automations/{FULL_AUTO['id']}")
     assert body["triggers"][-1] == {"kind": "imessage", "from": "+15551234567",
@@ -833,7 +939,8 @@ def test_trigger_add_no_run_if_missed():
         return SimpleNamespace(**{"automation": "Daily Report", "discord": None,
                                   "secret": None, "pattern": None, "mention": False,
                                   "author": None, "imessage": None, "app_start": False,
-                                  "at": None, "expression": None, "timezone": None,
+                                  "at": None, "every": None, "expression": None,
+                                  "timezone": None,
                                   **over})
 
     c = _WorkdirClient()

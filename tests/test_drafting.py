@@ -100,6 +100,29 @@ def test_triggers_key_is_parsed():
                                   "source": "spec"}]
 
 
+def test_triggers_interval_entry_is_parsed():
+    # §8 rule 9 / §4.3: { every: duration } drafts an interval, source: spec
+    # like every other drafted schedule.
+    withtrig = GOOD_STEPS.replace(
+        "note: Created\n", 'note: Created\ntriggers:\n  - every: "PT6H"\n')
+    draft, errors = validate_steps(parse_envelope(withtrig))
+    assert errors == []
+    assert draft["triggers"] == [{"kind": "interval", "every": "PT6H", "enabled": True,
+                                  "source": "spec"}]
+
+
+def test_triggers_interval_bad_duration_rejected():
+    # §4.3 interval dialect: the plain-word reason rides the validation error.
+    for snippet, reason in (('triggers:\n  - every: "P1W"\n', "ISO-8601 duration"),
+                            ('triggers:\n  - every: "PT10S"\n', "at least 15 seconds"),
+                            ('triggers:\n  - every: "P400D"\n', "at most 365 days"),
+                            ('triggers:\n  - { every: "PT6H", timezone: Asia/Tokyo }\n',
+                             "must be")):
+        bad = GOOD_STEPS.replace("note: Created\n", "note: Created\n" + snippet)
+        _, errors = validate_steps(parse_envelope(bad))
+        assert any(reason in e for e in errors), snippet
+
+
 def test_triggers_bad_entries_rejected():
     # one-shot `time` entries, bad expressions, and invalid message details are
     # validation errors (§8 rule 9)
@@ -599,9 +622,13 @@ def test_steps_prompt_embeds_current_triggers():
                {"id": "t1", "kind": "cron", "expression": "0 8 * * *", "enabled": True},
                {"id": "t2", "kind": "imessage", "from": "+15551234567", "enabled": False},
                {"id": "t3", "kind": "time", "at": "2030-01-01T09:00", "enabled": True}]}
+    cur["triggers"].append({"id": "t4", "kind": "interval", "every": "PT6H",
+                            "enabled": True, "source": "user"})
     p = build_steps_prompt("# T\n\nBody.", cur, GRANTS)
     assert "=== CURRENT triggers" in p
     assert "cron: 0 8 * * *" in p
+    # §4.3: a stored interval renders as { every: … } — never the `time` fallback
+    assert "every: PT6H" in p
     assert "imessage: '+15551234567'" in p and "'off': true" in p
     assert "time: 2030-01-01T09:00" in p
     # an empty trigger list beside existing steps still renders the section, as none
@@ -1424,6 +1451,23 @@ def test_validate_actions_trigger_ops():
         {"op": "enable", "index": 2, "enabled": False},
         {"op": "remove", "index": 2},
     ]
+
+
+def test_validate_actions_trigger_ops_interval():
+    # §8 `triggers` ops: an interval add lands source: user, like a cron add.
+    ok, errs = validate_actions("triggers:\n  - add: { every: 'PT90S' }\n", None, 1)
+    assert errs == []
+    assert ok["triggers"] == [
+        {"op": "add", "trigger": {"kind": "interval", "every": "PT90S",
+                                  "enabled": True, "source": "user"}}]
+    ok, errs = validate_actions("triggers:\n  - edit: { index: 1, every: 'PT6H' }\n", None, 1)
+    assert errs == []
+    assert ok["triggers"] == [
+        {"op": "edit", "index": 1,
+         "trigger": {"kind": "interval", "every": "PT6H", "enabled": True,
+                     "source": "user"}}]
+    _, errs = validate_actions("triggers:\n  - add: { every: 'P1W' }\n", None, 1)
+    assert any("ISO-8601 duration" in e for e in errs)
 
 
 def test_validate_actions_concurrency():

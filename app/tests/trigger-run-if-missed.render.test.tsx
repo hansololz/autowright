@@ -1,5 +1,5 @@
 // §9.2 "Catch up if missed": the §4.3 runIfMissed surface: the NO CATCH-UP
-// badge a cron/time row wears while the opt-out is stored, and the editor
+// badge a cron/interval/time row wears while the opt-out is stored, and the editor
 // checkbox that sets it (checked by default, `runIfMissed: false` on save only
 // when unchecked). Both render for real (happy-dom) against the real store
 // with the api module mocked.
@@ -73,17 +73,19 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe('§9.2 NO CATCH-UP badge', () => {
-  it('marks every cron/time row that stored the opt-out, and no other', () => {
+  it('marks every cron/interval/time row that stored the opt-out, and no other', () => {
     render(<TriggersCard
       auto={auto([
         trigger({ id: 't1', runIfMissed: false }),
         trigger({ id: 't2', runIfMissed: true }),
         trigger({ id: 't3' }),
         trigger({ id: 't4', kind: 'time', at: '2999-01-01T09:00', runIfMissed: false }),
+        trigger({ id: 't5', kind: 'interval', every: 'PT6H', runIfMissed: false }),
+        trigger({ id: 't6', kind: 'interval', every: 'P1D' }),
       ])}
       statusText="Next: tomorrow"
     />)
-    expect(screen.getAllByText('NO CATCH-UP').length).toBe(2)
+    expect(screen.getAllByText('NO CATCH-UP').length).toBe(3)
   })
 
   it('is absent when nothing opted out: true and the absent default read alike', () => {
@@ -137,10 +139,12 @@ describe('§9.2 "Catch up if missed" checkbox', () => {
     expect(onSave.mock.calls[0][0]).not.toHaveProperty('runIfMissed')
   })
 
-  it('the kind picker keeps it to cron and one-time triggers', () => {
+  it('the kind picker keeps it to the schedule and one-time kinds', () => {
     render(editor())
-    fireEvent.click(screen.getByText('One time'))
-    expect(screen.getByLabelText('Catch up if missed')).toBeTruthy()
+    for (const kind of ['Interval', 'One time']) {
+      fireEvent.click(screen.getByText(kind))
+      expect(screen.getByLabelText('Catch up if missed')).toBeTruthy()
+    }
     for (const kind of ['App start', 'Discord', 'iMessage']) {
       fireEvent.click(screen.getByText(kind))
       expect(screen.queryByLabelText('Catch up if missed')).toBeNull()

@@ -349,7 +349,7 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
     system entry
     ("Discord trigger added." / "Cron trigger 2 updated." / "Cron trigger 3 removed." /
     "Cron trigger 1 turned off." — the leading word is the trigger's kind from a fixed
-    display map, cron → Cron, time → One-time, app_start → App-start,
+    display map, cron → Cron, interval → Interval, time → One-time, app_start → App-start,
     discord → Discord, imessage → iMessage: display words only, never §4.3 label math —
     details live on the card, which re-labels through §19 `/triggers/preview`);
     an `add` whose entry matches an existing trigger on the §4.3 identity fields is a

@@ -143,6 +143,9 @@ class Scheduler:
         granularity the safety net always had)."""
         due: list[tuple[datetime, dict]] = []
         dropped: list[dict] = []  # §6 runIfMissed-off triggers whose span was slept through
+        # §4.3 interval anchor: the automation's run baseline, read once per
+        # tick (the same baseline §4.1 overdue uses) — never stored.
+        run_baseline = self.store.run_baseline(a)
         for t in list(a["triggers"]):  # consume_trigger below mutates the list
             key = (a["id"], t["id"])
             if key not in self._baseline:
@@ -181,7 +184,7 @@ class Scheduler:
                     self.store.consume_trigger(a, t["id"])
                     self._publish_changed(a)
                 continue
-            occ = triggerlib.trigger_next(t, after=base)
+            occ = triggerlib.trigger_next(t, after=base, run_baseline=run_baseline)
             if occ and occ <= now:
                 # §6: at most one catch-up per wake — swallow every older occurrence.
                 self._set_baseline(key, now, now_utc)
@@ -189,7 +192,8 @@ class Scheduler:
                     # §6 opt-out: fire only when an occurrence landed within
                     # the grace window; anything older was slept through and
                     # is dropped, never fired late.
-                    fresh = triggerlib.trigger_next(t, after=now - timedelta(seconds=GRACE_S))
+                    fresh = triggerlib.trigger_next(t, after=now - timedelta(seconds=GRACE_S),
+                                                    run_baseline=run_baseline)
                     if fresh is None or fresh > now:
                         dropped.append(t)
                         if t["kind"] == "time":
