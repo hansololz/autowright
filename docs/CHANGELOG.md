@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.4 - 2026-09-11
+
+- Automations can now run on a repeating interval, such as every 30 minutes, instead of only on a fixed schedule.
+- Compare any two stored versions of an automation side by side, from either version menu or the history banner.
+- A new marketplace lets you browse shared automation catalogs and install from them, available as a preview in Developer mode.
+- The up and down arrows now move the viewed row in execution logs, the step-script viewer, and the version diff.
+- Stored versions are permanent now, so the only way to remove them is to delete the whole automation.
+- A refused update install, an oversized import file, and a run that cannot recover now say so instead of silently going nowhere.
+
 ## v0.11.3 - 2026-09-08
 
 - Autowright is a smaller download and takes up less room on disk, with no change to what it can do.
