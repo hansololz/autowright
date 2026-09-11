@@ -876,7 +876,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   the singular; a script's single trailing final newline is neither rendered nor counted)
   and the control cluster — a find button (`fa-magnifying-glass`, "Find in script",
   `aria-pressed` while the find bar is open), previous / next step chevrons as
-  `.ad-btn-icon` buttons (disabled at the ends; the ← / → arrow keys navigate too) and a
+  `.ad-btn-icon` buttons (disabled at the ends; the ↑ / ↓ and ← / → arrow keys navigate
+  too - ↑ / ↓ because the navigator is a vertical list, ← / → the chevrons' own axis) and a
   close ✕ (Escape and backdrop click also close, standard `Modal` behavior). The toolbar
   never scrolls, so the filename and the controls stay put through a long script and
   never overlap code.
@@ -899,7 +900,7 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   50 %, radius 2, token color kept), and the current match is kept in view: the code pane
   scrolls so it sits mid-pane (never the page). Enter in the field steps to the next
   match, Shift+Enter to the previous; Escape in the field closes the find bar and clears
-  the query without closing the modal, and the ← / → keys type in the field instead of
+  the query without closing the modal, and the arrow keys type in the field instead of
   flipping steps (the flip keys ignore every editable target). Typing a new query or
   flipping steps returns to the first match.
   Below it the script sits in its own overlay-scrollbar pane with a line-number gutter
@@ -984,8 +985,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   (faint) for an identical one. Every file is listed, unchanged ones included, so the
   navigator reads as the whole version folder with the changes marked. The viewed row
   carries the 2 px accent bar and faint fill of the step navigator; the unviewed rows are
-  buttons, the viewed row a plain block, and ← / → flip files with the same no-focus-ring
-  rules. The first CHANGED file is viewed on open (the first file when nothing changed).
+  buttons, the viewed row a plain block, and ↑ / ↓ or ← / → flip files with the same
+  no-focus-ring rules. The first CHANGED file is viewed on open (the first file when nothing changed).
   The **diff pane**'s fixed 44 px toolbar carries, left, the faint mono "FILE N OF M"
   eyebrow followed by the viewed file's filename in dimmer mono, and, right, the file's
   change tag again, then the **"to" picker**, a `.ad-btn-pill` reading "vs v`<y>`" with a

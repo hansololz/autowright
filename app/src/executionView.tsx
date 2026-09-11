@@ -288,8 +288,8 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
     setSel({ step, attempt })
   }
 
-  // §7 flip keys — the §9.2 step-modal shape: ← / → move the selection one
-  // row through the rail's order (Setup log, then the steps), no wrap, no-op
+  // §7 flip keys — the §9.2 step-modal shape: ↑ / ↓ and ← / → move the selection
+  // one row through the rail's order (Setup log, then the steps), no wrap, no-op
   // at the ends and while nothing is selected. Editable targets are ignored;
   // the page's rail yields to any open modal (the keys must not flip logs
   // under a Report-issue card), the modal's rail to its own closing card. A
@@ -329,10 +329,12 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
         showFind.current()
         return
       }
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+      const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown'
+      if (!back && !forward) return
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
       if (layout === 'page' && (anyModalOpen() || devlogOverlayOpen())) return
-      if (!flipRef.current(e.key === 'ArrowLeft' ? -1 : 1)) return
+      if (!flipRef.current(back ? -1 : 1)) return
       e.preventDefault()
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
     }

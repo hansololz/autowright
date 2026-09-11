@@ -364,6 +364,23 @@ describe('step-script modal', () => {
     expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
   })
 
+  it('detail variant: ↑ / ↓ flip steps exactly as ← / → do, guarded at both ends', () => {
+    renderDetail()
+    openFirst()
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(screen.getByText('STEP 2 OF 2')).toBeTruthy()
+    expect(navRow('Send mail').getAttribute('aria-current')).toBe('step')
+    // ArrowDown at the last step is a no-op, never an overflow
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(screen.getByText('STEP 2 OF 2')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
+    expect(navRow('Fetch page').getAttribute('aria-current')).toBe('step')
+    // ArrowUp at the first step is a no-op, never an underflow
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
+  })
+
   it('the viewed navigator row is a text-selectable block, the others are buttons', () => {
     renderDetail()
     openFirst()
@@ -510,6 +527,8 @@ describe('find in script (§9.2)', () => {
     fireEvent.click(screen.getByLabelText('Find in script'))
     const input = screen.getByPlaceholderText('Find in script')
     fireEvent.keyDown(input, { key: 'ArrowRight' })
+    expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
     expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
     fireEvent.change(input, { target: { value: 'send' } })
     fireEvent.keyDown(input, { key: 'Escape' })

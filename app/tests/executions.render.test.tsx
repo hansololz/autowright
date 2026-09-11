@@ -824,6 +824,25 @@ describe('execution page LOGS rail keys and selection (§7)', () => {
     expect(selectedRow().textContent).toContain('Fetch page')
   })
 
+  it('↑ / ↓ move the selection exactly as ← / → do, and stop at both ends', () => {
+    seedThree()
+    render(<ExecutionPage />)
+    expect(selectedRow().textContent).toContain('Send mail')
+    // ArrowDown on the last row is a no-op, never an overflow
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(selectedRow().textContent).toContain('Parse it')
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(selectedRow().textContent).toContain('Setup log')
+    // ArrowUp on the Setup log, the first row, is a no-op
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(selectedRow().textContent).toContain('Setup log')
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(selectedRow().textContent).toContain('Fetch page')
+  })
+
   it('the LOGS pane header counts the selected step as LOG k OF n; the Setup log carries no counter', () => {
     seedThree()
     render(<ExecutionPage />)
@@ -870,6 +889,8 @@ describe('execution page LOGS rail keys and selection (§7)', () => {
     document.body.appendChild(input)
     input.focus()
     fireEvent.keyDown(input, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Parse it')
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
     expect(selectedRow().textContent).toContain('Parse it')
     input.remove()
   })
@@ -1010,6 +1031,8 @@ describe('execution page LOGS pane header controls + find in log (§7)', () => {
     // arrow keys in the field never flip the log; the flip keeps the bar and query
     fireEvent.change(field, { target: { value: 'e' } })
     fireEvent.keyDown(field, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.keyDown(field, { key: 'ArrowUp' })
     expect(selectedRow().textContent).toContain('Send mail')
     fireEvent.click(btn('Previous log'))
     expect(selectedRow().textContent).toContain('Parse it')

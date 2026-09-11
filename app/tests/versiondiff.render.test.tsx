@@ -106,6 +106,26 @@ describe('VersionDiffModal', () => {
     expect(screen.getByText('FILE 4 OF 5')).toBeTruthy()
   })
 
+  it('↑ / ↓ flip files exactly as ← / → do, guarded at both ends', async () => {
+    mockedApi.versionDiff.mockResolvedValue(DIFF)
+    open()
+    await waitFor(() => expect(screen.getByText('FILE 3 OF 5')).toBeTruthy())
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(screen.getByText('FILE 4 OF 5')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(screen.getByText('FILE 3 OF 5')).toBeTruthy()
+    // ArrowUp on the first file is a no-op, never an underflow
+    fireEvent.click(screen.getByTestId('diff-file-manifest'))
+    expect(screen.getByText('FILE 1 OF 5')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    expect(screen.getByText('FILE 1 OF 5')).toBeTruthy()
+    // …and ArrowDown on the last is a no-op, never an overflow
+    fireEvent.click(screen.getByTestId('diff-file-02-old.py'))
+    expect(screen.getByText('FILE 5 OF 5')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(screen.getByText('FILE 5 OF 5')).toBeTruthy()
+  })
+
   it('a collapsed run expands in place', async () => {
     const rows: DiffRow[] = [...Array.from({ length: 12 }, (_, i) => same(i + 1)), { kind: 'add', left: null, right: { number: 13, text: 'new' } }]
     // a document file: plain text, so a whole line is one text node

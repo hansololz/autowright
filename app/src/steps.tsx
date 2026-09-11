@@ -402,8 +402,8 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
   )
 }
 
-// Left / right arrow keys flip the viewed step; ⌘F / Ctrl+F opens the find
-// bar. Rendered inside the Modal so it can see `closing`: the children stay
+// The arrow keys flip the viewed step (↑ / ↓ along the navigator's own axis,
+// ← / → along the chevrons'); ⌘F / Ctrl+F opens the find bar. Rendered inside the Modal so it can see `closing`: the children stay
 // mounted through the ~200 ms exit animation, and a key press then would act
 // on the fading card — same guard shape as the Modal's own Escape handler.
 // The flip keys ignore editable targets, so typing in the find field never
@@ -420,7 +420,9 @@ export function StepKeys({ i, count, closing, onNav, onFind }: {
       if (devlogOverlayOpen()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { if (!onFind) return; e.preventDefault(); onFind(); return }
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
-      const flip = e.key === 'ArrowLeft' ? (i > 0 ? i - 1 : null) : e.key === 'ArrowRight' ? (i < count - 1 ? i + 1 : null) : null
+      const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+      const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown'
+      const flip = back ? (i > 0 ? i - 1 : null) : forward ? (i < count - 1 ? i + 1 : null) : null
       if (flip === null) return
       e.preventDefault()
       // §9.2: a key flip drops focus from whatever holds it — a chevron, or

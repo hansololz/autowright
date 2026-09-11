@@ -59,7 +59,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   `#16100a` (`--on-accent`); link hover `oklch(0.82 0.14 60)`; `::selection` accent `/ .35`;
   keyboard focus ring `oklch(0.74 0.155 52 / .55)` (`--focus-ring`) — a global
   `:focus-visible` rule draws a 2 px outline (offset 2) on every focusable element except
-  `.ad-input` fields, which keep their border ring.
+  `.ad-input` fields, which keep their border ring, and the shared `Modal` card, which never
+  shows one (the modal rule below).
 - Status colors (oklch; tint backgrounds at the alpha shown): green `oklch(0.76 0.15 150)`
   `/ .13`, cyan `oklch(0.78 0.12 210)` `/ .13`, red `oklch(0.7 0.19 25)` `/ .13`, amber
   `oklch(0.8 0.13 85)` `/ .14`, magenta `oklch(0.72 0.16 340)` `/ .13`, gray `oklch(0.72 0.015 262)` `/ .13`. One extra chip color: orange `oklch(0.72 0.15 60)` `/ .13` for
@@ -311,7 +312,14 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     the exit finishes. Keyboard focus is **trapped** in the open card: Tab on the card's last
     focusable element wraps to its first and Shift+Tab wraps back, and a modal that opens
     while focus sits outside its card moves focus onto the card, so no keypress ever
-    reaches the page underneath (the §9.3 overlay still wins, as for every shortcut). A modal may guard its escape paths (`guardClose`): Escape and a
+    reaches the page underneath (the §9.3 overlay still wins, as for every shortcut). The
+    card itself never draws the focus ring, however focus reached it
+    (`.ad-modal-card:focus-visible { outline: none }`): it holds focus only as the trap's
+    anchor, and a whole-card outline reads as the modal being selected - the ring belongs
+    to the controls inside. Navigator modals (the §9.2 step-script and version-diff
+    modals, the §7 rail in the §11 test-run modal) bind ↑ / ↓ as well as ← / → to move the
+    viewed row, so an arrow press always moves through the left-hand list instead of
+    landing on the card with nothing to do. A modal may guard its escape paths (`guardClose`): Escape and a
     backdrop click first ask it whether the dismissal may proceed, so an editor holding
     unsaved text raises its discard confirm instead of closing — the confirm stacks above
     it and Escape closes only the top-most card. The one blocking exception is `BlockingOverlay` (the §4.9 reset

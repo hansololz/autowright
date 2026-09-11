@@ -4,6 +4,8 @@
 // open §9.3 developer-log overlay owns Escape outright — the card underneath
 // yields. The Modal renders for real (happy-dom) with the api module mocked,
 // so importing src/ui opens no sockets.
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
@@ -222,5 +224,26 @@ describe('Modal focus trap (§14)', () => {
     screen.getByText('under last').focus()
     fireEvent.keyDown(document, { key: 'Tab' })
     expect(document.activeElement).toBe(screen.getByText('top first'))
+  })
+})
+
+// §14: the card takes focus as the trap anchor, so a whole-card outline would
+// read as the modal being selected. It carries the class the token sheet hangs
+// its no-ring rule on; the controls inside keep their own rings.
+describe('Modal card focus ring (§14)', () => {
+  it('the aria-modal card carries the ad-modal-card class', () => {
+    render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="Ringless">
+        {() => <div>ringless body</div>}
+      </Modal>,
+    )
+    const card = document.querySelector('[aria-modal="true"]') as HTMLElement
+    expect(card.classList.contains('ad-modal-card')).toBe(true)
+  })
+
+  it('tokens.css drops the outline on that class', () => {
+    // the sheet never loads in happy-dom — the rule is asserted on the source
+    const tokens = readFileSync(join(__dirname, '..', 'src', 'tokens.css'), 'utf-8')
+    expect(tokens).toMatch(/\.ad-modal-card:focus-visible\s*\{[^}]*outline:\s*none[^}]*\}/)
   })
 })

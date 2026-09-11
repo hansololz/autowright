@@ -1029,7 +1029,9 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
           : 'adFadeIn var(--t-enter) var(--ease-enter) both',
       }}
     >
-      <div ref={card} role={role} aria-modal="true" aria-label={ariaLabel} tabIndex={-1} style={{
+      {/* §14: the card holds focus only as the trap's anchor and never draws the
+        * focus ring (.ad-modal-card) - the ring belongs to the controls inside. */}
+      <div ref={card} className="ad-modal-card" role={role} aria-modal="true" aria-label={ariaLabel} tabIndex={-1} style={{
         background: 'var(--bg-menu)', border: '1px solid var(--border-input)', borderRadius: 12,
         boxShadow: 'var(--shadow-modal)', width, padding: '22px 24px',
         animation: closing ? EXIT_DOWN : ENTER_UP,

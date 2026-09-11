@@ -277,9 +277,9 @@ duration label when the attempt settles; each attempt ticks its own elapsed, so 
 step's row reads the new attempt's time, exactly what its settled label will show;
 skipping lives in the header's Skip-step button. Above step 1 sits a **"Setup log"**
 pseudo-row (terminal icon in place of a status dot) selecting the execution-scoped log.
-Selecting any row changes which log the LOGS pane shows. The **← / → arrow keys** move the
-selection too, one row at a time through the rail's order (Setup log, then step 1 … N — ← from
-step 1 lands on the Setup log; no wrap, a no-op at either end and while nothing is selected),
+Selecting any row changes which log the LOGS pane shows. The **↑ / ↓ and ← / → arrow keys**
+move the selection too, one row at a time through the rail's order (Setup log, then step 1 … N —
+↑ or ← from step 1 lands on the Setup log; no wrap, a no-op at either end and while nothing is selected),
 the same flip keys as the §9.2 step-script modal: they ignore every editable target, they are
 inert while a modal covers the rail (the page's rail yields whenever any modal is open; the §11
 test-run modal's rail yields while its card is closing), and a key flip is the user's own
@@ -338,7 +338,7 @@ manager") that opens the execution's §5 `logs/` dir (the §4.5 `logs` path) thr
 can hand the raw NDJSON files to someone; then a find button (`fa-magnifying-glass`, "Find in log",
 `aria-pressed` while the find bar is open) and previous / next log chevrons (`fa-chevron-left` /
 `-right`, "Previous log" / "Next log") that move the selection one rail row through the rail's
-order (Setup log, then the steps) exactly as the ← / → keys do, disabled at the ends and while
+order (Setup log, then the steps) exactly as the arrow keys do, disabled at the ends and while
 nothing is selected. Both homes (page and §11 test-run modal) render the cluster; the modal's
 own toolbar controls (Skip step / Cancel / ✕) follow it. The header's right padding is the
 modal toolbar's 10 px so the cluster's glyphs sit on the 18 px content line, and on the page the

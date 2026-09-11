@@ -143,6 +143,9 @@ body {
 /* §14 keyboard focus ring — every focusable except .ad-input (border ring instead) */
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .ad-input:focus-visible, .ad-input :focus-visible { outline: none; }
+/* §14: the modal card takes focus as the trap anchor - a whole-card outline would read as
+   the modal being selected, so it never shows the ring; its controls keep theirs. */
+.ad-modal-card:focus-visible { outline: none; }
 
 input, textarea, select, button { font: inherit; color: inherit; }
 /* §14 page title — PageTitle renders it; title rows with inline metadata reuse it */

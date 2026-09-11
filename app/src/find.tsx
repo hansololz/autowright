@@ -141,7 +141,7 @@ export function FindBar({ find, label }: { find: Find; label: string }) {
         onKeyDown={(e) => {
           if (e.key === 'Enter') { e.preventDefault(); find.step(e.shiftKey ? -1 : 1) }
           else if (e.key === 'Escape') { e.stopPropagation(); find.close() }
-          else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') e.stopPropagation()
+          else if (e.key.startsWith('Arrow')) e.stopPropagation()
         }}
         style={{ width: 280, flex: '0 1 auto', minWidth: 0 }}
       />
