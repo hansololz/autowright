@@ -988,6 +988,17 @@ ipcMain.handle('open-archive', async () => {
     return null
   }
 })
+// §22.3 add marketplace: the native picker for a marketplace catalog. Unlike
+// open-archive nothing is read here - the backend reads the file itself (§22.4),
+// so only the path crosses back.
+ipcMain.handle('open-catalog', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [{ name: 'Marketplace catalog', extensions: ['yaml', 'yml'] }],
+  })
+  if (r.canceled || !r.filePaths[0]) return null
+  return { path: r.filePaths[0] }
+})
 // §9.3 developer log overlay: tail of each existing log file. Polled by the
 // renderer while the overlay is open — no watchers, nothing runs while closed.
 const LOG_FILES = ['app.log', 'backend.out.log', 'backend.err.log', 'vite.log']

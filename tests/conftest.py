@@ -324,6 +324,9 @@ def client(home):
     store.agents = [{"id": "mock", "harness": "Claude Code", "mode": "default",
                      "model": None}]
     store.default_agent_id = "mock"  # §4.7 single pointer
+    # §22.2: the marketplace sources store loads once at startup like the §5
+    # store, re-read here so it follows this test's AUTOWRIGHT_HOME.
+    api.marketplace_store.load()
     c = TestClient(api.app)
     c.headers["Authorization"] = f"Bearer {api.AUTH_TOKEN}"
     return c

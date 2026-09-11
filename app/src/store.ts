@@ -7,6 +7,8 @@ type Surface = 'onboard' | 'app' | 'create' | 'menubar'
 export type Page =
   | 'automations' | 'automation' | 'executions' | 'execution'
   | 'agents' | 'agentNew' | 'secrets' | 'settings' | 'about'
+  // §22.3: rendered only while the §4.9 developerMode setting is on
+  | 'marketplace'
 
 type CreateFrom = 'app' | 'edit' | null
 
@@ -64,6 +66,10 @@ interface Model {
   // keyed — drives the §9.1 drafting notes and the §11 re-attach; kept
   // current by the draftjob.changed event.
   draftJobs: DraftJobRow[]
+  // §22.3/§22.4: bumped by every marketplace.changed event - the Marketplace
+  // page refetches when it moves, so a §20 CLI change shows without a reload.
+  // The sources themselves live on the page, not here: nothing else reads them.
+  marketplaceVersion: number
   // §9.5 report issue modal — opened by the §9 "Report an issue" nav row; not a page.
   reportOpen: boolean
   // §9.4 What's-new modal — opened by the About row and by the post-update
@@ -230,6 +236,7 @@ export const useStore = create<Model>((set, get) => ({
   updateAvailable: null,
   pendingDraft: null,
   draftJobs: [],
+  marketplaceVersion: 0,
   reportOpen: false,
   whatsNewOpen: false,
   platformOs: '',
@@ -565,6 +572,12 @@ export const useStore = create<Model>((set, get) => ({
           ? others
           : [...others, { owner: msg.owner, jobId: msg.jobId, status: msg.status, mode: msg.mode }],
       })
+      return
+    }
+    if (ev === 'marketplace.changed') {
+      // §22.3: the page watches this counter - no /state refresh, the
+      // marketplace store is nowhere in the snapshot.
+      set({ marketplaceVersion: m.marketplaceVersion + 1 })
       return
     }
     if (ev === 'agents.changed' || ev === 'secrets.changed' || ev === 'settings.changed' || ev === 'draft.changed') {

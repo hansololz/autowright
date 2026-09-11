@@ -136,6 +136,7 @@ def main() -> None:
     trim_logs()  # before route_logs: the trim must find no handle held open
     route_logs()
     store.load_all()
+    api.marketplace_store.load()  # §22.2: the sources store, loaded once at startup
     # Bind before publishing: uvicorn serves on this very socket, so the port
     # is ours the moment backend.json exists. Probing a free port, closing it,
     # and letting uvicorn rebind would leave a gap where another process can

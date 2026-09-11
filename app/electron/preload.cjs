@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('autowright', {
   // §5.1 transfer archives: native dialogs + file IO for export/import
   saveFile: (defaultName, data) => ipcRenderer.invoke('save-file', defaultName, data),
   openArchive: () => ipcRenderer.invoke('open-archive'),
+  // §22.3 add marketplace: pick a catalog file - only its path travels, the
+  // backend reads the file itself.
+  openCatalog: () => ipcRenderer.invoke('open-catalog'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   // §9.5 report modal: OS details for the info block
   platformInfo: () => ipcRenderer.invoke('platform-info'),

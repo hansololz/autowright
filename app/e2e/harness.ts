@@ -154,6 +154,17 @@ export class Backend {
     return res.json()
   }
 
+  /** The same authenticated call for a route that answers bytes rather than
+   * JSON (§5.1 export) — `api` parses every answer as JSON. */
+  async apiBytes(method: string, route: string): Promise<Buffer> {
+    const res = await fetch(`http://127.0.0.1:${this.port}${route}`, {
+      method,
+      headers: { Authorization: `Bearer ${this.token}` },
+    })
+    if (!res.ok) throw new Error(`${method} ${route} -> ${res.status}: ${await res.text()}`)
+    return Buffer.from(await res.arrayBuffer())
+  }
+
   /** Seed one automation over the real HTTP API (it_harness.make_draft shape).
    * `steps` overrides the default two-step draft; `opts` adds params, the
    * allowed-secrets grant list, or a authoring agent. */

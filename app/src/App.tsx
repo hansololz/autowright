@@ -13,6 +13,7 @@ import AutomationsList from './pages/AutomationsList'
 import CreateFlow from './pages/CreateFlow'
 import ExecutionPage from './pages/ExecutionPage'
 import ExecutionsList from './pages/ExecutionsList'
+import MarketplacePage from './pages/MarketplacePage'
 import MenuBarPanel from './pages/MenuBarPanel'
 import Onboarding from './pages/Onboarding'
 import ReportModal from './pages/ReportModal'
@@ -25,6 +26,9 @@ const NAV: { page: string; label: string; icon: string }[] = [
   { page: 'executions', label: 'Executions', icon: 'fa-clock-rotate-left' },
   { page: 'agents', label: 'Agents', icon: 'fa-microchip' },
   { page: 'secrets', label: 'Secrets', icon: 'fa-key' },
+  // §22.3: preview surface - the row renders only while the §4.9 developerMode
+  // setting is on, and carries no count pill.
+  { page: 'marketplace', label: 'Marketplace', icon: 'fa-store' },
   { page: 'settings', label: 'Settings', icon: 'fa-sliders' },
 ]
 
@@ -54,6 +58,8 @@ function Sidebar() {
   // known and not yet installed (§3 update-available) — the accent icon alone
   // signals in the collapsed rail. Clicking opens About pre-armed (§9.4).
   const updateAvailable = useStore((s) => s.updateAvailable)
+  // §22.3 preview gate: the Marketplace row shows only in developer mode.
+  const developerMode = useStore((s) => s.settings?.developerMode) ?? false
   const platformOs = useStore((s) => s.platformOs)
   const activeRoot = page === 'automation' ? 'automations' : page === 'execution' ? 'executions' : page === 'agentNew' ? 'agents' : page
   const counts: Record<string, number> = {
@@ -85,7 +91,7 @@ function Sidebar() {
           <span className="ad-rail-reveal" style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-.01em', whiteSpace: 'nowrap' }}>Autowright</span>
         </div>
         {[
-          { rows: NAV, style: { padding: '0 10px' } },
+          { rows: developerMode ? NAV : NAV.filter((n) => n.page !== 'marketplace'), style: { padding: '0 10px' } },
           { rows: BOTTOM_NAV, style: { padding: '0 10px 12px', marginTop: 'auto' } },
         ].map((group, i) => (
           <nav key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2, ...group.style }}>
@@ -119,6 +125,7 @@ function Sidebar() {
               return (
                 <button
                   key={n.page}
+                  data-testid={`nav-${n.page}`}
                   className={'ad-nav-row' + (active ? ' active' : '')}
                   onClick={() => go(n.page as never, { automationId: null, executionId: null })}
                   style={{
@@ -152,6 +159,7 @@ function Content() {
     case 'agents': return <AgentsPage />
     case 'agentNew': return <AgentNewPage />
     case 'secrets': return <SecretsPage />
+    case 'marketplace': return <MarketplacePage />
     case 'settings': return <SettingsPage />
     case 'about': return <AboutPage />
     default: return <AutomationsList />
@@ -210,7 +218,8 @@ function BootSplash({ waiting }: { waiting: boolean }) {
 export default function App() {
   const connected = useStore((s) => s.connected)
   const surface = useStore((s) => s.surface)
-  // Only the error boundary's key needs this — the pages select it themselves.
+  // The error boundary's key and the §22.3 preview-gate redirect need this -
+  // the pages select it themselves.
   const page = useStore((s) => s.page)
   const toast = useStore((s) => s.toast)
   const reportOpen = useStore((s) => s.reportOpen)
@@ -220,9 +229,19 @@ export default function App() {
   const login = useStore((s) => s.settings?.login)
   const menuBarIcon = useStore((s) => s.settings?.menuBarIcon)
   const automaticUpdateCheck = useStore((s) => s.settings?.automaticUpdateCheck)
+  // §22.3 preview gate - the redirect effect below watches it.
+  const developerMode = useStore((s) => s.settings?.developerMode)
+  const go = useStore((s) => s.go)
   const platformOs = useStore((s) => s.platformOs)
 
   useEffect(() => { void boot(); return disconnect }, [])
+
+  // §22.3 preview gate: Developer mode turning off (the §4.9 toggle, or a §20
+  // `settings set` seen through the store refresh) leaves the Marketplace page
+  // for Automations - the same shape as the §9.3 overlay closing itself.
+  useEffect(() => {
+    if (page === 'marketplace' && developerMode === false) go('automations')
+  }, [page, developerMode])
 
   // §4.9: the shell owns the OS-side settings effects (login item, tray icon,
   // §3 automatic update check) — push the stored values on every load/change

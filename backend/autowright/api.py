@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import __version__, harness, imessage, installer, keychain, models, paths, platform
+from . import __version__, harness, imessage, installer, keychain, marketplace, models, paths, platform
 from . import drafting, packages as pkglib, reqlog, timefmt, transfer, triggers as triggerlib
 from .drafting import draft_jobs
 from .engine import Engine, kill_orphan_agent_group, kill_orphan_group
@@ -35,6 +35,9 @@ AUTH_TOKEN = pysecrets.token_hex(24)
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 engine = Engine(store)
+# §22.2: the marketplace sources store, loaded once at startup by main() next to
+# the §5 store, and rewritten whole on every change.
+marketplace_store = marketplace.MarketplaceStore()
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -2314,6 +2317,114 @@ def delete_all_secrets() -> dict:
         store.save_secrets()
     hub.publish("secrets.changed")  # one event covers the whole sweep
     return {"deleted": len(swept)}
+
+
+# ---------- marketplace (§22) ----------
+_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                      ".webp": "image/webp", ".gif": "image/gif"}
+
+
+def _marketplace_json() -> dict:
+    with marketplace_store.lock:
+        return {"sources": [marketplace_store.serialize(s)
+                            for s in marketplace_store.sources]}
+
+
+@app.get("/marketplace", dependencies=[Depends(auth)])
+def marketplace_sources() -> dict:
+    """§22.4: every source in store order, each with the entries derived from
+    its cached catalog."""
+    return _marketplace_json()
+
+
+@app.post("/marketplace/sources", dependencies=[Depends(auth)])
+async def marketplace_add(body: models.MarketplaceAdd) -> dict:
+    """§22.4 add: exactly one of a link or a file path. §22.2 fetches and
+    validates first, so a failure stores nothing."""
+    url = (body.url or "").strip()
+    path = (body.path or "").strip()
+    if url and path:
+        raise HTTPException(422, "give a link or a file path, not both")
+    if not url and not path:
+        raise HTTPException(422, "give a link or a file path")
+    try:
+        # Threadpool, not the loop: add is a refresh, and a refresh downloads.
+        source = await run_in_threadpool(
+            lambda: marketplace_store.add(url=url or None, path=path or None))
+    except marketplace.MarketplaceDuplicate as e:
+        raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+    hub.publish("marketplace.changed")
+    return source
+
+
+@app.post("/marketplace/sources/{source_id}/refresh", dependencies=[Depends(auth)])
+async def marketplace_refresh(source_id: str) -> dict:
+    """§22.4: 200 even when the refresh failed - `error` carries the reason and
+    the cache is unchanged."""
+    try:
+        source = await run_in_threadpool(marketplace_store.refresh, source_id)
+    except KeyError:
+        raise HTTPException(404, "marketplace not found") from None
+    hub.publish("marketplace.changed")
+    return source
+
+
+@app.post("/marketplace/refresh", dependencies=[Depends(auth)])
+async def marketplace_refresh_all() -> dict:
+    """§22.4: every source in order; one event covers the whole sweep."""
+    sources = await run_in_threadpool(marketplace_store.refresh_all)
+    hub.publish("marketplace.changed")
+    return {"sources": sources}
+
+
+@app.delete("/marketplace/sources/{source_id}", dependencies=[Depends(auth)])
+def marketplace_remove(source_id: str) -> dict:
+    try:
+        marketplace_store.remove(source_id)
+    except KeyError:
+        raise HTTPException(404, "marketplace not found") from None
+    hub.publish("marketplace.changed")
+    return {"ok": True}
+
+
+@app.get("/marketplace/sources/{source_id}/entries/{index}/image",
+         dependencies=[Depends(auth)])
+def marketplace_image(source_id: str, index: int):
+    """§22.4: the cached preview image with the content type matching its
+    extension; 404 when the source, the entry, or the image doesn't exist."""
+    f = marketplace_store.image_path(source_id, index)
+    if f is None:
+        raise HTTPException(404, "no image for that entry")
+    from fastapi.responses import FileResponse
+
+    return FileResponse(f, media_type=_IMAGE_MEDIA_TYPES.get(f.suffix.lower()))
+
+
+@app.post("/marketplace/sources/{source_id}/entries/{index}/preview",
+          dependencies=[Depends(auth)])
+async def marketplace_entry_preview(source_id: str, index: int) -> dict:
+    """§22.4 install: the entry's archive fetched, fully validated, and parked
+    under a §5.2 token - exactly `POST /automations/import/url`, and the confirm
+    is the ordinary `POST /automations/import/confirm`."""
+    def _preview() -> dict:
+        try:
+            data, reference = marketplace_store.entry_archive(source_id, index)
+            preview = transfer.preview_archive(store, data)
+        except (marketplace.MarketplaceError, transfer.TransferError) as e:
+            raise HTTPException(422, str(e)) from e
+        # §22.4: both carry the resolved archive reference (the https URL, or
+        # the absolute path a file-relative reference resolved to).
+        preview["sourceUrl"] = reference
+        preview["resolvedUrl"] = reference
+        return {"token": _park_archive(data), "preview": preview}
+
+    try:
+        # Threadpool, not the loop: the fetch and the §5.1 validation both block.
+        return await run_in_threadpool(_preview)
+    except KeyError:
+        raise HTTPException(404, "marketplace entry not found") from None
 
 
 # ---------- settings ----------

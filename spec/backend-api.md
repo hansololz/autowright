@@ -330,6 +330,12 @@ remain plain dicts (§2).
   error, oversized or non-archive download — answers 422 with the reason
 - `POST /automations/import/confirm` `{ token }` → `{ automation, summary }` exactly like
   `/automations/import`; the token is one-time — spent, expired, or unknown answers 404
+- `GET /marketplace` · `POST /marketplace/sources` · `POST /marketplace/sources/{id}/refresh` ·
+  `POST /marketplace/refresh` · `DELETE /marketplace/sources/{id}` ·
+  `GET /marketplace/sources/{id}/entries/{index}/image` ·
+  `POST /marketplace/sources/{id}/entries/{index}/preview` — the §22 marketplace surface,
+  specified in §22.4; the entry preview parks a §5.2 token the ordinary
+  `/automations/import/confirm` lands
 - `GET /automations/{id}/memory/files` — read-only list of the §4.1 memory directory's
   files: `{ files: [{ name, size, updated }] }` — `name` the memory-relative posix path
   (recursive), `size` in bytes, `updated` the §4.1 display label; sorted by name; empty or
@@ -757,7 +763,8 @@ already neutralize. The provider config and
   §4.5 test record superseded by the next test or removed by its draft settling; clients
   drop the row and decrement `executionsTotal`; the §6 retention sweep publishes nothing,
   its rows fall off at the next fetch), `automation.changed`, `agents.changed`,
-  `secrets.changed`, `settings.changed`, `draft.changed` (the §4.4 pending slot was kept
+  `secrets.changed`, `settings.changed`, `marketplace.changed` (§22.4 — after every
+  marketplace add, refresh, and remove; no payload), `draft.changed` (the §4.4 pending slot was kept
   or discarded — clients re-`GET /state`; §11 test executions stream over the
   ordinary `execution.*` events), `draftjob.changed` (`{ owner, jobId, status, mode }` —
   published when an owner-stamped §19 drafting job starts, settles, is consumed, or is

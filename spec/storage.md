@@ -61,6 +61,11 @@ import-spool/                  # §5.2 parked import archives — one file per p
                                # (a crashed process leaves its spool files behind). Nothing
                                # here is ever read back after a restart — the tokens that
                                # addressed these files lived in memory only
+marketplace/                   # §22 marketplace sources: sources.yaml + one dir per source
+  sources.yaml                 #   [{id, kind: url|file, origin, added_at, refreshed_at, error}]
+  <source-id>/                 #   the last successfully fetched catalog, byte for byte,
+    marketplace-catalog.yaml   #   plus images/<index>.<ext> — the cached preview
+    images/                    #   images; the whole dir is rebuilt on every refresh
 harness/                       # per-provider workspaces for provider CLI children (§6)
   <provider-id>/               #   §19 provider id: claude · codex · gemini · opencode · ollama
     workspace/                 #   cwd for that provider's children (invocations, installs,

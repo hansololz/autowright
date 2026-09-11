@@ -32,6 +32,7 @@ autowright execution <verb> …           list · show · tail · cancel · retr
 autowright secret list|set|delete
 autowright agent list|check
 autowright settings show|set
+autowright marketplace list|add|refresh|remove|install   (§22.5)
 autowright service install|uninstall|status|restart|stop   (§3 — the only group that needs no backend)
 ```
 

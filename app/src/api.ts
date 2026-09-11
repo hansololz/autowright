@@ -15,6 +15,9 @@ declare global {
       resizePanel(h: number): Promise<void>
       saveFile(defaultName: string, data: ArrayBuffer): Promise<string | null>
       openArchive(): Promise<{ name: string; data: Uint8Array } | { error: string } | null>
+      // §22.3 add marketplace: the picked catalog's path only - the backend
+      // reads the file itself, so no bytes cross the bridge.
+      openCatalog(): Promise<{ path: string } | null>
       revealPath(p: string): Promise<void>
       // §9.5 report modal: OS details + bundle version for the info block
       platformInfo(): Promise<{ platform: string; osName?: string; release: string; arch: string; version: string; trayPanel?: boolean }>
@@ -278,6 +281,34 @@ export const api = {
   importConfirm: (tok: string) =>
     req<{ automation: import('./types').Automation; summary: import('./types').ImportSummary }>(
       'POST', '/automations/import/confirm', { token: tok }),
+  // §22.4 marketplace - sources are added, refreshed and removed whole; the
+  // page re-reads the list after every one of its own actions.
+  marketplaceList: () => req<{ sources: import('./types').MarketplaceSource[] }>('GET', '/marketplace'),
+  // §22.4: exactly one of url/path, non-empty - 422 on a bad catalog, 409 on
+  // an origin that is already added.
+  marketplaceAdd: (body: { url?: string; path?: string }) =>
+    req<import('./types').MarketplaceSource>('POST', '/marketplace/sources', body),
+  // §22.2: 200 even when the refresh failed - the answer's `error` says what
+  // happened and the cached copy is unchanged.
+  marketplaceRefresh: (id: string) =>
+    req<import('./types').MarketplaceSource>('POST', `/marketplace/sources/${id}/refresh`),
+  marketplaceRefreshAll: () =>
+    req<{ sources: import('./types').MarketplaceSource[] }>('POST', '/marketplace/refresh'),
+  marketplaceRemove: (id: string) => req<{ ok: true }>('DELETE', `/marketplace/sources/${id}`),
+  // §22.3 install: the §5.2 two-phase import, parked under a token - the
+  // confirm is the ordinary importConfirm above.
+  marketplaceEntryPreview: (id: string, index: number) =>
+    req<{ token: string; preview: import('./types').ImportPreview }>(
+      'POST', `/marketplace/sources/${id}/entries/${index}/preview`),
+  // §22.3 preview images ride the authenticated route (a plain <img src> can
+  // carry no bearer header), so the page fetches the bytes and shows a blob URL.
+  marketplaceImage: async (id: string, index: number): Promise<Blob> => {
+    const r = await fetch(`${base}/marketplace/sources/${id}/entries/${index}/image`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!r.ok) throw new Error(r.statusText)
+    return r.blob()
+  },
   // Raw result-dir file (§4.5) — Response, not JSON: callers .text() or .blob() it.
   resultFile: async (executionId: string, name: string): Promise<Response> => {
     const r = await fetch(`${base}/executions/${executionId}/result/${encodeURIComponent(name)}`, {

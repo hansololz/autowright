@@ -1104,9 +1104,11 @@ notifications: attention | all — "Only when something needs attention" / "Afte
 days: int ≥ 1 (default 90) — history retention; keepForever: bool disables cleanup
 developerMode: bool (default false) — "Developer mode" ("Logs every backend request and every AI
   request, including the full prompt, to the backend log. Press `` ` `` to show the logs
-  panel.") — gates request logging, the per-request log files under `<logs>/requests/` (§5),
-  the §5 build-failure records under `<logs>/build-failures/`, and the `` ` ``-key log
-  overlay (§9.3)
+  panel. Also shows the Marketplace page, which is in preview.") — gates request logging,
+  the per-request log files under `<logs>/requests/` (§5),
+  the §5 build-failure records under `<logs>/build-failures/`, the `` ` ``-key log
+  overlay (§9.3), and the visibility of the §22 Marketplace page and nav row (visibility
+  only - its routes, store, and CLI stay live in every mode)
 cliEnabled: bool (default true) — whether the user wants the `autowright` command available;
   drives the COMMAND LINE card's toggle (below) and the §3 one-shot first-run install. On by
   default: fresh installs and pre-key upgrades resolve to true through the defaults merge,

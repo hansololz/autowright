@@ -31,6 +31,8 @@ words from other languages except established technical terms.
   [spec/ui-shell.md](spec/ui-shell.md) ·
   §11 create/edit flow (incl. BUILD/TEST cards · test-run modal) → [spec/ui-create-edit.md](spec/ui-create-edit.md) ·
   §14 design tokens → [spec/design-tokens.md](spec/design-tokens.md)
+- **Marketplace:** §22 marketplace (catalog format · sources store · page · API/CLI
+  addenda; preview behind Developer mode) → [spec/marketplace.md](spec/marketplace.md)
 - **Dev:** §15 dev/test knobs · §16 test seed data · §18 commands →
   [spec/dev-test.md](spec/dev-test.md) · §17 repository (below, in this file)
 
@@ -222,7 +224,9 @@ migrate-on-load migration so data written by released versions keeps loading (§
   watcher, reply sending), `imessage.py` (chat.db reader + ROWID cursor, typedstream
   `attributedBody` decoder, osascript Messages sender, §19 permission probes),
   drafting, harness adapters,
-  transfer archives (`transfer.py`, §5.1 + §5.2 URL fetch/resolution), FastAPI API (`api.py`),
+  transfer archives (`transfer.py`, §5.1 + §5.2 URL fetch/resolution), the §22 marketplace
+  (`marketplace.py`: catalog parsing/validation, the sources store, refresh + image cache,
+  entry archive fetch), FastAPI API (`api.py`),
   the §2 platform layer (`platform/` package: `base.py` — the capability Protocols,
   `Capabilities`, and the composed `Platform` dataclass; `darwin.py` — the macOS build:
   osascript notifier, caffeinate power assertion, launchd service delegation, POSIX process
@@ -276,7 +280,9 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `linux.cjs` holds the §2 Linux values; `fallback.cjs` the degraded unknown-platform
   build; the modules never import `electron`), Vite + React + TS renderer
   under `src/` (`store.ts` central model, `api.ts` client,
-  `ui.tsx` shared primitives, `tokens.css` design tokens, `pages/` one file per screen —
+  `ui.tsx` shared primitives, `tokens.css` design tokens, `pages/` one file per screen
+  (`pages/MarketplacePage.tsx` the §22 page; `pages/ImportModal.tsx` the §9.1 import modal,
+  shared with §22 Install) —
   except the two biggest screens, each a thin page over its own directory: the §11
   create/edit flow (`pages/CreateFlow.tsx` over `pages/createflow/`: `model.ts` — the pure
   editor model and helpers, `useDraftJob.ts` — §8 job polling, `ChatPanel.tsx`,

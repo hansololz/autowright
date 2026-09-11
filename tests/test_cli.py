@@ -2405,6 +2405,211 @@ def test_cmd_agent_list_and_check(capsys):
     assert "no agent named 'nope'" in str(ei.value.code)
 
 
+# ---------------------------------------------------------------- marketplace
+
+SOURCES = [
+    {"id": "m1111111-a", "kind": "url", "origin": "https://example.com/marketplace.yaml",
+     "name": "Community automations", "description": "Automations I use.",
+     "addedAt": "2026-09-10T08:00:00Z", "refreshedAt": "2026-09-11T07:30:00Z",
+     "error": None,
+     "entries": [
+         {"index": 0, "title": "Manga chapter watcher",
+          "description": "Checks the series you follow every morning at 8.",
+          "archive": "https://example.com/manga.autowright", "image": True},
+         {"index": 1, "title": "Inbox sweeper", "description": "",
+          "archive": "https://example.com/inbox.autowright", "image": False}]},
+    {"id": "m2222222-b", "kind": "file", "origin": "/Users/x/shared/marketplace.yaml",
+     "name": "Mine", "description": "", "addedAt": "2026-09-09T08:00:00Z",
+     "refreshedAt": "2026-09-09T08:00:00Z",
+     "error": "the file couldn't be read", "entries": []},
+]
+
+
+class _MarketClient:
+    """§22.5 routing stub: the sources listing answers every GET (deep-copied,
+    so a command that mutates a record can't leak across tests); writes are
+    recorded and answered from a per-path table."""
+
+    base = "http://127.0.0.1:5151"
+
+    def __init__(self, sources=(), writes=None):
+        self.sources = [copy.deepcopy(s) for s in sources]
+        self.writes = writes or {}
+        self.calls = []
+        self.timeouts = []  # (method, path, timeout) per write, parallel to calls
+
+    def req(self, method, path, body=None, timeout=30):
+        if method == "GET":
+            assert path == "/marketplace", f"unexpected GET {path}"
+            return {"sources": copy.deepcopy(self.sources)}
+        self.calls.append((method, path, body))
+        self.timeouts.append((method, path, timeout))
+        assert path in self.writes, f"unexpected {method} {path}"
+        return copy.deepcopy(self.writes[path])
+
+
+def test_cmd_marketplace_list_prints_one_block_per_source(capsys):
+    """§22.5: `<name> [<id8>]  <origin>`, the refreshed line, then every entry
+    numbered from 1 - the description omitted when the catalog has none."""
+    _run(_MarketClient(SOURCES), "marketplace", "list")
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "Community automations [m1111111]  https://example.com/marketplace.yaml"
+    assert out[1] == "  refreshed 2026-09-11T07:30:00Z"
+    assert out[2] == ("  1. Manga chapter watcher - Checks the series you follow "
+                      "every morning at 8.")
+    assert out[3] == "  2. Inbox sweeper"
+
+
+def test_cmd_marketplace_list_reports_an_empty_catalog_and_a_failed_refresh(capsys):
+    """§22.2/§22.5: a source that couldn't be refreshed prints the error in
+    place of the refreshed line and still lists its last good copy - here an
+    empty catalog, which says so rather than printing nothing."""
+    _run(_MarketClient(SOURCES), "marketplace", "list")
+    out = capsys.readouterr().out.splitlines()
+    assert out[4] == "Mine [m2222222]  /Users/x/shared/marketplace.yaml"
+    assert out[5] == "  couldn't refresh: the file couldn't be read"
+    assert "refreshed 2026-09-09" not in "\n".join(out)
+    assert out[6] == "  no automations listed"
+
+
+def test_cmd_marketplace_add_sends_a_link_as_a_url(capsys):
+    """§22.5: an https link travels as { url }; so does an http:// one, so the
+    backend's own 422 explains why http isn't allowed."""
+    added = {"id": "m3333333-c", "name": "Community automations",
+             "entries": [{"index": 0}, {"index": 1}]}
+    c = _MarketClient(writes={"/marketplace/sources": added})
+    _run(c, "marketplace", "add", "  https://example.com/marketplace.yaml  ")
+    assert c.calls == [("POST", "/marketplace/sources",
+                        {"url": "https://example.com/marketplace.yaml"})]
+    # §20 HTTP timeouts: add fetches over the network - the long timeout
+    assert c.timeouts == [("POST", "/marketplace/sources", 600)]
+    assert ("added Community automations [m3333333] - 2 automation(s)"
+            in capsys.readouterr().out)
+
+    c = _MarketClient(writes={"/marketplace/sources": added})
+    _run(c, "marketplace", "add", "http://example.com/marketplace.yaml")
+    assert c.calls[0][2] == {"url": "http://example.com/marketplace.yaml"}
+
+
+def test_cmd_marketplace_add_makes_a_file_path_absolute(tmp_path, monkeypatch, capsys):
+    """§22.5: anything that isn't a link is a file path, made absolute against
+    the current directory before it travels - the backend reads the file."""
+    monkeypatch.chdir(tmp_path)
+    c = _MarketClient(writes={"/marketplace/sources": {
+        "id": "m4444444-d", "name": "Mine", "entries": []}})
+    _run(c, "marketplace", "add", "shared/marketplace.yaml")
+    assert c.calls == [("POST", "/marketplace/sources",
+                        {"path": os.path.join(os.getcwd(), "shared", "marketplace.yaml")})]
+    assert "added Mine [m4444444] - 0 automation(s)" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_refresh_one_resolves_the_source(capsys):
+    """§22.4: a single-source refresh answers 200 with the source - a success
+    prints the entry count."""
+    c = _MarketClient(SOURCES, writes={"/marketplace/sources/m1111111-a/refresh": {
+        "id": "m1111111-a", "name": "Community automations", "error": None,
+        "entries": [{"index": 0}, {"index": 1}, {"index": 2}]}})
+    _run(c, "marketplace", "refresh", "community")  # name substring resolves
+    assert c.calls == [("POST", "/marketplace/sources/m1111111-a/refresh", None)]
+    assert c.timeouts == [("POST", "/marketplace/sources/m1111111-a/refresh", 600)]
+    assert ("refreshed Community automations - 3 automation(s)"
+            in capsys.readouterr().out)
+
+
+def test_cmd_marketplace_refresh_all_reports_each_and_exits_1_on_a_failure(capsys):
+    """§22.5: refresh-all never stops at the first bad source - every source
+    prints its own line, and the exit code says one of them failed."""
+    c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
+        {"id": "m1111111-a", "name": "Community automations", "error": None,
+         "entries": [{"index": 0}]},
+        {"id": "m2222222-b", "name": "Mine", "error": "the file couldn't be read",
+         "entries": []}]}})
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "refresh")
+    assert ei.value.code == 1
+    assert c.calls == [("POST", "/marketplace/refresh", None)]
+    out = capsys.readouterr().out
+    assert "refreshed Community automations - 1 automation(s)" in out
+    assert "couldn't refresh Mine: the file couldn't be read" in out
+
+
+def test_cmd_marketplace_refresh_all_succeeds_quietly(capsys):
+    c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
+        {"id": "m1111111-a", "name": "Community automations", "error": None,
+         "entries": []}]}})
+    _run(c, "marketplace", "refresh")  # no SystemExit
+    assert "refreshed Community automations - 0 automation(s)" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_remove(capsys):
+    c = _MarketClient(SOURCES, writes={"/marketplace/sources/m2222222-b": {"ok": True}})
+    _run(c, "marketplace", "remove", "m2222222")  # id prefix resolves
+    assert c.calls == [("DELETE", "/marketplace/sources/m2222222-b", None)]
+    assert "removed Mine" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_install_previews_by_index_then_confirms(capsys):
+    """§22.5: the number on the command line is the 1-based one `list` prints
+    and rides as the §22.4 0-based index; the typed command is the go-ahead, so
+    the preview token is confirmed straight away and the shared §20 import
+    summary lines print."""
+    c = _MarketClient(SOURCES, writes={
+        "/marketplace/sources/m1111111-a/entries/1/preview": {
+            "token": "tok9", "preview": {"resolvedUrl": "https://example.com/inbox.autowright"}},
+        "/automations/import/confirm": {
+            "automation": {"name": "Inbox sweeper", "id": "deadbeef-1"},
+            "summary": {"secretsMatched": [
+                {"name": "API_KEY", "matchedTo": "API_KEY", "matchedBy": "name"}],
+                "agentsMatched": [], "unresolved": [
+                    {"kind": "secret", "name": "MAIL_PASS", "description": ""}],
+                "packages": []}}})
+    _run(c, "marketplace", "install", "Community automations", "2")
+    assert c.calls == [
+        ("POST", "/marketplace/sources/m1111111-a/entries/1/preview", None),
+        ("POST", "/automations/import/confirm", {"token": "tok9"}),
+    ]
+    # §20 HTTP timeouts: the archive fetch and the confirm that lands it both
+    # take the long timeout
+    assert [t for _, _, t in c.timeouts] == [600, 600]
+    out = capsys.readouterr().out
+    assert "imported 'Inbox sweeper' [deadbeef]" in out
+    assert "  secrets matched: API_KEY" in out
+    assert "  no match on this machine: secret MAIL_PASS" in out
+    assert "this automation needs attention" in out
+    assert "triggers imported off" in out
+
+
+def test_find_source_resolves_id_prefix_name_and_substring():
+    from autowright.cli import find_source
+
+    c = _MarketClient(SOURCES)
+    assert find_source(c, "m1111111-a")["name"] == "Community automations"
+    assert find_source(c, "m2222222")["name"] == "Mine"
+    assert find_source(c, "cOmMuNiTy AuToMaTiOnS")["id"] == "m1111111-a"
+    assert find_source(c, "community")["id"] == "m1111111-a"   # unique substring
+
+
+def test_find_source_ambiguity_and_no_match_exit_with_the_candidates():
+    """§20 reference rule: ambiguity exits with the candidate list, a no-match
+    with what this machine has."""
+    from autowright.cli import find_source
+
+    with pytest.raises(SystemExit) as ei:
+        find_source(_MarketClient(SOURCES), "m")  # both ids start with m
+    msg = str(ei.value.code)
+    assert "is ambiguous" in msg
+    assert "Community automations (m1111111)" in msg and "Mine (m2222222)" in msg
+
+    with pytest.raises(SystemExit) as ei:
+        find_source(_MarketClient(SOURCES), "nope")
+    assert "no marketplace matches 'nope'" in str(ei.value.code)
+    assert "Community automations, Mine" in str(ei.value.code)
+
+    with pytest.raises(SystemExit) as ei:
+        find_source(_MarketClient([]), "nope")
+    assert "(none)" in str(ei.value.code)
+
+
 def test_cmd_settings_show_and_set(capsys):
     _run(_RouteClient({"/settings": {"login": True, "days": 30, "keepAwake": True}}),
          "settings", "show")

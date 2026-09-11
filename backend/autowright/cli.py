@@ -13,6 +13,7 @@ import argparse
 import getpass
 import http.client
 import json
+import os
 import shutil
 import sys
 import textwrap
@@ -65,9 +66,10 @@ class Client:
                      "`autowright service restart` or `autowright-backend`")
 
     def req(self, method: str, path: str, body: dict | None = None, timeout: int = 30):
-        # §20 HTTP timeouts: 30 s default; the three legitimately long calls
-        # (package install, import in all three of its steps, and automation
-        # delete) override to 600 s.
+        # §20 HTTP timeouts: 30 s default; the legitimately long calls
+        # (package install, import in all three of its steps, automation
+        # delete, and the §22.5 marketplace calls that go over the network)
+        # override to 600 s.
         r = urllib.request.Request(
             self.base + path,
             data=json.dumps(body).encode() if body is not None else None,
@@ -149,6 +151,29 @@ def find_execution(c: Client, ref: str | None) -> dict:
         return matches[0]
     sys.exit(f"no unique execution matches {ref!r} — "
              f"have: {', '.join(f'{e['id'][:8]} ({e['automationName']}, {e['status']}, {e['started']})' for e in execs) or '(none)'}")
+
+
+def find_source(c: Client, ref: str) -> dict:
+    """§22.5: a marketplace source resolves like every other §20 reference."""
+    sources = c.req("GET", "/marketplace")["sources"]
+    for s in sources:
+        if s["id"] == ref:
+            return s
+    # §20: the short ids the CLI prints must resolve back - try id prefix
+    # before names.
+    matches = [s for s in sources if s["id"].startswith(ref)]
+    if not matches:
+        matches = [s for s in sources if s["name"].lower() == ref.lower()]
+    if not matches:
+        matches = [s for s in sources if ref.lower() in s["name"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        sys.exit(f"{ref!r} is ambiguous - matches: "
+                 + ", ".join(f"{s['name']} ({s['id'][:8]})" for s in matches)
+                 + " - use the id instead")
+    sys.exit(f"no marketplace matches {ref!r} - "
+             f"have: {', '.join(s['name'] for s in sources) or '(none)'}")
 
 
 def _pjson(data) -> None:
@@ -844,28 +869,10 @@ def cmd_automation_export(c: Client, args) -> None:
     print(f"exported {a['name']!r} to {path}")
 
 
-def cmd_automation_import(c: Client, args) -> None:
-    if args.path.startswith(("http://", "https://")):
-        # §5.2: fetch + preview on the backend, confirm immediately — the typed
-        # command is the user's explicit action (http:// gets the backend's 422).
-        pr = c.req("POST", "/automations/import/url", {"url": args.path}, timeout=600)
-        resolved = pr.get("preview", {}).get("resolvedUrl")
-        if resolved and resolved != args.path.strip():
-            print(f"resolved to {resolved}")
-        # §20 HTTP timeouts: the confirm lands the archive — a large one on a
-        # slow volume must never report "backend isn't reachable" while it works.
-        r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
-                  timeout=600)
-    else:
-        try:
-            with open(args.path, "rb") as f:
-                data = f.read()
-        except OSError as e:
-            # §20: an unreadable archive is a plain message on stderr, never a
-            # raw OSError.
-            sys.exit(f"can't read {args.path}: {e.strerror or e}")
-        r = json.loads(c.req_raw("POST", "/automations/import", data,
-                                 timeout=600).decode() or "{}")
+def _print_import_summary(c: Client, r: dict) -> None:
+    """§20: the summary lines an import prints once the archive has landed -
+    shared verbatim by `automation import` and §22.5 `marketplace install`,
+    so an install reads exactly like an import."""
     s = r.get("summary", {})
     print(f"imported {r.get('automation', {}).get('name', '?')!r} [{r.get('automation', {}).get('id', '')[:8]}]")
     if s.get("renamedFrom"):
@@ -897,6 +904,31 @@ def cmd_automation_import(c: Client, args) -> None:
         print("  this automation needs attention - open it and fix the "
               "highlighted agents and secrets")
     print("  triggers imported off — enable them with `autowright automation trigger on`")
+
+
+def cmd_automation_import(c: Client, args) -> None:
+    if args.path.startswith(("http://", "https://")):
+        # §5.2: fetch + preview on the backend, confirm immediately - the typed
+        # command is the user's explicit action (http:// gets the backend's 422).
+        pr = c.req("POST", "/automations/import/url", {"url": args.path}, timeout=600)
+        resolved = pr.get("preview", {}).get("resolvedUrl")
+        if resolved and resolved != args.path.strip():
+            print(f"resolved to {resolved}")
+        # §20 HTTP timeouts: the confirm lands the archive - a large one on a
+        # slow volume must never report "backend isn't reachable" while it works.
+        r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
+                  timeout=600)
+    else:
+        try:
+            with open(args.path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            # §20: an unreadable archive is a plain message on stderr, never a
+            # raw OSError.
+            sys.exit(f"can't read {args.path}: {e.strerror or e}")
+        r = json.loads(c.req_raw("POST", "/automations/import", data,
+                                 timeout=600).decode() or "{}")
+    _print_import_summary(c, r)
 
 
 # ------------------------------------------------------------ automation param
@@ -1391,6 +1423,89 @@ def cmd_agent_check(c: Client, args) -> None:
                  f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
     r = c.req("POST", f"/agents/{match[0]['id']}/check")
     print(json.dumps(r))
+
+
+# ---------------------------------------------------------------- marketplace
+
+def cmd_marketplace_list(c: Client, args) -> None:
+    for s in c.req("GET", "/marketplace")["sources"]:
+        print(f"{s['name']} [{s['id'][:8]}]  {s['origin']}")
+        if s.get("error"):
+            # §22.2: a failed refresh leaves the cache alone - the entries
+            # below are still the last good copy.
+            print(f"  couldn't refresh: {s['error']}")
+        elif s.get("refreshedAt"):
+            print(f"  refreshed {s['refreshedAt']}")
+        entries = s.get("entries") or []
+        if not entries:
+            print("  no automations listed")
+        for n, e in enumerate(entries, 1):
+            # §22.1 entries are addressed by position - `marketplace install`
+            # takes the number printed here.
+            description = f" - {e['description']}" if e.get("description") else ""
+            print(f"  {n}. {e['title']}{description}")
+
+
+def cmd_marketplace_add(c: Client, args) -> None:
+    ref = args.source.strip()
+    if ref.startswith(("http://", "https://")):
+        # §22.4: a link travels as { url } - http:// gets the backend's 422
+        # rather than a second copy of the rule here.
+        body = {"url": ref}
+    else:
+        # §22.5: a file path is made absolute against the current directory
+        # before it travels - the backend reads the file itself.
+        body = {"path": os.path.abspath(ref)}
+    # §20 HTTP timeouts: add fetches the catalog and its images over the
+    # network, so it takes the long timeout the import calls take.
+    s = c.req("POST", "/marketplace/sources", body, timeout=600)
+    print(f"added {s['name']} [{s['id'][:8]}] - {len(s.get('entries') or [])} automation(s)")
+
+
+def cmd_marketplace_refresh(c: Client, args) -> None:
+    if args.source:
+        s = find_source(c, args.source)
+        # §22.4: a single-source refresh answers 200 either way - the failure
+        # is in `error`, not in the status code.
+        sources = [c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=600)]
+    else:
+        sources = c.req("POST", "/marketplace/refresh", timeout=600)["sources"]
+    failed = False
+    for s in sources:
+        if s.get("error"):
+            failed = True
+            print(f"couldn't refresh {s['name']}: {s['error']}")
+        else:
+            print(f"refreshed {s['name']} - {len(s.get('entries') or [])} automation(s)")
+    if failed:
+        # §22.5: a refresh-all never stops at the first bad source, but the
+        # exit code says one of them failed.
+        sys.exit(1)
+
+
+def cmd_marketplace_remove(c: Client, args) -> None:
+    s = find_source(c, args.source)
+    c.req("DELETE", f"/marketplace/sources/{s['id']}")
+    print(f"removed {s['name']}")
+
+
+def cmd_marketplace_install(c: Client, args) -> None:
+    s = find_source(c, args.source)
+    # §22.5: the number on the command line is the 1-based one `list` prints;
+    # §22.4 addresses entries by 0-based index.
+    if args.n < 1:
+        sys.exit("entry numbers start at 1 - see `autowright marketplace list`")
+    entries = s.get("entries") or []
+    if args.n > len(entries):
+        sys.exit(f"{s.get('name', '?')!r} lists {len(entries)} automation(s) - "
+                 f"there is no entry {args.n}")
+    pr = c.req("POST", f"/marketplace/sources/{s['id']}/entries/{args.n - 1}/preview",
+               timeout=600)
+    # §20 import rule: the typed command is the user's go-ahead - preview and
+    # confirm in one, exactly as `automation import` does with a link.
+    r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
+              timeout=600)
+    _print_import_summary(c, r)
 
 
 # ---------------------------------------------------------------- settings
@@ -2507,6 +2622,86 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p.add_argument("values", nargs="+", metavar="KEY=VALUE",
                    help="one or more settings to change, by the key names `settings show` "
                         "prints")
+
+    mg = _sub(top, "marketplace", None, "browse and install automations others published",
+              description="A marketplace is a catalog someone published listing automations "
+                          "anyone can install - a title, a description, and the archive "
+                          "behind each one. Add the ones you follow by link or by file, and "
+                          "they stay on this machine so a refresh picks up what was added "
+                          "to them since."
+                          "\n\n"
+                          "Wherever a verb takes a marketplace, name it by its name "
+                          "(case-insensitive), a unique part of its name, its id, or a "
+                          "unique id prefix - the [abcd1234] form `list` prints resolves "
+                          "back."
+                          "\n\n"
+                          "Installing is the ordinary import: the archive is fetched, "
+                          "matched against the agents and secrets this machine has, and "
+                          "landed with its triggers switched off."
+                          ).add_subparsers(dest="verb", required=False, metavar="VERB")
+    _sub(mg, "list", cmd_marketplace_list,
+         "list the marketplaces you added, with their automations",
+         description="One block per marketplace: its name, its short id, where it came from, "
+                     "when it was last refreshed, and every automation it lists, numbered."
+                     "\n\n"
+                     "Those numbers are what `marketplace install` takes, and they follow the "
+                     "published catalog, so list again after a refresh. A marketplace that "
+                     "couldn't be refreshed says so and still shows the last copy that "
+                     "arrived.")
+    p = _sub(mg, "add", cmd_marketplace_add, "add a marketplace by link or file",
+             description="Add a marketplace and read what it lists. The argument is either an "
+                         "https link to a marketplace catalog, or the path to one on this "
+                         "machine."
+                         "\n\n"
+                         "The catalog is fetched and checked before anything is saved, so a link "
+                         "that doesn't answer or a file that isn't a marketplace catalog is refused "
+                         "and nothing is added. Adding the same one twice is refused too. "
+                         "Nothing is installed by adding: a marketplace is a list to browse.",
+             epilog="Examples:\n"
+                    "  autowright marketplace add https://example.com/marketplace-catalog.yaml\n"
+                    "  autowright marketplace add ./shared/marketplace-catalog.yaml")
+    p.add_argument("source", metavar="link-or-file",
+                   help="an https link to a marketplace catalog, or the path to one on this "
+                        "machine")
+    p = _sub(mg, "refresh", cmd_marketplace_refresh, "re-read a marketplace, or all of them",
+             description="Read a marketplace again where it came from, so automations added "
+                         "to it since show up here. With no marketplace named, every one is "
+                         "refreshed in the order `list` prints them."
+                         "\n\n"
+                         "A refresh that fails leaves the copy you already have alone and "
+                         "says what went wrong, and the rest still refresh. The command exits "
+                         "1 when any of them failed.",
+             epilog="Examples:\n"
+                    "  autowright marketplace refresh                 all of them\n"
+                    "  autowright marketplace refresh \"Community\"     just that one")
+    p.add_argument("source", nargs="?",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix (default: every one)")
+    p = _sub(mg, "remove", cmd_marketplace_remove, "remove a marketplace",
+             description="Remove a marketplace and the copy of its catalog kept here."
+                         "\n\n"
+                         "Automations you already installed from it are ordinary automations "
+                         "and are untouched. You can add it again later.")
+    p.add_argument("source",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix")
+    p = _sub(mg, "install", cmd_marketplace_install, "install one of a marketplace's automations",
+             description="Install the automation at the given number in a marketplace, as "
+                         "`list` prints it. Typing the command is taken as your go-ahead, so "
+                         "it installs without asking to confirm."
+                         "\n\n"
+                         "This is the same import `automation import` does, and prints the "
+                         "same summary: the agents and secrets the archive names are matched "
+                         "against what this machine has, anything unmatched is listed for you "
+                         "to fix in the app, and the triggers arrive switched off. Packages "
+                         "it declares are installed afterwards.",
+             epilog="Examples:\n"
+                    "  autowright marketplace install \"Community\" 2")
+    p.add_argument("source",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix")
+    p.add_argument("n", type=int, metavar="N",
+                   help="which automation, by the number `marketplace list` prints beside it")
 
     _add_service(top)
     return ap

@@ -188,4 +188,9 @@ autowright agent list · agent check <name>        # AI agents available to agen
   match lands the automation needing attention - the user fixes it in the app's editor.
   Export includes the user's param values — `--no-values` leaves
   them out when the archive is for someone else.
+- `marketplace list` / `marketplace add <link-or-file>` / `marketplace refresh [<name>]` /
+  `marketplace remove <name>` / `marketplace install <name> <n>` work with marketplaces -
+  catalogs someone published listing shareable automations. `list` numbers each marketplace's entries;
+  `install` takes that number and lands the automation through the ordinary import (agents and
+  secrets matched by name, triggers off).
 - `settings show` / `settings set days=30 notifications=all developerMode=on dataPath=/path`.

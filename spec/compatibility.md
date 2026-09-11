@@ -68,6 +68,18 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-11 - `marketplace/` store added (§22).** A new directory under the §5 data
+  root: `sources.yaml` (the user's marketplace sources - id, kind, origin, timestamps, last
+  error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source. Additive: no
+  existing file changes shape, data written before this date holds no such directory, and a
+  release without the feature never reads it (the directory is inert on downgrade). The
+  catalog people share carries its own `format_version: 1` hard gate, like §5.1 archives
+  and outside the §21 promise; `sources.yaml` loads under the §5 lenient rule (an entry
+  missing `id`, `kind`, or `origin` skips with a warning). No migration. First version
+  writing the new shape: the next release after 2026-09-11; oldest shape still read: the
+  same (the store did not exist before). Fixture test:
+  `tests/test_marketplace.py::test_sources_yaml_lenient_load`.
+
 - **2026-09-09 - `interval` trigger kind added to automation.yaml.** The §4.3 trigger
   list gains a new kind, `interval` (`every`: an ISO-8601 duration in the §4.3 canonical
   form, beside the cron-style `source`, `runIfMissed`, and `enabledAt`). Additive: no

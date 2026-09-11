@@ -219,7 +219,8 @@ On macOS its top edge (46 px) sits **below** the traffic lights — the lights a
 every window state) and end around y ≈ 28, so panel and lights never overlap; on
 Windows its top edge (53 px) clears the 41 px title bar by the same 12 px as the bottom gap. Collapsed
 (default, no hover) the rail is 58 px wide and shows icons only: logo at top, nav icons
-(Automations, Executions, Agents, Secrets, Settings), and the About icon pinned at the bottom
+(Automations, Executions, Agents, Secrets, Marketplace - the §22 row, rendered only while
+§4.9 `developerMode` is on - Settings), and the About icon pinned at the bottom
 below a flexible spacer — About is meta, not a working surface. While the store holds §9.4
 `updateAvailable` (the §3 update-available event — a known, not-yet-installed update), an
 extra nav row appears directly above About (`data-testid="nav-update"`): fa-download icon

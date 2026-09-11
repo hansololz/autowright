@@ -171,6 +171,14 @@ def pending_draft_dir() -> Path:
     return app_support() / "draft"
 
 
+def marketplace_dir() -> Path:
+    """§22.2: the marketplace sources store - `sources.yaml` plus one directory
+    per source (its cached `marketplace-catalog.yaml` and `images/`). Created on
+    demand by the first write, so an install that never opens the page holds no
+    such directory."""
+    return app_support() / "marketplace"
+
+
 def import_spool_dir() -> Path:
     """§5.2: parked import archives, one file per preview token. Transient and
     disposable — deleted on confirm/eviction/expiry, and the whole directory is

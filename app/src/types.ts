@@ -376,6 +376,37 @@ export interface ImportPreview {
   resolvedUrl?: string
 }
 
+// §22.4 marketplace entry - one row of a source's catalog, addressed by its
+// 0-based `index` in catalog order. `archive` is the resolved archive
+// reference (an https URL, or an absolute path for a file-relative one);
+// `image` says whether a cached preview image exists to fetch.
+export interface MarketplaceEntry {
+  index: number
+  title: string
+  description: string
+  archive: string
+  image: boolean
+}
+
+// §22.4 marketplace source - one catalog the user added. `name`,
+// `description` and `entries` are derived from the cached catalog;
+// `refreshedAt` is the last successful fetch (null until one lands) and
+// `error` the last refresh failure's message.
+export interface MarketplaceSource {
+  id: string
+  kind: 'url' | 'file'
+  origin: string
+  name: string
+  description: string
+  addedAt: string
+  refreshedAt: string | null
+  error: string | null
+  // §22.4: whether a readable cached catalog exists - false drives the
+  // "Couldn't load" copy (a real empty catalog still counts as cached).
+  cached: boolean
+  entries: MarketplaceEntry[]
+}
+
 export interface Settings {
   login: boolean
   menuBarIcon: boolean
@@ -593,6 +624,8 @@ export type WsEvent =
   | { event: 'secrets.changed' }
   | { event: 'settings.changed' }
   | { event: 'draft.changed' }
+  // §22.4: a source was added, refreshed or removed - the §22.3 page refetches
+  | { event: 'marketplace.changed' }
   // §19 background continuation: cancelled/consumed remove the snapshot row,
   // everything else upserts it (a held outcome stays listed until consumed)
   | { event: 'draftjob.changed'; owner: string; jobId: string; status: string; mode: 'chat' | 'sync' }

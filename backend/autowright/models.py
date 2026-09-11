@@ -236,6 +236,14 @@ class ImportConfirm(BaseModel):
     token: StrictStr
 
 
+class MarketplaceAdd(BaseModel):
+    """POST /marketplace/sources (§22.4) - exactly one of the two, non-empty;
+    the exactly-one rule and the https/absolute-path rules are the handler's."""
+
+    url: StrictStr | None = None
+    path: StrictStr | None = None
+
+
 class AgentAdd(BaseModel):
     """POST /agents (§4.7) — harness membership and the mode/model matrix stay
     semantic (the handler's), the shapes are checked here."""
