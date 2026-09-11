@@ -40,8 +40,6 @@ vi.mock('../src/api', () => ({
     getExecutionLogs: vi.fn(async () => ({ lines: [] })),
     analyzeExec: vi.fn(async () => ({})),
     getAutomation: vi.fn(async () => ({})),
-    // §4.4/§19 delete an old version (editor version menu)
-    deleteVersion: vi.fn(async () => ({ automation: {} })),
     // §9.2 version diff modal (compare icon + the history banner's Compare button)
     versionDiff: vi.fn(async () => ({ from: 1, to: 2, files: [] })),
     // §11 save paths — edit mode mints a version, create mode creates
@@ -678,28 +676,19 @@ describe('CreateFlow blockers thread entries (§11)', () => {
     expect(screen.getByText('1 blocker — dismissed')).toBeTruthy()
   })
 
-  it('version menu: only older rows carry delete; confirming calls the DELETE and toasts', async () => {
+  it('version menu: the current version is an inert header and no row carries a delete', async () => {
     const edited = {
       ...AUTO, version: 2,
       versions: [{ version: 1, when: 'created Jul 1, 2026', note: null, spec: AUTO.spec, steps: AUTO.steps, notes: '', params: [], packages: [] }],
     } as unknown as Automation
     storeMod.useStore.setState({ automations: [edited] })
-    ;(mockedApi.getAutomation as ReturnType<typeof vi.fn>).mockResolvedValue({ ...edited, versions: [] })
     render(<CreateFlow />)
     fireEvent.click(screen.getByTestId('version-menu'))
     // §4.4: the current version is an inert header, never a selectable option
     expect(screen.getByText('v2 · current')).toBeTruthy()
     expect(screen.getByText(/Your draft builds on this/)).toBeTruthy()
-    // §4.4: hidden, not disabled — the Draft row and the header carry no trash
-    expect(screen.getByTestId('delete-version-1')).toBeTruthy()
-    expect(screen.queryByTestId('delete-version-2')).toBeNull()
-    fireEvent.click(screen.getByTestId('delete-version-1'))
-    // danger ConfirmModal; confirming fires the §19 DELETE and reloads the automation
-    expect(screen.getByText('Delete v1?')).toBeTruthy()
-    fireEvent.click(screen.getByText('Delete v1', { exact: true }))
-    await waitFor(() => expect(mockedApi.deleteVersion).toHaveBeenCalledWith('a1', 1))
-    await waitFor(() => expect(mockedApi.getAutomation).toHaveBeenCalledWith('a1'))
-    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('v1 deleted.'))
+    // §4.4: versions are permanent — no delete affordance anywhere in the menu
+    expect(screen.queryByLabelText(/^Delete v/)).toBeNull()
   })
 
   it('version menu: older rows carry a compare icon, and the history banner offers Compare with the current version', async () => {

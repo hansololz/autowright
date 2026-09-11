@@ -199,9 +199,6 @@ export const api = {
   getChat: (owner: string) => req<{ chat: import('./types').ChatEntry[] }>('GET', `/chat/${owner}`),
   putChat: (owner: string, chat: import('./types').ChatEntry[]) => req('PUT', `/chat/${owner}`, { chat }),
   restore: (automationId: string, v: number) => req<{ version: number }>('POST', `/automations/${automationId}/restore`, { version: v }),
-  // §4.4/§19 delete an old version — never the current one (the UI hides the affordance)
-  deleteVersion: (automationId: string, v: number) =>
-    req<{ automation: import('./types').Automation }>('DELETE', `/automations/${automationId}/versions/${v}`),
   // §19 test: starts a §4.5 test execution record of the sent draft's steps;
   // progress via the ordinary exec.* events, cancel via POST /executions/{id}/cancel
   postTest: (body: Record<string, unknown>) => req<{ executionId: string }>('POST', '/tests', body),

@@ -726,8 +726,8 @@ of sync (§4.1). Everything else the blocked job leaves untouched.
 
 **Review.** 1800 px max-width page. Title row: name (single line, shrinks with ellipsis so a long name never pushes the
 buttons out of the window), version dropdown (edit mode; §4.4 rows — the current version is
-only an inert header, never a selectable option; older rows carry the delete-version trash
-affordance, which the Draft row and that header never show), Start over ghost
+only an inert header, never a selectable option; older rows carry the §4.4 compare icon,
+which the Draft row and that header never show), Start over ghost
 (edit: "Discard draft"), a "Keep draft" ghost (edit mode only, rendered once the draft is
 touched or a stored draft exists — leaves the editor on the §4.4 draft-keep path, toast
 "Draft kept — resume it from this automation anytime."), primary Create/Save — labeled "Create automation" in create mode,

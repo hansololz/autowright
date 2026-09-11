@@ -277,18 +277,7 @@ remain plain dicts (§2).
   and `del` + `mod` rows. A file identical on both sides is still listed (`unchanged`,
   every row `same`), a file on one side only is `new` / `removed` with every row `add` /
   `del`; a file absent on both sides (no notes in either version) is `unchanged` with no rows.
-  Read under `store.lock`: a concurrent save or delete-version never yields a
-  half-read pair.
-- `DELETE /automations/{id}/versions/{v}` — §4.4 delete an old version: removes the
-  `versions/vX/` folder and the in-memory entry, answers `{ automation }` (the updated
-  full JSON) and publishes the automation-changed event. Guards, checked under one lock
-  span: 404 unknown automation or version, 400 when `v` is the current version (the UI
-  never offers it — restore another version first), 409 when any live or queued
-  execution records `(kind: version, version: v)` — an admitted version execution (§19
-  execute `version`, §20 `execute --version`) must not
-  lose its content before or during its run. Past execution records are untouched
-  (§4.5 stores its own step list), but a failed execution on a deleted version can no
-  longer retry — the §7 retry's version resolution answers 404
+  Read under `store.lock`: a concurrent save never yields a half-read pair.
 - `GET /automations/{id}/export?values=0|1` — the §5.1 transfer archive as `application/zip`
   (`Content-Disposition` filename `<name>.autowright`, name sanitized for the filesystem);
   `values=0` omits `param_values` from the manifest (default `1`)

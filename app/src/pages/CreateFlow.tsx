@@ -850,23 +850,8 @@ export default function CreateFlow() {
     }
   }
 
-  // §4.4 delete an old version — the affordance exists only on older rows,
-  // so the current version and the Draft can never reach here.
-  const [delVer, setDelVer] = useState<number | null>(null)
   // §4.4: the version menu's compare icon / the banner's Compare button
   const [diffFrom, setDiffFrom] = useState<number | null>(null)
-  const deleteVersion = async (v: number) => {
-    if (!auto) return
-    try {
-      await api.deleteVersion(auto.id, v)
-      // Viewing the deleted version → back to the Draft view (§4.4).
-      if (rev?.viewing === v) pickVersion('draft')
-      await loadAuto(auto.id)
-      showToast(`v${v} deleted.`)
-    } catch (err) {
-      showToast((err as Error).message)
-    }
-  }
 
   // ---- leave / start over / save ----
   const close = async () => {
@@ -1131,9 +1116,9 @@ export default function CreateFlow() {
                         },
                         ...(auto.versions ?? []).map((v) => ({
                           key: v.version, label: `v${v.version}`, sub: v.when + (v.note ? ' · ' + v.note : ''),
-                          // §4.4: only older rows are deletable — the Draft and
-                          // current rows hide the affordance (never disabled).
-                          del: true,
+                          // §4.4: only older rows carry the compare icon — the Draft
+                          // and current rows hide the affordance (never disabled).
+                          older: true,
                         })),
                       ]).map((it) => {
                         const sel = rev.viewing === it.key
@@ -1145,28 +1130,16 @@ export default function CreateFlow() {
                             sub={it.sub}
                             selected={sel}
                             onPick={() => pickVersion(it.key)}
-                            trailing={'del' in it && it.del ? (
-                              <span style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none' }}>
-                                {/* §4.4: compare (before the trash) — a diff against the current version */}
-                                <button
-                                  className="ad-btn-icon"
-                                  title={`Compare v${it.key}`}
-                                  aria-label={`Compare v${it.key}`}
-                                  data-testid={`compare-version-${it.key}`}
-                                  onClick={(e) => { e.stopPropagation(); setVerOpen(false); setDiffFrom(it.key as number) }}
-                                >
-                                  <i className="fa-solid fa-code-compare" />
-                                </button>
-                                <button
-                                  className="ad-btn-icon danger"
-                                  title={`Delete v${it.key}`}
-                                  aria-label={`Delete v${it.key}`}
-                                  data-testid={`delete-version-${it.key}`}
-                                  onClick={(e) => { e.stopPropagation(); setVerOpen(false); setDelVer(it.key as number) }}
-                                >
-                                  <i className="fa-solid fa-trash-can" />
-                                </button>
-                              </span>
+                            trailing={'older' in it && it.older ? (
+                              <button
+                                className="ad-btn-icon"
+                                title={`Compare v${it.key}`}
+                                aria-label={`Compare v${it.key}`}
+                                data-testid={`compare-version-${it.key}`}
+                                onClick={(e) => { e.stopPropagation(); setVerOpen(false); setDiffFrom(it.key as number) }}
+                              >
+                                <i className="fa-solid fa-code-compare" />
+                              </button>
                             ) : undefined}
                           />
                         )
@@ -1352,21 +1325,6 @@ export default function CreateFlow() {
           current={auto.version}
           from={diffFrom}
           onClose={() => setDiffFrom(null)}
-        />
-      )}
-      {delVer != null && (
-        <ConfirmModal
-          title={`Delete v${delVer}?`}
-          body={(
-            <>
-              v{delVer} is deleted from the version history. This can’t be undone.
-              Past executions of v{delVer} stay in Executions.
-            </>
-          )}
-          confirmLabel={`Delete v${delVer}`}
-          danger
-          onConfirm={() => { const v = delVer; setDelVer(null); void deleteVersion(v) }}
-          onCancel={() => setDelVer(null)}
         />
       )}
 

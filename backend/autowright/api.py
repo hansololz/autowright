@@ -1201,7 +1201,7 @@ def version_diff(automation_id: str,
     once here (versions_diff.py) for the §9.2 modal and the §20 CLI alike.
     Both labels are "vN" naming a stored version (404 otherwise, the current
     one included) and must differ (400). Read under store.lock so a concurrent
-    save or delete-version never yields a half-read pair."""
+    save never yields a half-read pair."""
     a = _auto_or_404(automation_id)
     x = versions_diff.parse_version_label(from_version)
     y = versions_diff.parse_version_label(to_version)
@@ -1213,26 +1213,6 @@ def version_diff(automation_id: str,
             raise HTTPException(400, "from and to must be different versions")
         files = versions_diff.diff_versions(a["versions"][x], a["versions"][y])
     return {"from": x, "to": y, "files": files}
-
-
-@app.delete("/automations/{automation_id}/versions/{version}", dependencies=[Depends(auth)])
-def delete_version(automation_id: str, version: int) -> dict:
-    """§4.4/§19 delete an old version. Guards under one lock span: never the
-    current version (400), never one a live or queued execution records (409 —
-    an admitted version execution must not lose its content before or mid-run)."""
-    a = _auto_or_404(automation_id)
-    with store.lock:
-        if version == a["current_version"]:
-            raise HTTPException(400, "the current version can't be deleted — restore another version first")
-        if version not in a["versions"]:
-            raise HTTPException(404, f"v{version} not found")
-        if any(x["automation_id"] == a["id"] and x.get("kind") == "version"
-               and x.get("version") == version and x["status"] in ("executing", "queued")
-               for x in store.execs.values()):
-            raise HTTPException(409, f"an execution is using v{version} — wait for it to finish")
-        store.delete_version(a, version)
-    _publish_auto_changed(a)
-    return {"automation": _auto_json_locked(a)}
 
 
 @app.post("/automations/{automation_id}/execute", dependencies=[Depends(auth)])
@@ -1792,7 +1772,7 @@ def retry_exec(execution_id: str) -> dict:
     try:
         h2 = engine.retry(a, h)
     except LookupError as e:
-        # §19: a deleted version (or record) no longer resolves — 404, like
+        # §19: a version that no longer loads (or a missing record) resolves to 404, like
         # execute_auto's unknown-version mapping; not a liveness conflict.
         raise HTTPException(404, str(e)) from e
     except RuntimeError as e:

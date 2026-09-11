@@ -1295,49 +1295,6 @@ def test_save_version_and_restore(client):
     assert [v["version"] for v in j["versions"]] == [2, 1]
 
 
-def test_delete_version(client):
-    from autowright.storage import store
-
-    a = store.create_automation(make_version(), "Deleter", "mock")
-    client.post(f"/automations/{a['id']}/versions",
-                json={"draft": make_version(notes="second", note="Change")})
-    client.post(f"/automations/{a['id']}/versions",
-                json={"draft": make_version(notes="third", note="Change again")})
-    base = f"/automations/{a['id']}/versions"
-
-    # §4.4 guards: current refused (400), unknown version 404
-    assert client.delete(f"{base}/3").status_code == 400
-    assert client.delete(f"{base}/9").status_code == 404
-    assert client.delete(f"/automations/{'0' * 36}/versions/1").status_code == 404
-
-    # success: v1 gone from the list, folder gone from disk, current untouched
-    r = client.delete(f"{base}/1")
-    assert r.status_code == 200
-    j = r.json()["automation"]
-    assert j["version"] == 3
-    assert [v["version"] for v in j["versions"]] == [2]
-    assert not (store.auto_dir(store.autos[a["id"]]) / "versions" / "v1").exists()
-    # deleting the deleted version again → 404
-    assert client.delete(f"{base}/1").status_code == 404
-
-
-def test_delete_version_409_while_execution_uses_it(client):
-    from autowright.storage import store
-
-    a = store.create_automation(make_version(), "Busy deleter", "mock")
-    client.post(f"/automations/{a['id']}/versions",
-                json={"draft": make_version(notes="second", note="Change")})
-    au = store.autos[a["id"]]
-    base = f"/automations/{a['id']}/versions"
-    # a live Execute-once on v1 blocks the delete; so does a queued one (§19)
-    for status in ("executing", "queued"):
-        h = store.create_execution(au, "version", 1, "manual", [], status=status)
-        assert client.delete(f"{base}/1").status_code == 409
-        h["status"] = "cancelled"
-        store.update_execution(h)
-    assert client.delete(f"{base}/1").status_code == 200
-
-
 def test_save_version_applies_draft_triggers(client):
     from autowright.storage import store
 
@@ -3808,9 +3765,9 @@ def test_retry_endpoint_reruns_and_answers_conflicts(client, monkeypatch):
     assert r.status_code == 200 and r.json()["executionId"] == eid
     assert _until_finished(events, eid)["execution"]["status"] == "succeeded"
 
-    # a failed record whose version is gone → 404 with the engine's words
-    # (§19 delete-version rule: the version no longer resolves — like
-    # execute's unknown-version mapping, not a liveness conflict)
+    # a failed record whose version is gone (a folder removed by hand, §5) →
+    # 404 with the engine's words: the version no longer resolves — like
+    # execute's unknown-version mapping, not a liveness conflict
     h2 = store.create_execution(a, "version", 99, "manual", [], status="failed")
     store.update_execution(h2)
     a["_live"].discard(h2["id"])

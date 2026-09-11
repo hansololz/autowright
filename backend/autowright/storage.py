@@ -1107,15 +1107,6 @@ class Store:
             self._write_toplevel(a)
             return n
 
-    def delete_version(self, a: dict, v: int) -> None:
-        """§4.4 delete an old version: folder gone, then the in-memory entry.
-        Never the current version — the API guards that before calling in."""
-        with self.lock:
-            shutil.rmtree(self.auto_dir(a) / "versions" / f"v{v}", ignore_errors=True)
-            a["versions"].pop(v, None)
-            a["updated_at"] = timefmt.now_iso()
-            self._write_toplevel(a)
-
     def draft_dir(self, a: dict | None) -> Path:
         """§5/§19: the one draft-container location rule — the pending
         create-mode slot (`<root>/draft/`, owner `pending`) or the

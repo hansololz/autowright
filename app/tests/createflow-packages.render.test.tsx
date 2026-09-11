@@ -35,7 +35,6 @@ vi.mock('../src/api', () => ({
     getExecutionLogs: vi.fn(async () => ({ lines: [] })),
     analyzeExec: vi.fn(async () => ({})),
     getAutomation: vi.fn(async () => ({})),
-    deleteVersion: vi.fn(async () => ({ automation: {} })),
     saveVersion: vi.fn(async () => ({ version: 2 })),
     createAutomation: vi.fn(async () => ({ id: 'a2' })),
     state: vi.fn(async () => ({})),

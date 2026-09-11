@@ -756,22 +756,16 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   button (`fa-code-compare`, `.ad-btn-icon`, "Compare vX") on its right, opening the §9.2
   version diff modal on vX → the current version (the menu closes first; the row's own
   pick, where it has one, is not triggered). The Draft row and the current-version header
-  never show it (hidden, not disabled, the same rule as the trash below): the current
-  version is the modal's default right side, and a draft is not a stored version.
-- **Deleting old versions** (editor version menu only): every *older* row carries a trash
-  icon button (`.ad-btn-icon.danger`) on its right, after the compare icon. The Draft row and the current-version
-  header never show it — **hidden, not disabled**: deleting the current version is
-  structurally impossible (restore another version first and it stops being current), and
-  permanently inapplicable actions hide rather than grey out — the same rule that keeps
-  the current version out of both menus' selectable rows. The trash opens a danger ConfirmModal ("Delete v X? · v X is deleted
-  from the version history. This can't be undone. Past executions of v X stay in
-  Executions."); confirming calls the §19 DELETE, reloads the automation, and toasts
-  "v X deleted." If the deleted version was the one being viewed, the editor jumps back to
-  the Draft view (the loaded-from-history banner leaves with it). Deletion is
-  irreversible — no snapshot, no undo. The backend refuses deleting the current version
-  (400) and a version with a live or queued execution on it (409 — an in-flight Execute
-  once must not lose its content mid-run); a failed execution whose version was deleted
-  can no longer Retry (its §7 retry answers 404), and its stored record is untouched.
+  never show it (hidden, not disabled: permanently inapplicable actions hide rather than
+  grey out, the rule that keeps the current version out of both menus' selectable rows):
+  the current version is the modal's default right side, and a draft is not a stored
+  version.
+- **Versions are permanent.** No surface deletes a stored version: not the version menus, not
+  the §19 API, not the §20 CLI. History is the record of what the automation was, restore
+  depends on every version still being there, and a failed execution's §7 Retry resolves
+  its version by number. The only way a version folder leaves disk is deleting the whole
+  automation (§5). (Decided 2026-09-10; the earlier delete-version trash and its DELETE
+  endpoint were removed.)
 - Detail page: the version menu is **read-only history** — older rows show version, note, and
   date and carry no mutating action; their one control is the compare icon above (a diff
   changes nothing). There is no Execute once in the UI: re-executing an older version
