@@ -244,7 +244,8 @@ migrate-on-load migration so data written by released versions keeps loading (§
   drops the table and startup's yaml reconcile rebuilds it), `reqlog.py` (§5 per-request log
   files + build-failure records, developerMode-gated), `testexec.py` (§11 draft test executions
   through the real engine path, plus the §8 chat call's RECENT EXECUTIONS context), `specmd.py`
-  (spec.md ↔ §4.1 block-list conversion), `events.py` (in-process pubsub hub feeding the §19
+  (spec.md ↔ §4.1 block-list conversion), `versions_diff.py` (the §19 version diff: two
+  stored versions compared file by file through stdlib `difflib`), `events.py` (in-process pubsub hub feeding the §19
   WebSocket), and the small utilities `keychain.py` (§4.8 Keychain values via keyring),
   `notify.py` (osascript notifications), `paths.py` (§5 filesystem locations,
   `AUTOWRIGHT_HOME` override, the §5.1 `current_os` platform token and its §4.1

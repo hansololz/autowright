@@ -180,6 +180,9 @@ export const api = {
   createAutomation: (body: Record<string, unknown>) => req<import('./types').Automation>('POST', '/automations', body),
   saveVersion: (automationId: string, body: Record<string, unknown>) =>
     req<{ version: number }>('POST', `/automations/${automationId}/versions`, body),
+  // §19 version diff: the backend diffs, the §9.2 modal only renders
+  versionDiff: (automationId: string, from: number, to: number) =>
+    req<import('./types').VersionDiff>('GET', `/automations/${automationId}/diff?from=v${from}&to=v${to}`),
   // §19 the one draft-container surface: owner = automation id | 'pending'
   // (the §4.4 create-mode slot <root>/draft/). agentId rides beside the
   // pending payload only — the identity no automation record exists to hold.

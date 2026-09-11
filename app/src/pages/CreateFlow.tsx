@@ -23,6 +23,7 @@ import {
   jobStageTitle, loadVersionInto,
   newEntry, persistChat, secretRefsOf, seedEmpty, seedFromAuto, seedFromPayload, serializeDraft,
 } from './createflow/model'
+import { VersionDiffModal } from '../versiondiff'
 import { useDraftJob } from './createflow/useDraftJob'
 import { ChatPanel } from './createflow/ChatPanel'
 import { BuildCard, TestCard } from './createflow/BuildTestCards'
@@ -852,6 +853,8 @@ export default function CreateFlow() {
   // §4.4 delete an old version — the affordance exists only on older rows,
   // so the current version and the Draft can never reach here.
   const [delVer, setDelVer] = useState<number | null>(null)
+  // §4.4: the version menu's compare icon / the banner's Compare button
+  const [diffFrom, setDiffFrom] = useState<number | null>(null)
   const deleteVersion = async (v: number) => {
     if (!auto) return
     try {
@@ -1143,15 +1146,27 @@ export default function CreateFlow() {
                             selected={sel}
                             onPick={() => pickVersion(it.key)}
                             trailing={'del' in it && it.del ? (
-                              <button
-                                className="ad-btn-icon danger"
-                                title={`Delete v${it.key}`}
-                                aria-label={`Delete v${it.key}`}
-                                data-testid={`delete-version-${it.key}`}
-                                onClick={(e) => { e.stopPropagation(); setVerOpen(false); setDelVer(it.key as number) }}
-                              >
-                                <i className="fa-solid fa-trash-can" />
-                              </button>
+                              <span style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none' }}>
+                                {/* §4.4: compare (before the trash) — a diff against the current version */}
+                                <button
+                                  className="ad-btn-icon"
+                                  title={`Compare v${it.key}`}
+                                  aria-label={`Compare v${it.key}`}
+                                  data-testid={`compare-version-${it.key}`}
+                                  onClick={(e) => { e.stopPropagation(); setVerOpen(false); setDiffFrom(it.key as number) }}
+                                >
+                                  <i className="fa-solid fa-code-compare" />
+                                </button>
+                                <button
+                                  className="ad-btn-icon danger"
+                                  title={`Delete v${it.key}`}
+                                  aria-label={`Delete v${it.key}`}
+                                  data-testid={`delete-version-${it.key}`}
+                                  onClick={(e) => { e.stopPropagation(); setVerOpen(false); setDelVer(it.key as number) }}
+                                >
+                                  <i className="fa-solid fa-trash-can" />
+                                </button>
+                              </span>
                             ) : undefined}
                           />
                         )
@@ -1225,6 +1240,10 @@ export default function CreateFlow() {
                   <span style={{ flex: 1 }}>
                     {`Loaded v${rev.viewing} from history. Saving restores it as v${auto.version + 1} — your draft stays in the Version menu.`}
                   </span>
+                  {/* §4.4: what a restore would change, one click from the button that performs it */}
+                  <button className="ad-btn-soft" data-testid="compare-with-current" onClick={() => setDiffFrom(rev.viewing as number)} style={{ flex: 'none' }}>
+                    Compare with v{auto.version}
+                  </button>
                   <button className="ad-btn-soft" disabled={busyRewrite} onClick={() => pickVersion('draft')} style={{ flex: 'none' }}>
                     Back to draft
                   </button>
@@ -1326,6 +1345,15 @@ export default function CreateFlow() {
         </div>
       </div>
 
+      {diffFrom !== null && auto && (
+        <VersionDiffModal
+          automationId={auto.id}
+          versions={[{ version: auto.version, when: '', note: null }, ...(auto.versions ?? [])]}
+          current={auto.version}
+          from={diffFrom}
+          onClose={() => setDiffFrom(null)}
+        />
+      )}
       {delVer != null && (
         <ConfirmModal
           title={`Delete v${delVer}?`}

@@ -96,6 +96,25 @@ export interface VersionInfo {
   packages: PackageDep[]
 }
 
+// §19 GET /automations/{id}/diff — the §9.2 version diff, one entry per file
+// of the §5 version folder (manifest, spec, notes, then the step scripts).
+export interface DiffSide { number: number; text: string }
+export interface DiffRow {
+  kind: 'same' | 'add' | 'del' | 'mod'
+  left: DiffSide | null
+  right: DiffSide | null
+}
+export interface DiffFile {
+  kind: 'manifest' | 'spec' | 'notes' | 'step'
+  name: string
+  file: string | null
+  status: 'unchanged' | 'changed' | 'new' | 'removed'
+  added: number
+  removed: number
+  rows: DiffRow[]
+}
+export interface VersionDiff { from: number; to: number; files: DiffFile[] }
+
 // §4.4/§11 chat-thread entry — persisted at the container root (chat.jsonl,
 // §19 /chat/{owner}); the thread outlives the draft (§4.4 thread lifetime).
 // Transient progress entries are editor state only and never use this shape.

@@ -79,6 +79,41 @@ def exec_started_ms(h: dict) -> int:
 PARAM_VALUE_KEYS = ("on", "lines", "rows", "value")
 
 
+def manifest_step_entry(s: dict, fname: str) -> dict[str, Any]:
+    """The one §5 manifest entry for a step — written by the version-folder
+    writer and dumped again by the §19 version diff's manifest text."""
+    entry: dict[str, Any] = {"file": fname, "name": s["name"], "description": s.get("description", "")}
+    if s.get("agent"):
+        entry["agent"] = True
+        entry["why"] = s.get("why", "")
+        if s.get("agents"):
+            entry["agents"] = list(s["agents"])
+    if s.get("secrets"):
+        entry["secrets"] = list(s["secrets"])
+    if s.get("packages"):
+        entry["packages"] = list(s["packages"])
+    # §4.1 per-step time limit + §7 retry pair. The internal shape is
+    # snake_case only — the API boundary normalizes the camelCase client
+    # spelling before anything reaches storage.
+    if s.get("timeout"):
+        entry["timeout"] = int(s["timeout"])
+    if s.get("no_timeout"):
+        entry["no_timeout"] = True
+    if s.get("retries"):
+        entry["retries"] = int(s["retries"])
+    if s.get("infinite_retries"):
+        entry["infinite_retries"] = True
+    return entry
+
+
+def manifest_packages(ver: dict) -> list[dict]:
+    """§6.2: statuses are transient (draft payload / API only) — the stored
+    manifest keeps just the declaration; absent when none are declared."""
+    return [{"pip": p.get("pip"), "import": p.get("import"),
+             **({"why": p["why"]} if p.get("why") else {})}
+            for p in ver.get("packages", []) or []]
+
+
 def strip_param_values(params: list | None) -> list[dict]:
     """§4.2: definitions only — drop the resolved-value keys a draft seeded
     from the merged API shape carries."""
@@ -900,28 +935,7 @@ class Store:
         manifest_steps = []
         for i, s in enumerate(ver["steps"], 1):
             fname = safe_step_filename(s.get("file"), i, s.get("name"), keep)
-            entry: dict[str, Any] = {"file": fname, "name": s["name"], "description": s.get("description", "")}
-            if s.get("agent"):
-                entry["agent"] = True
-                entry["why"] = s.get("why", "")
-                if s.get("agents"):
-                    entry["agents"] = list(s["agents"])
-            if s.get("secrets"):
-                entry["secrets"] = list(s["secrets"])
-            if s.get("packages"):
-                entry["packages"] = list(s["packages"])
-            # §4.1 per-step time limit + §7 retry pair. The internal shape is
-            # snake_case only — the API boundary normalizes the camelCase
-            # client spelling before anything reaches storage.
-            if s.get("timeout"):
-                entry["timeout"] = int(s["timeout"])
-            if s.get("no_timeout"):
-                entry["no_timeout"] = True
-            if s.get("retries"):
-                entry["retries"] = int(s["retries"])
-            if s.get("infinite_retries"):
-                entry["infinite_retries"] = True
-            manifest_steps.append(entry)
+            manifest_steps.append(manifest_step_entry(s, fname))
             keep.add(fname)
             atomic_write_text(vd / fname, s.get("code", ""))
         atomic_write_text(vd / "spec.md", blocks_to_md(ver.get("spec", [])))
@@ -930,11 +944,7 @@ class Store:
             atomic_write_text(vd / "notes.md", ver["notes"].strip() + "\n")
         elif (vd / "notes.md").exists():
             (vd / "notes.md").unlink()
-        # §6.2: statuses are transient (draft payload / API only) — the stored
-        # manifest keeps just the declaration; absent when none are declared.
-        pkgs = [{"pip": p.get("pip"), "import": p.get("import"),
-                 **({"why": p["why"]} if p.get("why") else {})}
-                for p in ver.get("packages", []) or []]
+        pkgs = manifest_packages(ver)
         save_yaml(vd / "automation.yaml", {
             "when": ver.get("when"),
             "note": ver.get("note"),

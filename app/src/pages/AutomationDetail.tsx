@@ -11,6 +11,7 @@ import {
   PageTitle, PopMenu, ScrollArea, Toggle, nextIn, usePopover,
 } from '../ui'
 import { StepList } from '../steps'
+import { VersionDiffModal } from '../versiondiff'
 import { nextTriggerShort, useTriggerPreview } from '../triggers'
 import { ResultSection, SpecMarkdown } from '../result'
 import { badgeAnim, runAction } from './detail/model'
@@ -39,6 +40,8 @@ export default function AutomationDetail() {
   const [verOpen, setVerOpen, verRef] = usePopover()
   const [actOpen, setActOpen, actRef] = usePopover()
   const [delAsk, setDelAsk] = useState(false)
+  // §4.4: the version menu's compare icon — the older version to diff against the current
+  const [diffFrom, setDiffFrom] = useState<number | null>(null)
   // §9.2 capacity popup — a click on Execute now while anything is live
   // routes through the modal; `kind` is decided at click time.
   const [execAsk, setExecAsk] = useState<'parallel' | 'queue' | 'full' | null>(null)
@@ -267,6 +270,19 @@ export default function AutomationDetail() {
                   key={v.version} mono
                   title={`v${v.version}`}
                   sub={(v.note ? `${v.note} — ` : '') + v.when}
+                  // §4.4: read-only history — the compare icon is the row's one
+                  // control (a diff changes nothing)
+                  trailing={(
+                    <button
+                      className="ad-btn-icon"
+                      title={`Compare v${v.version}`}
+                      aria-label={`Compare v${v.version}`}
+                      data-testid={`compare-version-${v.version}`}
+                      onClick={() => { setVerOpen(false); setDiffFrom(v.version) }}
+                    >
+                      <i className="fa-solid fa-code-compare" />
+                    </button>
+                  )}
                 />
               ))}
               </ScrollArea>
@@ -534,6 +550,15 @@ export default function AutomationDetail() {
             )
           }}
         </Modal>
+      )}
+      {diffFrom !== null && (
+        <VersionDiffModal
+          automationId={auto.id}
+          versions={[{ version: auto.version, when: '', note: null }, ...(auto.versions ?? [])]}
+          current={auto.version}
+          from={diffFrom}
+          onClose={() => setDiffFrom(null)}
+        />
       )}
       {execAsk === 'parallel' && (
         <ConfirmModal

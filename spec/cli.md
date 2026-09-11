@@ -24,7 +24,8 @@ way it edits any code. The §17 `skills/autowright/` agent skill is the primary 
 autowright status                       backend health, version, entity counts
 autowright instructions                 §8 framework + build instruction files, verbatim
 autowright automation <verb> …          list · show · pull · push · create · delete · restore ·
-                                        execute [--version vN|draft] [--queue] · export · import ·
+                                        diff --from vN [--to vN] · execute [--version vN|draft] [--queue] ·
+                                        export · import ·
                                         param list|set · trigger list|add|on|off|remove ·
                                         memory show|clear · snapshot list|create|restore|delete
 autowright execution <verb> …           list · show · tail · cancel · retry · skip · result
@@ -129,6 +130,15 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   when an automation's `problems` list is non-empty, and
   `automation show` prints a `needs fixing:` block — one indented line per problem label,
   in §4.1 order. `--json` carries the serialized `problems` field as always.
+- **Version diff** (`automation diff <ref> --from vN [--to vN]`): the §9.2 version diff
+  modal's CLI parity, straight from §19 `GET .../diff` (`--to` defaults to the current
+  version; a `from` that is not `vN` exits with "version must be vN", and the API's 404 /
+  400 surface as its detail line). Human output prints, per file in the endpoint's order,
+  a header `== <file> (<status>[, +a -r])` (`unchanged` files are the header alone),
+  then the rows with a two-character prefix: `  ` same, `- ` del, `+ ` add, a `mod` row as
+  its `- ` line then its `+ ` line; in a changed file a run of more than 6 same rows
+  collapses to `  … <n> unchanged lines` keeping 3 of context on each side (the modal's
+  rule), and new / removed files print every row. `--json` prints the endpoint's payload.
 - **Memory inspection** (`automation memory show <ref> [file]`) — the authoring surface's
   only read access to §6 memory contents (§8 drafting calls never carry them). With no
   `file`, lists the memory directory's files — memory-relative path, size, updated — via §19

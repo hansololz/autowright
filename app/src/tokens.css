@@ -94,6 +94,9 @@
   --backdrop: rgba(5, 7, 10, 0.6);
   --find-bg: oklch(0.74 0.155 52 / 0.22);
   --find-active-bg: oklch(0.74 0.155 52 / 0.5);
+  /* §9.2 version-diff row grounds: the status-wash recipe on the code ground */
+  --diff-add-bg: oklch(0.76 0.15 150 / 0.13);
+  --diff-del-bg: oklch(0.7 0.19 25 / 0.13);
   /* floating-surface shadows (§14: the only drop-shadow tier) */
   --shadow-menu: 0 18px 44px rgba(0, 0, 0, 0.5);
   --shadow-toast: 0 10px 30px rgba(0, 0, 0, 0.4);

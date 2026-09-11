@@ -250,6 +250,35 @@ remain plain dicts (§2).
   endpoints themselves (save, create, draft DELETE), never through this surface
 - `POST /automations/{id}/restore` `{ version }` — restore vX as vN+1, written through the
   §5 version-folder writer (manifest last as the commit point — never a tree copy)
+- `GET /automations/{id}/diff?from=vX&to=vY`: the §9.2 version diff, what changed between
+  two stored versions, computed here (stdlib `difflib`, `versions_diff.py`) so the UI and
+  the §20 CLI render one result and neither diffs. `from` / `to` are "vN" labels
+  (case-insensitive, as execute's `version`), each must name a stored version (404
+  otherwise; the current version included), and they must differ (400). Answers
+  `{ from: X, to: Y, files: [...] }`, one entry per **file of the §5 version folder**, in
+  the order the §9.2 navigator lists them: the manifest, the spec, the notes, then the
+  steps in the `to` version's order with the `from`-only steps appended (steps matched by
+  name, k-th of a name to k-th). A file entry is `{ kind: "manifest" | "spec" | "notes" |
+  "step", name (the navigator title: "Manifest" / "Spec" / "Notes" / the step name), file
+  (the folder filename: `automation.yaml`, `spec.md`, `notes.md`, the step's `file`),
+  status: "unchanged" | "changed" | "new" | "removed", added, removed (line counts), rows:
+  [{ kind: "same" | "add" | "del" | "mod", left: { number, text } | null, right: { number,
+  text } | null }] }`. The text compared: for the **manifest**, the versioned manifest
+  fields the §5 writer emits (`params` definitions, `packages`, the step entries with
+  their `file`, `name`, `description`, agent / secrets / packages / time-limit / retry
+  fields) dumped as YAML through the same `save_yaml` dump, minus the `when` / `note`
+  metadata that differs by construction, so the manifest side reads as the on-disk
+  `automation.yaml` would; the **spec** as `spec.md`'s markdown (§4.1 blocks rendered
+  back through the writer's `blocks_to_md`); the **notes** as `notes.md`; a **step** as its
+  script. A single trailing newline is stripped before splitting, and empty text is zero
+  lines. Rows come from `SequenceMatcher` opcodes with `replace` blocks paired
+  line-for-line into `mod` rows (the leftover of the longer side as `del` / `add`), so a
+  side-by-side renders straight from the list; `added` / `removed` count the `add` + `mod`
+  and `del` + `mod` rows. A file identical on both sides is still listed (`unchanged`,
+  every row `same`), a file on one side only is `new` / `removed` with every row `add` /
+  `del`; a file absent on both sides (no notes in either version) is `unchanged` with no rows.
+  Read under `store.lock`: a concurrent save or delete-version never yields a
+  half-read pair.
 - `DELETE /automations/{id}/versions/{v}` — §4.4 delete an old version: removes the
   `versions/vX/` folder and the in-memory entry, answers `{ automation }` (the updated
   full JSON) and publishes the automation-changed event. Guards, checked under one lock

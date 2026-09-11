@@ -741,11 +741,74 @@ def cmd_automation_delete(c: Client, args) -> None:
 
 def cmd_automation_restore(c: Client, args) -> None:
     a = find_automation(c, args.automation)
-    v = args.version.lstrip("vV")
-    if not v.isdigit():
-        sys.exit(f"version must be vN, got {args.version!r}")
-    r = c.req("POST", f"/automations/{a['id']}/restore", {"version": int(v)})
+    v = _version_arg(args.version)
+    r = c.req("POST", f"/automations/{a['id']}/restore", {"version": v})
     print(f"restored v{v} of {a['name']!r} as v{r.get('version', '?')}")
+
+
+def _version_arg(label: str) -> int:
+    v = label.lstrip("vV")
+    if not v.isdigit():
+        sys.exit(f"version must be vN, got {label!r}")
+    return int(v)
+
+
+DIFF_CONTEXT = 3       # §20/§9.2: same-rows kept on each side of a collapsed run
+DIFF_COLLAPSE_OVER = 6  # a run of same rows longer than this collapses
+
+
+def diff_rows_text(rows: list[dict], collapse: bool) -> list[str]:
+    """§20 human rows: a two-character prefix per line (`  ` same, `- ` del,
+    `+ ` add, a mod row as its `- ` then `+ ` line); in a changed file a run of
+    more than DIFF_COLLAPSE_OVER same rows collapses to one `… <n> unchanged
+    lines` marker keeping DIFF_CONTEXT rows of context on each side."""
+    out: list[str] = []
+    i = 0
+    while i < len(rows):
+        r = rows[i]
+        if r["kind"] == "same":
+            j = i
+            while j < len(rows) and rows[j]["kind"] == "same":
+                j += 1
+            run = rows[i:j]
+            head = DIFF_CONTEXT if i > 0 else 0
+            tail = DIFF_CONTEXT if j < len(rows) else 0
+            if collapse and len(run) > DIFF_COLLAPSE_OVER and len(run) - head - tail > 0:
+                out += ["  " + x["left"]["text"] for x in run[:head]]
+                out.append(f"  … {len(run) - head - tail} unchanged lines")
+                out += ["  " + x["left"]["text"] for x in run[len(run) - tail:]] if tail else []
+            else:
+                out += ["  " + x["left"]["text"] for x in run]
+            i = j
+            continue
+        if r["left"] is not None:
+            out.append("- " + r["left"]["text"])
+        if r["right"] is not None:
+            out.append("+ " + r["right"]["text"])
+        i += 1
+    return out
+
+
+def cmd_automation_diff(c: Client, args) -> None:
+    a = find_automation(c, args.automation)
+    x = _version_arg(args.from_version)
+    if args.to_version:
+        y = _version_arg(args.to_version)
+    else:
+        y = c.req("GET", f"/automations/{a['id']}")["version"]
+    d = c.req("GET", f"/automations/{a['id']}/diff?from=v{x}&to=v{y}")
+    if args.json:
+        _pjson(d)
+        return
+    print(f"{a['name']}: v{d['from']} → v{d['to']}")
+    for f in d["files"]:
+        status = f["status"]
+        counts = f", +{f['added']} -{f['removed']}" if status == "changed" else ""
+        print(f"== {f['file']} ({status}{counts})")
+        if status == "unchanged":
+            continue
+        for line in diff_rows_text(f["rows"], collapse=status == "changed"):
+            print(line)
 
 
 def cmd_automation_execute(c: Client, args) -> None:
@@ -1860,6 +1923,22 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "exactly as they are.")
     _ref(p)
     p.add_argument("version", metavar="vN", help='the version to bring back, like "v3"')
+    p = _sub(ag, "diff", cmd_automation_diff, "show what changed between two versions",
+             json_flag=True,
+             description="Print what changed between two versions of an automation, file by "
+                         "file: the manifest, the spec, the notes, then every step script. "
+                         "Look here before `restore` to see exactly what bringing an old "
+                         "version back would change."
+                         "\n\n"
+                         "Lines are prefixed `- ` (only in the older version), `+ ` (only in "
+                         "the newer) or two spaces (in both); long unchanged stretches "
+                         "collapse to a one-line count. `automation show` lists the "
+                         "versions you can name.")
+    _ref(p)
+    p.add_argument("--from", dest="from_version", metavar="vN", required=True,
+                   help='the older version, like "v3"')
+    p.add_argument("--to", dest="to_version", metavar="vN",
+                   help="the newer version (default: the current one)")
     p = _sub(ag, "execute", cmd_automation_execute, "execute an automation right now",
              description="Execute an automation now, as if a trigger had fired, and print the "
                          "new execution's id. It runs in the background, so the command "

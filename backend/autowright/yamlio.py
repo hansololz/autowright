@@ -73,5 +73,11 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
         raise
 
 
+def dump_yaml(data: Any) -> str:
+    """The one YAML dump: every stored file and the §19 version diff's manifest
+    text go through it, so a diff reads as the on-disk file would."""
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
 def save_yaml(path: Path, data: Any, mode: int | None = None) -> None:
-    atomic_write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True), mode)
+    atomic_write_text(path, dump_yaml(data), mode)

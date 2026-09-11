@@ -748,9 +748,18 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   draft builds on this — Save lands it as vN+1." — the same header treatment as the
   detail-page menu (hidden as an option, not disabled). Loading an old version shows a banner: "Loaded vX from history.
   Saving restores it as vN+1 — your draft stays in the Version menu." with a bordered
-  **Back to draft** button; Save label becomes "Restore vX as vN+1".
+  **Back to draft** button; Save label becomes "Restore vX as vN+1". The banner also
+  carries a bordered **Compare with vN** button (`.ad-btn-soft`, before Back to draft; N
+  is the current version) opening the §9.2 **version diff modal** on vX → vN, so what a
+  restore would change is one click away from the button that performs it.
+- **Comparing versions** (both version menus): every *older* row carries a compare icon
+  button (`fa-code-compare`, `.ad-btn-icon`, "Compare vX") on its right, opening the §9.2
+  version diff modal on vX → the current version (the menu closes first; the row's own
+  pick, where it has one, is not triggered). The Draft row and the current-version header
+  never show it (hidden, not disabled, the same rule as the trash below): the current
+  version is the modal's default right side, and a draft is not a stored version.
 - **Deleting old versions** (editor version menu only): every *older* row carries a trash
-  icon button (`.ad-btn-icon.danger`) on its right. The Draft row and the current-version
+  icon button (`.ad-btn-icon.danger`) on its right, after the compare icon. The Draft row and the current-version
   header never show it — **hidden, not disabled**: deleting the current version is
   structurally impossible (restore another version first and it stops being current), and
   permanently inapplicable actions hide rather than grey out — the same rule that keeps
@@ -764,7 +773,8 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   once must not lose its content mid-run); a failed execution whose version was deleted
   can no longer Retry (its §7 retry answers 404), and its stored record is untouched.
 - Detail page: the version menu is **read-only history** — older rows show version, note, and
-  date and carry no actions. There is no Execute once in the UI: re-executing an older version
+  date and carry no mutating action; their one control is the compare icon above (a diff
+  changes nothing). There is no Execute once in the UI: re-executing an older version
   from the app was removed (params are current stored values and old versions can hold stale
   assumptions); executing an old version stays possible through §19 execute `version` and the
   §20 CLI's `execute --version`. The menu's footer explainer: "Triggers and Execute now always

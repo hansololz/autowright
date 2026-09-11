@@ -42,6 +42,8 @@ vi.mock('../src/api', () => ({
     getAutomation: vi.fn(async () => ({})),
     // §4.4/§19 delete an old version (editor version menu)
     deleteVersion: vi.fn(async () => ({ automation: {} })),
+    // §9.2 version diff modal (compare icon + the history banner's Compare button)
+    versionDiff: vi.fn(async () => ({ from: 1, to: 2, files: [] })),
     // §11 save paths — edit mode mints a version, create mode creates
     saveVersion: vi.fn(async () => ({ version: 2 })),
     createAutomation: vi.fn(async () => ({ id: 'a2' })),
@@ -698,6 +700,35 @@ describe('CreateFlow blockers thread entries (§11)', () => {
     await waitFor(() => expect(mockedApi.deleteVersion).toHaveBeenCalledWith('a1', 1))
     await waitFor(() => expect(mockedApi.getAutomation).toHaveBeenCalledWith('a1'))
     await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('v1 deleted.'))
+  })
+
+  it('version menu: older rows carry a compare icon, and the history banner offers Compare with the current version', async () => {
+    const edited = {
+      ...AUTO, version: 2,
+      versions: [{ version: 1, when: 'created Jul 1, 2026', note: null, spec: AUTO.spec, steps: AUTO.steps, notes: '', params: [], packages: [] }],
+    } as unknown as Automation
+    storeMod.useStore.setState({ automations: [edited] })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByTestId('version-menu'))
+    // §4.4: hidden, not disabled — only the older row carries the icon
+    expect(screen.getByTestId('compare-version-1')).toBeTruthy()
+    expect(screen.queryByTestId('compare-version-2')).toBeNull()
+    fireEvent.click(screen.getByTestId('compare-version-1'))
+    await waitFor(() => expect(mockedApi.versionDiff).toHaveBeenCalledWith('a1', 1, 2))
+    expect(screen.getByRole('dialog', { name: 'Changes from v1 to v2' })).toBeTruthy()
+    // the compare click never loads the version into the editor
+    expect(screen.queryByText(/Loaded v1 from history/)).toBeNull()
+    fireEvent.click(screen.getByLabelText('Close'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    // loading v1 from the menu shows the banner with its Compare button
+    fireEvent.click(screen.getByTestId('version-menu'))
+    fireEvent.click(screen.getByText('v1'))
+    expect(screen.getByText(/Loaded v1 from history/)).toBeTruthy()
+    ;(mockedApi.versionDiff as ReturnType<typeof vi.fn>).mockClear()
+    fireEvent.click(screen.getByTestId('compare-with-current'))
+    expect(screen.getByTestId('compare-with-current').textContent).toBe('Compare with v2')
+    await waitFor(() => expect(mockedApi.versionDiff).toHaveBeenCalledWith('a1', 1, 2))
+    expect(screen.getByRole('dialog', { name: 'Changes from v1 to v2' })).toBeTruthy()
   })
 
   it('a fresh draft’s blocked first message: the reply is an ordinary chat message', async () => {

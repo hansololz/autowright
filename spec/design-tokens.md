@@ -203,8 +203,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (`rgba(255,255,255,.15)`), `--backdrop` (`rgba(5,7,10,.6)` — every modal/overlay
   scrim), the floating-surface shadows `--shadow-menu` / `--shadow-toast` /
   `--shadow-modal` / `--shadow-panel` / `--shadow-rail` (values above), the §13 panel
-  ground `--bg-panel` + `--border-panel`, and the find-in-script highlights `--find-bg`
-  (`--accent` / .22) + `--find-active-bg` (/ .5). No `rgba`/`oklch` literal survives at a
+  ground `--bg-panel` + `--border-panel`, the find-in-script highlights `--find-bg`
+  (`--accent` / .22) + `--find-active-bg` (/ .5), and the §9.2 version-diff row grounds
+  `--diff-add-bg` (`--green` / .13) + `--diff-del-bg` (`--red` / .13): the status-wash
+  recipe on the code ground, never a status `-bg` token reused at a diff call site. No `rgba`/`oklch` literal survives at a
   call site; `result.tsx`'s iframe base sheet is the one sanctioned hex mirror. Recurring fragments are
   `ui.tsx` primitives: `MiniBadge` (uppercase mono chip; status `Badge` maps onto it),
   `ProgressBar` (`percent: number | null` — null renders the indeterminate `adBarSlide` bar; the
@@ -381,7 +383,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     content around it (no triggers, no snapshots, no files, no matching steps). Bare
     `Spinner`s and ad-hoc "Loading…" text are not loading states.
   - **Modals:** the `Modal` card pads `22px 24px` by default (`cardStyle` zeroes it for the
-    full-bleed §9.2/§11 viewer, editor and test-run modals); title 15/600, 6 px above the subtitle; footer
+    full-bleed §9.2/§11 viewer, diff, editor and test-run modals; the two-column viewers
+    are `min(1120px, 92vw)` wide, the four-column §9.2 version diff `min(1440px, 94vw)`); title 15/600, 6 px above the subtitle; footer
     buttons in a right-aligned flex row, gap 10, 18 px above. `DocModal` (`ui.tsx`) is the
     one document viewer (§9.4 About documents and the What's new modal).
   - **Icons:** trailing row chevrons 10 px, back-link chevron 10 px, status dots 7 px,

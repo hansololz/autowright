@@ -20,6 +20,8 @@ vi.mock('../src/api', () => ({
     patchAutomation: vi.fn(async () => ({})),
     deleteAutomation: vi.fn(async () => ({})),
     deleteDraft: vi.fn(async () => ({})),
+    // §9.2 version diff modal (opened by the version menu's compare icon)
+    versionDiff: vi.fn(async () => ({ from: 1, to: 2, files: [] })),
   },
 }))
 
@@ -468,5 +470,17 @@ describe('§9.2 delete while the page is open', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  it('version menu: an older row carries the compare icon, which opens the diff modal on vX → current', async () => {
+    seed(auto({
+      version: 2,
+      versions: [{ version: 1, when: 'created Jul 1, 2026', note: null, spec: [], steps: [], params: [], packages: [] }],
+    }))
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByText('v2'))
+    fireEvent.click(screen.getByTestId('compare-version-1'))
+    await waitFor(() => expect(mockedApi.versionDiff).toHaveBeenCalledWith('a1', 1, 2))
+    expect(screen.getByRole('dialog', { name: 'Changes from v1 to v2' })).toBeTruthy()
   })
 })

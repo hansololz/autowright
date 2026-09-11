@@ -948,6 +948,72 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   runs again, up to `<n>` more time(s)" ("1 more time" in the singular) / infinite: "If this
   step fails it runs again until it succeeds, or you cancel or skip it." Agents and
   secrets are changed on the edit page.
+- **Version diff modal**: opened from a version menu's compare icon or the §4.4
+  loaded-from-history banner, it shows what changed between two stored versions of the
+  automation before the user restores one. It is the step-script modal's frame put to a
+  second use (`versiondiff.tsx`): the same §14 `Modal` card, zero padding, `overflow:
+  hidden`, no header row, a 280 px navigator on the left and a full-height pane on the
+  `--bg-code` ground on the right, but `min(1440px, 94vw)` wide, since the pane holds two
+  code columns. The comparison is always **chronological**: the older version on the left,
+  the newer on the right, and the modal never explains restore direction; the §4.4 banner
+  already does. The pair opens as the clicked version → the current version (the "to" side
+  is what a restore would replace); a "to" picker in the toolbar (below) swaps the right
+  side for any other stored version, and the sides are re-ordered so the older one stays
+  left. The content comes from the §19 diff endpoint (`GET /automations/{id}/diff`), fetched
+  on open and again on every pair change (the renderer never diffs). While a fetch is in
+  flight the pane shows the §14 `PageLoading` spinner over the previous rows' frame, and a
+  failed fetch a red `Notice` with the error line in the pane (the navigator stays). Its
+  height is fixed for the life of one comparison, sized by the LONGEST file's row count at
+  the code rhythm (the same rule and bounds as the step-script modal: toolbar + rows ×
+  12px/1.65 + padding, floored at 440 px, capped at 82vh); a new pair is a new document
+  and may re-size the card.
+  The **file navigator** (280 px, `--bg-menu` ground, hairline right border, its own
+  overlay-scrollbar pane) has the 44 px header carrying a faint mono "v`<x>` → v`<y>`"
+  eyebrow, then one row per **file of the version folder** (§5): "Manifest"
+  (`automation.yaml`), "Spec" (`spec.md`), "Notes" (`notes.md`), then one row per step
+  script in the NEWER version's order, with the steps only the older version has appended
+  in their own order. Steps match across versions by NAME (the k-th step of a name matches
+  the k-th of the same name on the other side, the §9.2 change badge's rule), so a
+  renamed step reads as one removed and one new. A row shows the file's title (13/600
+  `--text` on the viewed row, 500 `--text-muted` on the others), under it in dim mono the
+  §4.1 version-folder filename (a step's `NN-name.py`; the fixed names for the three
+  documents), and at its right a change tag in mono: "+`<a>` −`<r>`" (added / removed line
+  counts, green / red `--text` on the digits, the sign faint) for a changed file, "New" for a
+  file only the newer version has, "Removed" for one only the older has, "Unchanged"
+  (faint) for an identical one. Every file is listed, unchanged ones included, so the
+  navigator reads as the whole version folder with the changes marked. The viewed row
+  carries the 2 px accent bar and faint fill of the step navigator; the unviewed rows are
+  buttons, the viewed row a plain block, and ← / → flip files with the same no-focus-ring
+  rules. The first CHANGED file is viewed on open (the first file when nothing changed).
+  The **diff pane**'s fixed 44 px toolbar carries, left, the faint mono "FILE N OF M"
+  eyebrow followed by the viewed file's filename in dimmer mono, and, right, the file's
+  change tag again, then the **"to" picker**, a `.ad-btn-pill` reading "vs v`<y>`" with a
+  caret, opening a `PopMenu` (mono `MenuItemRow`s: "v`<n>`" over its date · note, the
+  current one titled "v`<n>` · current", the picked one checked) of every stored version
+  except the clicked one (the fixed side; the picker reads "vs" that other version even when
+  the re-ordering puts it on the left), and the control cluster: previous / next file chevrons
+  (`.ad-btn-icon`, disabled at the ends) and a close ✕ (Escape and backdrop click also
+  close; while the picker menu is open, Escape closes the menu instead, via the §14
+  `guardClose`, so browsing the pair never loses the comparison). Below it the rows sit in one overlay-scrollbar pane as a four-column grid
+  (left gutter, left text, right gutter, right text), so the two sides scroll as one and a
+  wrapped line never drifts from its counterpart; the two text columns share a
+  `--hairline-dim` divider, gutters follow the step-script modal (faint mono,
+  right-aligned, unselectable), text is `--code-text` at 12px/1.65 mono with §11 `PyCode`
+  highlighting on step scripts and plain text on the three documents, wrapped under its own
+  number, 28 px right inset. Row kinds and grounds: `same` (both sides, no tint), `add`
+  (right side only; its two cells on `--diff-add-bg`), `del` (left side only; its two
+  cells on `--diff-del-bg`), `mod` (a replaced pair: old line left on the del ground,
+  new line right on the add ground). An absent side renders empty cells, no number. In a
+  changed file, a run of `same` rows longer than 6 collapses to one full-width faint mono
+  row "⋯ `<n>` unchanged lines" (a button; 3 rows of context are kept on each side of the
+  run, and clicking it expands the run in place for the life of the comparison); an
+  unchanged, new or removed file shows every row plainly with no collapsing. Switching
+  files remounts the rows pane with the §14 keyed fade (resetting its scroll); the
+  navigator and toolbar stay put. Empty documents (no notes, an empty script) diff as zero
+  rows, and a single trailing final newline is neither rendered nor counted (the
+  step-script modal's rule). The modal is read-only and offers no restore of its own;
+  restoring stays the editor's Save. Not in this modal (deliberately, for now): find,
+  intra-line word highlighting, and the Draft as a side.
 - **SPEC panel** — collapsible (expand/collapse header toggle), expanded by default; the automation's spec blocks rendered through the shared §4.5 Markdown renderer, footer: "The AI regenerates the steps from this
   document when you edit it. Every change mints a new version — older ones live in the Version
   menu on the edit page."

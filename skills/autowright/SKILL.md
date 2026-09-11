@@ -127,8 +127,9 @@ user state — see Parameters), and the manifest's triggers merge into the store
 and intervals replace the stored schedules (matching entries keep their on/off state),
 message/app-start entries add only when not already present, and stored non-schedule
 triggers always survive.
-Mistake in a new version? `autowright automation restore <name> v3` brings any old version
-back as the next version.
+Mistake in a new version? `autowright automation diff <name> --from v3` shows what changed
+since v3 (file by file, `--to vN` for another pair), and `autowright automation restore
+<name> v3` brings any old version back as the next version.
 
 ## Executing and results
 

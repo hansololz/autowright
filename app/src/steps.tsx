@@ -408,15 +408,17 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
 // on the fading card — same guard shape as the Modal's own Escape handler.
 // The flip keys ignore editable targets, so typing in the find field never
 // flips the step.
-function StepKeys({ i, count, closing, onNav, onFind }: {
-  i: number; count: number; closing: boolean; onNav: (i: number) => void; onFind: () => void
+// Shared by the §9.2 step-script modal and the version diff modal (versiondiff.tsx),
+// which flips files with the same keys and the same no-focus-ring rules.
+export function StepKeys({ i, count, closing, onNav, onFind }: {
+  i: number; count: number; closing: boolean; onNav: (i: number) => void; onFind?: () => void
 }) {
   useEffect(() => {
     if (closing) return
     const onKey = (e: KeyboardEvent) => {
       // §9.3: both shortcuts yield to the developer-log overlay above the card
       if (devlogOverlayOpen()) return
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); onFind(); return }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { if (!onFind) return; e.preventDefault(); onFind(); return }
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
       const flip = e.key === 'ArrowLeft' ? (i > 0 ? i - 1 : null) : e.key === 'ArrowRight' ? (i < count - 1 ? i + 1 : null) : null
       if (flip === null) return

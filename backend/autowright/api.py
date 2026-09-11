@@ -27,7 +27,7 @@ from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, fini
 from .storage import (SECRET_REF_RE, LiveExecutionError, StoreUnwritableError, _kind_ok,
                       is_test, exec_started_ms, iter_file_stats, new_id, size_label, store,
                       strip_param_values)
-from . import testexec
+from . import testexec, versions_diff
 
 log = logging.getLogger("autowright.api")
 
@@ -1191,6 +1191,28 @@ def restore(automation_id: str, body: models.VersionRestore) -> dict:
     n = store.restore_version(a, v)
     _publish_auto_changed(a)
     return {"version": n, "automation": _auto_json_locked(a)}
+
+
+@app.get("/automations/{automation_id}/diff", dependencies=[Depends(auth)])
+def version_diff(automation_id: str,
+                 from_version: str = Query(alias="from"),
+                 to_version: str = Query(alias="to")) -> dict:
+    """§19 version diff: what changed between two stored versions, computed
+    once here (versions_diff.py) for the §9.2 modal and the §20 CLI alike.
+    Both labels are "vN" naming a stored version (404 otherwise, the current
+    one included) and must differ (400). Read under store.lock so a concurrent
+    save or delete-version never yields a half-read pair."""
+    a = _auto_or_404(automation_id)
+    x = versions_diff.parse_version_label(from_version)
+    y = versions_diff.parse_version_label(to_version)
+    with store.lock:
+        for label, n in ((from_version, x), (to_version, y)):
+            if n is None or n not in a["versions"]:
+                raise HTTPException(404, f"version {label} not found")
+        if x == y:
+            raise HTTPException(400, "from and to must be different versions")
+        files = versions_diff.diff_versions(a["versions"][x], a["versions"][y])
+    return {"from": x, "to": y, "files": files}
 
 
 @app.delete("/automations/{automation_id}/versions/{version}", dependencies=[Depends(auth)])
