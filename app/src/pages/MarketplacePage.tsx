@@ -19,8 +19,8 @@ import { ImportSummaryModal } from './AutomationsList'
 // §22.1 example catalog - the MAKE YOUR OWN section's code box, verbatim from
 // the spec so an author can copy it and fill it in.
 const EXAMPLE_CATALOG = `format_version: 1
-name: "Community automations"        # optional (max 80 chars): the source's title
-description: "Automations I use."    # optional (max 500 chars)
+name: "Community automations"        # optional (max 200 chars): the source's title
+description: "Automations I use."    # optional (max 1000 chars)
 entries:                             # required list, may be empty, max 200 entries
   - title: "Manga chapter watcher"   # required, non-empty, max 120 chars
     description: "Checks the series you follow every morning at 8."  # optional, max 1000
