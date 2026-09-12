@@ -283,9 +283,12 @@ derived content) is `{ id, kind, location, shown, autoRefresh, name, description
 addedAt, refreshedAt, error, cached, entries: [{ index, title, description, archive,
 image }] }` - `kind` derived from `location` (`url`, `file`, `none`), `location` the
 §22.2 column (null, a path, or a link), `archive` the entry's `path` as written (an https
-URL or an absolute local path), `image` a boolean saying whether the entry lists an image
-at all (the bytes come from the image route on demand), `cached` whether a readable copy
-exists (false only for the §22.2 unreadable-copy case; an empty catalog is still cached).
+URL or an absolute local path), `image` the entry's image reference as written (an https
+URL or an absolute local path) or `null` when it lists none (the bytes come from the
+image route on demand; the reference itself is what the §22.7 picker copies when the
+entry is added to another catalog - a boolean before 2026-09-12), `cached` whether a
+readable copy exists (false only for the §22.2 unreadable-copy case; an empty catalog is
+still cached).
 
 - `GET /marketplace` → `{ sources: [Source] }` in table order, hidden ones included (the
   page collapses them; the CLI marks them).
@@ -441,18 +444,32 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   while LOCATION is empty, Install opening the import modal on the preview step, the add
   modal's inline 422 for a typed path and a pasted link and its drop zone adding a dropped
   `.yaml` (path through `pathForFile`) and refusing anything else, the Edit button on path
-  and `null` locations only, the editor opening on the served catalog, the picker
-  appending a row, the EXPORT FOLDER row appearing for a `null`-location catalog once an
-  app automation is added and gating Save, Save sending the §22.7 body, the discard
+  and `null` locations only, the editor opening on the served catalog with the details
+  form viewed (its LOCATION line naming the file) and one navigator row per entry (title over its reference label), clicking
+  a row viewing its entry form with the title, description, and reference editable, the
+  picker's THIS MAC tab listing and filtering this app's automations, a pick exporting
+  the automation without values through `saveFile` and landing in the details step as
+  the saved file (a cancelled dialog returns to the list, a failed export shows its
+  reason) with the title and description prefilled before Add appends and views the row,
+  the A
+  CATALOG tab listing the other catalogs' entries (the working catalog and empty ones
+  left out) and a pick carrying the entry's `path` and `image` as written, the A FILE tab
+  going through `openArchivePath` into the details step with the file's stem, Remove from
+  catalog dropping the viewed entry, a blank title and a malformed reference stopping
+  Save on the offending entry with the reason in the footer, Save sending the §22.7 body
+  (`path` for a kept row, `archiveFile` for an unedited exported or picked file, `image`
+  when set), a backend `entry <i>:` 422 viewing that entry, the discard
   confirm on Escape with unsaved edits, and Create catalog… opening the empty editor whose
   Create button works with or without a chosen folder.
 - e2e: one drive with a file-based catalog under the test data root (a catalog plus one
   archive exported in the same test), asserting the page lists it and Install lands the
   automation with its triggers off; then, with the native folder dialog stubbed to a temp
-  folder, **Create catalog…** opens the editor, **Choose folder…** picks the location,
-  **Add automation…** picks the seeded automation, Create lands the catalog and the
-  exported archive in that folder (listed by its absolute path), and the new section
-  lists one entry.
+  folder and the native save dialog stubbed to `Watcher.autowright` inside it, **Create
+  catalog…** opens the editor, **Choose folder…** picks the location, **Add automation…**
+  picks the seeded automation on the THIS MAC tab (the export lands through the stubbed
+  save dialog) and Add accepts the prefilled details, the navigator lists the new row,
+  Create lands the catalog beside the archive in that folder (listed by its absolute
+  path), and the new section lists one entry.
 
 ### 22.7 Catalog authoring
 
@@ -460,63 +477,140 @@ A catalog the user writes in the app is a §22.2 row whose copy the app edits in
 with a location that is either a **file path** (the catalog lives in a folder the user
 chose, and the copy mirrors it) or **`null`** (the copy is the only copy). Either way the
 catalog only **references** archives, by absolute path or https link (§22.1): an archive
-file the user picks is listed where it is, and an automation exported from this app lands
-in an **export folder** the user chooses - beside the catalog when the catalog has a file
-location, otherwise a folder picked in the editor (the EXPORT FOLDER row, below) - never
-under the data root. Nothing here is special at read time: an authored catalog is a
-§22.1 catalog like any other. A catalog with a link location is not editable here (the
-file isn't on this machine).
+file the user picks is listed where it is, and an automation from this app is exported
+**where the user saves it** - the picker runs the §9.2 export's native save dialog at
+pick time, so the user manages where every archive lives and the editor never chooses a
+folder (the EXPORT FOLDER row and the editor's export-on-save were removed 2026-09-12;
+the §22.4 `automationId` / `exportFolder` save fields stay for the §22.5 CLI). Nothing
+here is special at read time: an authored catalog is a §22.1 catalog like any other. A
+catalog with a link location is not editable here (the file isn't on this machine).
 
-**Create.** **Create catalog…** (page header, and the empty state's MAKE YOUR OWN
-section) opens the **catalog editor** modal (below) empty, in create mode: title "Create
-catalog", and above the fields a SAVE LOCATION section - the chosen folder's path (mono,
-muted; "Kept by Autowright" until one is chosen) beside a dashed **Choose folder…**
-button that opens the native folder picker (the §3 `pick-folder` IPC; null cancels) and,
-once chosen, a quiet **Clear** text button beside it, with the caption "Optional. Choose a
-folder to keep the catalog file yourself; otherwise Autowright keeps the only copy.".
-Choosing a folder fills NAME with the folder's name when NAME is still empty. **Save**
-(labelled **Create**, "Creating…" while busy) POSTs `/marketplace/catalogs` with the
-folder (when chosen), the export folder (when the EXPORT FOLDER row is showing), and the
-editor's content - the backend refuses a folder that already holds a
-`marketplace-catalog.yaml` (409 - the user should **Add** it instead), otherwise writes
-the catalog (to the folder, or to the row's copy) and the exported archives through the
-save steps and adds the row. Success refetches, closes, and toasts "Created <name>.". A
-422 or 409 shows inline like a save's.
+**Create** and **Edit** share one surface, the **catalog editor** (redesigned 2026-09-12
+as a two-column form; the earlier single-column list of input cards is gone).
+**Create catalog…** (page header, and the empty state's MAKE YOUR OWN section) opens it
+empty in create mode; the **Edit** button on a catalog with a path or `null` location
+opens it in edit mode on `GET …/catalog` (the file at the location, or the copy; the §14
+`PageLoading` well in the form pane until it lands - a 409 or 422 toasts the reason and
+closes). The catalog open in the editor is the **working catalog**.
 
-**Edit.** The **Edit** button on a catalog with a path or `null` location opens the
-**catalog editor** modal (width 640) on `GET …/catalog` (the file at the location, or
-the copy). Title "Edit catalog"; beneath it the catalog file's path (mono, muted, 12 px)
-for a path location, "Kept by Autowright" for `null`. Fields, each under a §14 eyebrow:
-NAME (`ad-input`, placeholder the folder name, or "My catalog"), DESCRIPTION
-(`ad-input`). Then AUTOMATIONS: one `.ad-card` row per entry holding a title input (600),
-a description input, a mono muted line naming the archive (`<path>` for a saved entry,
-"Exported on save" for an automation picked from this app, the picked file's path for a
-file), and a quiet `fa-xmark` icon button (`aria-label` "Remove entry"); with no rows, the
-§14 `EmptyLine` "No automations yet.". Under the list two dashed buttons: **Add
-automation…** and **Choose an .autowright file…**. Beneath them, the **EXPORT FOLDER**
-row - rendered only when the catalog's location is `null` (or, in create mode, no folder
-is chosen) **and** at least one row is an automation from this app: the eyebrow, the
-chosen folder's path (mono, muted; "No folder chosen yet") beside a dashed **Choose
-folder…** button (the §3 `pick-folder` IPC), caption "The automations you add from this
-Mac are exported here." Save is disabled while the row is showing and no folder is
-chosen. Footer: quiet Cancel / accent **Save** ("Saving…" beside the §9 spinner while
-busy); a 422 or 409 shows inline in red above the footer. Escape or a backdrop click with
-unsaved edits raises the §14 in-modal discard confirm ("Discard your catalog edits?" /
-"The changes you made to this catalog will be lost."; Discard / Keep editing). Save PUTs
-`…/catalog`, refetches, closes, and toasts "Saved <name>.".
+**The catalog editor** is a §14 `Modal` on the §9.2 step-script modal's two-column frame:
+`min(960px, 92vw)` wide, `padding: 0`, `overflow: hidden`, a fixed height of
+`min(680px, 82vh)` so viewing a different row never resizes it, no title row (the
+navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalog".
 
-- **Add automation…** stacks the **picker** (width 460): title "Add automation", a search
-  input (placeholder "Search automations", filters by name substring), and one
-  `MenuItemRow`-style row per automation in this app (name 600, description muted, one
-  line) - click appends an entry row (title = the automation's name, description = its
-  description) and closes the picker. Empty: "No automations yet." / "No automations
-  match.". The same automation may be added more than once; the save exports it twice.
-- **Choose an .autowright file…** opens the native open dialog through the §3
-  `open-archive-path` IPC (filtered to `autowright`; answers `{ path }` or null - the
-  backend reads the file itself, only the path travels) and appends a row (title = the
-  file's stem, description empty). The file is listed where it is, never copied.
-- Images are kept as written on an existing entry and never set by the editor (deferred:
-  picking a preview image); reordering entries is deferred too (edit the YAML by hand).
+- Left, the **catalog navigator** (280 px, `--hairline-dim` right border, its own §14
+  overlay-scrollbar pane): a 44 px header (dim-hairline bottom border) holding the eyebrow
+  CREATE CATALOG / EDIT CATALOG. Then the **details row**: the catalog's name as typed
+  (600 when viewed, 500 muted otherwise; the muted "Untitled catalog" while blank) over a
+  muted one-line sub naming where it lives - the catalog file's path for a path location,
+  "Kept by Autowright" for `null`; in create mode the chosen folder's catalog path once
+  one is chosen, "Kept by Autowright" until then. Then the eyebrow AUTOMATIONS · <n>
+  (`padding: 14px 18px 4px`) and one **entry row** per entry in catalog order: the title
+  (the muted "Untitled" while blank) over a muted sub naming the reference - the hostname
+  for an https link, the file name for a path, "No archive yet" while the reference is
+  blank. Rows are
+  the §9.2 navigator's rows: the viewed row is a plain block on the `--bg-active` wash with
+  the inset accent bar and `aria-current="true"`, every other row an
+  `.ad-btn-bare.ad-hover-row.ad-focus-inset` button that views it. With no entries, the
+  §14 `EmptyLine` "No automations yet." under the eyebrow. Pinned under the list (outside
+  the scroll pane; `padding: 12px 14px`, dim-hairline top border): a full-width dashed
+  **Add automation…** button (`fa-plus`) opening the picker. Arrow keys are not bound
+  here: the pane on the right is a form, and ↑ / ↓ belong to its inputs.
+- Right, the **form pane** (flex 1): a 44 px toolbar (dim-hairline bottom border) holding
+  the eyebrow DETAILS or AUTOMATION <i> OF <n> (1-based) and, at the right, an
+  `.ad-btn-icon` Close (`fa-xmark`, `aria-label` "Close"; it goes through the discard
+  guard below). Beneath, a scroll pane padded `18px 22px` holding the viewed form, every
+  field under a §14 eyebrow with the §14 caption under it where one is named:
+  - **Details form** (viewed when the editor opens, and after the last entry is removed).
+    In edit mode first a LOCATION line: the catalog file's full path (mono, muted, 12 px,
+    wrapping - the navigator row only has room for its tail) with the caption "The file
+    this editor writes.", or "Kept by Autowright" with the caption "Autowright keeps the
+    only copy; there is no file of yours to point at.". In create mode first the SAVE
+    LOCATION row: the chosen folder's path (mono, muted;
+    "Kept by Autowright" until one is chosen) beside a dashed **Choose folder…** button
+    (the §3 `pick-folder` IPC; null cancels) and, once chosen, a quiet **Clear** text
+    button, caption "Optional. Choose a folder to keep the catalog file yourself;
+    otherwise Autowright keeps the only copy.". Choosing a folder fills NAME with the
+    folder's name when NAME is still empty. Then NAME (`ad-input`, placeholder the
+    folder's name, or "My catalog") and DESCRIPTION (`ad-input`).
+  - **Entry form**: TITLE (`ad-input`), DESCRIPTION (`ad-input`), then AUTOMATION: a mono
+    `ad-input` holding the reference exactly as written (placeholder
+    `https://…/name.autowright or /path/to/name.autowright`, caption "An https link, or
+    the archive's absolute path on this Mac." through the §9 per-OS copy rule) - every
+    entry is a reference, whichever way it came in. Then IMAGE: a mono `ad-input` (placeholder
+    `Optional: https://… or /path/to/preview.png`, caption "A preview for the marketplace
+    page: an https link, or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif."). Under
+    the fields, 18 px down, a quiet danger **Remove from catalog** text button
+    (`fa-trash`; `aria-label` "Remove entry") with the muted caption "Its archive file
+    stays where it is." beside it. Removing views the entry after it (the one before when
+    it was last; the details form when none is left).
+- **Footer**, full width under both columns (dim-hairline top border, `padding: 14px
+  22px`): at the left the inline error (red, 12.5 px) when one is set; at the right quiet
+  **Cancel** / accent **Save** (**Create** in create mode; "Saving…" / "Creating…" beside
+  the §9 spinner while busy). Before sending, the
+  editor checks every entry itself and, at the first problem, views that entry and puts
+  the reason in the footer: a blank title ("Give this automation a title."); a reference
+  that is neither an `https://` link nor an absolute path, or doesn't end in `.autowright`
+  ("Give an https link or an absolute path to an .autowright file."); a non-empty image of
+  the wrong form ("Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp,
+  or .gif image."). A 422 or 409 from the backend shows in the footer as it comes, and one
+  whose message starts `entry <i>:` views entry `i` as well. Create POSTs
+  `/marketplace/catalogs` with the folder (when chosen) and the content - the backend
+  refuses a folder that already holds a `marketplace-catalog.yaml` (409 - the user should
+  **Add** it instead), otherwise writes the catalog through the save steps and adds the
+  row; success refetches, closes, and toasts "Created <name>.". Save PUTs `…/catalog`,
+  refetches, closes, and toasts "Saved <name>.". Escape, a backdrop click, the Close
+  button, or Cancel with unsaved edits (any field, folder, or entry differs from what the
+  editor opened on) raises the §14 in-modal discard confirm ("Discard your catalog
+  edits?" / "The changes you made to this catalog will be lost."; Discard / Keep editing).
+
+**Add automation picker** (stacked over the editor, width 520, z 80): title "Add
+automation" (15/600). Beneath it a row of `.ad-btn-tab` chips (`aria-pressed` on the
+active one, gap 6): **This Mac**, **A catalog**, **A file**; This Mac is active when the
+picker opens.
+
+- THIS MAC: a search input (placeholder "Search automations"; filters by name substring)
+  over a `.ad-card` list (padding 4, max-height 320, scrolling) of one `MenuItemRow` per
+  automation in this app (name, description muted on one line). Empty: "No automations
+  yet." / "No automations match.". Clicking a row **exports the automation now**: the §19
+  export **without parameter values** (a marketplace archive is for other people, the §5.1
+  `--no-values` rule) and then the §3 `save-file` dialog with the default name
+  `<transfer.safe_filename(name)>.autowright` - the same dialog the §9.2 Export… uses, so
+  the user chooses where the archive lives. While the export runs the list is replaced by
+  the line "Exporting <name>…" beside the §9 spinner. Cancelling the dialog returns to the
+  list with nothing written; a failed export shows its reason in red under the list. On
+  save the picker goes to the details step with the saved file as the pick.
+- A CATALOG: the same search (placeholder "Search catalogs"; matches an entry's title or
+  its catalog's name) over a list grouped by catalog in table order: an inert `header`
+  `MenuItemRow` per catalog (its name, sub the §22.3 location label - hostname, file name,
+  or "Kept by Autowright") followed by one pickable row per entry (title, description).
+  Hidden catalogs are listed like any other; the working catalog (edit mode) and a
+  catalog with no entries are left out. Empty: "No other catalogs list automations yet."
+  (create mode: "No catalogs list automations yet.") / "No automations match.".
+- A FILE: a dashed full-width **Choose an .autowright file…** (`fa-file-import`) opening
+  the native open dialog through the §3 `open-archive-path` IPC (filtered to
+  `autowright`; answers `{ path }` or null on cancel - the backend reads the file itself,
+  only the path travels), caption "The file is listed where it is, never copied.".
+
+Picking (a row, or a file) turns the picker to its **details step**: beneath the title a
+muted line naming the pick - the saved or chosen file's path (mono) for a This Mac export
+or a file, "<entry title> · <catalog name>" for a catalog entry - then TITLE (`ad-input`,
+prefilled with the automation's name / the entry's title / the file's stem) and
+DESCRIPTION (`ad-input`, prefilled with the automation's description / the entry's
+description / empty). Footer: quiet **Back** (returns to the list with the tab kept; an
+exported archive stays where it was saved) / accent **Add** (disabled while TITLE is
+blank; Enter in either field adds). Add appends the entry to the end of the working
+catalog, views it in the editor, and closes the picker: an exported automation and a
+chosen file carry the file's path; a catalog entry carries its `path` and `image` exactly
+as the other catalog lists them (never fetched or copied - a local path in someone else's
+catalog is listed as it is). The same automation may be exported and added more than
+once. Reordering entries is deferred (edit the YAML by hand).
+
+**Save body.** Each entry sends its title, description, and image (when non-empty), plus
+exactly one of: `archiveFile` (a file exported or picked in this editing session whose
+AUTOMATION field still holds that path - the backend then checks it is a real archive)
+or `path` (everything else, as written: a saved entry, a catalog pick, or a reference the
+user typed or edited). The editor never sends `automationId` or `exportFolder`.
 
 **Save** (`PUT …/catalog`). Each entry names exactly one of `path` (a reference kept as
 written), `automationId` (an automation in this app, exported on save), or `archiveFile`

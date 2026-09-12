@@ -377,15 +377,16 @@ export interface ImportPreview {
 }
 
 // §22.4 marketplace entry - one row of a source's catalog, addressed by its
-// 0-based `index` in catalog order. `archive` is the resolved archive
-// reference (an https URL, or an absolute path for a file-relative one);
-// `image` says whether a cached preview image exists to fetch.
+// 0-based `index` in catalog order. `archive` is the entry's archive
+// reference as written (an https URL or an absolute path); `image` its image
+// reference as written, or null when it lists none - the bytes come from the
+// §22.4 image route on demand, the reference is what the §22.7 picker copies.
 export interface MarketplaceEntry {
   index: number
   title: string
   description: string
   archive: string
-  image: boolean
+  image: string | null
 }
 
 // §22.4 marketplace source - one catalog-table row (§22.2) with its derived

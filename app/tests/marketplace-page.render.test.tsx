@@ -3,10 +3,10 @@
 // a seeded catalog's grid, a hidden catalog collapsing to its header, the
 // settings modal's PATCH, Install opening the §9.1 import modal on its preview
 // step, the add modal's three ways in, and the §22.7 authoring flow (the Edit
-// button, the catalog editor, the automation picker, the EXPORT FOLDER row,
-// Save's body, the discard confirm, and create mode's folder chooser). App
-// renders for real (happy-dom) with the api module mocked, `settings-gating`
-// style.
+// button, the two-column catalog editor, the picker's three tabs with This
+// Mac exporting through the native save dialog at pick time, Save's body, the
+// discard confirm, and create mode's folder chooser). App renders for real
+// (happy-dom) with the api module mocked, `settings-gating` style.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type {
@@ -32,6 +32,9 @@ const marketplaceImage = vi.fn(() => Promise.reject(new Error('no image')))
 const marketplaceCatalogCreate = vi.fn()
 const marketplaceCatalogRead = vi.fn<(id: string) => Promise<MarketplaceCatalog>>()
 const marketplaceCatalogSave = vi.fn()
+// §22.7: a This Mac pick exports the automation there and then, without
+// parameter values.
+const exportAutomation = vi.fn<(automationId: string, values: boolean) => Promise<ArrayBuffer>>()
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => true),
@@ -53,6 +56,7 @@ vi.mock('../src/api', () => ({
     marketplaceCatalogCreate: (body: unknown) => marketplaceCatalogCreate(body),
     marketplaceCatalogRead: (id: string) => marketplaceCatalogRead(id),
     marketplaceCatalogSave: (id: string, body: unknown) => marketplaceCatalogSave(id, body),
+    exportAutomation: (id: string, values: boolean) => exportAutomation(id, values),
   },
 }))
 
@@ -63,9 +67,11 @@ let MarketplacePage: typeof import('../src/pages/MarketplacePage').default
 const openCatalog = vi.fn()
 // §22.3: the dropped file's path, which is all that ever travels.
 const pathForFile = vi.fn<(file: File) => string>()
-// §22.7: the native pickers the create flow and the editor's file button use.
+// §22.7: the native pickers the create flow and the editor's file button use,
+// and the save dialog a This Mac pick exports through.
 const pickFolder = vi.fn()
 const openArchivePath = vi.fn()
+const saveFile = vi.fn<(defaultName: string, data: ArrayBuffer) => Promise<string | null>>()
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -80,6 +86,7 @@ beforeAll(async () => {
     pathForFile,
     pickFolder,
     openArchivePath,
+    saveFile,
   }
   const ls = new Map<string, string>()
   Object.defineProperty(globalThis, 'localStorage', {
@@ -111,7 +118,7 @@ const source = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => ({
   entries: [{
     index: 0, title: 'Manga chapter watcher',
     description: 'Checks the series you follow every morning at 8.',
-    archive: 'https://example.com/shared/automations/manga.autowright', image: false,
+    archive: 'https://example.com/shared/automations/manga.autowright', image: null,
   }],
   ...over,
 })
@@ -125,6 +132,18 @@ const fileSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource =>
 // §22.2: no location at all - the app's copy is the only copy.
 const keptSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => source({
   kind: 'none', location: null, refreshedAt: null, ...over,
+})
+
+// §22.7 picker, A CATALOG tab: another catalog on the page, listing an entry
+// whose archive and image are §22.1 references a pick copies as written.
+const otherSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => source({
+  id: 's2', name: 'Neighbours', description: 'What they share.',
+  entries: [{
+    index: 0, title: 'Inbox sweeper', description: 'Files the mail.',
+    archive: 'https://example.com/shared/automations/inbox.autowright',
+    image: 'https://example.com/shared/images/inbox.png',
+  }],
+  ...over,
 })
 
 const preview = (): ImportPreview => ({
@@ -178,6 +197,10 @@ beforeEach(() => {
   marketplaceCatalogSave.mockReset()
   pickFolder.mockReset()
   openArchivePath.mockReset()
+  exportAutomation.mockReset()
+  exportAutomation.mockResolvedValue(new ArrayBuffer(8))
+  saveFile.mockReset()
+  saveFile.mockResolvedValue('/Users/x/archives/Watcher.autowright')
   storeMod.useStore.setState({
     connected: true, surface: 'app', page: 'automations', automations: [],
     executions: [], agents: [], secrets: [], settings: { ...SETTINGS },
@@ -439,12 +462,19 @@ describe('§22.3 add marketplace modal', () => {
 
 describe('§22.7 catalog authoring', () => {
   // Opens the editor on a catalog that lives on this machine and waits for the
-  // served catalog to land.
+  // served catalog to land on the details form, which is viewed on open.
   const openEditor = async (s: MarketplaceSource = fileSource()) => {
     marketplaceList.mockResolvedValue({ sources: [s] })
     render(<MarketplacePage />)
     fireEvent.click(await screen.findByLabelText('Edit catalog'))
     return await screen.findByTestId('catalog-name') as HTMLInputElement
+  }
+
+  // §22.7: the picker's details step, accepted as it comes prefilled - Add
+  // appends the entry, views it, and closes the picker (a §14 200 ms exit).
+  const acceptPick = async () => {
+    fireEvent.click(await screen.findByTestId('catalog-picker-add'))
+    await waitFor(() => expect(screen.queryByTestId('catalog-picker')).toBeNull(), { timeout: 3000 })
   }
 
   it('Edit shows only for a catalog on this machine', async () => {
@@ -464,56 +494,212 @@ describe('§22.7 catalog authoring', () => {
     expect(screen.queryByLabelText('Edit catalog')).toBeNull()
   })
 
-  it('the editor opens on the catalog file, not the cache', async () => {
+  it('the editor opens on the catalog file with the details form viewed', async () => {
     const name = await openEditor()
     await waitFor(() => expect(marketplaceCatalogRead).toHaveBeenCalledWith('s1'))
     expect(screen.getByTestId('catalog-editor')).toBeTruthy()
+    expect(screen.getByText('EDIT CATALOG')).toBeTruthy()
+    // §22.7: the details row is viewed on open, and names where the file lives.
+    expect(screen.getByTestId('catalog-nav-details').getAttribute('aria-current')).toBe('true')
+    expect(screen.getByText('DETAILS')).toBeTruthy()
+    expect(screen.getByTestId('catalog-where').textContent)
+      .toBe('/Users/x/shelf/marketplace-catalog.yaml')
+    // §22.7: the details form leads with the full path (the row only has its tail).
+    expect(screen.getByTestId('catalog-location').textContent)
+      .toBe('/Users/x/shelf/marketplace-catalog.yaml')
     expect(name.value).toBe('Community')
     expect((screen.getByTestId('catalog-description') as HTMLInputElement).value)
       .toBe('Automations I use.')
-    // §22.7: where the catalog lives, and one row per entry naming its archive.
-    expect(screen.getByTestId('catalog-where').textContent)
-      .toBe('/Users/x/shelf/marketplace-catalog.yaml')
-    expect(screen.getAllByTestId('catalog-row')).toHaveLength(1)
-    expect((screen.getAllByTestId('catalog-row-title')[0] as HTMLInputElement).value)
-      .toBe('Manga chapter watcher')
-    expect(screen.getByText('/Users/x/shelf/automations/manga.autowright')).toBeTruthy()
+    // §22.7: one navigator row per entry - its title over its reference label.
+    const rows = screen.getAllByTestId('catalog-nav-row')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toBe('Manga chapter watchermanga.autowright')
   })
 
   it('a catalog kept by Autowright says so where the path would be', async () => {
     await openEditor(keptSource())
     expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
+    expect(screen.getByTestId('catalog-location').textContent).toBe('Kept by Autowright')
   })
 
-  it('Add automation… lists this app’s automations, filters, and appends a row', async () => {
+  it('clicking a row views its entry form, editable in place', async () => {
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-nav-row'))
+    expect((await screen.findByTestId('catalog-entry-title') as HTMLInputElement).value)
+      .toBe('Manga chapter watcher')
+    expect((screen.getByTestId('catalog-entry-description') as HTMLInputElement).value)
+      .toBe('Checks the series you follow every morning at 8.')
+    expect((screen.getByTestId('catalog-entry-path') as HTMLInputElement).value)
+      .toBe('/Users/x/shelf/automations/manga.autowright')
+    expect(screen.getByText('AUTOMATION 1 OF 1')).toBeTruthy()
+    // §22.7: the form pane holds one form at a time - Details is not in it.
+    expect(screen.queryByTestId('catalog-name')).toBeNull()
+    fireEvent.change(screen.getByTestId('catalog-entry-title'), { target: { value: 'Renamed' } })
+    await waitFor(() => expect(screen.getByTestId('catalog-nav-row').textContent)
+      .toBe('Renamedmanga.autowright'))
+  })
+
+  it('the picker’s THIS MAC tab lists and filters this app’s automations', async () => {
     storeMod.useStore.setState({
       automations: [auto(), auto({ id: 'a2', name: 'Digest', description: 'Sends the mail.' })],
     })
     await openEditor()
     fireEvent.click(screen.getByTestId('catalog-add-automation'))
-    expect(await screen.findByText('Add automation')).toBeTruthy()
+    expect(await screen.findByTestId('catalog-picker')).toBeTruthy()
+    // §22.7: This Mac is the tab the picker opens on.
+    expect(screen.getByTestId('catalog-picker-tab-mac').getAttribute('aria-pressed')).toBe('true')
     expect(screen.getAllByTestId('catalog-picker-row')).toHaveLength(2)
     // §22.7: the search filters by name substring
     fireEvent.change(screen.getByTestId('catalog-picker-search'), { target: { value: 'watch' } })
     expect(screen.getAllByTestId('catalog-picker-row')).toHaveLength(1)
     fireEvent.click(screen.getByTestId('catalog-picker-row'))
-    await waitFor(() => expect(screen.getAllByTestId('catalog-row')).toHaveLength(2))
-    const rows = screen.getAllByTestId('catalog-row')
-    expect((rows[1].querySelector('input') as HTMLInputElement).value).toBe('Watcher')
-    // §22.7: the archive doesn't exist yet - the save exports it.
-    expect(screen.getByText('Exported on save')).toBeTruthy()
+    // §22.7: the pick exports the automation right away, without parameter
+    // values, and the list says so while it runs.
+    expect(exportAutomation).toHaveBeenCalledWith('a1', false)
+    expect(screen.getByTestId('catalog-picker-exporting').textContent)
+      .toContain('Exporting Watcher…')
+    // §22.7: the bytes go through the §3 save dialog under the safe name.
+    await waitFor(() => expect(saveFile)
+      .toHaveBeenCalledWith('Watcher.autowright', expect.anything()))
+    // §22.7 details step: the saved file, the name and description prefilled
+    expect((await screen.findByTestId('catalog-picker-title') as HTMLInputElement).value)
+      .toBe('Watcher')
+    expect((screen.getByTestId('catalog-picker-description') as HTMLInputElement).value)
+      .toBe('Checks the feed.')
+    expect(screen.getByTestId('catalog-picker-source').textContent)
+      .toBe('/Users/x/archives/Watcher.autowright')
+    await acceptPick()
+    // §22.7: Add appends the row and views it - the entry is a file entry,
+    // listed where the user saved it.
+    const rows = screen.getAllByTestId('catalog-nav-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[1].textContent).toBe('WatcherWatcher.autowright')
+    expect((screen.getByTestId('catalog-entry-path') as HTMLInputElement).value)
+      .toBe('/Users/x/archives/Watcher.autowright')
   })
 
-  it('Save sends the §22.7 body - a path for the kept row, an id for the new one', async () => {
+  it('a cancelled save dialog leaves the picker on its list', async () => {
     storeMod.useStore.setState({ automations: [auto()] })
+    saveFile.mockResolvedValue(null)
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-add-automation'))
+    fireEvent.click(await screen.findByTestId('catalog-picker-row'))
+    await waitFor(() => expect(screen.queryByTestId('catalog-picker-exporting')).toBeNull())
+    // §22.7: nothing was written, so the picker returns to the list.
+    expect(saveFile).toHaveBeenCalledWith('Watcher.autowright', expect.anything())
+    expect(screen.getByTestId('catalog-picker-row')).toBeTruthy()
+    expect(screen.queryByTestId('catalog-picker-title')).toBeNull()
+    expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(1)
+  })
+
+  it('a failed export shows its reason under the list', async () => {
+    storeMod.useStore.setState({ automations: [auto()] })
+    exportAutomation.mockRejectedValue(new Error('its agent is gone'))
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-add-automation'))
+    fireEvent.click(await screen.findByTestId('catalog-picker-row'))
+    expect((await screen.findByTestId('catalog-picker-error')).textContent)
+      .toBe('its agent is gone')
+    // §22.7: no archive, so no pick - the list is still there.
+    expect(saveFile).not.toHaveBeenCalled()
+    expect(screen.getByTestId('catalog-picker-row')).toBeTruthy()
+    expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(1)
+  })
+
+  it('the A CATALOG tab lists the other catalogs and a pick carries its path and image', async () => {
+    marketplaceCatalogSave.mockResolvedValue(fileSource())
+    marketplaceList.mockResolvedValue({
+      sources: [fileSource(), otherSource(), source({ id: 's3', name: 'Empty', entries: [] })],
+    })
+    render(<MarketplacePage />)
+    fireEvent.click(await screen.findByLabelText('Edit catalog'))
+    await screen.findByTestId('catalog-name')
+    fireEvent.click(screen.getByTestId('catalog-add-automation'))
+    fireEvent.click(await screen.findByTestId('catalog-picker-tab-catalog'))
+    // §22.7: the working catalog and catalogs with no entries are left out.
+    const headers = screen.getAllByTestId('catalog-picker-catalog')
+    expect(headers).toHaveLength(1)
+    expect(headers[0].textContent).toBe('Neighboursexample.com')
+    expect(screen.getAllByTestId('catalog-picker-row')).toHaveLength(1)
+    fireEvent.click(screen.getByTestId('catalog-picker-row'))
+    expect((await screen.findByTestId('catalog-picker-title') as HTMLInputElement).value)
+      .toBe('Inbox sweeper')
+    expect(screen.getByTestId('catalog-picker-source').textContent).toBe('Inbox sweeper · Neighbours')
+    await acceptPick()
+    // §22.7: the other catalog's reference and image, copied exactly as written.
+    expect((screen.getByTestId('catalog-entry-path') as HTMLInputElement).value)
+      .toBe('https://example.com/shared/automations/inbox.autowright')
+    expect((screen.getByTestId('catalog-entry-image') as HTMLInputElement).value)
+      .toBe('https://example.com/shared/images/inbox.png')
+    fireEvent.click(screen.getByTestId('catalog-save'))
+    await waitFor(() => expect(marketplaceCatalogSave).toHaveBeenCalledWith('s1', {
+      name: 'Community',
+      description: 'Automations I use.',
+      entries: [
+        {
+          title: 'Manga chapter watcher',
+          description: 'Checks the series you follow every morning at 8.',
+          path: '/Users/x/shelf/automations/manga.autowright',
+        },
+        {
+          title: 'Inbox sweeper',
+          description: 'Files the mail.',
+          image: 'https://example.com/shared/images/inbox.png',
+          path: 'https://example.com/shared/automations/inbox.autowright',
+        },
+      ],
+    }))
+  })
+
+  it('the A FILE tab picks an archive through openArchivePath', async () => {
+    openArchivePath.mockResolvedValue({ path: '/Users/x/archives/Weekly digest.autowright' })
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-add-automation'))
+    fireEvent.click(await screen.findByTestId('catalog-picker-tab-file'))
+    fireEvent.click(screen.getByTestId('catalog-add-file'))
+    // §22.7: the details step opens on the file's stem, the path named as it is.
+    expect((await screen.findByTestId('catalog-picker-title') as HTMLInputElement).value)
+      .toBe('Weekly digest')
+    expect(screen.getByTestId('catalog-picker-source').textContent)
+      .toBe('/Users/x/archives/Weekly digest.autowright')
+    await acceptPick()
+    expect((screen.getByTestId('catalog-entry-path') as HTMLInputElement).value)
+      .toBe('/Users/x/archives/Weekly digest.autowright')
+    expect(screen.getAllByTestId('catalog-nav-row')[1].textContent)
+      .toBe('Weekly digestWeekly digest.autowright')
+  })
+
+  it('Remove from catalog drops the viewed entry', async () => {
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-nav-row'))
+    fireEvent.click(await screen.findByTestId('catalog-entry-remove'))
+    // §22.7: with nothing left, the details form is viewed again.
+    await waitFor(() => expect(screen.queryByTestId('catalog-nav-row')).toBeNull())
+    expect(screen.getByTestId('catalog-name')).toBeTruthy()
+    expect(screen.getByText('No automations yet.')).toBeTruthy()
+  })
+
+  it('Save sends the §22.7 body - a path, two archive files, and the image', async () => {
+    storeMod.useStore.setState({ automations: [auto()] })
+    openArchivePath.mockResolvedValue({ path: '/Users/x/archives/Digest.autowright' })
     marketplaceCatalogSave.mockResolvedValue(fileSource({ name: 'Shelf' }))
     const name = await openEditor()
     fireEvent.change(name, { target: { value: 'Shelf' } })
+    // an automation from this app, exported at pick time and listed where it landed
     fireEvent.click(screen.getByTestId('catalog-add-automation'))
     fireEvent.click(await screen.findByTestId('catalog-picker-row'))
-    await waitFor(() => expect(screen.getAllByTestId('catalog-row')).toHaveLength(2))
-    // §22.7: a file location exports beside the catalog - no EXPORT FOLDER row.
-    expect(screen.queryByTestId('catalog-export-folder')).toBeNull()
+    await acceptPick()
+    // a file picked through A FILE, left exactly as it was picked
+    fireEvent.click(screen.getByTestId('catalog-add-automation'))
+    fireEvent.click(await screen.findByTestId('catalog-picker-tab-file'))
+    fireEvent.click(screen.getByTestId('catalog-add-file'))
+    await acceptPick()
+    // the kept row gets an image reference
+    fireEvent.click(screen.getAllByTestId('catalog-nav-row')[0])
+    fireEvent.change(await screen.findByTestId('catalog-entry-image'),
+      { target: { value: '/Users/x/shelf/images/manga.png' } })
+    fireEvent.click(screen.getByTestId('catalog-nav-details'))
+    await screen.findByTestId('catalog-name')
     fireEvent.click(screen.getByTestId('catalog-save'))
     await waitFor(() => expect(marketplaceCatalogSave).toHaveBeenCalledWith('s1', {
       name: 'Shelf',
@@ -522,51 +708,51 @@ describe('§22.7 catalog authoring', () => {
         {
           title: 'Manga chapter watcher',
           description: 'Checks the series you follow every morning at 8.',
+          image: '/Users/x/shelf/images/manga.png',
           path: '/Users/x/shelf/automations/manga.autowright',
         },
-        { title: 'Watcher', description: 'Checks the feed.', automationId: 'a1' },
-      ],
-    }))
-  })
-
-  it('a catalog with no location needs an export folder before it can save', async () => {
-    storeMod.useStore.setState({ automations: [auto()] })
-    pickFolder.mockResolvedValue('/Users/x/exports')
-    marketplaceCatalogSave.mockResolvedValue(keptSource())
-    await openEditor(keptSource())
-    // §22.7: the row appears only once an automation from this app is listed.
-    expect(screen.queryByTestId('catalog-export-folder')).toBeNull()
-    fireEvent.click(screen.getByTestId('catalog-add-automation'))
-    fireEvent.click(await screen.findByTestId('catalog-picker-row'))
-    await waitFor(() => expect(screen.getAllByTestId('catalog-row')).toHaveLength(2))
-    expect(screen.getByTestId('catalog-export-folder').textContent).toBe('No folder chosen yet')
-    expect((screen.getByTestId('catalog-save') as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByTestId('catalog-choose-export-folder'))
-    await waitFor(() => expect(screen.getByTestId('catalog-export-folder').textContent)
-      .toBe('/Users/x/exports'))
-    expect((screen.getByTestId('catalog-save') as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByTestId('catalog-save'))
-    await waitFor(() => expect(marketplaceCatalogSave).toHaveBeenCalledWith('s1', {
-      name: 'Community',
-      description: 'Automations I use.',
-      exportFolder: '/Users/x/exports',
-      entries: [
         {
-          title: 'Manga chapter watcher',
-          description: 'Checks the series you follow every morning at 8.',
-          path: '/Users/x/shelf/automations/manga.autowright',
+          title: 'Watcher', description: 'Checks the feed.',
+          archiveFile: '/Users/x/archives/Watcher.autowright',
         },
-        { title: 'Watcher', description: 'Checks the feed.', automationId: 'a1' },
+        { title: 'Digest', description: '', archiveFile: '/Users/x/archives/Digest.autowright' },
       ],
     }))
   })
 
-  it('a rejected save shows the reason inline and keeps the editor open', async () => {
+  it('a blank title, a bad reference and a bad image stop Save on the entry', async () => {
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-nav-row'))
+    fireEvent.change(await screen.findByTestId('catalog-entry-title'), { target: { value: '  ' } })
+    fireEvent.click(screen.getByTestId('catalog-nav-details'))
+    await screen.findByTestId('catalog-name')
+    fireEvent.click(screen.getByTestId('catalog-save'))
+    // §22.7: the editor checks itself first - nothing travels, and the entry
+    // with the problem is the one it views.
+    expect(screen.getByTestId('catalog-error').textContent).toBe('Give this automation a title.')
+    expect(await screen.findByTestId('catalog-entry-title')).toBeTruthy()
+    fireEvent.change(screen.getByTestId('catalog-entry-title'), { target: { value: 'Manga' } })
+    fireEvent.change(screen.getByTestId('catalog-entry-path'), { target: { value: 'manga.autowright' } })
+    fireEvent.click(screen.getByTestId('catalog-save'))
+    expect(screen.getByTestId('catalog-error').textContent)
+      .toBe('Give an https link or an absolute path to an .autowright file.')
+    fireEvent.change(screen.getByTestId('catalog-entry-path'),
+      { target: { value: 'https://example.com/manga.autowright' } })
+    fireEvent.change(screen.getByTestId('catalog-entry-image'), { target: { value: '/Users/x/cover.bmp' } })
+    fireEvent.click(screen.getByTestId('catalog-save'))
+    expect(screen.getByTestId('catalog-error').textContent)
+      .toBe('Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif image.')
+    expect(marketplaceCatalogSave).not.toHaveBeenCalled()
+  })
+
+  it('a rejected save shows the reason in the footer and views the entry it names', async () => {
     marketplaceCatalogSave.mockRejectedValue(new Error('entry 0: it has no title'))
     await openEditor()
     fireEvent.click(screen.getByTestId('catalog-save'))
     expect((await screen.findByTestId('catalog-error')).textContent)
       .toBe('entry 0: it has no title')
+    // §22.7: a message naming an entry views it, and the editor stays open.
+    expect(screen.getByTestId('catalog-entry-title')).toBeTruthy()
     expect(screen.getByTestId('catalog-editor')).toBeTruthy()
   })
 
@@ -593,16 +779,19 @@ describe('§22.7 catalog authoring', () => {
     // §22.7 create mode: no GET, empty fields, and the app keeping the copy
     // until a folder is chosen.
     expect(await screen.findByTestId('catalog-editor')).toBeTruthy()
-    expect(screen.getByText('Create catalog')).toBeTruthy()
+    expect(screen.getByText('CREATE CATALOG')).toBeTruthy()
     expect(marketplaceCatalogRead).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('catalog-where')).toBeNull()
+    expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
     expect(screen.getByTestId('catalog-folder').textContent).toBe('Kept by Autowright')
     expect(screen.getByText('No automations yet.')).toBeTruthy()
-    // §22.7: choosing a folder names the catalog after it
+    // §22.7: choosing a folder names the catalog after it, and says where the
+    // catalog file will land.
     fireEvent.click(screen.getByTestId('catalog-choose-folder'))
     await waitFor(() => expect(screen.getByTestId('catalog-folder').textContent)
       .toBe('/Users/x/shelf'))
     expect((screen.getByTestId('catalog-name') as HTMLInputElement).value).toBe('shelf')
+    expect(screen.getByTestId('catalog-where').textContent)
+      .toBe('/Users/x/shelf/marketplace-catalog.yaml')
     const save = screen.getByTestId('catalog-save') as HTMLButtonElement
     expect(save.disabled).toBe(false)
     expect(save.textContent).toBe('Create')
@@ -622,6 +811,7 @@ describe('§22.7 catalog authoring', () => {
     fireEvent.click(await screen.findByTestId('catalog-choose-folder'))
     await waitFor(() => expect(pickFolder).toHaveBeenCalled())
     expect(screen.getByTestId('catalog-folder').textContent).toBe('Kept by Autowright')
+    expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
     expect((screen.getByTestId('catalog-name') as HTMLInputElement).value).toBe('')
     fireEvent.change(screen.getByTestId('catalog-name'), { target: { value: 'Mine' } })
     fireEvent.click(screen.getByTestId('catalog-save'))

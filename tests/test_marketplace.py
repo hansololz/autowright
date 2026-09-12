@@ -247,7 +247,7 @@ def test_add_by_path_copies_the_catalog(market, tmp_path):
     assert source["error"] is None and source["refreshedAt"] and source["cached"] is True
     assert source["entries"] == [{"index": 0, "title": "Manga", "description": "Checks it",
                                   "archive": str(tmp_path / "manga.autowright"),
-                                  "image": True}]
+                                  "image": str(tmp_path / "cover.png")}]
     copy = market.catalog_file(source["id"])
     assert copy.read_text(encoding="utf-8") == f.read_text(encoding="utf-8")
     # §22.2: nothing else ever lives in the row's directory - no image cache
@@ -331,7 +331,7 @@ def test_refresh_rereads_the_location(market, tmp_path, monkeypatch):
     linked = market.add(url=CATALOG_URL)
     assert asked == [CATALOG_URL]
     assert linked["kind"] == "url" and linked["location"] == CATALOG_URL
-    assert linked["entries"][0]["image"] is True
+    assert linked["entries"][0]["image"] == "https://x.test/shelf/cover.png"
     market.refresh(linked["id"])
     assert asked == [CATALOG_URL, CATALOG_URL]
 
@@ -618,7 +618,9 @@ def test_images_are_read_on_demand_and_never_stored(market, tmp_path, monkeypatc
         {"title": "None", "path": str(tmp_path / "d.autowright")},
     ])
     source = market.add(path=str(f))
-    assert [e["image"] for e in source["entries"]] == [True, True, True, False]
+    assert [e["image"] for e in source["entries"]] == [
+        str(tmp_path / "cover.png"), "https://x.test/shelf/cover.PNG",
+        str(tmp_path / "gone.png"), None]
     assert market.image_bytes(source["id"], 0) == (PNG, ".png")
     asked = serve(monkeypatch, {"https://x.test/shelf/cover.PNG": PNG})
     assert market.image_bytes(source["id"], 1) == (PNG, ".png")
@@ -659,7 +661,8 @@ def test_routes_add_list_refresh_and_remove(client, tmp_path):
     r = client.post("/marketplace/sources", json={"path": str(f)})
     assert r.status_code == 200
     source = r.json()
-    assert source["name"] == "Shelf" and source["entries"][0]["image"] is True
+    assert source["name"] == "Shelf"
+    assert source["entries"][0]["image"] == str(tmp_path / "cover.png")
     assert source["kind"] == "file" and source["location"] == str(f)
 
     assert client.get("/marketplace").json()["sources"] == [source]
@@ -933,7 +936,7 @@ def test_create_writes_the_editors_content(market, tmp_path):
     assert source["kind"] == "file" and source["name"] == "Shelf"
     assert source["location"] == str(folder / marketplace.CATALOG_FILENAME)
     assert source["entries"] == [{"index": 0, "title": "First", "description": "Runs daily",
-                                  "archive": str(archive), "image": False}]
+                                  "archive": str(archive), "image": None}]
 
 
 def test_create_writes_nothing_when_an_entry_fails(market, tmp_path):
@@ -1013,9 +1016,9 @@ def test_save_exports_automations_beside_the_catalog(market, tmp_path):
     assert saved["name"] == "Shelf"
     assert saved["entries"] == [
         {"index": 0, "title": "First", "description": "Runs daily",
-         "archive": str(folder / "Daily Report.autowright"), "image": False},
+         "archive": str(folder / "Daily Report.autowright"), "image": None},
         {"index": 1, "title": "Second", "description": "",
-         "archive": str(folder / "Daily Report 2.autowright"), "image": False}]
+         "archive": str(folder / "Daily Report 2.autowright"), "image": None}]
     assert saved["refreshedAt"] != before
     assert market.catalog_file(source["id"]).read_text(encoding="utf-8") == \
         (folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8")
@@ -1091,7 +1094,7 @@ def test_save_keeps_a_path_entry_and_its_image_as_written(market, tmp_path):
     assert written["entries"] == [{"title": "Kept", "description": "Still here",
                                    "path": archive, "image": image}]
     assert (folder / "already.autowright").read_bytes() == b"already-here"
-    assert saved["entries"][0]["image"] is True
+    assert saved["entries"][0]["image"] == image
     assert market.image_bytes(source["id"], 0) == (PNG, ".png")
 
 
@@ -1273,7 +1276,7 @@ def test_catalog_create_route_takes_the_editors_content(client, tmp_path):
     assert source["name"] == "Shelf"
     assert source["entries"] == [{"index": 0, "title": "Watcher",
                                   "description": "Watches things",
-                                  "archive": str(archive), "image": False}]
+                                  "archive": str(archive), "image": None}]
 
     # §22.4: the folder now holds a catalog - add it instead, and nothing new lands
     r = client.post("/marketplace/catalogs", json=body)
@@ -1340,7 +1343,7 @@ def test_catalog_save_route_exports_without_parameter_values(client, tmp_path):
     assert b"super-secret-value" not in data
     assert r.json()["entries"] == [{"index": 0, "title": "Watcher",
                                     "description": "Watches things",
-                                    "archive": str(archive), "image": False}]
+                                    "archive": str(archive), "image": None}]
     # §22.7: an unknown automation is the entry's 422, with nothing written
     r = client.put(f"/marketplace/sources/{source['id']}/catalog", json={
         "name": "Shelf", "description": "",

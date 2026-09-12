@@ -6,13 +6,14 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import type {
-  ImportPreview, ImportSummary, MarketplaceCatalogSaveEntry, MarketplaceEntry, MarketplaceSource,
-} from '../types'
+import type { ImportPreview, ImportSummary, MarketplaceEntry, MarketplaceSource } from '../types'
 import {
-  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MenuItemRow, MetaChip,
+  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MetaChip,
   Modal, Notice, PageLoading, PageTitle, Spinner, Toggle,
 } from '../ui'
+import CatalogEditorModal, {
+  KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel, monoInput,
+} from './CatalogEditor'
 import ImportModal from './ImportModal'
 import { ImportSummaryModal } from './AutomationsList'
 
@@ -27,8 +28,6 @@ entries:                             # required list, may be empty, max 200 entr
     path: /Users/you/Automations/manga.autowright   # required: https URL or absolute local path
     image: /Users/you/Automations/manga.png         # optional: https URL or absolute local path`
 
-const KEPT_LABEL = 'Kept by Autowright'
-
 /** §4.1 shared time labels - Today | Yesterday | weekday (2-6 days back) | the
  * locale date, with the clock time appended. A §22.4 source carries the raw §5
  * timestamp rather than a serialized label, so the label is built here. */
@@ -42,19 +41,6 @@ function relativeTime(iso: string): string {
       : days > 1 && days < 7 ? at.toLocaleDateString(undefined, { weekday: 'long' })
         : at.toLocaleDateString()
   return `${date}, ${at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`
-}
-
-const lastSegment = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p
-
-/** §22.3 location chip text: a link shows its host, a path the catalog's file
- * name, a null location "Kept by Autowright"; the full location rides in the
- * `title` attribute. */
-function locationLabel(source: MarketplaceSource): string {
-  if (source.location === null) return KEPT_LABEL
-  if (source.kind === 'url') {
-    try { return new URL(source.location).hostname } catch { return source.location }
-  }
-  return lastSegment(source.location)
 }
 
 const locationIcon = (source: MarketplaceSource) =>
@@ -108,19 +94,6 @@ function EntryImage({ sourceId, index, refreshedAt, has }: {
     </div>
   )
 }
-
-const errLine = (msg: string, testId?: string) => (
-  <p data-testid={testId} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)', margin: '8px 0 0' }}>
-    {msg}
-  </p>
-)
-
-const inputStyle: React.CSSProperties = {
-  width: '100%', boxSizing: 'border-box', color: 'var(--text)',
-  font: '400 12.5px var(--sans)', padding: '9px 11px',
-}
-const monoInput: React.CSSProperties = { ...inputStyle, font: '400 12.5px var(--mono)' }
-const caption: React.CSSProperties = { fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-faint)', margin: '7px 0 0' }
 
 const isYaml = (name: string) => /\.ya?ml$/i.test(name)
 
@@ -320,336 +293,6 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
                 ) : 'Save'}
               </button>
             </div>
-          </div>
-        )
-      }}
-    </Modal>
-  )
-}
-
-// §22.7 editor rows: a saved entry keeps its `path`; a row picked from this app
-// carries the automation's id and a file row its path - both land on save.
-type EditorRow = MarketplaceCatalogSaveEntry & { key: number }
-
-/** §22.7 add-automation picker: every automation in this app, filtered by
- * name substring; one click appends a row and closes. */
-function AddAutomationPicker({ onPick, onClose }: {
-  onPick: (a: { id: string; name: string; description: string }) => void
-  onClose: () => void
-}) {
-  const automations = useStore((s) => s.automations)
-  const [query, setQuery] = useState('')
-  const shown = automations.filter((a) => a.name.toLowerCase().includes(query.trim().toLowerCase()))
-  return (
-    <Modal onClose={onClose} width={460} zIndex={80} ariaLabel="Add automation">
-      {(close) => (
-        <>
-          <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Add automation</h2>
-          <input
-            className="ad-input"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            autoFocus
-            spellCheck={false}
-            placeholder="Search automations"
-            data-testid="catalog-picker-search"
-            style={{ ...inputStyle, margin: '14px 0 10px' }}
-          />
-          <div className="ad-card" style={{ padding: 4, maxHeight: 320, overflowY: 'auto' }}>
-            {shown.length === 0 ? (
-              <EmptyLine>{automations.length === 0 ? 'No automations yet.' : 'No automations match.'}</EmptyLine>
-            ) : shown.map((a) => (
-              <MenuItemRow
-                key={a.id}
-                title={a.name}
-                sub={a.description || undefined}
-                testId="catalog-picker-row"
-                onPick={() => { onPick({ id: a.id, name: a.name, description: a.description || '' }); close() }}
-              />
-            ))}
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-            <BtnGhost onClick={close}>Cancel</BtnGhost>
-          </div>
-        </>
-      )}
-    </Modal>
-  )
-}
-
-const EMPTY_LOADED = { name: '', description: '', rows: [] as EditorRow[] }
-
-/** A folder chooser row (§22.7 SAVE LOCATION / EXPORT FOLDER): the chosen path
- * beside a dashed Choose folder… button, through the §3 pick-folder IPC. */
-function FolderRow({ value, empty, testId, chooseTestId, onChoose, onClear, onError }: {
-  value: string | null; empty: string; testId: string; chooseTestId: string
-  onChoose: (folder: string) => void; onClear?: () => void; onError: (msg: string) => void
-}) {
-  const choose = async () => {
-    let picked: string | null | undefined
-    try {
-      picked = await window.autowright?.pickFolder()
-    } catch (e) { onError((e as Error).message); return }
-    if (picked) onChoose(picked)
-  }
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-      <span
-        data-testid={testId}
-        style={{
-          flex: 1, minWidth: 0, font: '400 12px var(--mono)', color: value ? 'var(--text)' : 'var(--text-muted)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}
-      >
-        {value ?? empty}
-      </span>
-      {value && onClear && (
-        <button className="ad-btn-text dim small" data-testid={`${testId}-clear`} onClick={onClear}>Clear</button>
-      )}
-      <button className="ad-btn-dashed" data-testid={chooseTestId} onClick={() => { void choose() }}
-        style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 9 }}>
-        <i className="fa-solid fa-folder-open" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
-        Choose folder…
-      </button>
-    </div>
-  )
-}
-
-/** §22.7 catalog editor. Edit mode opens on the catalog as the editor sees it
- * (GET) and PUTs it whole on Save; create mode opens empty with an optional
- * SAVE LOCATION and POSTs the content on Create. Automations picked from this
- * app need an export folder: beside the catalog when it has one, otherwise the
- * EXPORT FOLDER row. */
-function CatalogEditorModal({ source, onClose, onSaved }: {
-  /** the source to edit, or null to create a new catalog */
-  source: MarketplaceSource | null
-  onClose: () => void
-  onSaved: (source: MarketplaceSource) => void
-}) {
-  const showToast = useStore((s) => s.showToast)
-  const creating = source === null
-  const [loaded, setLoaded] = useState<{ name: string; description: string; rows: EditorRow[] } | null>(
-    creating ? EMPTY_LOADED : null)
-  const [folder, setFolder] = useState<string | null>(null)
-  const [exportFolder, setExportFolder] = useState<string | null>(null)
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
-  const [rows, setRows] = useState<EditorRow[]>([])
-  const [picker, setPicker] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState(false)
-  const nextKey = useRef(1)
-  const folderName = source?.location ? lastSegment(source.location.replace(/[\\/][^\\/]*$/, ''))
-    : folder ? lastSegment(folder) : ''
-  // §22.7: exports need a folder - the catalog's own for a file location,
-  // otherwise the EXPORT FOLDER row, which appears once an app automation is
-  // in the list.
-  const hasFileLocation = source ? source.kind === 'file' : folder !== null
-  const hasAppRow = rows.some((r) => r.automationId)
-  const needsExportFolder = hasAppRow && !hasFileLocation
-
-  useEffect(() => {
-    if (!source) return
-    let gone = false
-    void (async () => {
-      try {
-        const c = await api.marketplaceCatalogRead(source.id)
-        if (gone) return
-        const initial = c.entries.map((e) => ({
-          key: nextKey.current++, title: e.title, description: e.description, path: e.path,
-          ...(e.image ? { image: e.image } : {}),
-        }))
-        setName(c.name); setDescription(c.description); setRows(initial)
-        setLoaded({ name: c.name, description: c.description, rows: initial })
-      } catch (e) {
-        // §22.4: a 409 (not on this machine) or 422 (unreadable file) - the
-        // modal can't open on nothing, so it toasts and closes.
-        if (gone) return
-        showToast((e as Error).message)
-        onClose()
-      }
-    })()
-    return () => { gone = true }
-  }, [source?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const dirty = loaded !== null && (
-    folder !== null || exportFolder !== null
-    || name !== loaded.name || description !== loaded.description
-    || rows.length !== loaded.rows.length
-    || rows.some((r, i) => r !== loaded.rows[i] || r.title !== loaded.rows[i].title || r.description !== loaded.rows[i].description)
-  )
-  const dirtyRef = useRef(dirty)
-  dirtyRef.current = dirty
-  const pending = useRef<'save' | 'discard'>('discard')
-  const saved = useRef<MarketplaceSource | null>(null)
-  const closeRef = useRef<() => void>(() => {})
-
-  const update = (key: number, patch: Partial<EditorRow>) =>
-    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
-  const addAutomation = (a: { id: string; name: string; description: string }) =>
-    setRows((prev) => [...prev, { key: nextKey.current++, title: a.name, description: a.description, automationId: a.id }])
-  const chooseFile = async () => {
-    let picked
-    try {
-      picked = await window.autowright?.openArchivePath()
-    } catch (e) { setError((e as Error).message); return }
-    if (!picked) return
-    const file = lastSegment(picked.path)
-    setRows((prev) => [...prev, {
-      key: nextKey.current++, title: file.replace(/\.autowright$/i, ''), description: '', archiveFile: picked.path,
-    }])
-  }
-  const canSave = !busy && loaded !== null && !(needsExportFolder && !exportFolder)
-  const save = async () => {
-    if (!canSave) return
-    setBusy(true); setError(null)
-    try {
-      const body = {
-        name, description,
-        ...(needsExportFolder && exportFolder ? { exportFolder } : {}),
-        entries: rows.map(({ key: _key, ...rest }) => rest),
-      }
-      saved.current = source
-        ? await api.marketplaceCatalogSave(source.id, body)
-        : await api.marketplaceCatalogCreate({ ...(folder ? { folder } : {}), ...body })
-      pending.current = 'save'
-      closeRef.current()
-    } catch (e) {
-      // §22.7: a 422 or 409 shows inline above the footer.
-      setError((e as Error).message); setBusy(false)
-    }
-  }
-  const guardClose = () => {
-    if (!dirtyRef.current) return true
-    setConfirm(true)
-    return false
-  }
-  const rowNote = (r: EditorRow) =>
-    r.path ? r.path : r.automationId ? 'Exported on save' : (r.archiveFile ?? '')
-
-  return (
-    <Modal
-      onClose={() => (pending.current === 'save' && saved.current ? onSaved(saved.current) : onClose())}
-      width={640} ariaLabel={creating ? 'Create catalog' : 'Edit catalog'} guardClose={guardClose}
-    >
-      {(close) => {
-        closeRef.current = close
-        return (
-          <div data-testid="catalog-editor">
-            <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>
-              {creating ? 'Create catalog' : 'Edit catalog'}
-            </h2>
-            {source && (
-              <p data-testid="catalog-where" style={{ margin: '6px 0 0', font: '400 12px var(--mono)', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {source.location ?? KEPT_LABEL}
-              </p>
-            )}
-            {loaded === null ? <PageLoading /> : (
-              <>
-                {creating && (
-                  <>
-                    <Eyebrow style={{ margin: '18px 0 6px' }}>SAVE LOCATION</Eyebrow>
-                    <FolderRow
-                      value={folder} empty={KEPT_LABEL} testId="catalog-folder" chooseTestId="catalog-choose-folder"
-                      onChoose={(picked) => {
-                        setFolder(picked); setError(null)
-                        if (!name.trim()) setName(lastSegment(picked))
-                      }}
-                      onClear={() => setFolder(null)}
-                      onError={setError}
-                    />
-                    <p style={caption}>Optional. Choose a folder to keep the catalog file yourself; otherwise Autowright keeps the only copy.</p>
-                  </>
-                )}
-                <Eyebrow style={{ margin: '18px 0 6px' }}>NAME</Eyebrow>
-                <input className="ad-input" value={name} onChange={(e) => setName(e.target.value)}
-                  placeholder={folderName || 'My catalog'} spellCheck={false} data-testid="catalog-name" style={inputStyle} />
-                <Eyebrow style={{ margin: '14px 0 6px' }}>DESCRIPTION</Eyebrow>
-                <input className="ad-input" value={description} onChange={(e) => setDescription(e.target.value)}
-                  data-testid="catalog-description" style={inputStyle} />
-                <Eyebrow style={{ margin: '18px 0 8px' }}>AUTOMATIONS</Eyebrow>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {rows.length === 0 ? (
-                    <div className="ad-card"><EmptyLine>No automations yet.</EmptyLine></div>
-                  ) : rows.map((r) => (
-                    <div key={r.key} className="ad-card" data-testid="catalog-row" style={{ padding: 12, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <input className="ad-input" value={r.title} onChange={(e) => update(r.key, { title: e.target.value })}
-                          placeholder="Title" data-testid="catalog-row-title"
-                          style={{ ...inputStyle, fontWeight: 600, padding: '7px 10px' }} />
-                        <input className="ad-input" value={r.description} onChange={(e) => update(r.key, { description: e.target.value })}
-                          placeholder="Description" data-testid="catalog-row-description"
-                          style={{ ...inputStyle, padding: '7px 10px' }} />
-                        <span style={{ font: '400 11.5px var(--mono)', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {rowNote(r)}
-                        </span>
-                      </div>
-                      <button
-                        className="ad-btn-ghost icon"
-                        onClick={() => setRows((prev) => prev.filter((x) => x.key !== r.key))}
-                        title="Remove entry"
-                        aria-label="Remove entry"
-                      >
-                        <i className="fa-solid fa-xmark" style={{ fontSize: 11 }} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
-                  <button className="ad-btn-dashed" data-testid="catalog-add-automation" onClick={() => setPicker(true)}
-                    style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
-                    <i className="fa-solid fa-plus" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
-                    Add automation…
-                  </button>
-                  <button className="ad-btn-dashed" data-testid="catalog-add-file" onClick={() => { void chooseFile() }}
-                    style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
-                    <i className="fa-solid fa-file-import" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
-                    Choose an .autowright file…
-                  </button>
-                </div>
-                {needsExportFolder && (
-                  <>
-                    <Eyebrow style={{ margin: '18px 0 6px' }}>EXPORT FOLDER</Eyebrow>
-                    <FolderRow
-                      value={exportFolder} empty="No folder chosen yet" testId="catalog-export-folder"
-                      chooseTestId="catalog-choose-export-folder"
-                      onChoose={(picked) => { setExportFolder(picked); setError(null) }}
-                      onError={setError}
-                    />
-                    <p style={caption}>The automations you add from this Mac are exported here.</p>
-                  </>
-                )}
-                <p style={{ ...caption, margin: '10px 0 0' }}>A removed entry's archive file stays where it is.</p>
-                {error && errLine(error, 'catalog-error')}
-                <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 18 }}>
-                  <BtnGhost onClick={() => { if (dirtyRef.current) setConfirm(true); else close() }} disabled={busy}>Cancel</BtnGhost>
-                  <button
-                    className="ad-btn-primary"
-                    data-testid="catalog-save"
-                    onClick={() => { void save() }}
-                    disabled={!canSave}
-                  >
-                    {busy ? (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                        <Spinner size={13} /> {creating ? 'Creating…' : 'Saving…'}
-                      </span>
-                    ) : creating ? 'Create' : 'Save'}
-                  </button>
-                </div>
-              </>
-            )}
-            {picker && <AddAutomationPicker onPick={addAutomation} onClose={() => setPicker(false)} />}
-            {confirm && (
-              <ConfirmModal
-                title="Discard your catalog edits?"
-                body="The changes you made to this catalog will be lost."
-                confirmLabel="Discard"
-                danger
-                onConfirm={() => { setConfirm(false); pending.current = 'discard'; close() }}
-                onCancel={() => setConfirm(false)}
-              />
-            )}
           </div>
         )
       }}
@@ -903,7 +546,7 @@ export default function MarketplacePage() {
                       data-testid="marketplace-entry"
                       style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
                     >
-                      <EntryImage sourceId={s.id} index={e.index} refreshedAt={s.refreshedAt} has={e.image} />
+                      <EntryImage sourceId={s.id} index={e.index} refreshedAt={s.refreshedAt} has={e.image !== null} />
                       <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 7, flex: 1 }}>
                         <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>{e.title}</div>
                         {e.description && (
@@ -958,6 +601,7 @@ export default function MarketplacePage() {
       {editing && (
         <CatalogEditorModal
           source={editing === 'create' ? null : editing}
+          sources={sources ?? []}
           onClose={() => setEditing(null)}
           onSaved={(source) => {
             const created = editing === 'create'

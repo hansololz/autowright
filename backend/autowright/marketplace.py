@@ -767,7 +767,7 @@ class MarketplaceStore:
                      else COPY_UNREADABLE_REMOVE)
         entries = [{"index": e["index"], "title": e["title"],
                     "description": e["description"], "archive": e["archive"],
-                    "image": bool(e["image"])}
+                    "image": e["image"] or None}
                    for e in (catalog["entries"] if catalog else [])]
         return {"id": source["id"], "kind": kind_of(source["location"]),
                 "location": source["location"], "shown": source["shown"],

@@ -2416,9 +2416,10 @@ SOURCES = [
      "entries": [
          {"index": 0, "title": "Manga chapter watcher",
           "description": "Checks the series you follow every morning at 8.",
-          "archive": "https://example.com/manga.autowright", "image": True},
+          "archive": "https://example.com/manga.autowright",
+          "image": "https://example.com/manga.png"},
          {"index": 1, "title": "Inbox sweeper", "description": "",
-          "archive": "https://example.com/inbox.autowright", "image": False}]},
+          "archive": "https://example.com/inbox.autowright", "image": None}]},
     {"id": "m2222222-b", "kind": "file", "location": "/Users/x/shared/marketplace.yaml",
      "shown": True, "autoRefresh": False,
      "name": "Mine", "description": "",

@@ -5,9 +5,10 @@
 // §22.2 file location is refreshable like a link, and Install runs the ordinary
 // §5.2 two-phase import, landing the automation with its triggers off. Then the
 // §22.7 authoring half: Create catalog… opens the editor empty, Choose folder…
-// picks a temp folder (the native picker stubbed in the main process), the
-// automation picker appends an entry, and Create lands the catalog plus the
-// exported archive in that folder.
+// picks a temp folder, the automation picker exports the automation on the
+// pick (through the native save dialog, into the same folder), and Create
+// lands the catalog beside that archive. Both native dialogs are stubbed in
+// the main process, where they can't be driven.
 import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -138,12 +139,17 @@ describe('marketplace e2e', () => {
     // §22.7 authoring: Create catalog… opens the editor empty, and Choose
     // folder… inside it opens the native folder picker, which can't be driven -
     // the main-process dialog answers this test's temp folder instead. The
-    // folder is empty: the catalog and the archive both land through Create.
+    // save dialog the picker's export runs is stubbed the same way, onto a
+    // file in that folder. The folder starts empty: the archive lands on the
+    // pick, the catalog on Create. The callback runs in the main process, so
+    // both paths are computed here and passed in.
     const authored = path.join(backend.home, 'authored')
+    const archivePath = path.join(authored, 'Watcher.autowright')
     await mkdir(authored, { recursive: true })
-    await handle.app.evaluate(({ dialog }, folder) => {
-      dialog.showOpenDialog = () => Promise.resolve({ canceled: false, filePaths: [folder] })
-    }, authored)
+    await handle.app.evaluate(({ dialog }, paths) => {
+      dialog.showOpenDialog = () => Promise.resolve({ canceled: false, filePaths: [paths.folder] })
+      dialog.showSaveDialog = () => Promise.resolve({ canceled: false, filePath: paths.archive })
+    }, { folder: authored, archive: archivePath })
 
     await clickNav(page, 'Marketplace')
     await page.getByTestId('marketplace-create').click()
@@ -153,14 +159,20 @@ describe('marketplace e2e', () => {
       10_000, 'the chosen folder to show as the save location')
     await page.getByTestId('catalog-add-automation').click()
     // Both automations are here by now (the import landed "Watcher 2") - the
-    // seeded one is the row whose title is exactly "Watcher".
+    // seeded one is the row whose title is exactly "Watcher", on the THIS MAC
+    // tab the picker opens on.
     await page.getByTestId('catalog-picker-row')
       .filter({ has: page.getByText('Watcher', { exact: true }) })
       .click()
-    // §22.7: the archive doesn't exist yet - the save exports it.
-    await page.getByTestId('catalog-row').getByText('Exported on save').waitFor({ timeout: 10_000 })
+    // §22.7 details step: the pick exported the automation through the save
+    // dialog, and the title comes prefilled from the automation.
+    await page.getByTestId('catalog-picker-add').waitFor({ timeout: 20_000 })
+    await page.getByTestId('catalog-picker-add').click()
+    // §22.7: the entry is a file entry, named after the archive it landed on.
+    await page.getByTestId('catalog-nav-row').filter({ hasText: 'Watcher.autowright' })
+      .waitFor({ timeout: 10_000 })
     // The picker stays mounted through its exit animation - shoot the settled editor.
-    await page.getByTestId('catalog-picker-search').waitFor({ state: 'detached', timeout: 10_000 })
+    await page.getByTestId('catalog-picker').waitFor({ state: 'detached', timeout: 10_000 })
     await shot(page, 'marketplace-editor.png')
 
     // §22.7 create: the primary button reads Create and POSTs the folder with
@@ -177,7 +189,8 @@ describe('marketplace e2e', () => {
     await page.getByTestId('catalog-editor').waitFor({ state: 'detached', timeout: 10_000 })
     await shot(page, 'marketplace-authored.png')
 
-    // §22.7: the catalog plus the archives it lists, written flat in the folder.
+    // §22.7: the catalog plus the archive it lists - the archive written by the
+    // picker's export, the catalog by Create.
     expect((await readdir(authored)).sort())
       .toEqual(['Watcher.autowright', 'marketplace-catalog.yaml'])
 
