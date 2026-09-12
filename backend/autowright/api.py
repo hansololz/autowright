@@ -2362,18 +2362,20 @@ async def marketplace_add(body: models.MarketplaceAdd) -> dict:
 @app.post("/marketplace/sources/{source_id}/refresh", dependencies=[Depends(auth)])
 async def marketplace_refresh(source_id: str) -> dict:
     """§22.4: 200 even when the refresh failed - `error` carries the reason and
-    the cache is unchanged."""
+    the cache is unchanged. 409 for a source whose catalog declares no `url`."""
     try:
         source = await run_in_threadpool(marketplace_store.refresh, source_id)
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
+    except marketplace.MarketplaceNotRefreshable as e:
+        raise HTTPException(409, str(e)) from e
     hub.publish("marketplace.changed")
     return source
 
 
 @app.post("/marketplace/refresh", dependencies=[Depends(auth)])
 async def marketplace_refresh_all() -> dict:
-    """§22.4: every source in order; one event covers the whole sweep."""
+    """§22.4: every refreshable source in order; one event covers the sweep."""
     sources = await run_in_threadpool(marketplace_store.refresh_all)
     hub.publish("marketplace.changed")
     return {"sources": sources}

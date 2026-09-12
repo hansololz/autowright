@@ -44,6 +44,7 @@ MAX_NAME = 80
 MAX_DESCRIPTION = 500
 MAX_TITLE = 120
 MAX_ENTRY_DESCRIPTION = 1000
+MAX_URL = 2000
 
 # §22.1: catalogs and images are small, so the §5.2 10-minute archive deadline
 # would let a trickling server pin a threadpool worker for ten minutes.
@@ -53,7 +54,9 @@ _FETCH_CHUNK = 64 * 1024
 ARCHIVE_EXTENSION = ".autowright"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
-CACHE_UNREADABLE = "the saved copy couldn't be read - refresh to fetch it again"
+CACHE_UNREADABLE = ("the saved copy couldn't be read - remove this marketplace and add "
+                    "it again")
+NOT_REFRESHABLE = "this marketplace declares no url to refresh from"
 
 
 class MarketplaceError(ValueError):
@@ -63,6 +66,11 @@ class MarketplaceError(ValueError):
 
 class MarketplaceDuplicate(MarketplaceError):
     """§22.2: the same origin added twice - the §19 route answers 409."""
+
+
+class MarketplaceNotRefreshable(MarketplaceError):
+    """§22.2: a refresh of a source whose catalog declares no `url` - the §19
+    route answers 409 with the record untouched."""
 
 
 # ---------- catalog (§22.1) ----------
@@ -124,6 +132,11 @@ def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
             f"this version of Autowright reads format {FORMAT_VERSION}")
     name = _text(raw, "name", "", MAX_NAME) or default_name(kind, origin)
     description = _text(raw, "description", "", MAX_DESCRIPTION)
+    # §22.1 `url`: the publisher's statement of where this file is published -
+    # what a refresh downloads. Blank is the same as absent.
+    url = _text(raw, "url", "", MAX_URL) or None
+    if url and not url.lower().startswith("https://"):
+        raise MarketplaceError("`url` must be an https link")
     listed = raw.get("entries")
     if listed is None:
         raise MarketplaceError("the catalog file has no `entries` list")
@@ -153,7 +166,7 @@ def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
                         "description": _text(item, "description", where,
                                              MAX_ENTRY_DESCRIPTION),
                         "path": archive, "image": image})
-    return {"name": name, "description": description, "entries": entries}
+    return {"name": name, "description": description, "url": url, "entries": entries}
 
 
 def resolve_reference(reference: str, *, kind: str, origin: str) -> str:
@@ -368,30 +381,58 @@ class MarketplaceStore:
             self._save()
             return self.serialize(source)
 
+    def _declared_url(self, source: dict) -> str | None:
+        """§22.2: the cached catalog's `url`, or None when it declares none or
+        the cache is unreadable - either way the source isn't refreshable.
+        Only the catalog's shape matters here, not whether its references
+        still resolve: refreshability follows the declared `url` alone.
+        Caller holds the lock."""
+        try:
+            text = _decode(self.catalog_file(source["id"]).read_bytes())
+            return parse_catalog(text, kind=source["kind"], origin=source["origin"])["url"]
+        except (MarketplaceError, OSError):
+            return None
+
     def refresh(self, source_id: str) -> dict:
-        """§22.2 refresh: re-read the origin. On failure nothing in the cache
-        changes, `refreshed_at` keeps its old value, and `error` records the
-        message - the page keeps showing the last good copy with the error
-        beside it, so a refresh-all never stops at the first bad source."""
+        """§22.2 refresh: download the cached catalog's `url`. A source that
+        declares none raises MarketplaceNotRefreshable with the record
+        untouched. On failure nothing in the cache changes, `refreshed_at`
+        keeps its old value, and `error` records the message - the page keeps
+        showing the last good copy with the error beside it, so a refresh-all
+        never stops at the first bad source."""
         with self.lock:
             source = self._find(source_id)
-            try:
-                self._refresh_cache(source)
-            except MarketplaceError as e:
-                source["error"] = str(e)
+            url = self._declared_url(source)
+            if url is None:
+                raise MarketplaceNotRefreshable(NOT_REFRESHABLE)
+            self._refresh_from(source, url)
             self._save()
             return self.serialize(source)
 
     def refresh_all(self) -> list[dict]:
-        """§22.2: every source, in listing order."""
+        """§22.2: every refreshable source, in listing order; the others are
+        listed as they were."""
         with self.lock:
             for source in self.sources:
-                try:
-                    self._refresh_cache(source)
-                except MarketplaceError as e:
-                    source["error"] = str(e)
+                url = self._declared_url(source)
+                if url is not None:
+                    self._refresh_from(source, url)
             self._save()
             return [self.serialize(s) for s in self.sources]
+
+    def _refresh_from(self, source: dict, url: str) -> None:
+        """One §22.2 refresh: the download and swap, with any failure recorded
+        as the source's `error`. The `url` may not be another source's origin -
+        the swap would leave two records for one link. Caller holds the lock."""
+        try:
+            other = next((s for s in self.sources
+                          if s is not source and s["origin"] == url), None)
+            if other is not None:
+                raise MarketplaceError(
+                    f'that link is already added as "{self.serialize(other)["name"]}"')
+            self._refresh_cache(source, kind="url", origin=url)
+        except MarketplaceError as e:
+            source["error"] = str(e)
 
     def remove(self, source_id: str) -> None:
         """§22.2 remove: the record and its directory. Automations installed
@@ -403,12 +444,16 @@ class MarketplaceStore:
         # §6: no rmtree ever runs under a store lock.
         shutil.rmtree(self.source_dir(source_id), ignore_errors=True)
 
-    def _refresh_cache(self, source: dict) -> None:
-        """The §22.2 refresh body: read the origin, validate it, resolve every
-        reference, then swap the catalog and the images into place. Raises
-        MarketplaceError with the cache untouched when anything fails before
-        the swap. Caller holds the lock."""
-        kind, origin = source["kind"], source["origin"]
+    def _refresh_cache(self, source: dict, *, kind: str | None = None,
+                       origin: str | None = None) -> None:
+        """The §22.2 fetch-and-swap body: read `origin` (the source's own at
+        add, the catalog's `url` at refresh), validate it, resolve every
+        reference, then swap the catalog and the images into place and make
+        that origin the source's. Raises MarketplaceError with the cache and
+        the record untouched when anything fails before the swap. Caller holds
+        the lock."""
+        kind = kind or source["kind"]
+        origin = origin or source["origin"]
         text = _decode(_read_origin(kind, origin))
         catalog = parse_catalog(text, kind=kind, origin=origin)
         # §22.1: validation covers the form of every reference at add and
@@ -429,6 +474,8 @@ class MarketplaceStore:
         # crash mid-write never leaves half a catalog as the cached copy.
         atomic_write_text(self.catalog_file(source["id"]), text)
         self._rebuild_images(source, images)
+        # §22.2: from now on the cached copy came from here.
+        source["kind"], source["origin"] = kind, origin
         source["refreshed_at"] = timefmt.now_iso()
         source["error"] = None
 
@@ -490,6 +537,7 @@ class MarketplaceStore:
                 "name": catalog["name"] if catalog
                         else default_name(source["kind"], source["origin"]),
                 "description": catalog["description"] if catalog else "",
+                "url": catalog["url"] if catalog else None,
                 "addedAt": source.get("added_at") or "",
                 "refreshedAt": source.get("refreshed_at"),
                 "error": error, "cached": catalog is not None, "entries": entries}

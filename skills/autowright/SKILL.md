@@ -190,7 +190,9 @@ autowright agent list · agent check <name>        # AI agents available to agen
   them out when the archive is for someone else.
 - `marketplace list` / `marketplace add <link-or-file>` / `marketplace refresh [<name>]` /
   `marketplace remove <name>` / `marketplace install <name> <n>` work with marketplaces -
-  catalogs someone published listing shareable automations. `list` numbers each marketplace's entries;
+  catalogs someone published listing shareable automations. `refresh` downloads the catalog again
+  from the `url` it declares; a catalog without one is a one-time download (remove and add it
+  again to pick up changes). `list` numbers each marketplace's entries;
   `install` takes that number and lands the automation through the ordinary import (agents and
   secrets matched by name, triggers off).
 - `settings show` / `settings set days=30 notifications=all developerMode=on dataPath=/path`.

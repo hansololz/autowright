@@ -2410,6 +2410,7 @@ def test_cmd_agent_list_and_check(capsys):
 SOURCES = [
     {"id": "m1111111-a", "kind": "url", "origin": "https://example.com/marketplace.yaml",
      "name": "Community automations", "description": "Automations I use.",
+     "url": "https://example.com/marketplace.yaml",
      "addedAt": "2026-09-10T08:00:00Z", "refreshedAt": "2026-09-11T07:30:00Z",
      "error": None,
      "entries": [
@@ -2419,8 +2420,8 @@ SOURCES = [
          {"index": 1, "title": "Inbox sweeper", "description": "",
           "archive": "https://example.com/inbox.autowright", "image": False}]},
     {"id": "m2222222-b", "kind": "file", "origin": "/Users/x/shared/marketplace.yaml",
-     "name": "Mine", "description": "", "addedAt": "2026-09-09T08:00:00Z",
-     "refreshedAt": "2026-09-09T08:00:00Z",
+     "name": "Mine", "description": "", "url": None,
+     "addedAt": "2026-09-09T08:00:00Z", "refreshedAt": "2026-09-09T08:00:00Z",
      "error": "the file couldn't be read", "entries": []},
 ]
 
@@ -2458,6 +2459,11 @@ def test_cmd_marketplace_list_prints_one_block_per_source(capsys):
     assert out[2] == ("  1. Manga chapter watcher - Checks the series you follow "
                       "every morning at 8.")
     assert out[3] == "  2. Inbox sweeper"
+    # §22.5: a catalog that declares no `url` is a one-time download - its
+    # second line says when it was added instead
+    _run(_MarketClient([{**SOURCES[0], "url": None}]), "marketplace", "list")
+    assert capsys.readouterr().out.splitlines()[1] == \
+        "  added 2026-09-10T08:00:00Z (no url to refresh from)"
 
 
 def test_cmd_marketplace_list_reports_an_empty_catalog_and_a_failed_refresh(capsys):
@@ -2508,6 +2514,7 @@ def test_cmd_marketplace_refresh_one_resolves_the_source(capsys):
     prints the entry count."""
     c = _MarketClient(SOURCES, writes={"/marketplace/sources/m1111111-a/refresh": {
         "id": "m1111111-a", "name": "Community automations", "error": None,
+        "url": "https://example.com/marketplace.yaml",
         "entries": [{"index": 0}, {"index": 1}, {"index": 2}]}})
     _run(c, "marketplace", "refresh", "community")  # name substring resolves
     assert c.calls == [("POST", "/marketplace/sources/m1111111-a/refresh", None)]
@@ -2516,14 +2523,24 @@ def test_cmd_marketplace_refresh_one_resolves_the_source(capsys):
             in capsys.readouterr().out)
 
 
+def test_cmd_marketplace_refresh_one_without_a_url_exits_before_asking(capsys):
+    """§22.5: a catalog that declares no `url` is a one-time download - the CLI
+    says so and never sends the request the backend would answer 409."""
+    c = _MarketClient(SOURCES)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "refresh", "Mine")
+    assert str(ei.value.code) == "'Mine' declares no url to refresh from"
+    assert c.calls == []
+
+
 def test_cmd_marketplace_refresh_all_reports_each_and_exits_1_on_a_failure(capsys):
     """§22.5: refresh-all never stops at the first bad source - every source
     prints its own line, and the exit code says one of them failed."""
     c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
         {"id": "m1111111-a", "name": "Community automations", "error": None,
-         "entries": [{"index": 0}]},
+         "url": "https://example.com/marketplace.yaml", "entries": [{"index": 0}]},
         {"id": "m2222222-b", "name": "Mine", "error": "the file couldn't be read",
-         "entries": []}]}})
+         "url": "https://example.com/mine.yaml", "entries": []}]}})
     with pytest.raises(SystemExit) as ei:
         _run(c, "marketplace", "refresh")
     assert ei.value.code == 1
@@ -2536,9 +2553,23 @@ def test_cmd_marketplace_refresh_all_reports_each_and_exits_1_on_a_failure(capsy
 def test_cmd_marketplace_refresh_all_succeeds_quietly(capsys):
     c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
         {"id": "m1111111-a", "name": "Community automations", "error": None,
-         "entries": []}]}})
+         "url": "https://example.com/marketplace.yaml", "entries": []}]}})
     _run(c, "marketplace", "refresh")  # no SystemExit
     assert "refreshed Community automations - 0 automation(s)" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_refresh_all_skips_a_source_without_a_url(capsys):
+    """§22.5: refresh-all skips a one-time download and says so - a skip is not
+    a failure, so the exit code stays 0."""
+    c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
+        {"id": "m1111111-a", "name": "Community automations", "error": None,
+         "url": "https://example.com/marketplace.yaml", "entries": [{"index": 0}]},
+        {"id": "m2222222-b", "name": "Mine", "error": None, "url": None,
+         "entries": []}]}})
+    _run(c, "marketplace", "refresh")  # no SystemExit
+    out = capsys.readouterr().out
+    assert "refreshed Community automations - 1 automation(s)" in out
+    assert "skipped Mine - no url to refresh from" in out
 
 
 def test_cmd_marketplace_remove(capsys):

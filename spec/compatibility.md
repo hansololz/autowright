@@ -68,9 +68,12 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
-- **2026-09-11 - `marketplace/` store added (§22).** A new directory under the §5 data
+- **2026-09-11 - `marketplaces/` store added (§22).** A new directory under the §5 data
   root: `sources.yaml` (the user's marketplace sources - id, kind, origin, timestamps, last
-  error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source. Additive: no
+  error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source, each
+  source under its uuid. Same day, before any release: the catalog gained the optional
+  `url` key and refresh downloads that instead of re-reading the add origin (a source
+  without `url` is a one-time download); the store shape is unchanged. Additive: no
   existing file changes shape, data written before this date holds no such directory, and a
   release without the feature never reads it (the directory is inert on downgrade). The
   catalog people share carries its own `format_version: 1` hard gate, like §5.1 archives

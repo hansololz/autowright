@@ -5,8 +5,10 @@
 A marketplace is a browsable set of shareable automations, described by one YAML file (the
 **marketplace catalog**, canonically named `marketplace-catalog.yaml`) listing `.autowright` archives with a title, a description, and a preview image.
 Anyone can write one by hand and host it anywhere (a GitHub repository, a web server, a
-folder on disk). The user adds a catalog to the app by link or by file; the app saves the
-catalog and where it came from, so **Refresh** re-reads the origin and shows new entries.
+folder on disk). The user adds a catalog to the app by link or by file; the app saves a copy
+under its own uuid. A catalog may declare its own published link in an optional `url` key;
+when it does, **Refresh** downloads that link and shows new entries, and when it doesn't the
+copy is a one-time download (remove and add again to pick up changes).
 Installing an entry is the §5.1/§5.2 import, unchanged: the archive is fetched at install
 time, previewed, and confirmed through the same two-phase flow, so every §5.1 guarantee
 holds (triggers land off, no records are ever created, only matched records are granted).
@@ -31,6 +33,7 @@ nothing that could land silently wrong).
 format_version: 1
 name: "Community automations"        # optional (max 80 chars): the source's title
 description: "Automations I use."    # optional (max 500 chars)
+url: https://example.com/shelf/marketplace-catalog.yaml  # optional: where this file is published, so Refresh can fetch it
 entries:                             # required list, may be empty, max 200 entries
   - title: "Manga chapter watcher"   # required, non-empty, max 120 chars
     description: "Checks the series you follow every morning at 8."  # optional, max 1000
@@ -43,6 +46,12 @@ entries:                             # required list, may be empty, max 200 entr
   `marketplace-catalog.yaml`, whose stem would name every unnamed catalog alike: then a
   file source takes its folder's name and a link source its host name. Strings are stripped; over-long
   strings are rejected, not truncated.
+- `url` is optional (max 2000 chars, stripped; blank is the same as absent) and must be an
+  `https://` link, else the validation error "`url` must be an https link". It is the
+  publisher's statement of where this catalog file lives. It plays no part in adding (add
+  reads the link or file the user gave) and is never written by the app; it is what a
+  §22.2 refresh downloads, and it makes the source refreshable at all. A catalog without
+  `url` is a one-time download: the page offers no Refresh for it.
 - `entries` keep catalog order and are addressed by **index** (0-based position) on every
   served surface. Entries carry no id: a catalog is a plain hand-written list, and the
   page re-reads it whole after every refresh, so positions are always current.
@@ -76,38 +85,48 @@ entries:                             # required list, may be empty, max 200 entr
 A **source** is one catalog the user added. Sources live under the §5 data root:
 
 ```
-marketplace/
+marketplaces/
   sources.yaml                  # [{id, kind: url | file, origin, added_at, refreshed_at, error}]
   <source-id>/
     marketplace-catalog.yaml    # the last successfully fetched catalog, byte for byte
     images/<index>.<ext>        # one cached preview image per entry that has one
 ```
 
-- `id` is a uuid (§4 id rule). `kind` is `url` (origin is the https link exactly as
-  pasted, stripped) or `file` (origin is the catalog's absolute path). `added_at` and
-  `refreshed_at` are §5 UTC timestamps; `refreshed_at` is the last *successful* fetch
-  (null until one succeeds - impossible after add, which fetches first). `error` is the
-  last refresh failure's message, null after every success.
-- The source's `name`, `description`, and `entries` are **derived from the cached
+- `id` is a uuid (§4 id rule) and names the source's directory. `kind` and `origin` say
+  where the cached copy came from: `url` (origin is an https link) or `file` (origin is
+  the catalog's absolute path). Add sets them to the link exactly as pasted (stripped) or
+  the file's resolved path; the first successful refresh moves them to the catalog's
+  §22.1 `url` (kind `url`), because from then on the cached copy is the published one.
+  `added_at` and `refreshed_at` are §5 UTC timestamps; `refreshed_at` is the last
+  *successful* fetch (null until one succeeds - impossible after add, which fetches
+  first). `error` is the last refresh failure's message, null after every success.
+- The source's `name`, `description`, `url`, and `entries` are **derived from the cached
   `marketplace-catalog.yaml` at load** - never duplicated into `sources.yaml`, so there is one truth.
-  A source whose cache is missing or fails §22.1 validation still lists (zero entries, the
-  error "the saved copy couldn't be read - refresh to fetch it again") rather than
-  vanishing; §5 lenient load applies to `sources.yaml` itself (an entry missing `id`,
-  `kind`, or `origin`, or with an unknown `kind`, skips with a warning).
-- **Add** fetches and validates first; any failure answers 422 and stores nothing. The same
-  origin (exact string equality after stripping; a file origin compares by resolved path)
-  cannot be added twice - 409 "that marketplace is already added". Add is a refresh that
-  creates the record.
-- **Refresh** (one source, or all in listing order) re-reads the origin: a link source
-  downloads it, a file source reads the file. On success the catalog is written to a temp
-  file and renamed into place, the images directory is rebuilt (every image the new
-  catalog lists is fetched fresh into a temp directory that then replaces `images/`),
-  `refreshed_at` is stamped and `error` cleared. On failure (unreachable, over the cap,
-  invalid) nothing in the cache changes, `refreshed_at` keeps its old value, and `error`
-  records the message - the page keeps showing the last good copy with the error beside
-  it. A single-source refresh through the API answers 200 with the source either way
-  (`error` says what happened) so a refresh-all never stops at the first bad source. One
-  refresh runs at a time per backend (a store-wide lock); a refresh runs on the threadpool.
+  A source whose cache is missing or fails §22.1 validation still lists (zero entries, no
+  `url`, the error "the saved copy couldn't be read - remove this marketplace and add it
+  again") rather than vanishing; §5 lenient load applies to `sources.yaml` itself (an
+  entry missing `id`, `kind`, or `origin`, or with an unknown `kind`, skips with a
+  warning).
+- **Add** reads the link or the file the user gave, validates, and caches; any failure
+  answers 422 and stores nothing. The same origin (exact string equality after stripping;
+  a file origin compares by resolved path) cannot be added twice - 409 "that marketplace
+  is already added". Add is the only time the pasted link or the file is read.
+- **Refresh** (one source, or all in listing order) downloads the cached catalog's §22.1
+  `url` - never the link or file the source was added from. A source whose catalog declares
+  no `url` is **not refreshable**: a single-source refresh answers 409 "this marketplace
+  declares no url to refresh from" and touches nothing; a refresh-all skips it. On success
+  the catalog is written to a temp file and renamed into place, the images directory is
+  rebuilt (every image the new catalog lists is fetched fresh into a temp directory that
+  then replaces `images/`), `kind`/`origin` become `url`/that link, `refreshed_at` is
+  stamped and `error` cleared. On failure (unreachable, over the cap, invalid, or the
+  `url` is already another source's origin - "that link is already added as "<name>"")
+  nothing in the cache or the record changes but `error`, which records the message - the
+  page keeps showing the last good copy with the error beside it. A refresh takes the
+  downloaded catalog as it is: if it declares a different `url`, the next refresh follows
+  that one; if it declares none, the source stops being refreshable. A single-source
+  refresh of a refreshable source answers 200 with the source either way (`error` says
+  what happened) so a refresh-all never stops at the first bad source. One refresh runs at
+  a time per backend (a store-wide lock); a refresh runs on the threadpool.
 - **Remove** deletes the record and its directory. Automations installed from it are
   ordinary automations and are untouched.
 - The store is loaded once at backend startup into memory and rewritten whole on every
@@ -127,8 +146,8 @@ in the app shell calls `go('automations')` - the same shape as the §9.3 overlay
 itself when the setting drops.
 
 **Page.** Title "Marketplace" with header actions: a ghost **Refresh all** (rendered only
-when at least one source exists; the §9 busy spinner while running) and the accent **Add
-marketplace…** button. The page fetches §19 `GET /marketplace` on mount and after each of
+when at least one source is refreshable, i.e. carries a `url`; the §9 busy spinner while
+running) and the accent **Add marketplace…** button. The page fetches §19 `GET /marketplace` on mount and after each of
 its own actions, and refetches when the §19 `marketplace.changed` WebSocket event arrives
 (a §20 CLI change shows without a reload); it shows the §14 `PageLoading` line until the
 first answer.
@@ -138,8 +157,9 @@ first answer.
 the automations it lists." (the machine noun through the §9 per-OS copy rule) and an "Add
 marketplace…" button. Below it, one **MAKE YOUR OWN** section: the eyebrow, one muted line
 "A marketplace catalog is a YAML file that lists .autowright archives. Save it as
-marketplace-catalog.yaml next to the archives it points to, then add it here.", and the
-§22.1 example catalog in a mono code box
+marketplace-catalog.yaml next to the archives it points to, then add it here. Put the link
+you publish it at in `url` so Refresh can fetch what you add later.", and the §22.1
+example catalog in a mono code box
 (`.ad-card` padding 14, `pre` at 12 px `--mono`, selectable, horizontal scroll inside the
 box). The section renders only in the empty state - once a source exists the user has seen
 the shape.
@@ -148,12 +168,15 @@ the shape.
 - Header row: the source name (600, 15 px), a §14 `MetaChip` naming the origin (link icon +
   hostname for a link source, file icon + file name for a file source; the full origin in
   the `title` attribute), and a muted line "Refreshed <date label>" (the §4.1 shared
-  date-label scheme, e.g. "Refreshed Today, 8:00 AM"; omitted while `refreshedAt` is null) or, while `error` is set, an amber `Notice` beneath the header: "Couldn't
-  refresh: <error>. Showing the last copy." (for a source with no readable cache - `cached` false: "Couldn't
-  load: <error>."). Two quiet square icon buttons on the right (`.ad-btn-ghost.icon`; Remove adds
-  `.danger` so it reads red - never the accent-filled §12 execute shape, two orange
-  squares beside a title read as a call to action):
-  **Refresh** (`fa-rotate`, spinner while running, `aria-label` "Refresh") and **Remove**
+  date-label scheme, e.g. "Refreshed Today, 8:00 AM"; omitted while `refreshedAt` is
+  null) for a refreshable source, or "Added <date label>" (from `addedAt`) for one whose
+  catalog declares no `url`. While `error` is set, an amber `Notice` beneath the header:
+  "Couldn't refresh: <error>. Showing the last copy." (for a source with no readable
+  cache - `cached` false: "Couldn't load: <error>."). Quiet square icon buttons on the
+  right (`.ad-btn-ghost.icon`; Remove adds `.danger` so it reads red - never the
+  accent-filled §12 execute shape, two orange squares beside a title read as a call to
+  action): **Refresh** (`fa-rotate`, spinner while running, `aria-label` "Refresh";
+  rendered only when the source carries a `url`) and **Remove**
   (`fa-trash`, `aria-label` "Remove") - Remove opens a danger `ConfirmModal`, title "Remove
   "<name>"?", body "Automations you already installed from it stay. You can add the
   marketplace again later.", confirm label "Remove". Removing refetches the list; no toast.
@@ -196,8 +219,9 @@ the button that produced it. Success closes the modal, refetches, and toasts "Ad
 ### 22.4 Backend API (§19 addendum)
 
 All routes authenticated like the rest of §19. `Source` is `{ id, kind, origin, name,
-description, addedAt, refreshedAt, error, cached, entries: [{ index, title, description,
-archive, image }] }` - `archive` the resolved archive reference (the https URL, or the
+description, url, addedAt, refreshedAt, error, cached, entries: [{ index, title,
+description, archive, image }] }` - `url` the catalog's declared §22.1 link or null (null
+means not refreshable), `archive` the resolved archive reference (the https URL, or the
 absolute path for a file-relative reference), `image` a boolean saying whether a cached
 preview exists, `cached` whether a readable cached catalog exists (false only for the
 §22.2 unreadable-cache case; an empty catalog is still cached).
@@ -208,8 +232,11 @@ preview exists, `cached` whether a readable cached catalog exists (false only fo
   stores nothing; an origin already added answers 409. A `path` must be an absolute path
   to an existing readable file.
 - `POST /marketplace/sources/{id}/refresh` → `Source` (200 even when the refresh failed;
-  `error` carries the reason and the cache is unchanged). Unknown id → 404.
-- `POST /marketplace/refresh` → `{ sources }` after refreshing every source in order.
+  `error` carries the reason and the cache is unchanged). Unknown id → 404; a source whose
+  catalog declares no `url` → 409 "this marketplace declares no url to refresh from", the
+  record untouched.
+- `POST /marketplace/refresh` → `{ sources }` after refreshing every refreshable source in
+  order (the others are listed as they were).
 - `DELETE /marketplace/sources/{id}` → `{ ok: true }`; unknown id → 404.
 - `GET /marketplace/sources/{id}/entries/{index}/image` → the cached image bytes with the
   content type matching its extension; 404 when the source, entry, or image doesn't exist.
@@ -231,7 +258,7 @@ a link or a file path").
 ```
 autowright marketplace list                    every source with its entries
 autowright marketplace add <url-or-path>       add a marketplace by https link or file path
-autowright marketplace refresh [<source>]      refresh one source, or all
+autowright marketplace refresh [<source>]      refresh one source, or every refreshable one
 autowright marketplace remove <source>         remove a source (installed automations stay)
 autowright marketplace install <source> <n>    install entry n (1-based, as `list` prints it)
 ```
@@ -240,11 +267,15 @@ autowright marketplace install <source> <n>    install entry n (1-based, as `lis
 exact name (case-insensitive); ambiguity and no-match are the standard §20 errors. A file
 path given to `add` is made absolute against the current directory before it travels.
 `list` prints one block per source - `<name> [<id8>]  <origin>` then `  refreshed <when>`
-(or `  couldn't refresh: <error>`) then each entry as `  <n>. <title> - <description>`
-(1-based; the description omitted when empty; "  no automations listed" for an empty
-catalog). `add` prints `added <name> [<id8>] - <count> automation(s)`; `refresh` prints one
-`refreshed <name> - <count> automation(s)` or `couldn't refresh <name>: <error>` line per
-source (exit 1 when any failed); `remove` prints `removed <name>`. `install` checks `<n>` against the
+for a refreshable source, `  added <when> (no url to refresh from)` for one without a
+`url`, or `  couldn't refresh: <error>` when the last refresh failed; then each entry as
+`  <n>. <title> - <description>` (1-based; the description omitted when empty; "  no
+automations listed" for an empty catalog). `add` prints `added <name> [<id8>] - <count>
+automation(s)`; `refresh <source>` on a source without a `url` exits 1 with `'<name>'
+declares no url to refresh from`; otherwise `refresh` prints one `refreshed <name> -
+<count> automation(s)`, `couldn't refresh <name>: <error>`, or (refresh-all only)
+`skipped <name> - no url to refresh from` line per source (exit 1 when any failed; a skip
+is not a failure); `remove` prints `removed <name>`. `install` checks `<n>` against the
 source's entry count first (`entry numbers start at 1 - see \`autowright marketplace list\`` /
 `'<name>' lists <count> automation(s) - there is no entry <n>`, exit 1), then previews the
 entry, confirms immediately (the typed command is the user's go-ahead, §20 import rule),
@@ -254,16 +285,19 @@ printer), including the foreground package ensure.
 ### 22.6 Tests
 
 - Backend (`tests/test_marketplace.py`): §22.1 validation (format gate, caps, extension
-  rules, index-naming errors), URL and file reference resolution including the
-  inside-the-directory rejection and the https-only join, refresh keeping the cache on
-  failure, images rebuilt on success and skipped on failure, lenient `sources.yaml` load,
-  and every §22.4 route with the network monkeypatched (add 422/409, refresh 200-with-error,
-  image 404, entry preview producing a confirmable token).
+  rules, index-naming errors, the `url` https rule), URL and file reference resolution
+  including the inside-the-directory rejection and the https-only join, refresh
+  downloading the catalog's `url` (never the add origin) and moving `kind`/`origin` to it,
+  refresh keeping the cache on failure, a source without `url` refusing refresh (409) and
+  being skipped by refresh-all, images rebuilt on success and skipped on failure, lenient
+  `sources.yaml` load, and every §22.4 route with the network monkeypatched (add 422/409,
+  refresh 200-with-error, image 404, entry preview producing a confirmable token).
 - Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): the nav
   row hidden while `developerMode` is false and shown when true, the redirect to Automations
   when the setting drops mid-page, the empty state with the example catalog, a source with
-  entries rendering its grid, Install opening the import modal on the preview step, and the
-  add modal's inline 422.
+  entries rendering its grid, the Refresh button and Refresh all present only for a source
+  with a `url`, Install opening the import modal on the preview step, and the add modal's
+  inline 422.
 - e2e: one drive with a file-based source under the test data root (a catalog plus one
   archive exported in the same test), asserting the page lists it and Install lands the
   automation with its triggers off.

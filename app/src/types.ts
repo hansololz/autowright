@@ -398,6 +398,9 @@ export interface MarketplaceSource {
   origin: string
   name: string
   description: string
+  // §22.1: the catalog's declared published link - what Refresh downloads.
+  // null means a one-time download: no Refresh is offered.
+  url: string | null
   addedAt: string
   refreshedAt: string | null
   error: string | null

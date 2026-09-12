@@ -82,7 +82,11 @@ describe('marketplace e2e', () => {
     const entry = page.getByTestId('marketplace-entry')
     await entry.getByText('Watcher', { exact: true }).waitFor({ timeout: 10_000 })
     await entry.getByText('From the e2e shelf.').waitFor()
-    await page.getByTestId('marketplace-refresh-all').waitFor()
+    // §22.1: this catalog declares no `url`, so it is a one-time download -
+    // neither Refresh all nor a per-source Refresh is offered.
+    expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(0)
+    expect(await page.getByRole('button', { name: 'Refresh' }).count()).toBe(0)
+    await page.getByText(/^Added /).waitFor()
     await shot(page, 'marketplace-source.png')
 
     // Install: the §9.1 import modal opens straight on its preview step. The

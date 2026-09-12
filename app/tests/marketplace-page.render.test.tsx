@@ -81,6 +81,7 @@ beforeAll(async () => {
 const source = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => ({
   id: 's1', kind: 'url', origin: 'https://example.com/shared/marketplace.yaml',
   name: 'Community', description: 'Automations I use.',
+  url: 'https://example.com/shared/marketplace-catalog.yaml',
   addedAt: new Date().toISOString(), refreshedAt: new Date().toISOString(), error: null,
   cached: true,
   entries: [{
@@ -146,6 +147,8 @@ describe('§22.3 Marketplace page', () => {
     expect(await screen.findByText('No marketplaces yet')).toBeTruthy()
     expect(screen.getByText('MAKE YOUR OWN')).toBeTruthy()
     expect(screen.getByText(/format_version: 1/)).toBeTruthy()
+    // §22.1: the example shows the `url` a refresh would download.
+    expect(screen.getByText(/url: https:\/\//)).toBeTruthy()
     // §22.3: Refresh all needs at least one source.
     expect(screen.queryByTestId('marketplace-refresh-all')).toBeNull()
   })
@@ -166,6 +169,19 @@ describe('§22.3 Marketplace page', () => {
     expect(screen.queryByText('MAKE YOUR OWN')).toBeNull()
   })
 
+  it('a source whose catalog declares no url offers no Refresh', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source({ url: null })] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
+    // §22.3: a one-time download has nothing to refresh from - it says when it
+    // was added instead, and keeps only Remove.
+    expect(screen.queryByLabelText('Refresh')).toBeNull()
+    expect(screen.queryByTestId('marketplace-refresh-all')).toBeNull()
+    expect(screen.getByText(/^Added Today, /)).toBeTruthy()
+    expect(screen.queryByText(/^Refreshed /)).toBeNull()
+    expect(screen.getByLabelText('Remove')).toBeTruthy()
+  })
+
   it('a failed refresh keeps the last copy beside the reason', async () => {
     marketplaceList.mockResolvedValue({ sources: [source({ error: 'the server did not answer' })] })
     render(<MarketplacePage />)
@@ -176,11 +192,13 @@ describe('§22.3 Marketplace page', () => {
 
   it('a source with nothing cached says it could not load at all', async () => {
     marketplaceList.mockResolvedValue({ sources: [source({
-      cached: false, entries: [], error: "the saved copy couldn't be read - refresh to fetch it again",
+      cached: false, url: null, entries: [],
+      error: "the saved copy couldn't be read - remove this marketplace and add it again",
     })] })
     render(<MarketplacePage />)
     expect(await screen.findByText(
-      "Couldn't load: the saved copy couldn't be read - refresh to fetch it again.")).toBeTruthy()
+      "Couldn't load: the saved copy couldn't be read - remove this marketplace and add it again."))
+      .toBeTruthy()
     expect(screen.getByText('This marketplace lists no automations yet.')).toBeTruthy()
   })
 

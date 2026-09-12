@@ -19,6 +19,7 @@ import { ImportSummaryModal } from './AutomationsList'
 const EXAMPLE_CATALOG = `format_version: 1
 name: "Community automations"        # optional (max 80 chars): the source's title
 description: "Automations I use."    # optional (max 500 chars)
+url: https://example.com/shelf/marketplace-catalog.yaml  # optional: where this file is published, so Refresh can fetch it
 entries:                             # required list, may be empty, max 200 entries
   - title: "Manga chapter watcher"   # required, non-empty, max 120 chars
     description: "Checks the series you follow every morning at 8."  # optional, max 1000
@@ -310,7 +311,8 @@ export default function MarketplacePage() {
       <PageTitle
         right={(
           <HeaderActions>
-            {sources && sources.length > 0 && (
+            {/* §22.3: only a source whose catalog declares a url can refresh. */}
+            {sources && sources.some((s) => s.url) && (
               <button
                 className="ad-btn-ghost"
                 data-testid="marketplace-refresh-all"
@@ -348,7 +350,7 @@ export default function MarketplacePage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 28 }}>
             <Eyebrow>MAKE YOUR OWN</Eyebrow>
             <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
-              A marketplace catalog is a YAML file that lists .autowright archives. Save it as marketplace-catalog.yaml next to the archives it points to, then add it here.
+              A marketplace catalog is a YAML file that lists .autowright archives. Save it as marketplace-catalog.yaml next to the archives it points to, then add it here. Put the link you publish it at in <code>url</code> so Refresh can fetch what you add later.
             </p>
             <div className="ad-card" style={{ padding: 14, overflow: 'hidden' }}>
               <pre style={{
@@ -376,26 +378,34 @@ export default function MarketplacePage() {
                       {originLabel(s)}
                     </MetaChip>
                   </span>
-                  {s.refreshedAt && (
+                  {/* §22.3: a refreshable source says when it was last fetched;
+                      a one-time download (no url) says when it was added. */}
+                  {s.url ? s.refreshedAt && (
                     <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                       Refreshed {relativeTime(s.refreshedAt)}
                     </span>
+                  ) : s.addedAt && (
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                      Added {relativeTime(s.addedAt)}
+                    </span>
                   )}
                 </div>
-                <button
-                  className="ad-btn-ghost icon"
-                  onClick={() => { void refreshOne(s.id) }}
-                  disabled={refreshing === s.id || refreshingAll}
-                  title="Refresh"
-                  aria-label="Refresh"
-                >
-                  <i
-                    className={refreshing === s.id || refreshingAll
-                      ? 'fa-solid fa-spinner fa-spin'
-                      : 'fa-solid fa-rotate'}
-                    style={{ fontSize: 11 }}
-                  />
-                </button>
+                {s.url && (
+                  <button
+                    className="ad-btn-ghost icon"
+                    onClick={() => { void refreshOne(s.id) }}
+                    disabled={refreshing === s.id || refreshingAll}
+                    title="Refresh"
+                    aria-label="Refresh"
+                  >
+                    <i
+                      className={refreshing === s.id || refreshingAll
+                        ? 'fa-solid fa-spinner fa-spin'
+                        : 'fa-solid fa-rotate'}
+                      style={{ fontSize: 11 }}
+                    />
+                  </button>
+                )}
                 <button
                   className="ad-btn-ghost icon danger"
                   onClick={() => setRemoving(s)}

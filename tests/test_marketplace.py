@@ -21,6 +21,27 @@ def write_catalog(tmp_path, entries, filename="marketplace.yaml", **top):
     return f
 
 
+# §22.2: what a refresh downloads - the `url` a test catalog declares.
+CATALOG_URL = "https://x.test/shelf/marketplace-catalog.yaml"
+
+
+def serve(monkeypatch, answers) -> list:
+    """§22.2 refresh: what the declared `url` (and any image reference in the
+    catalog it serves) answers with - bytes, or an exception to raise. Returns
+    the list of urls asked for, in order."""
+    asked = []
+
+    def fetch(url, *, cap, deadline_s=marketplace.FETCH_DEADLINE_S):
+        asked.append(url)
+        answer = answers[url]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(marketplace, "_fetch_url", fetch)
+    return asked
+
+
 @pytest.fixture()
 def market(home):
     """A store over this test's AUTOWRIGHT_HOME (§5 root)."""
@@ -79,6 +100,25 @@ def test_string_limits_reject_rather_than_truncate():
             marketplace.parse_catalog(catalog_text([], **{top: "x" * (limit + 1)}),
                                       kind="file", origin="/m/marketplace.yaml")
         assert f"{limit} characters" in str(e.value)
+
+
+def test_url_must_be_an_https_link():
+    """§22.1: `url` is the publisher's statement of where this catalog lives -
+    https only, stripped, blank the same as absent."""
+    def parse(**top):
+        return marketplace.parse_catalog(catalog_text([], **top), kind="file",
+                                         origin="/m/marketplace.yaml")
+
+    assert parse()["url"] is None
+    assert parse(url="  https://x.test/shelf/marketplace-catalog.yaml  ")["url"] == \
+        "https://x.test/shelf/marketplace-catalog.yaml"
+    assert parse(url="   ")["url"] is None
+    with pytest.raises(MarketplaceError) as e:
+        parse(url="http://x.test/m.yaml")
+    assert str(e.value) == "`url` must be an https link"
+    with pytest.raises(MarketplaceError) as e:
+        parse(url="https://x.test/" + "y" * marketplace.MAX_URL)
+    assert f"{marketplace.MAX_URL} characters" in str(e.value)
 
 
 def test_entry_rules_name_the_entry_index():
@@ -208,52 +248,148 @@ def test_add_stores_nothing_when_validation_fails(market, tmp_path):
     assert market.sources == []
 
 
-def test_refresh_keeps_the_cache_and_records_the_error(market, tmp_path):
-    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}])
+def test_refresh_keeps_the_cache_and_records_the_error(market, tmp_path, monkeypatch):
+    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}],
+                      url=CATALOG_URL)
     source = market.add(path=str(f))
     first_refreshed = source["refreshedAt"]
-    f.write_text("format_version: 1\nentries: [oops\n", encoding="utf-8")
+    serve(monkeypatch, {CATALOG_URL: b"format_version: 1\nentries: [oops\n"})
     after = market.refresh(source["id"])
     assert after["error"] and "YAML" in after["error"]
     assert after["refreshedAt"] == first_refreshed          # last *successful* fetch
     assert [e["title"] for e in after["entries"]] == ["One"]  # last good copy
+    # §22.2: a failed refresh leaves where the cached copy came from alone
+    assert after["kind"] == "file" and after["origin"] == str(f)
     # a success clears the error and stamps a new time
-    write_catalog(tmp_path, [{"title": "Two", "path": "two.autowright"}])
+    serve(monkeypatch, {CATALOG_URL: catalog_text(
+        [{"title": "Two", "path": "two.autowright"}], url=CATALOG_URL).encode()})
     fixed = market.refresh(source["id"])
     assert fixed["error"] is None
     assert [e["title"] for e in fixed["entries"]] == ["Two"]
 
 
-def test_refresh_all_never_stops_at_the_first_bad_source(market, tmp_path):
+def test_refresh_downloads_the_declared_url_not_the_add_origin(market, tmp_path,
+                                                               monkeypatch):
+    """§22.2: a refresh downloads the cached catalog's `url` - never the link
+    or the file the source was added from - and from then on the cached copy is
+    the published one (`kind`/`origin` move to it)."""
+    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}],
+                      name="Shelf", url=CATALOG_URL)
+    source = market.add(path=str(f))
+    assert source["kind"] == "file" and source["url"] == CATALOG_URL
+    # the file on disk is never read again: what lands is what the url served
+    f.write_text(catalog_text([{"title": "From the file", "path": "f.autowright"}],
+                              name="Stale", url=CATALOG_URL), encoding="utf-8")
+    served = catalog_text([{"title": "Two", "path": "two.autowright",
+                            "image": "img/cover.png"}], name="Shelf", url=CATALOG_URL)
+    asked = serve(monkeypatch, {CATALOG_URL: served.encode(),
+                                "https://x.test/shelf/img/cover.png": PNG})
+    after = market.refresh(source["id"])
+    assert asked == [CATALOG_URL, "https://x.test/shelf/img/cover.png"]
+    assert after["kind"] == "url" and after["origin"] == CATALOG_URL
+    assert after["url"] == CATALOG_URL and after["name"] == "Shelf"
+    assert [e["title"] for e in after["entries"]] == ["Two"]
+    assert after["entries"][0]["archive"] == "https://x.test/shelf/two.autowright"
+    assert market.catalog_file(source["id"]).read_text(encoding="utf-8") == served
+    assert market.image_path(source["id"], 0).read_bytes() == PNG
+
+
+def test_a_downloaded_catalog_without_a_url_stops_being_refreshable(market, tmp_path,
+                                                                    monkeypatch):
+    """§22.2: a refresh takes the downloaded catalog as it is - one that
+    declares no `url` leaves the source a one-time download."""
+    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}],
+                      url=CATALOG_URL)
+    source = market.add(path=str(f))
+    serve(monkeypatch, {CATALOG_URL: catalog_text(
+        [{"title": "Last", "path": "last.autowright"}]).encode()})
+    after = market.refresh(source["id"])
+    assert after["url"] is None
+    assert [e["title"] for e in after["entries"]] == ["Last"]
+    with pytest.raises(marketplace.MarketplaceNotRefreshable):
+        market.refresh(source["id"])
+
+
+def test_a_source_without_a_url_is_not_refreshable(market, tmp_path, monkeypatch):
+    """§22.2: a catalog that declares no `url` has nothing to refresh from - a
+    single-source refresh refuses with the record untouched, a refresh-all
+    skips it and still lists it."""
+    plain = write_catalog(tmp_path, [{"title": "Plain", "path": "p.autowright"}],
+                          filename="plain.yaml")
+    linked = write_catalog(tmp_path, [{"title": "Linked", "path": "l.autowright"}],
+                           filename="linked.yaml", url=CATALOG_URL)
+    one = market.add(path=str(plain))
+    two = market.add(path=str(linked))
+    assert one["url"] is None and two["url"] == CATALOG_URL
+    with pytest.raises(marketplace.MarketplaceNotRefreshable) as e:
+        market.refresh(one["id"])
+    assert str(e.value) == marketplace.NOT_REFRESHABLE
+    assert market.sources[0]["refreshed_at"] == one["refreshedAt"]
+    assert market.sources[0]["error"] is None
+    # §22.2 refresh-all: the skipped source is listed as it was
+    serve(monkeypatch, {CATALOG_URL: catalog_text(
+        [{"title": "Linked", "path": "l.autowright"}], url=CATALOG_URL).encode()})
+    sources = market.refresh_all()
+    assert [s["id"] for s in sources] == [one["id"], two["id"]]
+    assert sources[0]["refreshedAt"] == one["refreshedAt"]
+    assert sources[0]["error"] is None and sources[0]["kind"] == "file"
+    assert sources[1]["refreshedAt"] != two["refreshedAt"]
+
+
+def test_refresh_refuses_a_url_another_source_already_holds(market, tmp_path,
+                                                            monkeypatch):
+    """§22.2: the swap would leave two records for one link - the refresh fails
+    naming the other marketplace and the cache stays as it was."""
+    served = catalog_text([{"title": "Linked", "path": "l.autowright"}],
+                          name="Linked", url=CATALOG_URL)
+    serve(monkeypatch, {CATALOG_URL: served.encode()})
+    market.add(url=CATALOG_URL)
+    f = write_catalog(tmp_path, [{"title": "Mine", "path": "m.autowright"}],
+                      name="Mine", url=CATALOG_URL)
+    second = market.add(path=str(f))
+    after = market.refresh(second["id"])
+    assert after["error"] == 'that link is already added as "Linked"'
+    assert after["kind"] == "file" and after["origin"] == str(f)
+    assert [e["title"] for e in after["entries"]] == ["Mine"]
+
+
+def test_refresh_all_never_stops_at_the_first_bad_source(market, tmp_path, monkeypatch):
+    good_url = "https://x.test/good/marketplace-catalog.yaml"
+    bad_url = "https://x.test/bad/marketplace-catalog.yaml"
     good_dir, bad_dir = tmp_path / "good", tmp_path / "bad"
     good_dir.mkdir()
     bad_dir.mkdir()
-    good = write_catalog(good_dir, [{"title": "Good", "path": "g.autowright"}])
-    bad = write_catalog(bad_dir, [{"title": "Bad", "path": "b.autowright"}])
+    good = write_catalog(good_dir, [{"title": "Good", "path": "g.autowright"}],
+                         url=good_url)
+    bad = write_catalog(bad_dir, [{"title": "Bad", "path": "b.autowright"}], url=bad_url)
     market.add(path=str(good))
     bad_source = market.add(path=str(bad))
-    bad.unlink()
+    serve(monkeypatch, {
+        good_url: catalog_text([{"title": "Good", "path": "g.autowright"}],
+                               url=good_url).encode(),
+        bad_url: MarketplaceError("download failed - the server answered 404")})
     sources = market.refresh_all()
     assert sources[0]["error"] is None
     assert sources[1]["id"] == bad_source["id"] and sources[1]["error"]
     assert [e["title"] for e in sources[1]["entries"]] == ["Bad"]
 
 
-def test_images_are_rebuilt_and_skipped_on_failure(market, tmp_path):
+def test_images_are_rebuilt_and_skipped_on_failure(market, tmp_path, monkeypatch):
     (tmp_path / "cover.png").write_bytes(PNG)
     f = write_catalog(tmp_path, [
         {"title": "Has one", "path": "a.autowright", "image": "cover.png"},
         {"title": "Missing", "path": "b.autowright", "image": "gone.png"},
         {"title": "Too big", "path": "c.autowright", "image": "huge.png"},
-    ])
+    ], url=CATALOG_URL)
     (tmp_path / "huge.png").write_bytes(b"0" * (marketplace.MAX_IMAGE_BYTES + 1))
     source = market.add(path=str(f))
     assert [e["image"] for e in source["entries"]] == [True, False, False]
     # a refresh rebuilds the directory: the dropped image's cache file goes
-    write_catalog(tmp_path, [{"title": "Has one", "path": "a.autowright"}])
+    serve(monkeypatch, {CATALOG_URL: catalog_text(
+        [{"title": "Has one", "path": "a.autowright"}], url=CATALOG_URL).encode()})
     after = market.refresh(source["id"])
     assert after["entries"] == [{"index": 0, "title": "Has one", "description": "",
-                                 "archive": str(tmp_path / "a.autowright"),
+                                 "archive": "https://x.test/shelf/a.autowright",
                                  "image": False}]
     assert market.image_path(source["id"], 0) is None
     assert not market.images_dir(source["id"]).with_name("images.tmp").exists()
@@ -275,8 +411,9 @@ def test_url_source_fetches_catalog_and_images(market, monkeypatch):
     assert market.image_path(source["id"], 0).read_bytes() == PNG
 
 
-def test_unreadable_cache_still_lists_the_source(market, tmp_path):
-    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}], name="Shelf")
+def test_unreadable_cache_still_lists_the_source(market, tmp_path, monkeypatch):
+    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}],
+                      name="Shelf", url=CATALOG_URL)
     source = market.add(path=str(f))
     market.catalog_file(source["id"]).write_text("format_version: 9\n", encoding="utf-8")
     listed = market.serialize(market.sources[0])
@@ -284,10 +421,20 @@ def test_unreadable_cache_still_lists_the_source(market, tmp_path):
     assert listed["entries"] == [] and listed["name"] == "marketplace"
     assert listed["error"] == marketplace.CACHE_UNREADABLE
     assert listed["cached"] is False
+    # §22.2: an unreadable cache declares no `url` either - nothing to refresh from
+    assert listed["url"] is None
+    with pytest.raises(marketplace.MarketplaceNotRefreshable):
+        market.refresh(source["id"])
     # a real stored refresh error wins over the cache-read one
-    f.unlink()
+    market.catalog_file(source["id"]).write_text(
+        catalog_text([{"title": "One", "path": "one.autowright"}], url=CATALOG_URL),
+        encoding="utf-8")
+    serve(monkeypatch, {CATALOG_URL: MarketplaceError(
+        "download failed - the server answered 404")})
     failed = market.refresh(source["id"])
-    assert "couldn't read the catalog file" in failed["error"]
+    assert "the server answered 404" in failed["error"]
+    market.catalog_file(source["id"]).write_text("format_version: 9\n", encoding="utf-8")
+    assert market.serialize(market.sources[0])["error"] == failed["error"]
 
 
 def test_remove_drops_the_record_and_its_directory(market, tmp_path):
@@ -378,11 +525,12 @@ def _export(client) -> bytes:
     return client.get(f"/automations/{a['id']}/export").content
 
 
-def test_routes_add_list_refresh_and_remove(client, tmp_path):
+def test_routes_add_list_refresh_and_remove(client, tmp_path, monkeypatch):
     (tmp_path / "one.autowright").write_bytes(b"zip")
     (tmp_path / "cover.png").write_bytes(PNG)
     f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright",
-                                  "image": "cover.png"}], name="Shelf")
+                                  "image": "cover.png"}], name="Shelf",
+                      url=CATALOG_URL)
     r = client.post("/marketplace/sources", json={"path": str(f)})
     assert r.status_code == 200
     source = r.json()
@@ -400,7 +548,8 @@ def test_routes_add_list_refresh_and_remove(client, tmp_path):
     assert r.status_code == 409 and r.json()["detail"] == "that marketplace is already added"
 
     # §22.4 refresh: 200 with the reason even when it failed
-    f.unlink()
+    serve(monkeypatch, {CATALOG_URL: MarketplaceError(
+        "download failed - the server answered 404")})
     r = client.post(f"/marketplace/sources/{source['id']}/refresh")
     assert r.status_code == 200 and r.json()["error"]
     assert [e["title"] for e in r.json()["entries"]] == ["One"]
@@ -411,6 +560,28 @@ def test_routes_add_list_refresh_and_remove(client, tmp_path):
     assert client.delete(f"/marketplace/sources/{source['id']}").json() == {"ok": True}
     assert client.delete(f"/marketplace/sources/{source['id']}").status_code == 404
     assert client.get("/marketplace").json()["sources"] == []
+
+
+def test_route_refuses_to_refresh_a_source_without_a_url(client, tmp_path):
+    """§22.4: a source whose catalog declares no `url` answers 409 with the
+    record untouched, and a refresh-all lists it as it was."""
+    from autowright.api import marketplace_store
+
+    f = write_catalog(tmp_path, [{"title": "One", "path": "one.autowright"}], name="Shelf")
+    source = client.post("/marketplace/sources", json={"path": str(f)}).json()
+    assert source["url"] is None
+    record = dict(marketplace_store.sources[0])
+
+    r = client.post(f"/marketplace/sources/{source['id']}/refresh")
+    assert r.status_code == 409 and r.json()["detail"] == marketplace.NOT_REFRESHABLE
+    assert marketplace_store.sources[0] == record
+
+    r = client.post("/marketplace/refresh")
+    assert r.status_code == 200
+    listed = r.json()["sources"]
+    assert [s["id"] for s in listed] == [source["id"]]
+    assert listed[0]["refreshedAt"] == source["refreshedAt"]
+    assert listed[0]["error"] is None
 
 
 def test_image_route_serves_the_cached_bytes(client, tmp_path):

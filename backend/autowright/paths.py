@@ -176,7 +176,7 @@ def marketplace_dir() -> Path:
     per source (its cached `marketplace-catalog.yaml` and `images/`). Created on
     demand by the first write, so an install that never opens the page holds no
     such directory."""
-    return app_support() / "marketplace"
+    return app_support() / "marketplaces"
 
 
 def import_spool_dir() -> Path:

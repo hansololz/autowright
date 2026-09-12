@@ -1434,6 +1434,9 @@ def cmd_marketplace_list(c: Client, args) -> None:
             # §22.2: a failed refresh leaves the cache alone - the entries
             # below are still the last good copy.
             print(f"  couldn't refresh: {s['error']}")
+        elif not s.get("url"):
+            # §22.1: no `url` in the catalog means a one-time download.
+            print(f"  added {s.get('addedAt') or '?'} (no url to refresh from)")
         elif s.get("refreshedAt"):
             print(f"  refreshed {s['refreshedAt']}")
         entries = s.get("entries") or []
@@ -1465,6 +1468,10 @@ def cmd_marketplace_add(c: Client, args) -> None:
 def cmd_marketplace_refresh(c: Client, args) -> None:
     if args.source:
         s = find_source(c, args.source)
+        if not s.get("url"):
+            # §22.2: a catalog without `url` is a one-time download - the
+            # backend's 409, said up front rather than as an HTTP detail.
+            sys.exit(f"{s['name']!r} declares no url to refresh from")
         # §22.4: a single-source refresh answers 200 either way - the failure
         # is in `error`, not in the status code.
         sources = [c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=600)]
@@ -1475,6 +1482,9 @@ def cmd_marketplace_refresh(c: Client, args) -> None:
         if s.get("error"):
             failed = True
             print(f"couldn't refresh {s['name']}: {s['error']}")
+        elif not s.get("url"):
+            # §22.5: refresh-all skips a source without `url`; not a failure.
+            print(f"skipped {s['name']} - no url to refresh from")
         else:
             print(f"refreshed {s['name']} - {len(s.get('entries') or [])} automation(s)")
     if failed:
@@ -2627,8 +2637,9 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
               description="A marketplace is a catalog someone published listing automations "
                           "anyone can install - a title, a description, and the archive "
                           "behind each one. Add the ones you follow by link or by file, and "
-                          "they stay on this machine so a refresh picks up what was added "
-                          "to them since."
+                          "they stay on this machine; a catalog that names where it is "
+                          "published (its `url`) can be refreshed to pick up what was "
+                          "added to it since."
                           "\n\n"
                           "Wherever a verb takes a marketplace, name it by its name "
                           "(case-insensitive), a unique part of its name, its id, or a "
@@ -2663,10 +2674,12 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p.add_argument("source", metavar="link-or-file",
                    help="an https link to a marketplace catalog, or the path to one on this "
                         "machine")
-    p = _sub(mg, "refresh", cmd_marketplace_refresh, "re-read a marketplace, or all of them",
-             description="Read a marketplace again where it came from, so automations added "
-                         "to it since show up here. With no marketplace named, every one is "
-                         "refreshed in the order `list` prints them."
+    p = _sub(mg, "refresh", cmd_marketplace_refresh, "fetch a marketplace again, or all of them",
+             description="Download a marketplace catalog again from the `url` it declares, so "
+                         "automations added to it since show up here. A catalog that "
+                         "declares no `url` was a one-time download and can't be refreshed - "
+                         "remove it and add it again instead. With no marketplace named, "
+                         "every refreshable one is fetched in the order `list` prints them."
                          "\n\n"
                          "A refresh that fails leaves the copy you already have alone and "
                          "says what went wrong, and the rest still refresh. The command exits "
