@@ -1433,7 +1433,7 @@ describe('execution page header action gating (§7)', () => {
   })
 
   it('the §19 delete event stamps the open record — the actions go with it', () => {
-    seedRow({ status: 'failed', error: 'boom' })
+    seedRow({ status: 'failed', error: { step: null, message: 'boom', reason: null } })
     storeMod.useStore.setState({
       automations: [{ id: 'a1', name: 'Automation' } as unknown as Automation],
     })

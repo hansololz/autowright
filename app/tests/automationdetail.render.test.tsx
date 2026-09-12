@@ -5,7 +5,7 @@
 // the store seeded and the api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { Automation, Execution, ParamDef, Trigger } from '../src/types'
+import type { Automation, Execution, ParamDef, Trigger, VersionInfo } from '../src/types'
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => false),
@@ -460,7 +460,7 @@ describe('§9.2 delete while the page is open', () => {
       errors.push(args.map(String).join(' '))
     })
     try {
-      seed(auto({ versions: [{ version: 1, note: null, createdAt: '', steps: [] }] } as Partial<Automation>))
+      seed(auto({ versions: [{ version: 1, when: '', note: null, steps: [] } as unknown as VersionInfo] } as Partial<Automation>))
       const { container } = render(<AutomationDetail />)
       expect(container.textContent).toContain('Job')
       // What the delete form of automation.changed does to the row (store.ts patchAutomation).
