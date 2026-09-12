@@ -862,18 +862,19 @@ def test_invoke_timeout_kills_group_and_is_retryable(monkeypatch, tmp_path, home
 
 def test_invoke_output_resets_idle_window(monkeypatch, tmp_path, home):
     # §8: the timeout is an idle window — a child that streams a line every
-    # 0.4 s outlives a 1 s window because each line resets it. The old fixed
-    # timer would have killed this run at 1 s.
+    # 1 s for 5 s outlives a 3 s window because each line resets it. The old
+    # fixed timer would have killed this run at 3 s. The 2 s slack per gap
+    # keeps interpreter start-up under xdist contention from tripping it.
     from autowright import harness
 
     script = fake_cli(tmp_path,
                        "import sys, time\n"
                        "for _ in range(5):\n"
                        "    print('tick', flush=True)\n"
-                       "    time.sleep(0.4)\n"
+                       "    time.sleep(1.0)\n"
                        "print('done', flush=True)\n")
     monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
-    out = harness.invoke({"harness": "Claude Code"}, "question: hi?", timeout=1)
+    out = harness.invoke({"harness": "Claude Code"}, "question: hi?", timeout=3)
     assert "done" in out
 
 

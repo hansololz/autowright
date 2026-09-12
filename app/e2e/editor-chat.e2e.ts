@@ -84,26 +84,32 @@ describe('editor chat e2e', () => {
     // these assertions from passing vacuously on a short thread.
     const thread = page.getByTestId('chat-thread')
     let draft = ''
-    for (let lines = 8; lines <= 28; lines += 4) {
+    // The 120 px floor keeps the parked thread past the §11 60 px near-bottom
+    // band below, so the settling-entry check can't pass vacuously either.
+    for (let lines = 8; lines <= 40; lines += 4) {
       draft = Array(lines).fill('draft text').join('\n')
       await input.fill(draft)
-      if (await thread.evaluate((el) => el.scrollHeight > el.clientHeight + 40)) break
+      if (await thread.evaluate((el) => el.scrollHeight > el.clientHeight + 120)) break
     }
-    expect(await thread.evaluate((el) => el.scrollHeight > el.clientHeight + 40)).toBe(true)
+    expect(await thread.evaluate((el) => el.scrollHeight > el.clientHeight + 120)).toBe(true)
     // Typing more keeps the thread's scroll position — the auto-grow's
     // transient height:auto collapse must not yank the thread upward.
     await thread.evaluate((el) => { el.scrollTop = 5 })
     await input.fill(draft + '\nmore')
     expect(await thread.evaluate((el) => el.scrollTop)).toBe(5)
 
-    // A new entry re-pins the thread to the newest content: park the scroll
-    // away from the bottom, then let the sync chip land.
-    await thread.evaluate((el) => { el.scrollTop = 0 })
+    // §11 near-bottom rule: a settling entry never yanks a user who scrolled
+    // up. Start the sync first (the click scrolls its in-thread button into
+    // view, and the progress entry appearing may pin a near-bottom thread),
+    // then park the scroll at the top while the job runs. The chip landing
+    // must leave the thread at the top: only near-bottom threads follow.
     await page.getByTestId('chat-sync-now').click()
+    await page.getByTestId('chat-progress').waitFor({ timeout: 15_000 })
+    await thread.evaluate((el) => { el.scrollTop = 0 })
     await page.getByText('Steps synced with the spec.', { exact: true }).waitFor({ timeout: 60_000 })
-    await expect.poll(() => thread.evaluate(
-      (el) => el.scrollHeight - el.scrollTop - el.clientHeight), { timeout: 5_000 }).toBeLessThan(2)
-    expect(await thread.evaluate((el) => el.scrollHeight > el.clientHeight + 40)).toBe(true)
+    await page.waitForTimeout(500) // give any (wrong) re-pin effect a chance to fire
+    expect(await thread.evaluate((el) => el.scrollTop)).toBe(0)
+    expect(await thread.evaluate((el) => el.scrollHeight > el.clientHeight + 120)).toBe(true)
     await input.fill('') // back to the journey — composer at rest
 
     await page.getByText('In sync with the spec.').waitFor()

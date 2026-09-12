@@ -332,7 +332,8 @@ everything finer-grained belongs to the unit/integration tiers:
   entry's inline Sync now rebuilds the steps, and the draft saves as v2; the same journey
   checks the pane's two §11 visual behaviors happy-dom can't reach — the composer
   auto-grows and shrinks with its content, and the thread scroll stays put while typing
-  and re-pins to the newest entry when one lands
+  and stays put when an entry lands while the user is scrolled up (the §11 near-bottom
+  rule — a settling entry never yanks the thread)
 - the chat `actions.yaml` fix-and-test chain: one response carrying an answer, a spec
   rewrite, a notes rewrite, and `sync: true` + `test: true` → auto-sync → auto-test →
   the settled-test system chip in the thread
