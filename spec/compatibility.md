@@ -69,17 +69,19 @@ Newest first. One entry per compatibility decision: what changed, the migration,
 version that writes the new shape, and the oldest shape still read.
 
 - **2026-09-11 - `marketplaces/` store added (§22).** A new directory under the §5 data
-  root: `sources.yaml` (the user's marketplace sources - id, kind, origin, timestamps, last
+  root: `marketplaces.yaml` (the user's marketplace sources - id, kind, origin, timestamps, last
   error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source, each
   source under its uuid. Same day, before any release: the catalog gained the optional
   `url` key and refresh downloads that instead of re-reading the add origin (a source
-  without `url` is a one-time download); the store shape is unchanged. Also same day: §22.7
-  catalog authoring (create/edit routes that write a user's folder; no stored shape
-  involved). Additive: no
+  without `url` is a one-time download). Also same day: §22.7 catalog authoring. Later the
+  same day, still unreleased, the store was reshaped into the **catalog table** (`location`
+  null | path | link, `shown`, `auto_refresh`; `kind`/`origin` dropped; the catalog's
+  `url` key dropped; no `images/` cache) with no migration, by decision - nothing shipped
+  the earlier shapes. Additive: no
   existing file changes shape, data written before this date holds no such directory, and a
   release without the feature never reads it (the directory is inert on downgrade). The
   catalog people share carries its own `format_version: 1` hard gate, like §5.1 archives
-  and outside the §21 promise; `sources.yaml` loads under the §5 lenient rule (an entry
+  and outside the §21 promise; `marketplaces.yaml` loads under the §5 lenient rule (an entry
   missing `id`, `kind`, or `origin` skips with a warning). No migration. First version
   writing the new shape: the next release after 2026-09-11; oldest shape still read: the
   same (the store did not exist before). Fixture test:

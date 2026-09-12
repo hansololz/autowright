@@ -18,6 +18,8 @@ declare global {
       // §22.3 add marketplace: the picked catalog's path only - the backend
       // reads the file itself, so no bytes cross the bridge.
       openCatalog(): Promise<{ path: string } | null>
+      // §22.3 drop zone: a dropped File's on-disk path (Electron webUtils).
+      pathForFile(file: File): string
       // §22.7 catalog editor: an .autowright file's path only - the backend
       // copies it into the catalog's folder.
       openArchivePath(): Promise<{ path: string } | null>
@@ -305,8 +307,12 @@ export const api = {
       'POST', `/marketplace/sources/${id}/entries/${index}/preview`),
   // §22.7 catalog authoring: create writes an empty catalog into a folder and
   // adds it; read/save work on the catalog file on disk, not the cache.
-  marketplaceCatalogCreate: (body: { folder: string } & import('./types').MarketplaceCatalogSave) =>
+  marketplaceCatalogCreate: (body: { folder?: string } & import('./types').MarketplaceCatalogSave) =>
     req<import('./types').MarketplaceSource>('POST', '/marketplace/catalogs', body),
+  // §22.2 settings: location / shown / auto refresh - only the given fields
+  // change, nothing is fetched.
+  marketplaceSettings: (id: string, body: { location?: string; shown?: boolean; autoRefresh?: boolean }) =>
+    req<import('./types').MarketplaceSource>('PATCH', `/marketplace/sources/${id}`, body),
   marketplaceCatalogRead: (id: string) =>
     req<import('./types').MarketplaceCatalog>('GET', `/marketplace/sources/${id}/catalog`),
   marketplaceCatalogSave: (id: string, body: import('./types').MarketplaceCatalogSave) =>

@@ -1,12 +1,13 @@
 // §22.6 e2e: one file-based marketplace under the test data root — a catalog
 // plus an archive this test exports itself — driven end to end. The nav row is
 // gated on §4.9 developerMode (turned on through the real Settings toggle), the
-// §22.4 marketplace.changed event brings the added source in without a reload,
-// and Install runs the ordinary §5.2 two-phase import, landing the automation
-// with its triggers off. Then the §22.7 authoring half: Create catalog… opens
-// the editor empty, Choose folder… picks a temp folder (the native picker
-// stubbed in the main process), the automation picker appends an entry, and
-// Create lands the catalog plus the exported archive in that folder.
+// §22.4 marketplace.changed event brings the added row in without a reload, the
+// §22.2 file location is refreshable like a link, and Install runs the ordinary
+// §5.2 two-phase import, landing the automation with its triggers off. Then the
+// §22.7 authoring half: Create catalog… opens the editor empty, Choose folder…
+// picks a temp folder (the native picker stubbed in the main process), the
+// automation picker appends an entry, and Create lands the catalog plus the
+// exported archive in that folder.
 import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -87,12 +88,28 @@ describe('marketplace e2e', () => {
     const entry = page.getByTestId('marketplace-entry')
     await entry.getByText('Watcher', { exact: true }).waitFor({ timeout: 10_000 })
     await entry.getByText('From the e2e shelf.').waitFor()
-    // §22.1: this catalog declares no `url`, so it is a one-time download -
-    // neither Refresh all nor a per-source Refresh is offered.
-    expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(0)
-    expect(await page.getByRole('button', { name: 'Refresh' }).count()).toBe(0)
-    await page.getByText(/^Added /).waitFor()
+    // §22.2: a file location is re-read like a link, so both Refresh all and
+    // the row's own Refresh are offered, and the row says when it was read.
+    expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(1)
+    expect(await page.getByRole('button', { name: 'Refresh', exact: true }).count()).toBe(1)
+    await page.getByText(/^Refreshed /).waitFor()
     await shot(page, 'marketplace-source.png')
+
+    // §22.3 catalog settings: the §22.2 row's own columns behind the gear.
+    await page.getByRole('button', { name: 'Catalog settings' }).click()
+    await page.getByTestId('catalog-settings').waitFor({ timeout: 10_000 })
+    await page.getByTestId('settings-location').waitFor()
+    await shot(page, 'marketplace-settings.png')
+    await page.getByRole('button', { name: 'Cancel' }).click()
+    await page.getByTestId('catalog-settings').waitFor({ state: 'detached', timeout: 10_000 })
+
+    // §22.3 add modal: the drop zone and the link-or-path field (the native
+    // dialog itself can't be driven, so the modal is only looked at here).
+    await page.getByTestId('marketplace-add').first().click()
+    await page.getByTestId('marketplace-drop-zone').waitFor({ timeout: 10_000 })
+    await shot(page, 'marketplace-add.png')
+    await page.getByRole('button', { name: 'Cancel' }).click()
+    await page.getByTestId('marketplace-drop-zone').waitFor({ state: 'detached', timeout: 10_000 })
 
     // Install: the §9.1 import modal opens straight on its preview step. The
     // archive's own automation is already here, so it lands deduped (§5.1).
@@ -151,9 +168,11 @@ describe('marketplace e2e', () => {
     await page.getByTestId('catalog-save').click()
     await waitFor(async () => (await page.getByTestId('marketplace-source').count()) === 2,
       20_000, 'the authored catalog to land as a second source')
-    await page.getByTestId('marketplace-source').last()
-      .getByTestId('marketplace-entry').getByText('Watcher', { exact: true })
+    const authoredSection = page.getByTestId('marketplace-source').last()
+    await authoredSection.getByTestId('marketplace-entry').getByText('Watcher', { exact: true })
       .waitFor({ timeout: 10_000 })
+    // §22.3: the chip names the catalog file the row now reads from.
+    await authoredSection.getByText('marketplace-catalog.yaml').waitFor({ timeout: 10_000 })
     // Same for the editor: it closes after the save lands.
     await page.getByTestId('catalog-editor').waitFor({ state: 'detached', timeout: 10_000 })
     await shot(page, 'marketplace-authored.png')

@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('autowright', {
   backendInfo: () => ipcRenderer.invoke('backend-info'),
@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('autowright', {
   // §22.3 add marketplace: pick a catalog file - only its path travels, the
   // backend reads the file itself.
   openCatalog: () => ipcRenderer.invoke('open-catalog'),
+  // §22.3 add-marketplace drop zone: a dropped File's path on disk - only the
+  // path travels to the backend, which reads the file itself. Synchronous.
+  pathForFile: (file) => webUtils.getPathForFile(file),
   // §22.7 catalog editor: pick an .autowright file - path only, the backend
   // copies it.
   openArchivePath: () => ipcRenderer.invoke('open-archive-path'),

@@ -1,18 +1,19 @@
-"""§22 marketplace: the catalog format (§22.1) and the sources store (§22.2).
+"""§22 marketplace: the catalog format (§22.1) and the catalog table (§22.2).
 
 A marketplace is one hand-written YAML file listing §5.1 `.autowright` archives.
 This module parses and validates it (every reference is an https URL or an
 absolute local path, taken as it is - nothing is ever resolved against where
-the catalog came from), keeps the last successfully fetched copy plus its
-preview images under
-the §5 data root, and hands the §19 install route the archive bytes. Nothing
-here is ever executed: a catalog is data, and an archive lands only through the
-§5.1/§5.2 import.
+the catalog came from), keeps one table row per catalog plus the app's copy of
+it under the §5 data root, refreshes that copy from the row's location, reads
+preview images on demand, and hands the §19 install route the archive bytes.
+Nothing here is ever executed, and nothing but the catalog copy is ever stored:
+a marketplace references automations, it never holds them.
 """
 from __future__ import annotations
 
 import http.client
 import logging
+import os
 import shutil
 import threading
 import time
@@ -30,12 +31,12 @@ from .yamlio import atomic_write_text, load_yaml, save_yaml
 log = logging.getLogger("autowright.marketplace")
 
 FORMAT_VERSION = 1
-KINDS = ("url", "file")
 
-# §22.1/§22.2: the catalog's canonical file name - what the cache is saved as,
+# §22.1/§22.2: the catalog's canonical file name - what the copy is saved as,
 # and the stem whose default name would collide across every unnamed catalog.
 CATALOG_FILENAME = "marketplace-catalog.yaml"
 CANONICAL_STEM = Path(CATALOG_FILENAME).stem
+KEPT_NAME = "My catalog"
 
 # §22.1 caps (untrusted input): the archive itself is capped by §5.1 at install.
 MAX_CATALOG_BYTES = 1024 * 1024
@@ -45,21 +46,30 @@ MAX_NAME = 80
 MAX_DESCRIPTION = 500
 MAX_TITLE = 120
 MAX_ENTRY_DESCRIPTION = 1000
-MAX_URL = 2000
 
 # §22.1: catalogs and images are small, so the §5.2 10-minute archive deadline
 # would let a trickling server pin a threadpool worker for ten minutes.
 FETCH_DEADLINE_S = 60
 _FETCH_CHUNK = 64 * 1024
 
+# §22.2 auto refresh: 30 s after the store loads, then every 6 hours.
+AUTO_REFRESH_DELAY_S = 30
+AUTO_REFRESH_INTERVAL_S = 6 * 60 * 60
+
 ARCHIVE_EXTENSION = ".autowright"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
-CACHE_UNREADABLE = ("the saved copy couldn't be read - remove this marketplace and add "
-                    "it again")
-NOT_REFRESHABLE = "this marketplace declares no url to refresh from"
+COPY_UNREADABLE_REFRESH = "the saved copy couldn't be read - refresh to fetch it again"
+COPY_UNREADABLE_REMOVE = ("the saved copy couldn't be read - remove this marketplace and "
+                          "add it again")
+NOT_REFRESHABLE = "this catalog has no location to refresh from"
 NOT_EDITABLE = "only a catalog on this machine can be edited"
 FOLDER_TAKEN = "that folder already holds a marketplace catalog - add it instead"
+ALREADY_ADDED = "that marketplace is already added"
+NO_COPY_TO_KEEP = "there's no saved copy to keep - refresh first"
+AUTO_NEEDS_LOCATION = "auto refresh needs a location"
+BAD_LOCATION = "give an https link or an absolute path"
+NO_EXPORT_FOLDER = "say where to export the automations you added"
 
 
 class MarketplaceError(ValueError):
@@ -68,39 +78,66 @@ class MarketplaceError(ValueError):
 
 
 class MarketplaceDuplicate(MarketplaceError):
-    """§22.2: the same origin added twice - the §19 route answers 409."""
+    """§22.2: a location already in the table - the §19 route answers 409."""
 
 
 class MarketplaceNotRefreshable(MarketplaceError):
-    """§22.2: a refresh of a source whose catalog declares no `url` - the §19
-    route answers 409 with the record untouched."""
+    """§22.2: a refresh of a catalog with no location - the §19 route answers
+    409 with the row untouched."""
 
 
 class MarketplaceNotEditable(MarketplaceError):
-    """§22.7: the catalog editor on a `url` source - the file isn't on this
+    """§22.7: the catalog editor on a link location - the file isn't on this
     machine; the §19 route answers 409."""
 
 
-# ---------- catalog (§22.1) ----------
-def default_name(kind: str, origin: str) -> str:
-    """§22.1: the source's title when the catalog names none - the catalog
-    file's stem (`shelf` for `shelf.yaml`), or the last path segment's stem for
-    a link. The canonical `marketplace-catalog.yaml` is the exception: its stem
-    would name every unnamed catalog alike, so a file source takes its folder's
-    name and a link source its host name."""
-    if kind == "url":
-        split = urllib.parse.urlsplit(origin)
+# ---------- locations (§22.2) ----------
+def kind_of(location: str | None) -> str:
+    """§22.2: `kind` is derived from the location, never stored."""
+    if location is None:
+        return "none"
+    return "url" if location.lower().startswith("https://") else "file"
+
+
+def normalize_location(value: str | None) -> str | None:
+    """§22.2/§22.4: a location as the user gave it - blank is `null`, an https
+    link is kept as pasted (stripped), a path has `~` expanded and must be
+    absolute; anything else is BAD_LOCATION."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.lower().startswith("https://"):
+        return text
+    if "://" in text:
+        raise MarketplaceError(BAD_LOCATION)
+    expanded = os.path.expanduser(text)
+    if not Path(expanded).is_absolute():
+        raise MarketplaceError(BAD_LOCATION)
+    return str(Path(expanded).resolve())
+
+
+def default_name(location: str | None) -> str:
+    """§22.1: the catalog's title when it names none - the file's stem (`shelf`
+    for `shelf.yaml`), or the last path segment's stem for a link, except for
+    the canonical `marketplace-catalog.yaml`, whose stem would name every
+    unnamed catalog alike: then a path takes its folder's name and a link its
+    host name. A catalog kept by the app is "My catalog"."""
+    if location is None:
+        return KEPT_NAME
+    if kind_of(location) == "url":
+        split = urllib.parse.urlsplit(location)
         stem = Path(split.path).stem
         if stem == CANONICAL_STEM:
             stem = split.hostname or ""
     else:
-        path = Path(origin)
+        path = Path(location)
         stem = path.stem
         if stem == CANONICAL_STEM:
             stem = path.parent.name
     return stem or "marketplace"
 
 
+# ---------- catalog (§22.1) ----------
 def _extension(reference: str) -> str:
     """A reference's lowercased file extension, with any query string dropped
     first (§22.1) - `manga.autowright?raw=1` is an archive reference."""
@@ -129,12 +166,12 @@ def is_reference(value: str) -> bool:
         "://" not in value and Path(value).is_absolute())
 
 
-def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
+def parse_catalog(text: str, *, location: str | None = None) -> dict:
     """§22.1: parse and validate one marketplace catalog. Unknown keys at any
-    level are ignored so the format can grow inside one version. References
-    are checked for form here (the two legal forms, the extension rules) and
-    used as written everywhere else. Errors name the entry index. `kind` and
-    `origin` only feed the default name."""
+    level are ignored so the format can grow inside one version (the `url` key
+    an older draft carried is one of them). References are checked for form
+    here and used as written everywhere else. Errors name the entry index.
+    `location` only feeds the default name."""
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
@@ -146,13 +183,8 @@ def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
         raise MarketplaceError(
             f"this marketplace catalog is format {raw.get('format_version')!r}; "
             f"this version of Autowright reads format {FORMAT_VERSION}")
-    name = _text(raw, "name", "", MAX_NAME) or default_name(kind, origin)
+    name = _text(raw, "name", "", MAX_NAME) or default_name(location)
     description = _text(raw, "description", "", MAX_DESCRIPTION)
-    # §22.1 `url`: the publisher's statement of where this file is published -
-    # what a refresh downloads. Blank is the same as absent.
-    url = _text(raw, "url", "", MAX_URL) or None
-    if url and not url.lower().startswith("https://"):
-        raise MarketplaceError("`url` must be an https link")
     listed = raw.get("entries")
     if listed is None:
         raise MarketplaceError("the catalog file has no `entries` list")
@@ -188,18 +220,16 @@ def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
                         "description": _text(item, "description", where,
                                              MAX_ENTRY_DESCRIPTION),
                         "path": archive, "image": image})
-    return {"name": name, "description": description, "url": url, "entries": entries}
+    return {"name": name, "description": description, "entries": entries}
 
 
-def dump_catalog(name: str, description: str, url: str | None, entries: list[dict]) -> str:
+def dump_catalog(name: str, description: str, entries: list[dict]) -> str:
     """§22.7: the catalog text the editor writes - exactly the §22.1 keys in the
     §22.1 order, optional ones only when non-empty. Unknown keys and comments
     from the previous file don't survive: the editor owns the file."""
     doc: dict = {"format_version": FORMAT_VERSION, "name": name}
     if description:
         doc["description"] = description
-    if url:
-        doc["url"] = url
     listed = []
     for entry in entries:
         item: dict = {"title": entry["title"]}
@@ -247,20 +277,18 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
     return b"".join(chunks)
 
 
-def _read_origin(kind: str, origin: str) -> bytes:
-    """§22.2 refresh: the catalog bytes - downloaded for a link source, read
-    from disk for a file source, both under the §22.1 1 MB cap."""
-    if kind == "url":
-        return _fetch_url(origin, cap=MAX_CATALOG_BYTES)
+def _read_reference(reference: str, *, cap: int, what: str) -> bytes:
+    """§22.1: the bytes behind a reference - downloaded for an https link, read
+    from disk for a path, both under `cap`."""
+    if kind_of(reference) == "url":
+        return _fetch_url(reference, cap=cap)
     try:
-        data = Path(origin).read_bytes()
+        data = Path(reference).read_bytes()
     except OSError as e:
+        raise MarketplaceError(f"couldn't read the {what} - {e.strerror or e}") from None
+    if len(data) > cap:
         raise MarketplaceError(
-            f"couldn't read the catalog file - {e.strerror or e}") from None
-    if len(data) > MAX_CATALOG_BYTES:
-        raise MarketplaceError(
-            f"the catalog file is larger than the "
-            f"{MAX_CATALOG_BYTES // (1024 * 1024)} MB limit")
+            f"the {what} is larger than the {cap // (1024 * 1024)} MB limit")
     return data
 
 
@@ -271,33 +299,25 @@ def _decode(data: bytes) -> str:
         raise MarketplaceError("the catalog file isn't UTF-8 text") from None
 
 
-def _read_image_file(path: str) -> bytes:
-    """A file source's relative image, copied into the cache under the §22.1
-    5 MB cap. OSError is the caller's to log and skip."""
-    data = Path(path).read_bytes()
-    if len(data) > MAX_IMAGE_BYTES:
-        raise MarketplaceError(
-            f"the image is larger than the {MAX_IMAGE_BYTES // (1024 * 1024)} MB limit")
-    return data
-
-
-# ---------- sources store (§22.2) ----------
+# ---------- catalog table (§22.2) ----------
 class MarketplaceStore:
-    """§22.2: the marketplaces the user added, loaded once at backend startup
-    into memory and rewritten whole on every change, like agents and secrets.
-    `name`, `description`, and `entries` are never duplicated into
-    `sources.yaml` - they are derived from the cached catalog at every
-    serialization, so there is one truth."""
+    """§22.2: the catalog table, loaded once at backend startup into memory and
+    rewritten whole on every change, like agents and secrets. `name`,
+    `description`, and `entries` are never duplicated into the table - they
+    are derived from the app's copy at every serialization, so there is one
+    truth."""
 
     def __init__(self) -> None:
         # §22.2: one lock for every mutation and refresh - one refresh runs at
         # a time per backend.
         self.lock = threading.Lock()
         self.sources: list[dict] = []
+        self._auto_stop = threading.Event()
+        self._auto_thread: threading.Thread | None = None
 
     # ---------- paths ----------
     def file(self) -> Path:
-        return paths.marketplace_dir() / "sources.yaml"
+        return paths.marketplace_dir() / "marketplaces.yaml"
 
     def source_dir(self, source_id: str) -> Path:
         return paths.marketplace_dir() / source_id
@@ -305,14 +325,12 @@ class MarketplaceStore:
     def catalog_file(self, source_id: str) -> Path:
         return self.source_dir(source_id) / CATALOG_FILENAME
 
-    def images_dir(self, source_id: str) -> Path:
-        return self.source_dir(source_id) / "images"
-
     # ---------- load / save (§5) ----------
     def load(self) -> None:
-        """§5 lenient load: `sources.yaml` is hand-editable and must never
-        raise at startup - an entry missing `id`, `kind`, or `origin`, or
-        carrying an unknown kind, skips with a warning."""
+        """§5 lenient load: `marketplaces.yaml` is hand-editable and must never
+        raise at startup - a row missing `id`, or whose `location` is neither
+        null, an absolute path, nor an https link, skips with a warning; a
+        missing `shown` reads true, a missing `auto_refresh` false."""
         raw = load_yaml(self.file(), {}) or {}
         if not isinstance(raw, dict):
             log.warning("%s doesn't hold a mapping - loading no marketplaces", self.file())
@@ -324,19 +342,22 @@ class MarketplaceStore:
         sources = []
         for entry in listed:
             if not isinstance(entry, dict):
-                log.warning("skipping a sources.yaml entry that isn't a mapping")
+                log.warning("skipping a marketplaces.yaml row that isn't a mapping")
                 continue
-            missing = next((k for k in ("id", "kind", "origin") if not entry.get(k)), None)
-            if missing:
-                log.warning("skipping sources.yaml entry %r - it has no %s",
-                            entry.get("id") or entry.get("origin"), missing)
+            if not entry.get("id"):
+                log.warning("skipping a marketplaces.yaml row with no id (%r)",
+                            entry.get("location"))
                 continue
-            if entry["kind"] not in KINDS:
-                log.warning("skipping sources.yaml entry %r - %r isn't a marketplace kind",
-                            entry["id"], entry["kind"])
-                continue
-            sources.append({"id": str(entry["id"]), "kind": str(entry["kind"]),
-                            "origin": str(entry["origin"]),
+            location = entry.get("location")
+            if location is not None:
+                if not isinstance(location, str) or not is_reference(location):
+                    log.warning("skipping marketplaces.yaml row %r - %r isn't a location",
+                                entry["id"], location)
+                    continue
+            sources.append({"id": str(entry["id"]), "location": location,
+                            "shown": entry.get("shown", True) is not False,
+                            "auto_refresh": entry.get("auto_refresh") is True
+                                            and location is not None,
                             "added_at": entry.get("added_at") or "",
                             "refreshed_at": entry.get("refreshed_at") or None,
                             "error": entry.get("error") or None})
@@ -354,38 +375,42 @@ class MarketplaceStore:
                 return source
         raise KeyError(source_id)
 
-    # ---------- add / refresh / remove ----------
+    def _taken(self, location: str, *, except_id: str | None = None) -> bool:
+        """§22.2: the 409 duplicate rule - exact string equality (a path is
+        already resolved by `normalize_location`). Caller holds the lock."""
+        return any(s["location"] == location and s["id"] != except_id for s in self.sources)
+
+    # ---------- add / refresh / settings / remove ----------
     def add(self, *, url: str | None = None, path: str | None = None) -> dict:
-        """§22.2 add: exactly one of a link or a file path. Add is a refresh
-        that creates the record - it fetches and validates first, so any
-        failure raises and stores nothing."""
+        """§22.2 add: a link or a file path. It reads and validates first, so
+        any failure raises and stores nothing."""
         if url and path:
             raise MarketplaceError("give a link or a file path, not both")
-        origin = (url or path or "").strip()
-        if not origin:
+        given = (url or path or "").strip()
+        if not given:
             raise MarketplaceError("give a link or a file path")
         if url:
-            kind = "url"
-            if not origin.lower().startswith("https://"):
+            if not given.lower().startswith("https://"):
                 raise MarketplaceError("only https:// links can be added")
+            location = given
         else:
-            kind = "file"
-            candidate = Path(origin)
-            if not candidate.is_absolute():
+            if "://" in given:
                 raise MarketplaceError("give the catalog file's absolute path")
-            # §22.2: a file origin compares by resolved path, so the same file
-            # reached through a symlink or a `..` hop can't be added twice.
-            candidate = candidate.resolve()
+            expanded = os.path.expanduser(given)
+            if not Path(expanded).is_absolute():
+                raise MarketplaceError("give the catalog file's absolute path")
+            candidate = Path(expanded).resolve()
             if not candidate.is_file():
                 raise MarketplaceError("there's no catalog file at that path")
-            origin = str(candidate)
+            location = str(candidate)
         with self.lock:
-            if any(s["origin"] == origin for s in self.sources):
-                raise MarketplaceDuplicate("that marketplace is already added")
-            source = {"id": new_id(), "kind": kind, "origin": origin,
-                      "added_at": timefmt.now_iso(), "refreshed_at": None, "error": None}
+            if self._taken(location):
+                raise MarketplaceDuplicate(ALREADY_ADDED)
+            source = {"id": new_id(), "location": location, "shown": True,
+                      "auto_refresh": False, "added_at": timefmt.now_iso(),
+                      "refreshed_at": None, "error": None}
             try:
-                self._refresh_cache(source)
+                self._refresh_copy(source)
             except MarketplaceError:
                 # Nothing is stored, so nothing may be left on disk either.
                 shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
@@ -394,62 +419,103 @@ class MarketplaceStore:
             self._save()
             return self.serialize(source)
 
-    def _declared_url(self, source: dict) -> str | None:
-        """§22.2: the cached catalog's `url`, or None when it declares none or
-        the cache is unreadable - either way the source isn't refreshable.
-        Only the catalog's shape matters here, not whether its references
-        still resolve: refreshability follows the declared `url` alone.
-        Caller holds the lock."""
-        try:
-            text = _decode(self.catalog_file(source["id"]).read_bytes())
-            return parse_catalog(text, kind=source["kind"], origin=source["origin"])["url"]
-        except (MarketplaceError, OSError):
-            return None
-
     def refresh(self, source_id: str) -> dict:
-        """§22.2 refresh: download the cached catalog's `url`. A source that
-        declares none raises MarketplaceNotRefreshable with the record
-        untouched. On failure nothing in the cache changes, `refreshed_at`
-        keeps its old value, and `error` records the message - the page keeps
-        showing the last good copy with the error beside it, so a refresh-all
-        never stops at the first bad source."""
+        """§22.2 refresh: re-read the location. A `null` location raises
+        MarketplaceNotRefreshable with the row untouched. On failure nothing in
+        the copy changes, `refreshed_at` keeps its old value, and `error`
+        records the message - the page keeps showing the last good copy with
+        the error beside it."""
         with self.lock:
             source = self._find(source_id)
-            url = self._declared_url(source)
-            if url is None:
+            if source["location"] is None:
                 raise MarketplaceNotRefreshable(NOT_REFRESHABLE)
-            self._refresh_from(source, url)
+            self._try_refresh(source)
             self._save()
             return self.serialize(source)
 
     def refresh_all(self) -> list[dict]:
-        """§22.2: every refreshable source, in listing order; the others are
+        """§22.2: every catalog with a location, in table order; the others are
         listed as they were."""
         with self.lock:
             for source in self.sources:
-                url = self._declared_url(source)
-                if url is not None:
-                    self._refresh_from(source, url)
+                if source["location"] is not None:
+                    self._try_refresh(source)
             self._save()
             return [self.serialize(s) for s in self.sources]
 
-    def _refresh_from(self, source: dict, url: str) -> None:
-        """One §22.2 refresh: the download and swap, with any failure recorded
-        as the source's `error`. The `url` may not be another source's origin -
-        the swap would leave two records for one link. Caller holds the lock."""
-        try:
-            other = next((s for s in self.sources
-                          if s is not source and s["origin"] == url), None)
-            if other is not None:
-                raise MarketplaceError(
-                    f'that link is already added as "{self.serialize(other)["name"]}"')
-            self._refresh_cache(source, kind="url", origin=url)
-        except MarketplaceError as e:
-            source["error"] = str(e)
+    def auto_refresh_sweep(self) -> list[str]:
+        """§22.2 auto refresh: every row flagged `auto_refresh` with a location,
+        in table order, through the ordinary refresh. Answers the ids it
+        refreshed (a failure lands in `error` like a manual one)."""
+        with self.lock:
+            swept = []
+            for source in self.sources:
+                if source["auto_refresh"] and source["location"] is not None:
+                    self._try_refresh(source)
+                    swept.append(source["id"])
+            if swept:
+                self._save()
+            return swept
+
+    def start_auto_refresh(self, on_change) -> None:
+        """§22.2: the sweep 30 s after the store loads and every 6 hours after
+        that, on a daemon thread off the boot path. `on_change` runs after a
+        sweep that touched any row (the §19 `marketplace.changed` event)."""
+        if self._auto_thread is not None:
+            return
+        self._auto_stop.clear()
+
+        def run() -> None:
+            wait = AUTO_REFRESH_DELAY_S
+            while not self._auto_stop.wait(wait):
+                try:
+                    if self.auto_refresh_sweep():
+                        on_change()
+                except Exception:  # noqa: BLE001 - a sweep must never kill the thread
+                    log.exception("marketplace auto refresh failed")
+                wait = AUTO_REFRESH_INTERVAL_S
+
+        self._auto_thread = threading.Thread(target=run, name="marketplace-auto-refresh",
+                                             daemon=True)
+        self._auto_thread.start()
+
+    def stop_auto_refresh(self) -> None:
+        self._auto_stop.set()
+        self._auto_thread = None
+
+    def update_settings(self, source_id: str, *, location: str | None = ...,
+                        shown: bool | None = None, auto_refresh: bool | None = None) -> dict:
+        """§22.2 settings: only the given fields change; nothing is fetched.
+        `location` is the user's text (blank = null) or the `...` sentinel for
+        "not given"."""
+        with self.lock:
+            source = self._find(source_id)
+            # Every check first, then every write: a refused patch changes
+            # nothing at all.
+            new_location = source["location"]
+            if location is not ...:
+                new_location = normalize_location(location)
+                if new_location is not None and self._taken(new_location, except_id=source_id):
+                    raise MarketplaceDuplicate(ALREADY_ADDED)
+                if new_location is None and self._cached(source) is None:
+                    raise MarketplaceError(NO_COPY_TO_KEEP)
+            new_auto = source["auto_refresh"] if auto_refresh is None else bool(auto_refresh)
+            if new_location is None:
+                if auto_refresh:
+                    raise MarketplaceError(AUTO_NEEDS_LOCATION)
+                new_auto = False
+            if location is not ... and new_location != source["location"]:
+                source["location"] = new_location
+                source["error"] = None
+            source["auto_refresh"] = new_auto
+            if shown is not None:
+                source["shown"] = bool(shown)
+            self._save()
+            return self.serialize(source)
 
     def remove(self, source_id: str) -> None:
-        """§22.2 remove: the record and its directory. Automations installed
-        from it are ordinary automations and are untouched."""
+        """§22.2 remove: the row and its directory (the copy, nothing more).
+        Installed automations and referenced archive files are untouched."""
         with self.lock:
             source = self._find(source_id)
             self.sources.remove(source)
@@ -457,134 +523,137 @@ class MarketplaceStore:
         # §6: no rmtree ever runs under a store lock.
         shutil.rmtree(self.source_dir(source_id), ignore_errors=True)
 
-    def _refresh_cache(self, source: dict, *, kind: str | None = None,
-                       origin: str | None = None) -> None:
-        """The §22.2 fetch-and-swap body: read `origin` (the source's own at
-        add, the catalog's `url` at refresh), validate it, resolve every
-        reference, then swap the catalog and the images into place and make
-        that origin the source's. Raises MarketplaceError with the cache and
-        the record untouched when anything fails before the swap. Caller holds
-        the lock."""
-        kind = kind or source["kind"]
-        origin = origin or source["origin"]
-        text = _decode(_read_origin(kind, origin))
-        catalog = parse_catalog(text, kind=kind, origin=origin)
-        # §22.1: the parser has checked the form of every reference; whether
-        # the archive exists is checked at install, the image right here.
-        images = [(e["index"], e["image"]) for e in catalog["entries"] if e["image"]]
-        self.source_dir(source["id"]).mkdir(parents=True, exist_ok=True)
-        # §22.2: temp file, then renamed into place (atomic_write_text), so a
-        # crash mid-write never leaves half a catalog as the cached copy.
-        atomic_write_text(self.catalog_file(source["id"]), text)
-        self._rebuild_images(source, images)
-        # §22.2: from now on the cached copy came from here.
-        source["kind"], source["origin"] = kind, origin
+    def _try_refresh(self, source: dict) -> None:
+        """One §22.2 refresh with any failure recorded as the row's `error`.
+        Caller holds the lock."""
+        try:
+            self._refresh_copy(source)
+        except MarketplaceError as e:
+            source["error"] = str(e)
+
+    def _refresh_copy(self, source: dict) -> None:
+        """The §22.2 fetch-and-swap: read the location, validate, then rename
+        the new copy into place and stamp the row. Raises MarketplaceError
+        with the copy and the row untouched when anything fails before the
+        swap. Caller holds the lock."""
+        location = source["location"]
+        text = _decode(_read_reference(location, cap=MAX_CATALOG_BYTES, what="catalog file"))
+        parse_catalog(text, location=location)
+        self._write_copy(source, text)
         source["refreshed_at"] = timefmt.now_iso()
         source["error"] = None
 
-    def _rebuild_images(self, source: dict, images: list[tuple[int, str]]) -> None:
-        """§22.2: every image the new catalog lists is fetched fresh into a
-        temp directory that then replaces `images/`. §22.1: a missing or
-        oversized image simply leaves that entry without a preview (logged,
-        never a refresh failure)."""
-        current = self.images_dir(source["id"])
-        staging = current.with_name("images.tmp")
-        previous = current.with_name("images.old")
-        shutil.rmtree(staging, ignore_errors=True)
-        staging.mkdir(parents=True, exist_ok=True)
-        for index, reference in images:
-            try:
-                if reference.lower().startswith("https://"):
-                    data = _fetch_url(reference, cap=MAX_IMAGE_BYTES)
-                else:
-                    data = _read_image_file(reference)
-                (staging / f"{index}{_extension(reference)}").write_bytes(data)
-            except (MarketplaceError, OSError) as e:
-                log.warning("no preview image for entry %s of %s (%s)",
-                            index, source["origin"], e)
-        shutil.rmtree(previous, ignore_errors=True)
-        if current.exists():
-            current.rename(previous)
-        staging.rename(current)
-        shutil.rmtree(previous, ignore_errors=True)
+    def _write_copy(self, source: dict, text: str) -> None:
+        """§22.2: temp file, then renamed into place (atomic_write_text), so a
+        crash mid-write never leaves half a catalog as the copy."""
+        self.source_dir(source["id"]).mkdir(parents=True, exist_ok=True)
+        atomic_write_text(self.catalog_file(source["id"]), text)
 
     # ---------- authoring (§22.7) ----------
-    def create_catalog(self, folder: str, body: dict | None = None, export=None) -> dict:
-        """§22.7 create: write the editor's content (or an empty catalog named
-        after the folder) into an existing folder through the same steps a
-        save runs, then add the file as a source. A folder that already holds
-        a catalog is refused before anything is written - the user should add
-        it instead."""
-        target = Path((folder or "").strip())
-        if not str(target) or not target.is_absolute():
-            raise MarketplaceError("give the folder's absolute path")
-        target = target.resolve()
-        if not target.is_dir():
-            raise MarketplaceError("there's no folder at that path")
-        catalog = target / CATALOG_FILENAME
-        if catalog.exists():
-            raise MarketplaceDuplicate(FOLDER_TAKEN)
+    def create_catalog(self, folder: str | None, body: dict | None = None,
+                       export=None) -> dict:
+        """§22.7 create: the editor's content (or an empty catalog) written to
+        a folder the user chose - the row's location is that file - or, with
+        no folder, straight to a new row's copy with a `null` location. A
+        folder that already holds a catalog is refused before anything is
+        written."""
+        body = body or {}
+        target: Path | None = None
+        if (folder or "").strip():
+            target = Path(os.path.expanduser(folder.strip()))
+            if not target.is_absolute():
+                raise MarketplaceError("give the folder's absolute path")
+            target = target.resolve()
+            if not target.is_dir():
+                raise MarketplaceError("there's no folder at that path")
+            if (target / CATALOG_FILENAME).exists():
+                raise MarketplaceDuplicate(FOLDER_TAKEN)
+        location = str(target / CATALOG_FILENAME) if target else None
         with self.lock:
-            if any(s["origin"] == str(catalog) for s in self.sources):
-                raise MarketplaceDuplicate("that marketplace is already added")
-        text, writes = self._prepare_catalog(str(catalog), body or {}, export)
-        self._write_catalog(catalog, text, writes)
-        return self.add(path=str(catalog))
+            if location is not None and self._taken(location):
+                raise MarketplaceDuplicate(ALREADY_ADDED)
+            source = {"id": new_id(), "location": location, "shown": True,
+                      "auto_refresh": False, "added_at": timefmt.now_iso(),
+                      "refreshed_at": None, "error": None}
+            text, writes = self._prepare_catalog(source, body, export)
+            try:
+                self._commit_catalog(source, text, writes)
+            except MarketplaceError:
+                shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
+                raise
+            self.sources.append(source)
+            self._save()
+            return self.serialize(source)
 
-    def _file_source(self, source_id: str) -> dict:
-        """The source the editor may touch: a `file` kind, whose catalog is on
-        this machine. Caller holds the lock."""
+    def _editable(self, source_id: str) -> dict:
+        """The row the editor may touch: a path or `null` location, whose
+        catalog is on this machine. Caller holds the lock."""
         source = self._find(source_id)
-        if source["kind"] != "file":
+        if kind_of(source["location"]) == "url":
             raise MarketplaceNotEditable(NOT_EDITABLE)
         return source
 
+    def _editor_file(self, source: dict) -> Path:
+        """§22.7: what the editor reads and writes - the file at a path
+        location, the row's copy for `null`."""
+        return Path(source["location"]) if source["location"] else self.catalog_file(source["id"])
+
     def read_catalog(self, source_id: str) -> dict:
-        """§22.7 GET: the catalog file on disk as written - the truth for
-        editing, never the cache - with its references unresolved."""
+        """§22.7 GET: the catalog as the editor should see it, references
+        unresolved."""
         with self.lock:
-            source = self._file_source(source_id)
-        text = _decode(_read_origin("file", source["origin"]))
-        catalog = parse_catalog(text, kind="file", origin=source["origin"])
+            source = self._editable(source_id)
+        text = _decode(_read_reference(str(self._editor_file(source)), cap=MAX_CATALOG_BYTES,
+                                       what="catalog file"))
+        catalog = parse_catalog(text, location=source["location"])
         return {"name": catalog["name"], "description": catalog["description"],
-                "url": catalog["url"],
                 "entries": [{"index": e["index"], "title": e["title"],
                              "description": e["description"], "path": e["path"],
                              "image": e["image"]} for e in catalog["entries"]]}
 
     def save_catalog(self, source_id: str, body: dict, export) -> dict:
-        """§22.7 save: the content prepared and written over the source's own
-        catalog file, then the cache rebuilt from it."""
+        """§22.7 save: the content prepared and written over the catalog the
+        editor sees, then the copy brought up to date."""
         with self.lock:
-            source = self._file_source(source_id)
-            text, writes = self._prepare_catalog(source["origin"], body, export)
-            self._write_catalog(Path(source["origin"]), text, writes)
-            self._refresh_cache(source)
+            source = self._editable(source_id)
+            text, writes = self._prepare_catalog(source, body, export)
+            self._commit_catalog(source, text, writes)
             self._save()
             return self.serialize(source)
 
-    def _prepare_catalog(self, origin: str, body: dict, export) -> tuple[str, list]:
+    def _prepare_catalog(self, source: dict, body: dict, export) -> tuple[str, list]:
         """§22.7 steps 1-4. `export(automation_id)` answers `(name, bytes)` for
         an automation in this app - the §5.1 export without parameter values -
-        or raises KeyError / transfer.TransferError. An export lands beside the
-        catalog and is listed by its absolute path; an `archiveFile` is
-        validated and listed where it is. Everything is checked before anything
-        is written: fields, every entry's one-of rule, the exports and archive
-        files, the planned file names, then the catalog text itself through
-        the §22.1 parser. Answers the text plus the archive files to write."""
-        folder = Path(origin).parent
-        # 1. the top-level fields
-        top = {"name": body.get("name") or "", "description": body.get("description") or "",
-               "url": body.get("url") or ""}
-        name = _text(top, "name", "", MAX_NAME) or default_name("file", origin)
+        or raises KeyError / transfer.TransferError. An export lands in the
+        export folder (beside the catalog for a path location, else the body's
+        `exportFolder`) and is listed by its absolute path; an `archiveFile` is
+        validated and listed where it is. Everything is checked before
+        anything is written. Answers the text plus the archive files to
+        write. Caller holds the lock."""
+        location = source["location"]
+        # 1. the top-level fields, and the export folder when it will be needed
+        top = {"name": body.get("name") or "", "description": body.get("description") or ""}
+        name = _text(top, "name", "", MAX_NAME) or default_name(location)
         description = _text(top, "description", "", MAX_DESCRIPTION)
-        url = _text(top, "url", "", MAX_URL) or None
-        if url and not url.lower().startswith("https://"):
-            raise MarketplaceError("`url` must be an https link")
+        raw_entries = body.get("entries") or []
+        needs_folder = any(e.get("automationId") for e in raw_entries)
+        folder: Path | None = None
+        if needs_folder:
+            if location is not None:
+                folder = Path(location).parent
+            else:
+                given = (body.get("exportFolder") or "").strip()
+                if not given:
+                    raise MarketplaceError(NO_EXPORT_FOLDER)
+                folder = Path(os.path.expanduser(given))
+                if not folder.is_absolute() or not folder.is_dir():
+                    raise MarketplaceError(
+                        "the export folder must be an existing folder's absolute path")
+                folder = folder.resolve()
         # 2. every entry: the one-of rule, then the bytes it brings
-        planned: list[dict] = []          # the yaml entries, in order
-        pending: list[tuple[str, bytes]] = []   # (base name, bytes) to write
-        for index, raw in enumerate(body.get("entries") or []):
+        planned: list[dict] = []
+        pending: list[tuple[str, bytes]] = []
+        for index, raw in enumerate(raw_entries):
             where = f"entry {index}: "
             item = {"title": raw.get("title") or "",
                     "description": raw.get("description") or "",
@@ -622,6 +691,10 @@ class MarketplaceStore:
                 except OSError as e:
                     raise MarketplaceError(
                         f"{where}couldn't read {archive.name} - {e.strerror or e}") from None
+                if len(data) > transfer.MAX_ARCHIVE_BYTES:
+                    raise MarketplaceError(
+                        f"{where}{archive.name} is larger than the "
+                        f"{transfer.MAX_ARCHIVE_BYTES // (1024 * 1024)} MB limit")
                 try:
                     transfer.validate_archive(data)
                 except transfer.TransferError as e:
@@ -629,7 +702,7 @@ class MarketplaceStore:
                 # §22.7: listed where it is, never copied.
                 entry["path"] = str(archive)
             planned.append(entry)
-        # 3. a free file name beside the catalog for every export - never
+        # 3. a free file name in the export folder for every export - never
         #    overwrite; the entry lists the file by its absolute path
         taken: set[str] = set()
         writes: list[tuple[Path, bytes]] = []
@@ -647,28 +720,36 @@ class MarketplaceStore:
             entry["path"] = str(folder / candidate)
             writes.append((folder / candidate, data))
         # 4. the text, through the same parser a fetch runs
-        text = dump_catalog(name, description, url, planned)
-        parse_catalog(text, kind="file", origin=origin)
+        text = dump_catalog(name, description, planned)
+        parse_catalog(text, location=location)
         return text, writes
 
-    def _write_catalog(self, catalog: Path, text: str, writes: list) -> None:
-        """§22.7 step 5: the exports, then the catalog atomically."""
+    def _commit_catalog(self, source: dict, text: str, writes: list) -> None:
+        """§22.7 steps 5-6: the exports, then the catalog atomically - to the
+        location for a path (and the copy refreshed from it), to the row's copy
+        for `null`. Caller holds the lock."""
         try:
             for target, data in writes:
                 target.write_bytes(data)
-            atomic_write_text(catalog, text)
+            if source["location"] is not None:
+                atomic_write_text(Path(source["location"]), text)
         except OSError as e:
             raise MarketplaceError(
                 f"couldn't write into the catalog's folder - {e.strerror or e}") from None
+        if source["location"] is not None:
+            self._refresh_copy(source)
+        else:
+            self._write_copy(source, text)
+            source["error"] = None
 
     # ---------- serialization (§22.4) ----------
     def _cached(self, source: dict) -> dict | None:
-        """The cached catalog, or None when the saved copy is missing or no
-        longer valid (§22.2 - the source still lists, with zero entries, rather
-        than vanishing). `archive` is the entry's `path` as written."""
+        """The app's copy, or None when it is missing or no longer valid (§22.2
+        - the row still lists, with zero entries, rather than vanishing).
+        `archive` is the entry's `path` as written."""
         try:
             text = _decode(self.catalog_file(source["id"]).read_bytes())
-            catalog = parse_catalog(text, kind=source["kind"], origin=source["origin"])
+            catalog = parse_catalog(text, location=source["location"])
         except (MarketplaceError, OSError):
             return None
         for entry in catalog["entries"]:
@@ -676,59 +757,60 @@ class MarketplaceStore:
         return catalog
 
     def serialize(self, source: dict) -> dict:
-        """§22.4 `Source`. The entries are derived from the cached catalog
-        every time (a small file, parsed on demand), never duplicated into
-        `sources.yaml`."""
+        """§22.4 `Source`. The entries are derived from the copy every time (a
+        small file, parsed on demand), never duplicated into the table."""
         catalog = self._cached(source)
         error = source.get("error")
         if catalog is None and not error:
             # A real stored refresh error wins: it says what actually happened.
-            error = CACHE_UNREADABLE
+            error = (COPY_UNREADABLE_REFRESH if source["location"] is not None
+                     else COPY_UNREADABLE_REMOVE)
         entries = [{"index": e["index"], "title": e["title"],
                     "description": e["description"], "archive": e["archive"],
-                    "image": self.image_path(source["id"], e["index"]) is not None}
+                    "image": bool(e["image"])}
                    for e in (catalog["entries"] if catalog else [])]
-        return {"id": source["id"], "kind": source["kind"], "origin": source["origin"],
-                "name": catalog["name"] if catalog
-                        else default_name(source["kind"], source["origin"]),
+        return {"id": source["id"], "kind": kind_of(source["location"]),
+                "location": source["location"], "shown": source["shown"],
+                "autoRefresh": source["auto_refresh"],
+                "name": catalog["name"] if catalog else default_name(source["location"]),
                 "description": catalog["description"] if catalog else "",
-                "url": catalog["url"] if catalog else None,
                 "addedAt": source.get("added_at") or "",
                 "refreshedAt": source.get("refreshed_at"),
                 "error": error, "cached": catalog is not None, "entries": entries}
 
-    # ---------- install (§22.4) ----------
-    def image_path(self, source_id: str, index: int) -> Path | None:
-        """The cached preview image for one entry, or None when it has none."""
-        for extension in IMAGE_EXTENSIONS:
-            candidate = self.images_dir(source_id) / f"{index}{extension}"
-            if candidate.is_file():
-                return candidate
-        return None
-
-    def entry_archive(self, source_id: str, index: int) -> tuple[bytes, str]:
-        """§22.4 install: the entry's archive bytes plus its resolved
-        reference. An https reference goes through the ordinary §5.2 fetch (its
-        TransferError is the caller's 422 too); a local path is read and
-        capped here, and the §5.1 validation of the bytes is the caller's."""
+    # ---------- images and install (§22.4) ----------
+    def _entry(self, source_id: str, index: int) -> dict:
+        """One entry of a row's copy; KeyError for an unknown row or index,
+        MarketplaceError for an unreadable copy."""
         with self.lock:
             source = self._find(source_id)
             catalog = self._cached(source)
         if catalog is None:
-            raise MarketplaceError(CACHE_UNREADABLE)
+            raise MarketplaceError(COPY_UNREADABLE_REFRESH)
         entry = next((e for e in catalog["entries"] if e["index"] == index), None)
         if entry is None:
             raise KeyError(index)
-        reference = entry["archive"]
-        if reference.lower().startswith("https://"):
+        return entry
+
+    def image_bytes(self, source_id: str, index: int) -> tuple[bytes, str] | None:
+        """§22.4 image route: the entry's image read on demand by reference
+        (downloaded for a link, never stored; read for a path), plus its
+        extension. None when the entry lists no image; MarketplaceError when
+        the reference can't be read."""
+        entry = self._entry(source_id, index)
+        if not entry["image"]:
+            return None
+        return (_read_reference(entry["image"], cap=MAX_IMAGE_BYTES, what="image"),
+                _extension(entry["image"]))
+
+    def entry_archive(self, source_id: str, index: int) -> tuple[bytes, str]:
+        """§22.4 install: the entry's archive bytes plus its reference. An
+        https reference goes through the ordinary §5.2 fetch (its
+        TransferError is the caller's 422 too); a local path is read and
+        capped here, and the §5.1 validation of the bytes is the caller's."""
+        reference = self._entry(source_id, index)["archive"]
+        if kind_of(reference) == "url":
             data, _resolved = transfer.fetch_archive(reference)
             return data, reference
-        try:
-            data = Path(reference).read_bytes()
-        except OSError as e:
-            raise MarketplaceError(f"couldn't read the archive - {e.strerror or e}") from None
-        if len(data) > transfer.MAX_ARCHIVE_BYTES:
-            raise MarketplaceError(
-                f"the archive is larger than the "
-                f"{transfer.MAX_ARCHIVE_BYTES // (1024 * 1024)} MB import limit")
-        return data, reference
+        return (_read_reference(reference, cap=transfer.MAX_ARCHIVE_BYTES, what="archive"),
+                reference)

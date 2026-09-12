@@ -172,10 +172,10 @@ def pending_draft_dir() -> Path:
 
 
 def marketplace_dir() -> Path:
-    """§22.2: the marketplace sources store - `sources.yaml` plus one directory
-    per source (its cached `marketplace-catalog.yaml` and `images/`). Created on
-    demand by the first write, so an install that never opens the page holds no
-    such directory."""
+    """§22.2: the catalog table - `marketplaces.yaml` plus one directory per row
+    holding the app's copy of that catalog (`marketplace-catalog.yaml`, nothing
+    else). Created on demand by the first write, so an install that never
+    opens the page holds no such directory."""
     return app_support() / "marketplaces"
 
 

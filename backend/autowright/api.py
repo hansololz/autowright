@@ -2330,35 +2330,6 @@ def _marketplace_json() -> dict:
                             for s in marketplace_store.sources]}
 
 
-@app.get("/marketplace", dependencies=[Depends(auth)])
-def marketplace_sources() -> dict:
-    """§22.4: every source in store order, each with the entries derived from
-    its cached catalog."""
-    return _marketplace_json()
-
-
-@app.post("/marketplace/sources", dependencies=[Depends(auth)])
-async def marketplace_add(body: models.MarketplaceAdd) -> dict:
-    """§22.4 add: exactly one of a link or a file path. §22.2 fetches and
-    validates first, so a failure stores nothing."""
-    url = (body.url or "").strip()
-    path = (body.path or "").strip()
-    if url and path:
-        raise HTTPException(422, "give a link or a file path, not both")
-    if not url and not path:
-        raise HTTPException(422, "give a link or a file path")
-    try:
-        # Threadpool, not the loop: add is a refresh, and a refresh downloads.
-        source = await run_in_threadpool(
-            lambda: marketplace_store.add(url=url or None, path=path or None))
-    except marketplace.MarketplaceDuplicate as e:
-        raise HTTPException(409, str(e)) from e
-    except marketplace.MarketplaceError as e:
-        raise HTTPException(422, str(e)) from e
-    hub.publish("marketplace.changed")
-    return source
-
-
 def _marketplace_export(automation_id: str) -> tuple[str, bytes]:
     """§22.7: an automation in this app as a marketplace archive - for other
     people, so without parameter values."""
@@ -2369,11 +2340,59 @@ def _marketplace_export(automation_id: str) -> tuple[str, bytes]:
     return a["name"], transfer.export_automation(store, a, include_values=False)
 
 
+@app.get("/marketplace", dependencies=[Depends(auth)])
+def marketplace_sources() -> dict:
+    """§22.4: every catalog in table order, hidden ones included, each with the
+    entries derived from its copy."""
+    return _marketplace_json()
+
+
+@app.post("/marketplace/sources", dependencies=[Depends(auth)])
+async def marketplace_add(body: models.MarketplaceAdd) -> dict:
+    """§22.4 add: exactly one of a link or a file path. §22.2 reads and
+    validates first, so a failure stores nothing."""
+    url = (body.url or "").strip()
+    path = (body.path or "").strip()
+    if url and path:
+        raise HTTPException(422, "give a link or a file path, not both")
+    if not url and not path:
+        raise HTTPException(422, "give a link or a file path")
+    try:
+        # Threadpool, not the loop: an add downloads.
+        source = await run_in_threadpool(
+            lambda: marketplace_store.add(url=url or None, path=path or None))
+    except marketplace.MarketplaceDuplicate as e:
+        raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+    hub.publish("marketplace.changed")
+    return source
+
+
+@app.patch("/marketplace/sources/{source_id}", dependencies=[Depends(auth)])
+def marketplace_settings(source_id: str, body: models.MarketplaceSettings) -> dict:
+    """§22.4 settings: location, shown, auto refresh - only the given fields
+    change, nothing is fetched."""
+    try:
+        source = marketplace_store.update_settings(
+            source_id,
+            location=body.location if body.location is not None else ...,
+            shown=body.shown, auto_refresh=body.autoRefresh)
+    except KeyError:
+        raise HTTPException(404, "marketplace not found") from None
+    except marketplace.MarketplaceDuplicate as e:
+        raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+    hub.publish("marketplace.changed")
+    return source
+
+
 @app.post("/marketplace/catalogs", dependencies=[Depends(auth)])
 async def marketplace_catalog_create(body: models.MarketplaceCatalogCreate) -> dict:
-    """§22.7 create: the editor's content written into the folder through the
-    save steps, then added as a file source. 409 for a folder that already
-    holds one."""
+    """§22.7 create: the editor's content written to the chosen folder, or to
+    the app's copy without one, then listed. 409 for a folder that already
+    holds a catalog."""
     content = body.model_dump(exclude={"folder"})
     try:
         source = await run_in_threadpool(
@@ -2388,7 +2407,7 @@ async def marketplace_catalog_create(body: models.MarketplaceCatalogCreate) -> d
 
 @app.get("/marketplace/sources/{source_id}/catalog", dependencies=[Depends(auth)])
 def marketplace_catalog_read(source_id: str) -> dict:
-    """§22.7: the catalog file on disk, references as written."""
+    """§22.7: the catalog as the editor sees it, references as written."""
     try:
         return marketplace_store.read_catalog(source_id)
     except KeyError:
@@ -2401,8 +2420,8 @@ def marketplace_catalog_read(source_id: str) -> dict:
 
 @app.put("/marketplace/sources/{source_id}/catalog", dependencies=[Depends(auth)])
 async def marketplace_catalog_save(source_id: str, body: models.MarketplaceCatalogSave) -> dict:
-    """§22.7 save: exports and copies land beside the catalog, the file is
-    rewritten, the cache rebuilt. Nothing is written on a 422."""
+    """§22.7 save: exports land in the export folder, the catalog is rewritten,
+    the copy brought up to date. Nothing is written on a 422."""
     try:
         source = await run_in_threadpool(
             lambda: marketplace_store.save_catalog(source_id, body.model_dump(),
@@ -2420,7 +2439,7 @@ async def marketplace_catalog_save(source_id: str, body: models.MarketplaceCatal
 @app.post("/marketplace/sources/{source_id}/refresh", dependencies=[Depends(auth)])
 async def marketplace_refresh(source_id: str) -> dict:
     """§22.4: 200 even when the refresh failed - `error` carries the reason and
-    the cache is unchanged. 409 for a source whose catalog declares no `url`."""
+    the copy is unchanged. 409 for a catalog with no location."""
     try:
         source = await run_in_threadpool(marketplace_store.refresh, source_id)
     except KeyError:
@@ -2433,7 +2452,8 @@ async def marketplace_refresh(source_id: str) -> dict:
 
 @app.post("/marketplace/refresh", dependencies=[Depends(auth)])
 async def marketplace_refresh_all() -> dict:
-    """§22.4: every refreshable source in order; one event covers the sweep."""
+    """§22.4: every catalog with a location, in order; one event covers the
+    sweep."""
     sources = await run_in_threadpool(marketplace_store.refresh_all)
     hub.publish("marketplace.changed")
     return {"sources": sources}
@@ -2451,15 +2471,22 @@ def marketplace_remove(source_id: str) -> dict:
 
 @app.get("/marketplace/sources/{source_id}/entries/{index}/image",
          dependencies=[Depends(auth)])
-def marketplace_image(source_id: str, index: int):
-    """§22.4: the cached preview image with the content type matching its
-    extension; 404 when the source, the entry, or the image doesn't exist."""
-    f = marketplace_store.image_path(source_id, index)
-    if f is None:
-        raise HTTPException(404, "no image for that entry")
-    from fastapi.responses import FileResponse
+async def marketplace_image(source_id: str, index: int):
+    """§22.4: the entry's image read on demand by reference - never stored.
+    404 for no such entry or no image; 502 when the reference can't be read."""
+    from fastapi.responses import Response
 
-    return FileResponse(f, media_type=_IMAGE_MEDIA_TYPES.get(f.suffix.lower()))
+    try:
+        # Threadpool, not the loop: a link is downloaded right here.
+        found = await run_in_threadpool(marketplace_store.image_bytes, source_id, index)
+    except KeyError:
+        raise HTTPException(404, "marketplace entry not found") from None
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(502, str(e)) from e
+    if found is None:
+        raise HTTPException(404, "no image for that entry")
+    data, extension = found
+    return Response(content=data, media_type=_IMAGE_MEDIA_TYPES.get(extension))
 
 
 @app.post("/marketplace/sources/{source_id}/entries/{index}/preview",
@@ -2474,8 +2501,7 @@ async def marketplace_entry_preview(source_id: str, index: int) -> dict:
             preview = transfer.preview_archive(store, data)
         except (marketplace.MarketplaceError, transfer.TransferError) as e:
             raise HTTPException(422, str(e)) from e
-        # §22.4: both carry the resolved archive reference (the https URL, or
-        # the absolute path a file-relative reference resolved to).
+        # §22.4: both carry the archive reference as the catalog wrote it.
         preview["sourceUrl"] = reference
         preview["resolvedUrl"] = reference
         return {"token": _park_archive(data), "preview": preview}

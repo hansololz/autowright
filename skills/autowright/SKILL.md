@@ -190,16 +190,19 @@ autowright agent list · agent check <name>        # AI agents available to agen
   them out when the archive is for someone else.
 - `marketplace list` / `marketplace add <link-or-file>` / `marketplace refresh [<name>]` /
   `marketplace remove <name>` / `marketplace install <name> <n>` work with marketplaces -
-  catalogs someone published listing shareable automations. `refresh` downloads the catalog again
-  from the `url` it declares; a catalog without one is a one-time download (remove and add it
-  again to pick up changes). `list` numbers each marketplace's entries;
-  `install` takes that number and lands the automation through the ordinary import (agents and
-  secrets matched by name, triggers off).
-- `marketplace create <folder>` writes an empty marketplace-catalog.yaml into a folder on this
-  machine and adds it; `marketplace catalog add <name> <automation-or-.autowright-file>` exports
-  an automation (no parameter values) into that folder or lists an existing archive where it is
-  (catalog entries are absolute paths or https links, never relative);
-  `marketplace catalog set <name> name=… description=… url=…` edits the catalog's fields;
-  `marketplace catalog remove <name> <n>` drops entry n (its archive file stays). These work on
-  catalogs on this machine only (added by file or created here).
+  catalogs someone published listing shareable automations. Each catalog has a location (a link,
+  a file path, or none when Autowright keeps the only copy); `refresh` re-reads that location.
+  `marketplace set <name> location=… shown=on|off autoRefresh=on|off` changes where it is read
+  from, whether the page shows it, and whether it refreshes on its own (at launch and every 6
+  hours). `list` numbers each marketplace's entries; `install` takes that number and lands the
+  automation through the ordinary import (agents and secrets matched by name, triggers off).
+- `marketplace create [<folder>]` creates a catalog (in a folder on this machine, or kept by
+  Autowright without one) and adds it; `marketplace catalog add <name>
+  <automation-or-.autowright-file> [--export-to DIR]` exports an automation (no parameter
+  values) beside the catalog, or into DIR for a catalog kept by Autowright, or lists an existing
+  archive where it is (catalog entries are absolute paths or https links, never relative; a
+  marketplace never stores archives itself); `marketplace catalog set <name> name=…
+  description=…` edits the catalog's fields; `marketplace catalog remove <name> <n>` drops entry
+  n (its archive file stays). These work on catalogs on this machine only (a link location is
+  read-only).
 - `settings show` / `settings set days=30 notifications=all developerMode=on dataPath=/path`.

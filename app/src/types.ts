@@ -388,19 +388,19 @@ export interface MarketplaceEntry {
   image: boolean
 }
 
-// §22.4 marketplace source - one catalog the user added. `name`,
-// `description` and `entries` are derived from the cached catalog;
-// `refreshedAt` is the last successful fetch (null until one lands) and
-// `error` the last refresh failure's message.
+// §22.4 marketplace source - one catalog-table row (§22.2) with its derived
+// content. `location` is where Refresh reads from: null (the app keeps the
+// only copy), an absolute path, or an https link; `kind` is derived from it.
+// `name`, `description` and `entries` come from the app's copy; `refreshedAt`
+// is the last successful read of the location and `error` the last failure.
 export interface MarketplaceSource {
   id: string
-  kind: 'url' | 'file'
-  origin: string
+  kind: 'url' | 'file' | 'none'
+  location: string | null
+  shown: boolean
+  autoRefresh: boolean
   name: string
   description: string
-  // §22.1: the catalog's declared published link - what Refresh downloads.
-  // null means a one-time download: no Refresh is offered.
-  url: string | null
   addedAt: string
   refreshedAt: string | null
   error: string | null
@@ -424,7 +424,6 @@ export interface MarketplaceCatalogEntry {
 export interface MarketplaceCatalog {
   name: string
   description: string
-  url: string | null
   entries: MarketplaceCatalogEntry[]
 }
 
@@ -438,9 +437,11 @@ export interface MarketplaceCatalogSaveEntry {
 }
 
 export interface MarketplaceCatalogSave {
+  // §22.7: where automations from this app are exported when the catalog has
+  // no location (beside the catalog otherwise).
+  exportFolder?: string
   name: string
   description: string
-  url: string
   entries: MarketplaceCatalogSaveEntry[]
 }
 

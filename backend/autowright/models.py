@@ -244,10 +244,19 @@ class MarketplaceAdd(BaseModel):
     path: StrictStr | None = None
 
 
+class MarketplaceSettings(BaseModel):
+    """PATCH /marketplace/sources/{id} (§22.4): every field optional, only the
+    given ones change. `location` is text - blank means null."""
+
+    location: StrictStr | None = None
+    shown: StrictBool | None = None
+    autoRefresh: StrictBool | None = None
+
+
 class MarketplaceCatalogEntry(BaseModel):
     """One §22.7 editor row: exactly one of `path` (kept as written),
-    `automationId` (exported on save), or `archiveFile` (copied on save) - the
-    exactly-one rule is the store's, so it names the entry."""
+    `automationId` (exported on save), or `archiveFile` (listed where it is) -
+    the exactly-one rule is the store's, so it names the entry."""
 
     title: StrictStr = ""
     description: StrictStr = ""
@@ -258,19 +267,20 @@ class MarketplaceCatalogEntry(BaseModel):
 
 
 class MarketplaceCatalogSave(BaseModel):
-    """PUT /marketplace/sources/{id}/catalog (§22.7)."""
+    """PUT /marketplace/sources/{id}/catalog (§22.7). `exportFolder` is where
+    automations from this app are exported when the catalog has no location."""
 
+    exportFolder: StrictStr | None = None
     name: StrictStr = ""
     description: StrictStr = ""
-    url: StrictStr = ""
     entries: list[MarketplaceCatalogEntry] = Field(default_factory=list)
 
 
 class MarketplaceCatalogCreate(MarketplaceCatalogSave):
-    """POST /marketplace/catalogs (§22.7): the folder to create the catalog in,
-    plus the same content a save carries (all optional - the CLI sends none)."""
+    """POST /marketplace/catalogs (§22.7): the save fields plus an optional
+    folder - none means the app keeps the only copy."""
 
-    folder: StrictStr
+    folder: StrictStr | None = None
 
 
 class AgentAdd(BaseModel):
