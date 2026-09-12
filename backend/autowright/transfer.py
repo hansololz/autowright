@@ -705,6 +705,14 @@ def _validate(z: zipfile.ZipFile) -> dict:
             "agents": agents, "secrets": secrets}
 
 
+def validate_archive(data: bytes) -> None:
+    """§22.7: the §5.1 archive validation alone - no matching, nothing written.
+    A marketplace author copying an archive file into a catalog gets the same
+    verdict an importer would; TransferError names the reason."""
+    with _open_archive(data) as z:
+        _validate(z)
+
+
 def _open_archive(data: bytes) -> zipfile.ZipFile:
     if len(data) > MAX_ARCHIVE_BYTES:
         raise TransferError("the archive is larger than the 64 MB import limit")

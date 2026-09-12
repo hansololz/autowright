@@ -1,9 +1,10 @@
 """§22 marketplace: the catalog format (§22.1) and the sources store (§22.2).
 
 A marketplace is one hand-written YAML file listing §5.1 `.autowright` archives.
-This module parses and validates it, resolves its references (an https URL for a
-link source, a path that must stay inside the catalog's folder for a file
-source), keeps the last successfully fetched copy plus its preview images under
+This module parses and validates it (every reference is an https URL or an
+absolute local path, taken as it is - nothing is ever resolved against where
+the catalog came from), keeps the last successfully fetched copy plus its
+preview images under
 the §5 data root, and hands the §19 install route the archive bytes. Nothing
 here is ever executed: a catalog is data, and an archive lands only through the
 §5.1/§5.2 import.
@@ -57,6 +58,8 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 CACHE_UNREADABLE = ("the saved copy couldn't be read - remove this marketplace and add "
                     "it again")
 NOT_REFRESHABLE = "this marketplace declares no url to refresh from"
+NOT_EDITABLE = "only a catalog on this machine can be edited"
+FOLDER_TAKEN = "that folder already holds a marketplace catalog - add it instead"
 
 
 class MarketplaceError(ValueError):
@@ -71,6 +74,11 @@ class MarketplaceDuplicate(MarketplaceError):
 class MarketplaceNotRefreshable(MarketplaceError):
     """§22.2: a refresh of a source whose catalog declares no `url` - the §19
     route answers 409 with the record untouched."""
+
+
+class MarketplaceNotEditable(MarketplaceError):
+    """§22.7: the catalog editor on a `url` source - the file isn't on this
+    machine; the §19 route answers 409."""
 
 
 # ---------- catalog (§22.1) ----------
@@ -114,11 +122,19 @@ def _text(raw: dict, key: str, where: str, limit: int | None = None) -> str:
     return value
 
 
+def is_reference(value: str) -> bool:
+    """§22.1: a reference is an https URL or an absolute local path - nothing
+    relative, no other scheme, no `~`."""
+    return value.lower().startswith("https://") or (
+        "://" not in value and Path(value).is_absolute())
+
+
 def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
     """§22.1: parse and validate one marketplace catalog. Unknown keys at any
-    level are ignored so the format can grow inside one version. References are
-    checked for *form* here; `resolve_reference` turns them into a URL or a
-    path. Errors name the entry index."""
+    level are ignored so the format can grow inside one version. References
+    are checked for form here (the two legal forms, the extension rules) and
+    used as written everywhere else. Errors name the entry index. `kind` and
+    `origin` only feed the default name."""
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
@@ -158,10 +174,16 @@ def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
             raise MarketplaceError(f"{where}it has no `path`")
         if _extension(archive) != ARCHIVE_EXTENSION:
             raise MarketplaceError(f"{where}`path` must name an {ARCHIVE_EXTENSION} file")
+        if not is_reference(archive):
+            raise MarketplaceError(
+                f"{where}`path` must be an https link or an absolute path")
         image = _text(item, "image", where)
         if image and _extension(image) not in IMAGE_EXTENSIONS:
             raise MarketplaceError(
                 f"{where}`image` must name a {', '.join(IMAGE_EXTENSIONS)} file")
+        if image and not is_reference(image):
+            raise MarketplaceError(
+                f"{where}`image` must be an https link or an absolute path")
         entries.append({"index": index, "title": title,
                         "description": _text(item, "description", where,
                                              MAX_ENTRY_DESCRIPTION),
@@ -169,35 +191,26 @@ def parse_catalog(text: str, *, kind: str, origin: str) -> dict:
     return {"name": name, "description": description, "url": url, "entries": entries}
 
 
-def resolve_reference(reference: str, *, kind: str, origin: str) -> str:
-    """§22.1 reference resolution: the https URL, or the absolute path a file
-    source's relative reference names.
-
-    A link source joins with RFC 3986 `urljoin` against the catalog's URL and
-    must land on https. A file source resolves against the catalog's directory
-    and the result (symlinks followed) must stay inside it, so a catalog can
-    never point the app at an arbitrary file on the machine; an absolute https
-    reference is fine there too (mixed catalogs are legal)."""
-    if kind == "url":
-        resolved = urllib.parse.urljoin(origin, reference)
-        if urllib.parse.urlsplit(resolved).scheme != "https":
-            raise MarketplaceError(f"{reference} doesn't resolve to an https reference")
-        return resolved
-    if reference.lower().startswith("https://"):
-        return reference
-    if "://" in reference:
-        raise MarketplaceError(
-            f"{reference} is neither an https reference nor a relative path")
-    if Path(reference).is_absolute():
-        raise MarketplaceError(
-            f"{reference} is an absolute path - a reference must stay inside the "
-            "catalog's folder")
-    folder = Path(origin).parent.resolve()
-    resolved = (Path(origin).parent / reference).resolve()
-    if not resolved.is_relative_to(folder):
-        raise MarketplaceError(
-            f"{reference} points outside the catalog's folder")
-    return str(resolved)
+def dump_catalog(name: str, description: str, url: str | None, entries: list[dict]) -> str:
+    """§22.7: the catalog text the editor writes - exactly the §22.1 keys in the
+    §22.1 order, optional ones only when non-empty. Unknown keys and comments
+    from the previous file don't survive: the editor owns the file."""
+    doc: dict = {"format_version": FORMAT_VERSION, "name": name}
+    if description:
+        doc["description"] = description
+    if url:
+        doc["url"] = url
+    listed = []
+    for entry in entries:
+        item: dict = {"title": entry["title"]}
+        if entry.get("description"):
+            item["description"] = entry["description"]
+        item["path"] = entry["path"]
+        if entry.get("image"):
+            item["image"] = entry["image"]
+        listed.append(item)
+    doc["entries"] = listed
+    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
 
 
 # ---------- fetching (§22.1 caps and headers) ----------
@@ -456,19 +469,9 @@ class MarketplaceStore:
         origin = origin or source["origin"]
         text = _decode(_read_origin(kind, origin))
         catalog = parse_catalog(text, kind=kind, origin=origin)
-        # §22.1: validation covers the form of every reference at add and
-        # refresh time, so a resolution failure is a refresh failure naming
-        # the entry. Whether the archive exists is checked at install.
-        images: list[tuple[int, str]] = []
-        for entry in catalog["entries"]:
-            try:
-                resolve_reference(entry["path"], kind=kind, origin=origin)
-                if entry["image"]:
-                    images.append((entry["index"],
-                                   resolve_reference(entry["image"], kind=kind,
-                                                     origin=origin)))
-            except MarketplaceError as e:
-                raise MarketplaceError(f"entry {entry['index']}: {e}") from None
+        # §22.1: the parser has checked the form of every reference; whether
+        # the archive exists is checked at install, the image right here.
+        images = [(e["index"], e["image"]) for e in catalog["entries"] if e["image"]]
         self.source_dir(source["id"]).mkdir(parents=True, exist_ok=True)
         # §22.2: temp file, then renamed into place (atomic_write_text), so a
         # crash mid-write never leaves half a catalog as the cached copy.
@@ -505,19 +508,162 @@ class MarketplaceStore:
         staging.rename(current)
         shutil.rmtree(previous, ignore_errors=True)
 
+    # ---------- authoring (§22.7) ----------
+    def create_catalog(self, folder: str) -> dict:
+        """§22.7 create: write the empty catalog into an existing folder and
+        add it as a file source. A folder that already holds one is refused -
+        the user should add it instead."""
+        target = Path((folder or "").strip())
+        if not str(target) or not target.is_absolute():
+            raise MarketplaceError("give the folder's absolute path")
+        target = target.resolve()
+        if not target.is_dir():
+            raise MarketplaceError("there's no folder at that path")
+        catalog = target / CATALOG_FILENAME
+        if catalog.exists():
+            raise MarketplaceDuplicate(FOLDER_TAKEN)
+        try:
+            atomic_write_text(catalog, dump_catalog(target.name or "marketplace", "", None, []))
+        except OSError as e:
+            raise MarketplaceError(
+                f"couldn't write the catalog file - {e.strerror or e}") from None
+        return self.add(path=str(catalog))
+
+    def _file_source(self, source_id: str) -> dict:
+        """The source the editor may touch: a `file` kind, whose catalog is on
+        this machine. Caller holds the lock."""
+        source = self._find(source_id)
+        if source["kind"] != "file":
+            raise MarketplaceNotEditable(NOT_EDITABLE)
+        return source
+
+    def read_catalog(self, source_id: str) -> dict:
+        """§22.7 GET: the catalog file on disk as written - the truth for
+        editing, never the cache - with its references unresolved."""
+        with self.lock:
+            source = self._file_source(source_id)
+        text = _decode(_read_origin("file", source["origin"]))
+        catalog = parse_catalog(text, kind="file", origin=source["origin"])
+        return {"name": catalog["name"], "description": catalog["description"],
+                "url": catalog["url"],
+                "entries": [{"index": e["index"], "title": e["title"],
+                             "description": e["description"], "path": e["path"],
+                             "image": e["image"]} for e in catalog["entries"]]}
+
+    def save_catalog(self, source_id: str, body: dict, export) -> dict:
+        """§22.7 save. `export(automation_id)` answers `(name, bytes)` for an
+        automation in this app - the §5.1 export without parameter values - or
+        raises KeyError / transfer.TransferError. An export lands beside the
+        catalog and is listed by its absolute path; an `archiveFile` is
+        validated and listed where it is. Everything is checked before anything
+        is written: fields, every entry's one-of rule, the exports and archive
+        files, the planned file names, then the catalog text itself through
+        the §22.1 parser."""
+        with self.lock:
+            source = self._file_source(source_id)
+            origin = source["origin"]
+            folder = Path(origin).parent
+            # 1. the top-level fields
+            top = {"name": body.get("name") or "", "description": body.get("description") or "",
+                   "url": body.get("url") or ""}
+            name = _text(top, "name", "", MAX_NAME) or default_name("file", origin)
+            description = _text(top, "description", "", MAX_DESCRIPTION)
+            url = _text(top, "url", "", MAX_URL) or None
+            if url and not url.lower().startswith("https://"):
+                raise MarketplaceError("`url` must be an https link")
+            # 2. every entry: the one-of rule, then the bytes it brings
+            planned: list[dict] = []          # the yaml entries, in order
+            pending: list[tuple[str, bytes]] = []   # (base name, bytes) to write
+            for index, raw in enumerate(body.get("entries") or []):
+                where = f"entry {index}: "
+                item = {"title": raw.get("title") or "",
+                        "description": raw.get("description") or "",
+                        "image": raw.get("image") or ""}
+                title = _text(item, "title", where, MAX_TITLE)
+                if not title:
+                    raise MarketplaceError(f"{where}it has no title")
+                entry_description = _text(item, "description", where, MAX_ENTRY_DESCRIPTION)
+                image = _text(item, "image", where)
+                given = [k for k in ("path", "automationId", "archiveFile") if raw.get(k)]
+                if len(given) != 1:
+                    raise MarketplaceError(
+                        f"{where}give one of path, automationId, or archiveFile")
+                entry = {"title": title, "description": entry_description, "image": image}
+                if given[0] == "path":
+                    entry["path"] = str(raw["path"]).strip()
+                elif given[0] == "automationId":
+                    try:
+                        auto_name, data = export(str(raw["automationId"]))
+                    except KeyError:
+                        raise MarketplaceError(f"{where}no automation has that id") from None
+                    except transfer.TransferError as e:
+                        raise MarketplaceError(f"{where}{e}") from None
+                    entry["path"] = None
+                    pending.append((transfer.safe_filename(auto_name), data))
+                else:
+                    archive = Path(str(raw["archiveFile"]).strip())
+                    if not archive.is_absolute() or not archive.is_file():
+                        raise MarketplaceError(f"{where}there's no file at {archive}")
+                    if archive.suffix.lower() != ARCHIVE_EXTENSION:
+                        raise MarketplaceError(
+                            f"{where}{archive.name} isn't an {ARCHIVE_EXTENSION} file")
+                    try:
+                        data = archive.read_bytes()
+                    except OSError as e:
+                        raise MarketplaceError(
+                            f"{where}couldn't read {archive.name} - {e.strerror or e}") from None
+                    try:
+                        transfer.validate_archive(data)
+                    except transfer.TransferError as e:
+                        raise MarketplaceError(f"{where}{e}") from None
+                    # §22.7: listed where it is, never copied.
+                    entry["path"] = str(archive)
+                planned.append(entry)
+            # 3. a free file name beside the catalog for every export - never
+            #    overwrite; the entry lists the file by its absolute path
+            taken: set[str] = set()
+            writes: list[tuple[Path, bytes]] = []
+            new = iter(pending)
+            for entry in planned:
+                if entry["path"] is not None:
+                    continue
+                base, data = next(new)
+                candidate = f"{base}{ARCHIVE_EXTENSION}"
+                n = 2
+                while candidate.lower() in taken or (folder / candidate).exists():
+                    candidate = f"{base} {n}{ARCHIVE_EXTENSION}"
+                    n += 1
+                taken.add(candidate.lower())
+                entry["path"] = str(folder / candidate)
+                writes.append((folder / candidate, data))
+            # 4. the text, through the same parser a fetch runs
+            text = dump_catalog(name, description, url, planned)
+            parse_catalog(text, kind="file", origin=origin)
+            # 5. the exports, then the catalog atomically
+            try:
+                for target, data in writes:
+                    target.write_bytes(data)
+                atomic_write_text(Path(origin), text)
+            except OSError as e:
+                raise MarketplaceError(
+                    f"couldn't write into the catalog's folder - {e.strerror or e}") from None
+            # 6. the cache, from the file just written
+            self._refresh_cache(source)
+            self._save()
+            return self.serialize(source)
+
     # ---------- serialization (§22.4) ----------
     def _cached(self, source: dict) -> dict | None:
-        """The cached catalog with every archive reference resolved, or None
-        when the saved copy is missing or no longer valid (§22.2 - the source
-        still lists, with zero entries, rather than vanishing)."""
+        """The cached catalog, or None when the saved copy is missing or no
+        longer valid (§22.2 - the source still lists, with zero entries, rather
+        than vanishing). `archive` is the entry's `path` as written."""
         try:
             text = _decode(self.catalog_file(source["id"]).read_bytes())
             catalog = parse_catalog(text, kind=source["kind"], origin=source["origin"])
-            for entry in catalog["entries"]:
-                entry["archive"] = resolve_reference(entry["path"], kind=source["kind"],
-                                                     origin=source["origin"])
         except (MarketplaceError, OSError):
             return None
+        for entry in catalog["entries"]:
+            entry["archive"] = entry["path"]
         return catalog
 
     def serialize(self, source: dict) -> dict:
@@ -554,9 +700,8 @@ class MarketplaceStore:
     def entry_archive(self, source_id: str, index: int) -> tuple[bytes, str]:
         """§22.4 install: the entry's archive bytes plus its resolved
         reference. An https reference goes through the ordinary §5.2 fetch (its
-        TransferError is the caller's 422 too); a file reference is resolved
-        again here, so the §22.1 inside-the-directory check runs against the
-        catalog's directory at fetch time, not only at refresh."""
+        TransferError is the caller's 422 too); a local path is read and
+        capped here, and the §5.1 validation of the bytes is the caller's."""
         with self.lock:
             source = self._find(source_id)
             catalog = self._cached(source)

@@ -2359,6 +2359,58 @@ async def marketplace_add(body: models.MarketplaceAdd) -> dict:
     return source
 
 
+@app.post("/marketplace/catalogs", dependencies=[Depends(auth)])
+async def marketplace_catalog_create(body: models.MarketplaceCatalogCreate) -> dict:
+    """§22.7 create: the empty catalog written into the folder, then added as
+    a file source. 409 for a folder that already holds one."""
+    try:
+        source = await run_in_threadpool(marketplace_store.create_catalog, body.folder)
+    except marketplace.MarketplaceDuplicate as e:
+        raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+    hub.publish("marketplace.changed")
+    return source
+
+
+@app.get("/marketplace/sources/{source_id}/catalog", dependencies=[Depends(auth)])
+def marketplace_catalog_read(source_id: str) -> dict:
+    """§22.7: the catalog file on disk, references as written."""
+    try:
+        return marketplace_store.read_catalog(source_id)
+    except KeyError:
+        raise HTTPException(404, "marketplace not found") from None
+    except marketplace.MarketplaceNotEditable as e:
+        raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+@app.put("/marketplace/sources/{source_id}/catalog", dependencies=[Depends(auth)])
+async def marketplace_catalog_save(source_id: str, body: models.MarketplaceCatalogSave) -> dict:
+    """§22.7 save: exports and copies land beside the catalog, the file is
+    rewritten, the cache rebuilt. Nothing is written on a 422."""
+    def _export(automation_id: str) -> tuple[str, bytes]:
+        with store.lock:
+            a = store.autos.get(automation_id)
+        if a is None:
+            raise KeyError(automation_id)
+        # §22.7: a marketplace archive is for other people - no parameter values.
+        return a["name"], transfer.export_automation(store, a, include_values=False)
+
+    try:
+        source = await run_in_threadpool(
+            lambda: marketplace_store.save_catalog(source_id, body.model_dump(), _export))
+    except KeyError:
+        raise HTTPException(404, "marketplace not found") from None
+    except marketplace.MarketplaceNotEditable as e:
+        raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+    hub.publish("marketplace.changed")
+    return source
+
+
 @app.post("/marketplace/sources/{source_id}/refresh", dependencies=[Depends(auth)])
 async def marketplace_refresh(source_id: str) -> dict:
     """§22.4: 200 even when the refresh failed - `error` carries the reason and

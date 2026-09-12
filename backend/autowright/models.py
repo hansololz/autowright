@@ -244,6 +244,34 @@ class MarketplaceAdd(BaseModel):
     path: StrictStr | None = None
 
 
+class MarketplaceCatalogCreate(BaseModel):
+    """POST /marketplace/catalogs (§22.7): the folder to create the catalog in."""
+
+    folder: StrictStr
+
+
+class MarketplaceCatalogEntry(BaseModel):
+    """One §22.7 editor row: exactly one of `path` (kept as written),
+    `automationId` (exported on save), or `archiveFile` (copied on save) - the
+    exactly-one rule is the store's, so it names the entry."""
+
+    title: StrictStr = ""
+    description: StrictStr = ""
+    path: StrictStr | None = None
+    image: StrictStr | None = None
+    automationId: StrictStr | None = None
+    archiveFile: StrictStr | None = None
+
+
+class MarketplaceCatalogSave(BaseModel):
+    """PUT /marketplace/sources/{id}/catalog (§22.7)."""
+
+    name: StrictStr = ""
+    description: StrictStr = ""
+    url: StrictStr = ""
+    entries: list[MarketplaceCatalogEntry] = Field(default_factory=list)
+
+
 class AgentAdd(BaseModel):
     """POST /agents (§4.7) — harness membership and the mode/model matrix stay
     semantic (the handler's), the shapes are checked here."""

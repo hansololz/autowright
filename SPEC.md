@@ -32,7 +32,8 @@ words from other languages except established technical terms.
   §11 create/edit flow (incl. BUILD/TEST cards · test-run modal) → [spec/ui-create-edit.md](spec/ui-create-edit.md) ·
   §14 design tokens → [spec/design-tokens.md](spec/design-tokens.md)
 - **Marketplace:** §22 marketplace (catalog format · sources store · page · API/CLI
-  addenda; preview behind Developer mode) → [spec/marketplace.md](spec/marketplace.md)
+  addenda · §22.7 catalog authoring; preview behind Developer mode) →
+  [spec/marketplace.md](spec/marketplace.md)
 - **Dev:** §15 dev/test knobs · §16 test seed data · §18 commands →
   [spec/dev-test.md](spec/dev-test.md) · §17 repository (below, in this file)
 

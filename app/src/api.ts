@@ -18,6 +18,9 @@ declare global {
       // §22.3 add marketplace: the picked catalog's path only - the backend
       // reads the file itself, so no bytes cross the bridge.
       openCatalog(): Promise<{ path: string } | null>
+      // §22.7 catalog editor: an .autowright file's path only - the backend
+      // copies it into the catalog's folder.
+      openArchivePath(): Promise<{ path: string } | null>
       revealPath(p: string): Promise<void>
       // §9.5 report modal: OS details + bundle version for the info block
       platformInfo(): Promise<{ platform: string; osName?: string; release: string; arch: string; version: string; trayPanel?: boolean }>
@@ -300,6 +303,14 @@ export const api = {
   marketplaceEntryPreview: (id: string, index: number) =>
     req<{ token: string; preview: import('./types').ImportPreview }>(
       'POST', `/marketplace/sources/${id}/entries/${index}/preview`),
+  // §22.7 catalog authoring: create writes an empty catalog into a folder and
+  // adds it; read/save work on the catalog file on disk, not the cache.
+  marketplaceCatalogCreate: (folder: string) =>
+    req<import('./types').MarketplaceSource>('POST', '/marketplace/catalogs', { folder }),
+  marketplaceCatalogRead: (id: string) =>
+    req<import('./types').MarketplaceCatalog>('GET', `/marketplace/sources/${id}/catalog`),
+  marketplaceCatalogSave: (id: string, body: import('./types').MarketplaceCatalogSave) =>
+    req<import('./types').MarketplaceSource>('PUT', `/marketplace/sources/${id}/catalog`, body),
   // §22.3 preview images ride the authenticated route (a plain <img src> can
   // carry no bearer header), so the page fetches the bytes and shows a blob URL.
   marketplaceImage: async (id: string, index: number): Promise<Blob> => {

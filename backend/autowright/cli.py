@@ -1518,6 +1518,105 @@ def cmd_marketplace_install(c: Client, args) -> None:
     _print_import_summary(c, r)
 
 
+def cmd_marketplace_create(c: Client, args) -> None:
+    # §22.5: the folder is made absolute against the current directory before
+    # it travels - the backend writes the catalog into it and adds it.
+    body = {"folder": os.path.abspath(args.folder)}
+    # §20 HTTP timeouts: create adds the catalog as a source, which reads it
+    # and builds its cache - the long timeout the other marketplace calls take.
+    s = c.req("POST", "/marketplace/catalogs", body, timeout=600)
+    print(f"created {s['name']} [{s['id'][:8]}] at {s['origin']}")
+
+
+# §22.7: the three keys `catalog set` takes, in the order it names them.
+CATALOG_KEYS = ("name", "description", "url")
+
+
+def _read_catalog(c: Client, source: dict) -> dict:
+    """§22.7: the catalog file on disk - the truth for editing, never the
+    cache. A source that isn't a catalog on this machine answers 409, which
+    surfaces as the HTTP detail."""
+    return c.req("GET", f"/marketplace/sources/{source['id']}/catalog")
+
+
+def _catalog_entries(catalog: dict) -> list[dict]:
+    """The served entries as the §22.7 save takes them: an entry already in the
+    file keeps its reference and its image exactly as written."""
+    entries = []
+    for e in catalog.get("entries") or []:
+        entry = {"title": e.get("title") or "", "description": e.get("description") or "",
+                 "path": e.get("path") or ""}
+        if e.get("image"):
+            entry["image"] = e["image"]
+        entries.append(entry)
+    return entries
+
+
+def _save_catalog(c: Client, source: dict, catalog: dict, entries: list[dict]) -> dict:
+    """§22.7 save: the top-level fields as they were read, with the entries the
+    verb built. The backend checks everything before writing anything."""
+    body = {"name": catalog.get("name") or "", "description": catalog.get("description") or "",
+            "url": catalog.get("url") or "", "entries": entries}
+    # §20 HTTP timeouts: a save exports automations and rebuilds the cache.
+    return c.req("PUT", f"/marketplace/sources/{source['id']}/catalog", body, timeout=600)
+
+
+def cmd_marketplace_catalog_set(c: Client, args) -> None:
+    s = find_source(c, args.source)
+    catalog = _read_catalog(c, s)
+    for item in args.values:
+        k, sep, raw = item.partition("=")
+        if not sep:
+            sys.exit(f"expected KEY=VALUE, got {item!r}")
+        if k not in CATALOG_KEYS:
+            sys.exit(f"unknown catalog key {k!r} - have: {', '.join(CATALOG_KEYS)}")
+        # §22.5: an empty value clears the key.
+        catalog[k] = raw
+    saved = _save_catalog(c, s, catalog, _catalog_entries(catalog))
+    print(f"saved {saved['name']}")
+
+
+def cmd_marketplace_catalog_add(c: Client, args) -> None:
+    s = find_source(c, args.source)
+    ref = args.automation
+    if ref.lower().endswith(".autowright") and os.path.isfile(ref):
+        # §22.5: an existing .autowright file is the archive itself, made
+        # absolute against the current directory - the backend validates it
+        # and lists it where it is.
+        path = os.path.abspath(ref)
+        entry = {"archiveFile": path,
+                 "title": args.title or os.path.splitext(os.path.basename(path))[0],
+                 "description": args.description or ""}
+    else:
+        # §22.7: an automation in this app is exported on save, so the entry
+        # names it by id; the title and description default to the record's.
+        a = find_automation(c, ref)
+        entry = {"automationId": a["id"], "title": args.title or a["name"],
+                 "description": args.description or a.get("description") or ""}
+    catalog = _read_catalog(c, s)
+    entries = _catalog_entries(catalog) + [entry]
+    saved = _save_catalog(c, s, catalog, entries)
+    print(f"added {entry['title']} to {saved['name']} - entry {len(entries)}")
+
+
+def cmd_marketplace_catalog_remove(c: Client, args) -> None:
+    s = find_source(c, args.source)
+    # §22.5: the number on the command line is the 1-based one the catalog
+    # lists, checked the way `install` checks its own.
+    if args.n < 1:
+        sys.exit("entry numbers start at 1 - see `autowright marketplace list`")
+    catalog = _read_catalog(c, s)
+    entries = _catalog_entries(catalog)
+    if args.n > len(entries):
+        sys.exit(f"{s.get('name', '?')!r} lists {len(entries)} automation(s) - "
+                 f"there is no entry {args.n}")
+    dropped = entries.pop(args.n - 1)
+    saved = _save_catalog(c, s, catalog, entries)
+    # §22.7: removing an entry never deletes the archive beside the catalog.
+    print(f"removed entry {args.n} ({dropped['title']}) from {saved['name']} - "
+          "its archive file stays")
+
+
 # ---------------------------------------------------------------- settings
 
 def _menu_bar_icon_help() -> str:
@@ -2710,6 +2809,88 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "it declares are installed afterwards.",
              epilog="Examples:\n"
                     "  autowright marketplace install \"Community\" 2")
+    p.add_argument("source",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix")
+    p.add_argument("n", type=int, metavar="N",
+                   help="which automation, by the number `marketplace list` prints beside it")
+    p = _sub(mg, "create", cmd_marketplace_create, "create a marketplace catalog in a folder",
+             description="Write an empty marketplace catalog into a folder on this machine "
+                         "and add it, so you can fill it with automations to share. The "
+                         "folder holds the catalog and the archives it lists, side by side - "
+                         "share the folder, zip it, or publish it at a link."
+                         "\n\n"
+                         "A folder that already holds a marketplace catalog is refused; add "
+                         "that one instead. The catalog's verbs below are what fill it.",
+             epilog="Examples:\n"
+                    "  autowright marketplace create ~/Desktop/my-marketplace")
+    p.add_argument("folder",
+                   help="the folder to write the catalog into, absolute or relative to where "
+                        "you are")
+    cg = _sub(mg, "catalog", None, "edit a marketplace catalog you keep on this machine",
+              description="Edit a marketplace catalog of your own: its name, what it says "
+                          "about itself, where you publish it, and which automations it "
+                          "lists. Every verb here reads the catalog file on this machine and "
+                          "writes it back, so they only work on a marketplace you added by "
+                          "file - one fetched from a link says so and changes nothing."
+                          "\n\n"
+                          "An automation you add is exported into the catalog's folder when "
+                          "the catalog is saved, without any of your parameter values, so "
+                          "what you share is the automation and not your settings."
+                          ).add_subparsers(dest="catalog_verb", required=False, metavar="VERB")
+    p = _sub(cg, "set", cmd_marketplace_catalog_set,
+             "set the catalog's name, description, or link",
+             description="Change what the catalog says about itself. `name` is the title "
+                         "people see, `description` the line under it, and `url` the https "
+                         "link you publish the catalog file at - the one that lets anyone who "
+                         "added it refresh and pick up what you added since."
+                         "\n\n"
+                         "An empty value clears the key. The automations the catalog lists "
+                         "are left exactly as they are.",
+             epilog="Examples:\n"
+                    "  autowright marketplace catalog set mine name=\"My automations\"\n"
+                    "  autowright marketplace catalog set mine "
+                    "url=https://example.com/marketplace-catalog.yaml\n"
+                    "  autowright marketplace catalog set mine url=")
+    p.add_argument("source",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix")
+    p.add_argument("values", nargs="+", metavar="KEY=VALUE",
+                   help="one or more of name=, description=, and url=")
+    p = _sub(cg, "add", cmd_marketplace_catalog_add, "add an automation to the catalog",
+             description="Add one automation to the catalog. The argument is either an "
+                         "automation in this app, or the path to an .autowright file you "
+                         "already exported."
+                         "\n\n"
+                         "An automation from this app is exported into the catalog's folder "
+                         "when the catalog is saved (a name already taken gets a number, "
+                         "nothing is ever overwritten) and listed by its full path; a file is "
+                         "checked and listed where it is. The title and description people "
+                         "see default to the automation's own, or to the file's name.",
+             epilog="Examples:\n"
+                    "  autowright marketplace catalog add mine \"Daily Report\"\n"
+                    "  autowright marketplace catalog add mine ./report.autowright "
+                    "--title \"Morning report\"")
+    p.add_argument("source",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix")
+    p.add_argument("automation", metavar="automation-or-file",
+                   help="an automation in this app, by the usual reference forms, or the path "
+                        "to an .autowright file on this machine")
+    p.add_argument("--title", help="the title people see (default: the automation's name, or "
+                                   "the file's name)")
+    p.add_argument("--description", help="the line under the title (default: the "
+                                         "automation's description, or nothing)")
+    p = _sub(cg, "remove", cmd_marketplace_catalog_remove,
+             "drop one of the catalog's automations",
+             description="Drop the automation at the given number from the catalog, as "
+                         "`marketplace list` prints it."
+                         "\n\n"
+                         "The archive file stays in the catalog's folder - the folder is "
+                         "yours, so nothing there is deleted. Delete it yourself if you don't "
+                         "want it shared.",
+             epilog="Examples:\n"
+                    "  autowright marketplace catalog remove mine 2")
     p.add_argument("source",
                    help="which marketplace: its name, a unique part of its name, its id, or "
                         "an id prefix")

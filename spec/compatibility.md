@@ -73,7 +73,9 @@ version that writes the new shape, and the oldest shape still read.
   error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source, each
   source under its uuid. Same day, before any release: the catalog gained the optional
   `url` key and refresh downloads that instead of re-reading the add origin (a source
-  without `url` is a one-time download); the store shape is unchanged. Additive: no
+  without `url` is a one-time download); the store shape is unchanged. Also same day: §22.7
+  catalog authoring (create/edit routes that write a user's folder; no stored shape
+  involved). Additive: no
   existing file changes shape, data written before this date holds no such directory, and a
   release without the feature never reads it (the directory is inert on downgrade). The
   catalog people share carries its own `format_version: 1` hard gate, like §5.1 archives

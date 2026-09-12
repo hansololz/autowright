@@ -3,8 +3,10 @@
 // gated on §4.9 developerMode (turned on through the real Settings toggle), the
 // §22.4 marketplace.changed event brings the added source in without a reload,
 // and Install runs the ordinary §5.2 two-phase import, landing the automation
-// with its triggers off.
-import { mkdir, writeFile } from 'node:fs/promises'
+// with its triggers off. Then the §22.7 authoring half: New catalog… on a temp
+// folder (the native picker stubbed in the main process), the automation
+// picker, and Save landing the exported archive beside the new catalog.
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Backend, clickNav, closeApp, launchApp, shot, waitFor, type AppHandle } from './harness'
@@ -112,6 +114,44 @@ describe('marketplace e2e', () => {
     const landed = autos.find((a) => a.name === 'Watcher 2')!
     expect(landed.triggers.length).toBe(1)
     expect(landed.triggers.every((t) => t.enabled)).toBe(false)
+
+    // §22.7 authoring: New catalog… opens the native folder picker, which can't
+    // be driven - the main-process dialog answers this test's temp folder
+    // instead. It is empty: the catalog and the archive both land through Save.
+    const authored = path.join(backend.home, 'authored')
+    await mkdir(authored, { recursive: true })
+    await handle.app.evaluate(({ dialog }, folder) => {
+      dialog.showOpenDialog = () => Promise.resolve({ canceled: false, filePaths: [folder] })
+    }, authored)
+
+    await clickNav(page, 'Marketplace')
+    await page.getByTestId('marketplace-new').click()
+    await page.getByTestId('catalog-editor').waitFor({ timeout: 20_000 })
+    await page.getByTestId('catalog-add-automation').click()
+    // Both automations are here by now (the import landed "Watcher 2") - the
+    // seeded one is the row whose title is exactly "Watcher".
+    await page.getByTestId('catalog-picker-row')
+      .filter({ has: page.getByText('Watcher', { exact: true }) })
+      .click()
+    // §22.7: the archive doesn't exist yet - the save exports it.
+    await page.getByTestId('catalog-row').getByText('Exported on save').waitFor({ timeout: 10_000 })
+    // The picker stays mounted through its exit animation - shoot the settled editor.
+    await page.getByTestId('catalog-picker-search').waitFor({ state: 'detached', timeout: 10_000 })
+    await shot(page, 'marketplace-editor.png')
+
+    await page.getByTestId('catalog-save').click()
+    await waitFor(async () => (await page.getByTestId('marketplace-source').count()) === 2,
+      20_000, 'the authored catalog to land as a second source')
+    await page.getByTestId('marketplace-source').last()
+      .getByTestId('marketplace-entry').getByText('Watcher', { exact: true })
+      .waitFor({ timeout: 10_000 })
+    // Same for the editor: it closes after the save lands.
+    await page.getByTestId('catalog-editor').waitFor({ state: 'detached', timeout: 10_000 })
+    await shot(page, 'marketplace-authored.png')
+
+    // §22.7: the catalog plus the archives it lists, written flat in the folder.
+    expect((await readdir(authored)).sort())
+      .toEqual(['Watcher.autowright', 'marketplace-catalog.yaml'])
 
     // §22.3: the setting dropping while the page is open leaves for Automations.
     await clickNav(page, 'Marketplace')

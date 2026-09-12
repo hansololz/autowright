@@ -1,7 +1,11 @@
 """Marketplace (§22): catalog validation, reference resolution, the sources
 store's refresh/image cache, and the §22.4 routes with the network stubbed."""
+import io
+import zipfile
+
 import pytest
 import yaml
+from conftest import make_version
 
 from autowright import marketplace, paths, transfer
 from autowright.marketplace import MarketplaceError, MarketplaceStore
@@ -175,21 +179,49 @@ def test_url_references_join_and_must_stay_https():
                                       origin=origin)
 
 
-def test_file_references_stay_inside_the_catalog_folder(tmp_path):
+def test_file_references_resolve_against_the_folder_or_stand_alone(tmp_path):
+    """§22.1: a relative reference resolves against the catalog's directory
+    (`..` hops included); an https URL or an absolute local path is taken as it
+    is, in a file source and a link source alike; any other scheme is refused."""
     origin = str(tmp_path / "shelf" / "marketplace.yaml")
     (tmp_path / "shelf").mkdir()
     assert marketplace.resolve_reference("a/manga.autowright", kind="file",
                                          origin=origin) == \
         str(tmp_path / "shelf" / "a" / "manga.autowright")
+    assert marketplace.resolve_reference("../x.autowright", kind="file",
+                                         origin=origin) == str(tmp_path / "x.autowright")
     # an absolute https reference is fine in a file source (mixed catalogs)
     assert marketplace.resolve_reference("https://x.test/m.autowright", kind="file",
                                          origin=origin) == "https://x.test/m.autowright"
+    # an absolute local path stands alone - the user chose to add this catalog
+    elsewhere = str(tmp_path / "elsewhere" / "kept.autowright")
+    assert marketplace.resolve_reference(elsewhere, kind="file", origin=origin) == elsewhere
+    assert marketplace.resolve_reference(elsewhere, kind="url",
+                                         origin="https://x.test/shelf/marketplace.yaml") \
+        == elsewhere
     with pytest.raises(MarketplaceError) as e:
-        marketplace.resolve_reference("../x.autowright", kind="file", origin=origin)
-    assert "outside" in str(e.value)
+        marketplace.resolve_reference("file:///x.autowright", kind="file", origin=origin)
+    assert "neither an https reference nor a path" in str(e.value)
+
+
+def test_an_absolute_local_path_installs_from_anywhere(market, tmp_path):
+    """§22.1/§22.4: an entry naming an archive elsewhere on the machine reads
+    that file at install; a missing one is the ordinary 422-class error."""
+    kept = tmp_path / "elsewhere"
+    kept.mkdir()
+    (kept / "kept.autowright").write_bytes(b"not really a zip")
+    shelf = tmp_path / "shelf"
+    shelf.mkdir()
+    f = write_catalog(shelf, [{"title": "Kept", "path": str(kept / "kept.autowright")},
+                              {"title": "Gone", "path": str(kept / "gone.autowright")}])
+    source = market.add(path=str(f))
+    assert [e["archive"] for e in source["entries"]] == \
+        [str(kept / "kept.autowright"), str(kept / "gone.autowright")]
+    data, reference = market.entry_archive(source["id"], 0)
+    assert data == b"not really a zip" and reference == str(kept / "kept.autowright")
     with pytest.raises(MarketplaceError) as e:
-        marketplace.resolve_reference("/etc/passwd.autowright", kind="file", origin=origin)
-    assert "absolute path" in str(e.value)
+        market.entry_archive(source["id"], 1)
+    assert "couldn't read the archive" in str(e.value)
 
 
 # ---------- §22.2 store ----------
@@ -239,9 +271,10 @@ def test_add_stores_nothing_when_validation_fails(market, tmp_path):
         market.add(path=str(f))
     assert market.sources == []
     assert not (paths.marketplace_dir() / "sources.yaml").exists()
-    # an escaping reference is a validation failure naming its entry
-    bad = write_catalog(tmp_path, [{"title": "Escape", "path": "../x.autowright"}],
-                        filename="escape.yaml")
+    # a reference with a scheme that isn't https is a validation failure
+    # naming its entry (a `..` hop or an absolute local path is legal, §22.1)
+    bad = write_catalog(tmp_path, [{"title": "Scheme", "path": "file:///x.autowright"}],
+                        filename="scheme.yaml")
     with pytest.raises(MarketplaceError) as e:
         market.add(path=str(bad))
     assert str(e.value).startswith("entry 0: ")
@@ -655,3 +688,370 @@ def test_url_add_route(client, monkeypatch):
     assert source["kind"] == "url" and source["name"] == "Linked"
     assert source["entries"][0]["archive"] == "https://x.test/w.autowright"
     assert client.get("/marketplace").json()["sources"][0]["id"] == source["id"]
+
+
+# ---------- §22.7 catalog authoring ----------
+def _shelf(market, tmp_path, name="shelf"):
+    """§22.7 create: an empty catalog in its own folder, added as a file
+    source. Answers the folder and the served §22.4 Source."""
+    folder = tmp_path / name
+    folder.mkdir()
+    return folder, market.create_catalog(str(folder))
+
+
+def _exporter(archives: dict, calls: list | None = None):
+    """A §22.7 `export(automation_id)` stub: the `(name, bytes)` each id
+    answers with (the §5.1 export the route runs without parameter values), or
+    a KeyError for an id this app doesn't hold."""
+    def export(automation_id):
+        if calls is not None:
+            calls.append(automation_id)
+        if automation_id not in archives:
+            raise KeyError(automation_id)
+        return archives[automation_id]
+    return export
+
+
+def test_create_writes_the_empty_catalog_and_adds_the_source(market, tmp_path):
+    """§22.7: `format_version: 1`, the folder's name, no entries - then the
+    ordinary §22.2 add over the file just written."""
+    folder, source = _shelf(market, tmp_path, "community")
+    catalog = folder / marketplace.CATALOG_FILENAME
+    written = yaml.safe_load(catalog.read_text(encoding="utf-8"))
+    assert written == {"format_version": 1, "name": "community", "entries": []}
+    assert source["kind"] == "file" and source["origin"] == str(catalog)
+    assert source["name"] == "community" and source["entries"] == []
+    assert source["url"] is None and source["error"] is None and source["refreshedAt"]
+    # the catalog is cached like any other added source
+    assert market.catalog_file(source["id"]).read_text(encoding="utf-8") == \
+        catalog.read_text(encoding="utf-8")
+
+
+def test_create_refuses_a_taken_folder_and_a_bad_path(market, tmp_path):
+    folder, _ = _shelf(market, tmp_path)
+    with pytest.raises(marketplace.MarketplaceDuplicate) as e:
+        market.create_catalog(str(folder))
+    assert str(e.value) == marketplace.FOLDER_TAKEN
+    assert len(market.sources) == 1
+    with pytest.raises(MarketplaceError):
+        market.create_catalog(str(tmp_path / "nothing"))
+    with pytest.raises(MarketplaceError):
+        market.create_catalog("shelves/mine")
+    with pytest.raises(MarketplaceError):
+        market.create_catalog("")
+
+
+def test_read_catalog_answers_the_file_as_written(market, tmp_path, monkeypatch):
+    """§22.7 GET: the file on disk, references unresolved - a `url` source has
+    no file on this machine to edit."""
+    (tmp_path / "img").mkdir()
+    (tmp_path / "img" / "cover.png").write_bytes(PNG)
+    f = write_catalog(tmp_path, [{"title": "Manga", "description": "Checks it",
+                                  "path": "a/manga.autowright", "image": "img/cover.png"}],
+                      name="Mine", description="Automations I use.", url=CATALOG_URL)
+    source = market.add(path=str(f))
+    assert market.read_catalog(source["id"]) == {
+        "name": "Mine", "description": "Automations I use.", "url": CATALOG_URL,
+        "entries": [{"index": 0, "title": "Manga", "description": "Checks it",
+                     "path": "a/manga.autowright", "image": "img/cover.png"}]}
+
+    serve(monkeypatch, {CATALOG_URL: catalog_text(
+        [{"title": "Web", "path": "w.autowright"}], name="Linked").encode()})
+    linked = market.add(url=CATALOG_URL)
+    with pytest.raises(marketplace.MarketplaceNotEditable) as e:
+        market.read_catalog(linked["id"])
+    assert str(e.value) == marketplace.NOT_EDITABLE
+    with pytest.raises(KeyError):
+        market.read_catalog("nope")
+
+
+def test_save_exports_automations_beside_the_catalog(market, tmp_path):
+    """§22.7 steps 2-3: every `automationId` entry lands as its own archive
+    under `transfer.safe_filename` of the automation's name; a second entry
+    with the same name takes ` 2`."""
+    folder, source = _shelf(market, tmp_path)
+    calls: list = []
+    export = _exporter({"a1": ("Daily/Report", b"archive-bytes")}, calls)
+    before = source["refreshedAt"]
+    saved = market.save_catalog(source["id"], {
+        "name": "Shelf", "description": "What I run.", "url": CATALOG_URL,
+        "entries": [{"title": "First", "description": "Runs daily", "automationId": "a1"},
+                    {"title": "Second", "description": "", "automationId": "a1"}]}, export)
+    assert calls == ["a1", "a1"]
+    assert (folder / "Daily Report.autowright").read_bytes() == b"archive-bytes"
+    assert (folder / "Daily Report 2.autowright").read_bytes() == b"archive-bytes"
+    written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
+    assert written["name"] == "Shelf" and written["description"] == "What I run."
+    assert written["url"] == CATALOG_URL
+    assert [e["path"] for e in written["entries"]] == ["Daily Report.autowright",
+                                                       "Daily Report 2.autowright"]
+    # §22.7 step 6: the source's cache is rebuilt from the file just written
+    assert saved["name"] == "Shelf" and saved["url"] == CATALOG_URL
+    assert saved["entries"] == [
+        {"index": 0, "title": "First", "description": "Runs daily",
+         "archive": str(folder / "Daily Report.autowright"), "image": False},
+        {"index": 1, "title": "Second", "description": "",
+         "archive": str(folder / "Daily Report 2.autowright"), "image": False}]
+    assert saved["refreshedAt"] != before
+    assert market.catalog_file(source["id"]).read_text(encoding="utf-8") == \
+        (folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8")
+
+
+def test_save_never_overwrites_an_archive_already_there(market, tmp_path):
+    """§22.7 step 3: the folder is the user's - a file already on disk keeps
+    its bytes and the new export takes ` 2`."""
+    folder, source = _shelf(market, tmp_path)
+    (folder / "Watcher.autowright").write_bytes(b"the-users-own-file")
+    market.save_catalog(source["id"], {
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "Watcher", "description": "", "automationId": "a1"}]},
+        _exporter({"a1": ("Watcher", b"freshly-exported")}))
+    assert (folder / "Watcher.autowright").read_bytes() == b"the-users-own-file"
+    assert (folder / "Watcher 2.autowright").read_bytes() == b"freshly-exported"
+    written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
+    assert written["entries"][0]["path"] == "Watcher 2.autowright"
+
+
+def test_save_keeps_a_path_entry_and_its_image_as_written(market, tmp_path):
+    """§22.7: a `path` entry names an archive already in place - neither it nor
+    its image is touched by a save."""
+    folder, source = _shelf(market, tmp_path)
+    (folder / "already.autowright").write_bytes(b"already-here")
+    (folder / "images").mkdir()
+    (folder / "images" / "cover.png").write_bytes(PNG)
+    saved = market.save_catalog(source["id"], {
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "Kept", "description": "Still here",
+                     "path": "already.autowright", "image": "images/cover.png"}]},
+        _exporter({}))
+    written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
+    assert written["entries"] == [{"title": "Kept", "description": "Still here",
+                                   "path": "already.autowright", "image": "images/cover.png"}]
+    assert (folder / "already.autowright").read_bytes() == b"already-here"
+    assert saved["entries"][0]["image"] is True
+    assert market.image_path(source["id"], 0).read_bytes() == PNG
+
+
+def test_save_rewrites_the_file_with_the_catalog_keys_only(market, tmp_path):
+    """§22.7 step 4: the editor owns the file - unknown keys and hand-written
+    comments don't survive a save."""
+    folder = tmp_path / "hand"
+    folder.mkdir()
+    f = folder / marketplace.CATALOG_FILENAME
+    f.write_text("# the shelf I share with friends\n"
+                 "format_version: 1\n"
+                 "future: 1\n"
+                 "name: Hand written\n"
+                 "entries:\n"
+                 "  - title: One\n"
+                 "    path: one.autowright\n"
+                 "    future: 2\n", encoding="utf-8")
+    source = market.add(path=str(f))
+    market.save_catalog(source["id"], {
+        "name": "Hand written", "description": "", "url": "",
+        "entries": [{"title": "One", "description": "", "path": "one.autowright"}]},
+        _exporter({}))
+    text = f.read_text(encoding="utf-8")
+    assert "#" not in text and "future" not in text
+    written = yaml.safe_load(text)
+    assert list(written) == ["format_version", "name", "entries"]
+    assert list(written["entries"][0]) == ["title", "path"]
+
+
+def test_save_writes_nothing_when_an_entry_fails(market, tmp_path):
+    """§22.7: everything is checked before anything is written - a failure in
+    entry 1 leaves entry 0's export unwritten and the file byte-identical."""
+    folder, source = _shelf(market, tmp_path)
+    f = folder / marketplace.CATALOG_FILENAME
+    before_text = f.read_text(encoding="utf-8")
+    before_files = sorted(p.name for p in folder.iterdir())
+    with pytest.raises(MarketplaceError) as e:
+        market.save_catalog(source["id"], {
+            "name": "Shelf", "description": "", "url": "",
+            "entries": [{"title": "Fine", "description": "", "automationId": "a1"},
+                        {"title": "Gone", "description": "", "automationId": "deleted"}]},
+            _exporter({"a1": ("Fine", b"archive-bytes")}))
+    assert str(e.value) == "entry 1: no automation has that id"
+    assert sorted(p.name for p in folder.iterdir()) == before_files
+    assert f.read_text(encoding="utf-8") == before_text
+
+
+def test_save_checks_the_fields_and_the_one_of_rule(market, tmp_path):
+    """§22.7 step 1 and the exactly-one rule, both naming the entry."""
+    folder, source = _shelf(market, tmp_path)
+    f = folder / marketplace.CATALOG_FILENAME
+    before_text = f.read_text(encoding="utf-8")
+
+    def save(**body):
+        return market.save_catalog(source["id"], {"name": "Shelf", "description": "",
+                                                  "url": "", **body}, _exporter({}))
+
+    with pytest.raises(MarketplaceError) as e:
+        save(entries=[{"title": "  ", "description": "", "path": "a.autowright"}])
+    assert str(e.value) == "entry 0: it has no title"
+    with pytest.raises(MarketplaceError) as e:
+        save(entries=[{"title": "One", "description": "", "path": "a.autowright"},
+                      {"title": "Two", "description": "", "path": "b.autowright",
+                       "automationId": "a1"}])
+    assert str(e.value).startswith("entry 1: ")
+    with pytest.raises(MarketplaceError) as e:
+        save(entries=[{"title": "Neither", "description": ""}])
+    assert str(e.value).startswith("entry 0: ")
+    with pytest.raises(MarketplaceError) as e:
+        save(url="http://x.test/marketplace-catalog.yaml", entries=[])
+    assert str(e.value) == "`url` must be an https link"
+    with pytest.raises(MarketplaceError) as e:
+        save(name="x" * (marketplace.MAX_NAME + 1), entries=[])
+    assert f"{marketplace.MAX_NAME} characters" in str(e.value)
+    assert f.read_text(encoding="utf-8") == before_text
+
+
+def test_save_refuses_an_archive_file_that_is_not_an_archive(market, tmp_path):
+    """§22.7 step 2: an `archiveFile` passes the §5.1 archive validation
+    without matching - the verdict is the entry's 422."""
+    folder, source = _shelf(market, tmp_path)
+    junk = tmp_path / "junk.autowright"
+    junk.write_bytes(b"not a zip at all")
+
+    def save(path):
+        return market.save_catalog(source["id"], {
+            "name": "Shelf", "description": "", "url": "",
+            "entries": [{"title": "Copied", "description": "", "archiveFile": str(path)}]},
+            _exporter({}))
+
+    with pytest.raises(MarketplaceError) as e:
+        save(junk)
+    assert str(e.value) == "entry 0: not a valid .autowright archive"
+    with pytest.raises(MarketplaceError) as e:
+        save(tmp_path / "gone.autowright")
+    assert str(e.value).startswith("entry 0: there's no file at ")
+    plain = tmp_path / "notes.txt"
+    plain.write_text("hello", encoding="utf-8")
+    with pytest.raises(MarketplaceError) as e:
+        save(plain)
+    assert str(e.value) == "entry 0: notes.txt isn't an .autowright file"
+    assert sorted(p.name for p in folder.iterdir()) == [marketplace.CATALOG_FILENAME]
+
+
+def test_removing_an_entry_leaves_its_archive_file(market, tmp_path):
+    """§22.7: the folder is the user's - a removed entry's archive stays."""
+    folder, source = _shelf(market, tmp_path)
+    market.save_catalog(source["id"], {
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "One", "description": "", "automationId": "a1"}]},
+        _exporter({"a1": ("One", b"archive-bytes")}))
+    assert (folder / "One.autowright").is_file()
+    saved = market.save_catalog(source["id"], {
+        "name": "Shelf", "description": "", "url": "", "entries": []}, _exporter({}))
+    assert saved["entries"] == []
+    assert (folder / "One.autowright").read_bytes() == b"archive-bytes"
+    written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
+    assert written["entries"] == []
+
+
+# ---------- §22.4 authoring routes ----------
+def test_catalog_create_route(client, tmp_path):
+    folder = tmp_path / "shelf"
+    folder.mkdir()
+    r = client.post("/marketplace/catalogs", json={"folder": str(folder)})
+    assert r.status_code == 200
+    source = r.json()
+    assert source["kind"] == "file" and source["name"] == "shelf"
+    assert source["origin"] == str(folder / marketplace.CATALOG_FILENAME)
+    assert client.get("/marketplace").json()["sources"] == [source]
+
+    r = client.post("/marketplace/catalogs", json={"folder": str(folder)})
+    assert r.status_code == 409 and r.json()["detail"] == marketplace.FOLDER_TAKEN
+    r = client.post("/marketplace/catalogs", json={"folder": str(tmp_path / "nothing")})
+    assert r.status_code == 422
+    assert client.post("/marketplace/catalogs",
+                       json={"folder": "shelves/mine"}).status_code == 422
+    assert client.post("/marketplace/catalogs", json={}).status_code == 422
+
+
+def test_catalog_read_route(client, tmp_path, monkeypatch):
+    f = write_catalog(tmp_path, [{"title": "One", "description": "Runs daily",
+                                  "path": "one.autowright"}], name="Shelf")
+    source = client.post("/marketplace/sources", json={"path": str(f)}).json()
+    r = client.get(f"/marketplace/sources/{source['id']}/catalog")
+    assert r.status_code == 200
+    assert r.json() == {"name": "Shelf", "description": "", "url": None,
+                        "entries": [{"index": 0, "title": "One", "description": "Runs daily",
+                                     "path": "one.autowright", "image": ""}]}
+    assert client.get("/marketplace/sources/nope/catalog").status_code == 404
+
+    # §22.7: a `url` source's catalog isn't on this machine
+    monkeypatch.setattr(
+        marketplace, "_fetch_url",
+        lambda url, *, cap, deadline_s=60: catalog_text(
+            [{"title": "Web", "path": "w.autowright"}], name="Linked").encode())
+    linked = client.post("/marketplace/sources",
+                         json={"url": "https://x.test/marketplace.yaml"}).json()
+    r = client.get(f"/marketplace/sources/{linked['id']}/catalog")
+    assert r.status_code == 409 and r.json()["detail"] == marketplace.NOT_EDITABLE
+    r = client.put(f"/marketplace/sources/{linked['id']}/catalog",
+                   json={"name": "Linked", "description": "", "url": "", "entries": []})
+    assert r.status_code == 409 and r.json()["detail"] == marketplace.NOT_EDITABLE
+    assert client.put("/marketplace/sources/nope/catalog",
+                      json={"name": "", "description": "", "url": "",
+                            "entries": []}).status_code == 404
+
+
+def test_catalog_save_route_exports_without_parameter_values(client, tmp_path):
+    """§22.7 step 2: a marketplace archive is for other people - the route
+    exports with the §5.1 `--no-values` rule, so no parameter value travels."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), name="Watcher", agent_id="mock")
+    store.patch_automation(a, {"paramValues": {"greeting": "super-secret-value"}})
+    folder = tmp_path / "shelf"
+    folder.mkdir()
+    source = client.post("/marketplace/catalogs", json={"folder": str(folder)}).json()
+
+    r = client.put(f"/marketplace/sources/{source['id']}/catalog", json={
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "Watcher", "description": "Watches things",
+                     "automationId": a["id"]}]})
+    assert r.status_code == 200
+    archive = folder / "Watcher.autowright"
+    data = archive.read_bytes()
+    manifest = yaml.safe_load(zipfile.ZipFile(io.BytesIO(data)).read("manifest.yaml"))
+    assert "param_values" not in manifest
+    assert b"super-secret-value" not in data
+    assert r.json()["entries"] == [{"index": 0, "title": "Watcher",
+                                    "description": "Watches things",
+                                    "archive": str(archive), "image": False}]
+    # §22.7: an unknown automation is the entry's 422, with nothing written
+    r = client.put(f"/marketplace/sources/{source['id']}/catalog", json={
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "Gone", "description": "", "automationId": "nope"}]})
+    assert r.status_code == 422 and r.json()["detail"] == "entry 0: no automation has that id"
+
+
+def test_catalog_save_route_copies_and_validates_an_archive_file(client, tmp_path):
+    """§22.7 step 2: an `archiveFile` is read, validated like an import would,
+    and copied in beside the catalog under its own base name."""
+    archive = _export(client)
+    picked = tmp_path / "shared.autowright"
+    picked.write_bytes(archive)
+    folder = tmp_path / "shelf"
+    folder.mkdir()
+    source = client.post("/marketplace/catalogs", json={"folder": str(folder)}).json()
+
+    r = client.put(f"/marketplace/sources/{source['id']}/catalog", json={
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "Shared", "description": "", "archiveFile": str(picked)}]})
+    assert r.status_code == 200
+    assert (folder / "shared.autowright").read_bytes() == archive
+    assert r.json()["entries"][0]["archive"] == str(folder / "shared.autowright")
+
+    junk = tmp_path / "junk.autowright"
+    junk.write_bytes(b"not a zip at all")
+    r = client.put(f"/marketplace/sources/{source['id']}/catalog", json={
+        "name": "Shelf", "description": "", "url": "",
+        "entries": [{"title": "Shared", "description": "", "path": "shared.autowright"},
+                    {"title": "Junk", "description": "", "archiveFile": str(junk)}]})
+    assert r.status_code == 422
+    assert r.json()["detail"] == "entry 1: not a valid .autowright archive"
+    assert sorted(p.name for p in folder.iterdir()) == [marketplace.CATALOG_FILENAME,
+                                                        "shared.autowright"]

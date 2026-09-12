@@ -999,6 +999,16 @@ ipcMain.handle('open-catalog', async () => {
   if (r.canceled || !r.filePaths[0]) return null
   return { path: r.filePaths[0] }
 })
+// §22.7 catalog editor: pick an .autowright file to copy into a catalog. Like
+// open-catalog nothing is read here - the backend copies the file itself.
+ipcMain.handle('open-archive-path', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [{ name: 'Autowright automation', extensions: ['autowright'] }],
+  })
+  if (r.canceled || !r.filePaths[0]) return null
+  return { path: r.filePaths[0] }
+})
 // §9.3 developer log overlay: tail of each existing log file. Polled by the
 // renderer while the overlay is open — no watchers, nothing runs while closed.
 const LOG_FILES = ['app.log', 'backend.out.log', 'backend.err.log', 'vite.log']

@@ -195,4 +195,11 @@ autowright agent list · agent check <name>        # AI agents available to agen
   again to pick up changes). `list` numbers each marketplace's entries;
   `install` takes that number and lands the automation through the ordinary import (agents and
   secrets matched by name, triggers off).
+- `marketplace create <folder>` writes an empty marketplace-catalog.yaml into a folder on this
+  machine and adds it; `marketplace catalog add <name> <automation-or-.autowright-file>` exports
+  an automation (no parameter values) into that folder or lists an existing archive where it is
+  (catalog entries are absolute paths or https links, never relative);
+  `marketplace catalog set <name> name=… description=… url=…` edits the catalog's fields;
+  `marketplace catalog remove <name> <n>` drops entry n (its archive file stays). These work on
+  catalogs on this machine only (added by file or created here).
 - `settings show` / `settings set days=30 notifications=all developerMode=on dataPath=/path`.

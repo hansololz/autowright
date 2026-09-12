@@ -2,13 +2,15 @@
 // entries of its catalog; Install runs the ordinary §5.2 two-phase import.
 // The page and its nav row render only while the §4.9 developerMode setting is
 // on (§22 preview gate) - nothing else here is gated.
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import type { ImportPreview, ImportSummary, MarketplaceEntry, MarketplaceSource } from '../types'
+import type {
+  ImportPreview, ImportSummary, MarketplaceCatalogSaveEntry, MarketplaceEntry, MarketplaceSource,
+} from '../types'
 import {
-  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MetaChip,
+  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MenuItemRow, MetaChip,
   Modal, Notice, PageLoading, PageTitle, Spinner,
 } from '../ui'
 import ImportModal from './ImportModal'
@@ -23,8 +25,8 @@ url: https://example.com/shelf/marketplace-catalog.yaml  # optional: where this 
 entries:                             # required list, may be empty, max 200 entries
   - title: "Manga chapter watcher"   # required, non-empty, max 120 chars
     description: "Checks the series you follow every morning at 8."  # optional, max 1000
-    path: automations/manga.autowright   # required: https URL or a relative reference
-    image: images/manga.png              # optional: https URL or a relative reference`
+    path: /Users/you/Automations/manga.autowright   # required: https URL or absolute local path
+    image: /Users/you/Automations/manga.png         # optional: https URL or absolute local path`
 
 /** §4.1 shared time labels - Today | Yesterday | weekday (2-6 days back) | the
  * locale date, with the clock time appended. A §22.4 source carries the raw §5
@@ -207,6 +209,260 @@ function AddMarketplaceModal({ onClose, onAdded }: {
   )
 }
 
+// §22.7 editor rows: a saved entry keeps its `path`; a row picked from this app
+// carries the automation's id and a file row its path - both land on save.
+type EditorRow = MarketplaceCatalogSaveEntry & { key: number }
+
+const inputStyle: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box', color: 'var(--text)',
+  font: '400 12.5px var(--sans)', padding: '9px 11px',
+}
+
+/** §22.7 add-automation picker: every automation in this app, filtered by
+ * name substring; one click appends a row and closes. */
+function AddAutomationPicker({ onPick, onClose }: {
+  onPick: (a: { id: string; name: string; description: string }) => void
+  onClose: () => void
+}) {
+  const automations = useStore((s) => s.automations)
+  const [query, setQuery] = useState('')
+  const shown = automations.filter((a) => a.name.toLowerCase().includes(query.trim().toLowerCase()))
+  return (
+    <Modal onClose={onClose} width={460} zIndex={80} ariaLabel="Add automation">
+      {(close) => (
+        <>
+          <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Add automation</h2>
+          <input
+            className="ad-input"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+            spellCheck={false}
+            placeholder="Search automations"
+            data-testid="catalog-picker-search"
+            style={{ ...inputStyle, margin: '14px 0 10px' }}
+          />
+          <div className="ad-card" style={{ padding: 4, maxHeight: 320, overflowY: 'auto' }}>
+            {shown.length === 0 ? (
+              <EmptyLine>{automations.length === 0 ? 'No automations yet.' : 'No automations match.'}</EmptyLine>
+            ) : shown.map((a) => (
+              <MenuItemRow
+                key={a.id}
+                title={a.name}
+                sub={a.description || undefined}
+                testId="catalog-picker-row"
+                onPick={() => { onPick({ id: a.id, name: a.name, description: a.description || '' }); close() }}
+              />
+            ))}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+            <BtnGhost onClick={close}>Cancel</BtnGhost>
+          </div>
+        </>
+      )}
+    </Modal>
+  )
+}
+
+/** §22.7 catalog editor: opens on the catalog file as written (GET), edits
+ * the fields and the entry rows, and PUTs them whole on Save. */
+function CatalogEditorModal({ source, onClose, onSaved }: {
+  source: MarketplaceSource
+  onClose: () => void
+  onSaved: (source: MarketplaceSource) => void
+}) {
+  const showToast = useStore((s) => s.showToast)
+  const [loaded, setLoaded] = useState<{ name: string; description: string; url: string; rows: EditorRow[] } | null>(null)
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [url, setUrl] = useState('')
+  const [rows, setRows] = useState<EditorRow[]>([])
+  const [picker, setPicker] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState(false)
+  const nextKey = useRef(1)
+  const folderName = source.origin.split(/[\\/]/).slice(-2, -1)[0] || ''
+
+  useEffect(() => {
+    let gone = false
+    void (async () => {
+      try {
+        const c = await api.marketplaceCatalogRead(source.id)
+        if (gone) return
+        const initial = c.entries.map((e) => ({
+          key: nextKey.current++, title: e.title, description: e.description, path: e.path,
+          ...(e.image ? { image: e.image } : {}),
+        }))
+        setName(c.name); setDescription(c.description); setUrl(c.url ?? ''); setRows(initial)
+        setLoaded({ name: c.name, description: c.description, url: c.url ?? '', rows: initial })
+      } catch (e) {
+        // §22.4: a 409 (not on this machine) or 422 (unreadable file) - the
+        // modal can't open on nothing, so it toasts and closes.
+        if (gone) return
+        showToast((e as Error).message)
+        onClose()
+      }
+    })()
+    return () => { gone = true }
+  }, [source.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dirty = loaded !== null && (
+    name !== loaded.name || description !== loaded.description || url !== loaded.url
+    || rows.length !== loaded.rows.length
+    || rows.some((r, i) => r !== loaded.rows[i] || r.title !== loaded.rows[i].title || r.description !== loaded.rows[i].description)
+  )
+  const dirtyRef = useRef(dirty)
+  dirtyRef.current = dirty
+  const pending = useRef<'save' | 'discard'>('discard')
+  const saved = useRef<MarketplaceSource | null>(null)
+  const closeRef = useRef<() => void>(() => {})
+
+  const update = (key: number, patch: Partial<EditorRow>) =>
+    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
+  const addAutomation = (a: { id: string; name: string; description: string }) =>
+    setRows((prev) => [...prev, { key: nextKey.current++, title: a.name, description: a.description, automationId: a.id }])
+  const chooseFile = async () => {
+    let picked
+    try {
+      picked = await window.autowright?.openArchivePath()
+    } catch (e) { setError((e as Error).message); return }
+    if (!picked) return
+    const file = picked.path.split(/[\\/]/).pop() || picked.path
+    setRows((prev) => [...prev, {
+      key: nextKey.current++, title: file.replace(/\.autowright$/i, ''), description: '', archiveFile: picked.path,
+    }])
+  }
+  const save = async () => {
+    if (busy || !loaded) return
+    setBusy(true); setError(null)
+    try {
+      const body = {
+        name, description, url,
+        entries: rows.map(({ key: _key, ...rest }) => rest),
+      }
+      saved.current = await api.marketplaceCatalogSave(source.id, body)
+      pending.current = 'save'
+      closeRef.current()
+    } catch (e) {
+      // §22.7: a 422 or 409 shows inline above the footer.
+      setError((e as Error).message); setBusy(false)
+    }
+  }
+  const guardClose = () => {
+    if (!dirtyRef.current) return true
+    setConfirm(true)
+    return false
+  }
+  const rowNote = (r: EditorRow) =>
+    r.path ? r.path : r.automationId ? 'Exported on save' : (r.archiveFile ?? '')
+
+  return (
+    <Modal
+      onClose={() => (pending.current === 'save' && saved.current ? onSaved(saved.current) : onClose())}
+      width={640} ariaLabel="Edit catalog" guardClose={guardClose}
+    >
+      {(close) => {
+        closeRef.current = close
+        return (
+          <div data-testid="catalog-editor">
+            <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Edit catalog</h2>
+            <p style={{ margin: '6px 0 0', font: '400 12px var(--mono)', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {source.origin}
+            </p>
+            {loaded === null ? <PageLoading /> : (
+              <>
+                <Eyebrow style={{ margin: '18px 0 6px' }}>NAME</Eyebrow>
+                <input className="ad-input" value={name} onChange={(e) => setName(e.target.value)}
+                  placeholder={folderName} spellCheck={false} data-testid="catalog-name" style={inputStyle} />
+                <Eyebrow style={{ margin: '14px 0 6px' }}>DESCRIPTION</Eyebrow>
+                <input className="ad-input" value={description} onChange={(e) => setDescription(e.target.value)}
+                  data-testid="catalog-description" style={inputStyle} />
+                <Eyebrow style={{ margin: '14px 0 6px' }}>PUBLISHED LINK</Eyebrow>
+                <input className="ad-input" value={url} onChange={(e) => setUrl(e.target.value)}
+                  spellCheck={false} placeholder="https://… where you publish marketplace-catalog.yaml"
+                  data-testid="catalog-url" style={{ ...inputStyle, font: '400 12.5px var(--mono)' }} />
+                <p style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-faint)', margin: '7px 0 0' }}>
+                  Optional. People who add this catalog can refresh from here.
+                </p>
+                <Eyebrow style={{ margin: '18px 0 8px' }}>AUTOMATIONS</Eyebrow>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {rows.length === 0 ? (
+                    <div className="ad-card"><EmptyLine>No automations yet.</EmptyLine></div>
+                  ) : rows.map((r) => (
+                    <div key={r.key} className="ad-card" data-testid="catalog-row" style={{ padding: 12, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <input className="ad-input" value={r.title} onChange={(e) => update(r.key, { title: e.target.value })}
+                          placeholder="Title" data-testid="catalog-row-title"
+                          style={{ ...inputStyle, fontWeight: 600, padding: '7px 10px' }} />
+                        <input className="ad-input" value={r.description} onChange={(e) => update(r.key, { description: e.target.value })}
+                          placeholder="Description" data-testid="catalog-row-description"
+                          style={{ ...inputStyle, padding: '7px 10px' }} />
+                        <span style={{ font: '400 11.5px var(--mono)', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {rowNote(r)}
+                        </span>
+                      </div>
+                      <button
+                        className="ad-btn-ghost icon"
+                        onClick={() => setRows((prev) => prev.filter((x) => x.key !== r.key))}
+                        title="Remove entry"
+                        aria-label="Remove entry"
+                      >
+                        <i className="fa-solid fa-xmark" style={{ fontSize: 11 }} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+                  <button className="ad-btn-dashed" data-testid="catalog-add-automation" onClick={() => setPicker(true)}
+                    style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
+                    <i className="fa-solid fa-plus" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
+                    Add automation…
+                  </button>
+                  <button className="ad-btn-dashed" data-testid="catalog-add-file" onClick={() => { void chooseFile() }}
+                    style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 9 }}>
+                    <i className="fa-solid fa-file-import" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
+                    Choose an .autowright file…
+                  </button>
+                </div>
+                <p style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-faint)', margin: '10px 0 0' }}>
+                  A removed entry's archive file stays in the folder.
+                </p>
+                {error && (
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--red-text)', margin: '12px 0 0' }} data-testid="catalog-error">
+                    {error}
+                  </p>
+                )}
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 18 }}>
+                  <BtnGhost onClick={() => { if (dirtyRef.current) setConfirm(true); else close() }} disabled={busy}>Cancel</BtnGhost>
+                  <button className="ad-btn-primary" data-testid="catalog-save" onClick={() => { void save() }} disabled={busy}>
+                    {busy ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <Spinner size={13} /> Saving…
+                      </span>
+                    ) : 'Save'}
+                  </button>
+                </div>
+              </>
+            )}
+            {picker && <AddAutomationPicker onPick={addAutomation} onClose={() => setPicker(false)} />}
+            {confirm && (
+              <ConfirmModal
+                title="Discard your catalog edits?"
+                body="The changes you made to this catalog will be lost."
+                confirmLabel="Discard"
+                danger
+                onConfirm={() => { setConfirm(false); pending.current = 'discard'; close() }}
+                onCancel={() => setConfirm(false)}
+              />
+            )}
+          </div>
+        )
+      }}
+    </Modal>
+  )
+}
+
 export default function MarketplacePage() {
   // Per-field selectors (UI-GUIDE): a bare useStore() re-renders this page on
   // every store write anywhere - every toast, every log line of every execution.
@@ -222,6 +478,9 @@ export default function MarketplacePage() {
   const [refreshingAll, setRefreshingAll] = useState(false)
   const [refreshing, setRefreshing] = useState<string | null>(null)
   const [removing, setRemoving] = useState<MarketplaceSource | null>(null)
+  // §22.7: the source the catalog editor is open on, and the create flow.
+  const [editing, setEditing] = useState<MarketplaceSource | null>(null)
+  const [creating, setCreating] = useState(false)
   const [installing, setInstalling] = useState<string | null>(null)
   // §22.3 install: the parked preview the import modal opens on.
   const [install, setInstall] = useState<
@@ -279,6 +538,25 @@ export default function MarketplacePage() {
     } catch (e) { showToast((e as Error).message) }
   }
 
+  // §22.7 create: the native folder picker, then the catalog written and
+  // added by the backend, then the editor on the new source.
+  const newCatalog = async () => {
+    if (creating) return
+    let folder: string | null | undefined
+    try {
+      folder = await window.autowright?.pickFolder()
+    } catch (e) { showToast((e as Error).message); return }
+    if (!folder) return
+    setCreating(true)
+    try {
+      const source = await api.marketplaceCatalogCreate(folder)
+      await load()
+      showToast(`Created ${source.name}.`)
+      setEditing(source)
+    } catch (e) { showToast((e as Error).message) }
+    setCreating(false)
+  }
+
   const startInstall = async (source: MarketplaceSource, entry: MarketplaceEntry) => {
     if (installing) return
     setInstalling(`${source.id}:${entry.index}`)
@@ -305,12 +583,22 @@ export default function MarketplacePage() {
       {label}
     </button>
   )
+  const newButton = (
+    <button className="ad-btn-ghost" data-testid="marketplace-new" onClick={() => { void newCatalog() }} disabled={creating}>
+      {creating ? (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <Spinner size={13} /> Creating…
+        </span>
+      ) : 'New catalog…'}
+    </button>
+  )
 
   return (
     <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '26px 30px 70px' }}>
       <PageTitle
         right={(
           <HeaderActions>
+            {newButton}
             {/* §22.3: only a source whose catalog declares a url can refresh. */}
             {sources && sources.some((s) => s.url) && (
               <button
@@ -350,8 +638,9 @@ export default function MarketplacePage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 28 }}>
             <Eyebrow>MAKE YOUR OWN</Eyebrow>
             <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
-              A marketplace catalog is a YAML file that lists .autowright archives. Save it as marketplace-catalog.yaml next to the archives it points to, then add it here. Put the link you publish it at in <code>url</code> so Refresh can fetch what you add later.
+              Create a catalog here: pick a folder, add automations, and share the folder or publish it at a link. Or write the YAML by hand - list each archive by its full path on this {copy.machine} or an https link, save it as marketplace-catalog.yaml, then add it here. Put the link you publish it at in <code>url</code> so Refresh can fetch what you add later.
             </p>
+            <div>{newButton}</div>
             <div className="ad-card" style={{ padding: 14, overflow: 'hidden' }}>
               <pre style={{
                 margin: 0, font: `400 12px/1.7 var(--mono)`, color: 'var(--text-2)',
@@ -390,6 +679,17 @@ export default function MarketplacePage() {
                     </span>
                   )}
                 </div>
+                {s.kind === 'file' && (
+                  // §22.7: the catalog is on this machine, so it can be edited.
+                  <button
+                    className="ad-btn-ghost icon"
+                    onClick={() => setEditing(s)}
+                    title="Edit catalog"
+                    aria-label="Edit catalog"
+                  >
+                    <i className="fa-solid fa-pen" style={{ fontSize: 10 }} />
+                  </button>
+                )}
                 {s.url && (
                   <button
                     className="ad-btn-ghost icon"
@@ -484,6 +784,17 @@ export default function MarketplacePage() {
             setAddOpen(false)
             void load()
             showToast(`Added ${source.name}.`)
+          }}
+        />
+      )}
+      {editing && (
+        <CatalogEditorModal
+          source={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(source) => {
+            setEditing(null)
+            void load()
+            showToast(`Saved ${source.name}.`)
           }}
         />
       )}

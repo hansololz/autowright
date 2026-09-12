@@ -410,6 +410,40 @@ export interface MarketplaceSource {
   entries: MarketplaceEntry[]
 }
 
+// §22.7 catalog authoring - the catalog file on disk as written, references
+// unresolved, and the save body's entry rows (exactly one of path /
+// automationId / archiveFile each).
+export interface MarketplaceCatalogEntry {
+  index: number
+  title: string
+  description: string
+  path: string
+  image: string
+}
+
+export interface MarketplaceCatalog {
+  name: string
+  description: string
+  url: string | null
+  entries: MarketplaceCatalogEntry[]
+}
+
+export interface MarketplaceCatalogSaveEntry {
+  title: string
+  description: string
+  path?: string
+  image?: string
+  automationId?: string
+  archiveFile?: string
+}
+
+export interface MarketplaceCatalogSave {
+  name: string
+  description: string
+  url: string
+  entries: MarketplaceCatalogSaveEntry[]
+}
+
 export interface Settings {
   login: boolean
   menuBarIcon: boolean

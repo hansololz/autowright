@@ -2428,21 +2428,25 @@ SOURCES = [
 
 class _MarketClient:
     """§22.5 routing stub: the sources listing answers every GET (deep-copied,
-    so a command that mutates a record can't leak across tests); writes are
-    recorded and answered from a per-path table."""
+    so a command that mutates a record can't leak across tests), and the §22.7
+    authoring verbs read theirs from `gets`; writes are recorded and answered
+    from a per-path table."""
 
     base = "http://127.0.0.1:5151"
 
-    def __init__(self, sources=(), writes=None):
+    def __init__(self, sources=(), writes=None, gets=None):
         self.sources = [copy.deepcopy(s) for s in sources]
         self.writes = writes or {}
+        self.gets = gets or {}
         self.calls = []
         self.timeouts = []  # (method, path, timeout) per write, parallel to calls
 
     def req(self, method, path, body=None, timeout=30):
         if method == "GET":
-            assert path == "/marketplace", f"unexpected GET {path}"
-            return {"sources": copy.deepcopy(self.sources)}
+            if path == "/marketplace":
+                return {"sources": copy.deepcopy(self.sources)}
+            assert path in self.gets, f"unexpected GET {path}"
+            return copy.deepcopy(self.gets[path])
         self.calls.append((method, path, body))
         self.timeouts.append((method, path, timeout))
         assert path in self.writes, f"unexpected {method} {path}"
@@ -2639,6 +2643,139 @@ def test_find_source_ambiguity_and_no_match_exit_with_the_candidates():
     with pytest.raises(SystemExit) as ei:
         find_source(_MarketClient([]), "nope")
     assert "(none)" in str(ei.value.code)
+
+
+# ---------------------------------------------------------------- catalog authoring (§22.7)
+
+CATALOG_PATH = "/marketplace/sources/m2222222-b/catalog"
+
+# The §22.7 GET: the catalog file on disk, its references as written.
+CATALOG = {"name": "Mine", "description": "What I share.", "url": None,
+           "entries": [
+               {"index": 0, "title": "Daily Report", "description": "Reports daily",
+                "path": "Daily Report.autowright", "image": "images/report.png"},
+               {"index": 1, "title": "Backup", "description": "",
+                "path": "Backup.autowright", "image": ""}]}
+
+# The entries above as the PUT takes them back - the reference and the image
+# kept exactly as written.
+CATALOG_SENT = [
+    {"title": "Daily Report", "description": "Reports daily", "path": "Daily Report.autowright",
+     "image": "images/report.png"},
+    {"title": "Backup", "description": "", "path": "Backup.autowright"},
+]
+
+
+def test_cmd_marketplace_create_makes_the_folder_absolute(tmp_path, monkeypatch, capsys):
+    """§22.5: the folder is made absolute against the current directory, and
+    the line names the catalog the backend wrote."""
+    monkeypatch.chdir(tmp_path)
+    c = _MarketClient(writes={"/marketplace/catalogs": {
+        "id": "m5555555-e", "name": "my-marketplace",
+        "origin": "/x/my-marketplace/marketplace-catalog.yaml"}})
+    _run(c, "marketplace", "create", "my-marketplace")
+    assert c.calls == [("POST", "/marketplace/catalogs",
+                        {"folder": os.path.join(os.getcwd(), "my-marketplace")})]
+    # §20 HTTP timeouts: create reads the catalog back and builds its cache
+    assert c.timeouts == [("POST", "/marketplace/catalogs", 600)]
+    assert ("created my-marketplace [m5555555] at "
+            "/x/my-marketplace/marketplace-catalog.yaml" in capsys.readouterr().out)
+
+
+def test_cmd_marketplace_catalog_set_refuses_a_key_that_isnt_one_of_the_three():
+    """§22.5: `catalog set` takes name=, description=, and url= - any other key
+    exits naming them, and nothing is written."""
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG})
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "catalog", "set", "Mine", "entries=3")
+    assert str(ei.value.code) == "unknown catalog key 'entries' - have: name, description, url"
+    assert c.calls == []
+
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "catalog", "set", "Mine", "name")
+    assert str(ei.value.code) == "expected KEY=VALUE, got 'name'"
+
+
+def test_cmd_marketplace_catalog_set_clears_the_url_and_keeps_the_entries(capsys):
+    """§22.7: the save takes the whole catalog, so the fields left alone and
+    every entry ride along as written; an empty value clears its key."""
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG},
+                      writes={CATALOG_PATH: {"id": "m2222222-b", "name": "My automations"}})
+    _run(c, "marketplace", "catalog", "set", "Mine",
+         "name=My automations", "url=")
+    assert c.calls == [("PUT", CATALOG_PATH, {
+        "name": "My automations", "description": "What I share.", "url": "",
+        "entries": CATALOG_SENT})]
+    assert c.timeouts == [("PUT", CATALOG_PATH, 600)]
+    assert "saved My automations" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_catalog_add_names_an_automation_by_id(capsys):
+    """§22.7: an automation in this app is exported on save, so its entry
+    carries `automationId`; the title and description default to the record's
+    and `--title` overrides."""
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG,
+                                     "/automations": [dict(FULL_AUTO)]},
+                      writes={CATALOG_PATH: {"id": "m2222222-b", "name": "Mine"}})
+    _run(c, "marketplace", "catalog", "add", "Mine", "Daily Report")
+    assert c.calls == [("PUT", CATALOG_PATH, {
+        "name": "Mine", "description": "What I share.", "url": "",
+        "entries": CATALOG_SENT + [{"automationId": FULL_AUTO["id"],
+                                    "title": "Daily Report",
+                                    "description": "Reports daily"}]})]
+    assert "added Daily Report to Mine - entry 3" in capsys.readouterr().out
+
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG,
+                                     "/automations": [dict(FULL_AUTO)]},
+                      writes={CATALOG_PATH: {"id": "m2222222-b", "name": "Mine"}})
+    _run(c, "marketplace", "catalog", "add", "Mine", "abc12345",  # id prefix resolves
+         "--title", "Morning report", "--description", "Every morning at 8.")
+    assert c.calls[0][2]["entries"][-1] == {"automationId": FULL_AUTO["id"],
+                                            "title": "Morning report",
+                                            "description": "Every morning at 8."}
+    assert "added Morning report to Mine - entry 3" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_catalog_add_takes_an_archive_file(tmp_path, monkeypatch, capsys):
+    """§22.5: an argument that ends in .autowright and names an existing file
+    is the archive itself, made absolute, with the file's stem as the title."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Report.autowright").write_bytes(b"zip")
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG},
+                      writes={CATALOG_PATH: {"id": "m2222222-b", "name": "Mine"}})
+    _run(c, "marketplace", "catalog", "add", "Mine", "Report.autowright")
+    assert c.calls[0][2]["entries"][-1] == {
+        "archiveFile": str(tmp_path / "Report.autowright"),
+        "title": "Report", "description": ""}
+    assert "added Report to Mine - entry 3" in capsys.readouterr().out
+
+
+def test_cmd_marketplace_catalog_remove_checks_the_number_first():
+    """§22.5: a number out of range exits like `install` does, and nothing is
+    written."""
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG})
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "catalog", "remove", "Mine", "0")
+    assert str(ei.value.code) == \
+        "entry numbers start at 1 - see `autowright marketplace list`"
+
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "catalog", "remove", "Mine", "3")
+    assert str(ei.value.code) == "'Mine' lists 2 automation(s) - there is no entry 3"
+    assert c.calls == []
+
+
+def test_cmd_marketplace_catalog_remove_drops_the_entry_and_keeps_its_file(capsys):
+    """§22.7: the save is the catalog without that entry, and the line says the
+    archive beside the catalog stays."""
+    c = _MarketClient(SOURCES, gets={CATALOG_PATH: CATALOG},
+                      writes={CATALOG_PATH: {"id": "m2222222-b", "name": "Mine"}})
+    _run(c, "marketplace", "catalog", "remove", "Mine", "1")
+    assert c.calls == [("PUT", CATALOG_PATH, {
+        "name": "Mine", "description": "What I share.", "url": "",
+        "entries": CATALOG_SENT[1:]})]
+    assert ("removed entry 1 (Daily Report) from Mine - its archive file stays"
+            in capsys.readouterr().out)
 
 
 def test_cmd_settings_show_and_set(capsys):

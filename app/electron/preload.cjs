@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('autowright', {
   // §22.3 add marketplace: pick a catalog file - only its path travels, the
   // backend reads the file itself.
   openCatalog: () => ipcRenderer.invoke('open-catalog'),
+  // §22.7 catalog editor: pick an .autowright file - path only, the backend
+  // copies it.
+  openArchivePath: () => ipcRenderer.invoke('open-archive-path'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   // §9.5 report modal: OS details for the info block
   platformInfo: () => ipcRenderer.invoke('platform-info'),
