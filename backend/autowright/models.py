@@ -244,12 +244,6 @@ class MarketplaceAdd(BaseModel):
     path: StrictStr | None = None
 
 
-class MarketplaceCatalogCreate(BaseModel):
-    """POST /marketplace/catalogs (§22.7): the folder to create the catalog in."""
-
-    folder: StrictStr
-
-
 class MarketplaceCatalogEntry(BaseModel):
     """One §22.7 editor row: exactly one of `path` (kept as written),
     `automationId` (exported on save), or `archiveFile` (copied on save) - the
@@ -270,6 +264,13 @@ class MarketplaceCatalogSave(BaseModel):
     description: StrictStr = ""
     url: StrictStr = ""
     entries: list[MarketplaceCatalogEntry] = Field(default_factory=list)
+
+
+class MarketplaceCatalogCreate(MarketplaceCatalogSave):
+    """POST /marketplace/catalogs (§22.7): the folder to create the catalog in,
+    plus the same content a save carries (all optional - the CLI sends none)."""
+
+    folder: StrictStr
 
 
 class AgentAdd(BaseModel):

@@ -264,15 +264,22 @@ function AddAutomationPicker({ onPick, onClose }: {
   )
 }
 
-/** §22.7 catalog editor: opens on the catalog file as written (GET), edits
- * the fields and the entry rows, and PUTs them whole on Save. */
+const EMPTY_LOADED = { name: '', description: '', url: '', rows: [] as EditorRow[] }
+
+/** §22.7 catalog editor. Edit mode opens on the catalog file as written (GET)
+ * and PUTs it whole on Save; create mode opens empty with a SAVE LOCATION
+ * chooser and POSTs the folder plus the content on Create. */
 function CatalogEditorModal({ source, onClose, onSaved }: {
-  source: MarketplaceSource
+  /** the source to edit, or null to create a new catalog */
+  source: MarketplaceSource | null
   onClose: () => void
   onSaved: (source: MarketplaceSource) => void
 }) {
   const showToast = useStore((s) => s.showToast)
-  const [loaded, setLoaded] = useState<{ name: string; description: string; url: string; rows: EditorRow[] } | null>(null)
+  const creating = source === null
+  const [loaded, setLoaded] = useState<{ name: string; description: string; url: string; rows: EditorRow[] } | null>(
+    creating ? EMPTY_LOADED : null)
+  const [folder, setFolder] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [url, setUrl] = useState('')
@@ -282,9 +289,10 @@ function CatalogEditorModal({ source, onClose, onSaved }: {
   const [error, setError] = useState<string | null>(null)
   const [confirm, setConfirm] = useState(false)
   const nextKey = useRef(1)
-  const folderName = source.origin.split(/[\\/]/).slice(-2, -1)[0] || ''
+  const folderName = (source ? source.origin.split(/[\\/]/).slice(-2, -1)[0] : folder?.split(/[\\/]/).pop()) || ''
 
   useEffect(() => {
+    if (!source) return
     let gone = false
     void (async () => {
       try {
@@ -305,10 +313,11 @@ function CatalogEditorModal({ source, onClose, onSaved }: {
       }
     })()
     return () => { gone = true }
-  }, [source.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [source?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const dirty = loaded !== null && (
-    name !== loaded.name || description !== loaded.description || url !== loaded.url
+    folder !== null
+    || name !== loaded.name || description !== loaded.description || url !== loaded.url
     || rows.length !== loaded.rows.length
     || rows.some((r, i) => r !== loaded.rows[i] || r.title !== loaded.rows[i].title || r.description !== loaded.rows[i].description)
   )
@@ -320,6 +329,18 @@ function CatalogEditorModal({ source, onClose, onSaved }: {
 
   const update = (key: number, patch: Partial<EditorRow>) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
+  // §22.7 create: the native folder picker; the folder's name fills NAME
+  // while it is still empty.
+  const chooseFolder = async () => {
+    let picked: string | null | undefined
+    try {
+      picked = await window.autowright?.pickFolder()
+    } catch (e) { setError((e as Error).message); return }
+    if (!picked) return
+    setFolder(picked)
+    setError(null)
+    if (!name.trim()) setName(picked.split(/[\\/]/).filter(Boolean).pop() || '')
+  }
   const addAutomation = (a: { id: string; name: string; description: string }) =>
     setRows((prev) => [...prev, { key: nextKey.current++, title: a.name, description: a.description, automationId: a.id }])
   const chooseFile = async () => {
@@ -335,13 +356,16 @@ function CatalogEditorModal({ source, onClose, onSaved }: {
   }
   const save = async () => {
     if (busy || !loaded) return
+    if (creating && !folder) return
     setBusy(true); setError(null)
     try {
       const body = {
         name, description, url,
         entries: rows.map(({ key: _key, ...rest }) => rest),
       }
-      saved.current = await api.marketplaceCatalogSave(source.id, body)
+      saved.current = source
+        ? await api.marketplaceCatalogSave(source.id, body)
+        : await api.marketplaceCatalogCreate({ folder: folder!, ...body })
       pending.current = 'save'
       closeRef.current()
     } catch (e) {
@@ -360,18 +384,46 @@ function CatalogEditorModal({ source, onClose, onSaved }: {
   return (
     <Modal
       onClose={() => (pending.current === 'save' && saved.current ? onSaved(saved.current) : onClose())}
-      width={640} ariaLabel="Edit catalog" guardClose={guardClose}
+      width={640} ariaLabel={creating ? 'Create catalog' : 'Edit catalog'} guardClose={guardClose}
     >
       {(close) => {
         closeRef.current = close
         return (
           <div data-testid="catalog-editor">
-            <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Edit catalog</h2>
-            <p style={{ margin: '6px 0 0', font: '400 12px var(--mono)', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {source.origin}
-            </p>
+            <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>
+              {creating ? 'Create catalog' : 'Edit catalog'}
+            </h2>
+            {source && (
+              <p style={{ margin: '6px 0 0', font: '400 12px var(--mono)', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {source.origin}
+              </p>
+            )}
             {loaded === null ? <PageLoading /> : (
               <>
+                {creating && (
+                  <>
+                    <Eyebrow style={{ margin: '18px 0 6px' }}>SAVE LOCATION</Eyebrow>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span
+                        data-testid="catalog-folder"
+                        style={{
+                          flex: 1, minWidth: 0, font: '400 12px var(--mono)', color: folder ? 'var(--text)' : 'var(--text-muted)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {folder ?? 'No folder chosen yet'}
+                      </span>
+                      <button className="ad-btn-dashed" data-testid="catalog-choose-folder" onClick={() => { void chooseFolder() }}
+                        style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 9 }}>
+                        <i className="fa-solid fa-folder-open" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
+                        Choose folder…
+                      </button>
+                    </div>
+                    <p style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-faint)', margin: '7px 0 0' }}>
+                      The catalog file and the automations you export land here.
+                    </p>
+                  </>
+                )}
                 <Eyebrow style={{ margin: '18px 0 6px' }}>NAME</Eyebrow>
                 <input className="ad-input" value={name} onChange={(e) => setName(e.target.value)}
                   placeholder={folderName} spellCheck={false} data-testid="catalog-name" style={inputStyle} />
@@ -435,12 +487,17 @@ function CatalogEditorModal({ source, onClose, onSaved }: {
                 )}
                 <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 18 }}>
                   <BtnGhost onClick={() => { if (dirtyRef.current) setConfirm(true); else close() }} disabled={busy}>Cancel</BtnGhost>
-                  <button className="ad-btn-primary" data-testid="catalog-save" onClick={() => { void save() }} disabled={busy}>
+                  <button
+                    className="ad-btn-primary"
+                    data-testid="catalog-save"
+                    onClick={() => { void save() }}
+                    disabled={busy || (creating && !folder)}
+                  >
                     {busy ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                        <Spinner size={13} /> Saving…
+                        <Spinner size={13} /> {creating ? 'Creating…' : 'Saving…'}
                       </span>
-                    ) : 'Save'}
+                    ) : creating ? 'Create' : 'Save'}
                   </button>
                 </div>
               </>
@@ -478,9 +535,8 @@ export default function MarketplacePage() {
   const [refreshingAll, setRefreshingAll] = useState(false)
   const [refreshing, setRefreshing] = useState<string | null>(null)
   const [removing, setRemoving] = useState<MarketplaceSource | null>(null)
-  // §22.7: the source the catalog editor is open on, and the create flow.
-  const [editing, setEditing] = useState<MarketplaceSource | null>(null)
-  const [creating, setCreating] = useState(false)
+  // §22.7: the catalog editor - a source to edit, or 'create' for a new one.
+  const [editing, setEditing] = useState<MarketplaceSource | 'create' | null>(null)
   const [installing, setInstalling] = useState<string | null>(null)
   // §22.3 install: the parked preview the import modal opens on.
   const [install, setInstall] = useState<
@@ -538,25 +594,6 @@ export default function MarketplacePage() {
     } catch (e) { showToast((e as Error).message) }
   }
 
-  // §22.7 create: the native folder picker, then the catalog written and
-  // added by the backend, then the editor on the new source.
-  const newCatalog = async () => {
-    if (creating) return
-    let folder: string | null | undefined
-    try {
-      folder = await window.autowright?.pickFolder()
-    } catch (e) { showToast((e as Error).message); return }
-    if (!folder) return
-    setCreating(true)
-    try {
-      const source = await api.marketplaceCatalogCreate(folder)
-      await load()
-      showToast(`Created ${source.name}.`)
-      setEditing(source)
-    } catch (e) { showToast((e as Error).message) }
-    setCreating(false)
-  }
-
   const startInstall = async (source: MarketplaceSource, entry: MarketplaceEntry) => {
     if (installing) return
     setInstalling(`${source.id}:${entry.index}`)
@@ -583,13 +620,10 @@ export default function MarketplacePage() {
       {label}
     </button>
   )
-  const newButton = (
-    <button className="ad-btn-ghost" data-testid="marketplace-new" onClick={() => { void newCatalog() }} disabled={creating}>
-      {creating ? (
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <Spinner size={13} /> Creating…
-        </span>
-      ) : 'New catalog…'}
+  // §22.7 create: the editor opens empty; the folder is chosen inside it.
+  const createButton = (
+    <button className="ad-btn-ghost" data-testid="marketplace-create" onClick={() => setEditing('create')}>
+      Create catalog…
     </button>
   )
 
@@ -598,7 +632,7 @@ export default function MarketplacePage() {
       <PageTitle
         right={(
           <HeaderActions>
-            {newButton}
+            {createButton}
             {/* §22.3: only a source whose catalog declares a url can refresh. */}
             {sources && sources.some((s) => s.url) && (
               <button
@@ -640,7 +674,7 @@ export default function MarketplacePage() {
             <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
               Create a catalog here: pick a folder, add automations, and share the folder or publish it at a link. Or write the YAML by hand - list each archive by its full path on this {copy.machine} or an https link, save it as marketplace-catalog.yaml, then add it here. Put the link you publish it at in <code>url</code> so Refresh can fetch what you add later.
             </p>
-            <div>{newButton}</div>
+            <div>{createButton}</div>
             <div className="ad-card" style={{ padding: 14, overflow: 'hidden' }}>
               <pre style={{
                 margin: 0, font: `400 12px/1.7 var(--mono)`, color: 'var(--text-2)',
@@ -789,12 +823,13 @@ export default function MarketplacePage() {
       )}
       {editing && (
         <CatalogEditorModal
-          source={editing}
+          source={editing === 'create' ? null : editing}
           onClose={() => setEditing(null)}
           onSaved={(source) => {
+            const created = editing === 'create'
             setEditing(null)
             void load()
-            showToast(`Saved ${source.name}.`)
+            showToast(created ? `Created ${source.name}.` : `Saved ${source.name}.`)
           }}
         />
       )}

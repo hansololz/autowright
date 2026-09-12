@@ -305,8 +305,8 @@ export const api = {
       'POST', `/marketplace/sources/${id}/entries/${index}/preview`),
   // §22.7 catalog authoring: create writes an empty catalog into a folder and
   // adds it; read/save work on the catalog file on disk, not the cache.
-  marketplaceCatalogCreate: (folder: string) =>
-    req<import('./types').MarketplaceSource>('POST', '/marketplace/catalogs', { folder }),
+  marketplaceCatalogCreate: (body: { folder: string } & import('./types').MarketplaceCatalogSave) =>
+    req<import('./types').MarketplaceSource>('POST', '/marketplace/catalogs', body),
   marketplaceCatalogRead: (id: string) =>
     req<import('./types').MarketplaceCatalog>('GET', `/marketplace/sources/${id}/catalog`),
   marketplaceCatalogSave: (id: string, body: import('./types').MarketplaceCatalogSave) =>

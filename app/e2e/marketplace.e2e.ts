@@ -3,9 +3,10 @@
 // gated on §4.9 developerMode (turned on through the real Settings toggle), the
 // §22.4 marketplace.changed event brings the added source in without a reload,
 // and Install runs the ordinary §5.2 two-phase import, landing the automation
-// with its triggers off. Then the §22.7 authoring half: New catalog… on a temp
-// folder (the native picker stubbed in the main process), the automation
-// picker, and Save landing the exported archive beside the new catalog.
+// with its triggers off. Then the §22.7 authoring half: Create catalog… opens
+// the editor empty, Choose folder… picks a temp folder (the native picker
+// stubbed in the main process), the automation picker appends an entry, and
+// Create lands the catalog plus the exported archive in that folder.
 import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -117,9 +118,10 @@ describe('marketplace e2e', () => {
     expect(landed.triggers.length).toBe(1)
     expect(landed.triggers.every((t) => t.enabled)).toBe(false)
 
-    // §22.7 authoring: New catalog… opens the native folder picker, which can't
-    // be driven - the main-process dialog answers this test's temp folder
-    // instead. It is empty: the catalog and the archive both land through Save.
+    // §22.7 authoring: Create catalog… opens the editor empty, and Choose
+    // folder… inside it opens the native folder picker, which can't be driven -
+    // the main-process dialog answers this test's temp folder instead. The
+    // folder is empty: the catalog and the archive both land through Create.
     const authored = path.join(backend.home, 'authored')
     await mkdir(authored, { recursive: true })
     await handle.app.evaluate(({ dialog }, folder) => {
@@ -127,8 +129,11 @@ describe('marketplace e2e', () => {
     }, authored)
 
     await clickNav(page, 'Marketplace')
-    await page.getByTestId('marketplace-new').click()
+    await page.getByTestId('marketplace-create').click()
     await page.getByTestId('catalog-editor').waitFor({ timeout: 20_000 })
+    await page.getByTestId('catalog-choose-folder').click()
+    await waitFor(async () => (await page.getByTestId('catalog-folder').textContent()) === authored,
+      10_000, 'the chosen folder to show as the save location')
     await page.getByTestId('catalog-add-automation').click()
     // Both automations are here by now (the import landed "Watcher 2") - the
     // seeded one is the row whose title is exactly "Watcher".
@@ -141,6 +146,8 @@ describe('marketplace e2e', () => {
     await page.getByTestId('catalog-picker-search').waitFor({ state: 'detached', timeout: 10_000 })
     await shot(page, 'marketplace-editor.png')
 
+    // §22.7 create: the primary button reads Create and POSTs the folder with
+    // the editor's content.
     await page.getByTestId('catalog-save').click()
     await waitFor(async () => (await page.getByTestId('marketplace-source').count()) === 2,
       20_000, 'the authored catalog to land as a second source')

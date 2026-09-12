@@ -146,7 +146,7 @@ rail, rendered only while `settings.developerMode` is true; it carries no count 
 in the app shell calls `go('automations')` - the same shape as the §9.3 overlay closing
 itself when the setting drops.
 
-**Page.** Title "Marketplace" with header actions: a ghost **New catalog…** (§22.7; always
+**Page.** Title "Marketplace" with header actions: a ghost **Create catalog…** (§22.7; always
 rendered), a ghost **Refresh all** (rendered only when at least one source is refreshable,
 i.e. carries a `url`; the §9 busy spinner while running) and the accent **Add
 marketplace…** button. The page fetches §19 `GET /marketplace` on mount and after each of
@@ -161,7 +161,7 @@ marketplace…" button. Below it, one **MAKE YOUR OWN** section: the eyebrow, on
 "Create a catalog here: pick a folder, add automations, and share the folder or publish
 it at a link. Or write the YAML by hand - list each archive by its full path on this Mac
 or an https link, save it as marketplace-catalog.yaml, then add it here. Put the link you
-publish it at in `url` so Refresh can fetch what you add later.", a ghost **New catalog…**
+publish it at in `url` so Refresh can fetch what you add later.", a ghost **Create catalog…**
 button (the §22.7 create
 flow), and the §22.1 example catalog in a mono code box
 (`.ad-card` padding 14, `pre` at 12 px `--mono`, selectable, horizontal scroll inside the
@@ -252,10 +252,14 @@ preview exists, `cached` whether a readable cached catalog exists (false only fo
   for a local path), fully validated, and parked under a §5.2 token; `preview.sourceUrl` and `preview.resolvedUrl`
   both carry the resolved archive reference. Any failure answers 422; the confirm is the
   ordinary `POST /automations/import/confirm`.
-- `POST /marketplace/catalogs` `{ folder }` → `Source` (§22.7 create): `folder` must be an
-  absolute path to an existing directory (422 otherwise); a folder already holding
-  `marketplace-catalog.yaml` → 409 "that folder already holds a marketplace catalog - add
-  it instead". Writes the empty catalog and adds it as a file source.
+- `POST /marketplace/catalogs` `{ folder, name, description, url, entries }` → `Source`
+  (§22.7 create): `folder` must be an absolute path to an existing directory (422
+  otherwise); a folder already holding `marketplace-catalog.yaml` → 409 "that folder
+  already holds a marketplace catalog - add it instead"; a folder whose catalog path is
+  already a source → 409 "that marketplace is already added". The content fields are the
+  `PUT …/catalog` body and go through the same §22.7 save steps (422 with the reason and
+  nothing written on any failure); then the file is added as a source. Content may be
+  omitted (the §22.5 CLI `create` sends none): an empty catalog named after the folder.
 - `GET /marketplace/sources/{id}/catalog` → `{ name, description, url, entries: [{ index,
   title, description, path, image }] }` (§22.7): the catalog **file on disk**, references
   as written. 404 unknown id; 409 "only a catalog on this machine can be edited" for a
@@ -268,7 +272,7 @@ preview exists, `cached` whether a readable cached catalog exists (false only fo
 
 Request models (§19 `models.py`): `MarketplaceAdd { url?: str, path?: str }` with the
 exactly-one rule validated in the route (422 "give a link or a file path, not both" / "give
-a link or a file path"); `MarketplaceCatalogCreate { folder: str }`;
+a link or a file path"); `MarketplaceCatalogCreate { folder: str } + the save fields`;
 `MarketplaceCatalogSave { name: str, description: str, url: str, entries:
 [MarketplaceCatalogEntry { title, description, path?, image?, automationId?, archiveFile? }] }`
 with the §22.7 exactly-one rule per entry validated in the store.
@@ -336,21 +340,26 @@ stays`; a number out of range exits 1 like `install`.
   name gets ` 2`), validates and references an archive file in place (a non-archive is a
   422 naming the entry; nothing is copied), keeps a `path` entry and its `image` as
   written, rewrites the file with the §22.1 keys only, rebuilds the cache, writes nothing
-  on a 422, and leaves the archive file behind when its entry is removed.
+  on a 422, and leaves the archive file behind when its entry is removed; create takes
+  the same content and writes it into a fresh folder, refusing a taken folder before
+  writing anything.
 - Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): the nav
   row hidden while `developerMode` is false and shown when true, the redirect to Automations
   when the setting drops mid-page, the empty state with the example catalog, a source with
   entries rendering its grid, the Refresh button and Refresh all present only for a source
   with a `url`, Install opening the import modal on the preview step, the add modal's
   inline 422, the Edit button only on a `file` source, the editor opening on the served
-  catalog, the picker appending a row, Save sending the §22.7 body, and the discard confirm
-  on Escape with unsaved edits.
+  catalog, the picker appending a row, Save sending the §22.7 body, the discard confirm
+  on Escape with unsaved edits, and Create catalog… opening the empty editor whose Create
+  button stays disabled until Choose folder… picks a location and then POSTs the folder
+  with the content.
 - e2e: one drive with a file-based source under the test data root (a catalog plus one
   archive exported in the same test), asserting the page lists it and Install lands the
   automation with its triggers off; then, with the native folder dialog stubbed to a temp
-  folder, **New catalog…** opens the editor, **Add automation…** picks the seeded
-  automation, Save lands the exported archive beside the new catalog (listed by its
-  absolute path), and the new section lists one entry.
+  folder, **Create catalog…** opens the editor, **Choose folder…** picks the location,
+  **Add automation…** picks the seeded automation, Save lands the catalog and the exported
+  archive in that folder (listed by its absolute path), and the new section lists one
+  entry.
 
 ### 22.7 Catalog authoring
 
@@ -361,12 +370,19 @@ user picks from elsewhere are listed where they are. The app creates the folder'
 catalog, adds it as an ordinary `file` source (§22.2), and edits it in place. Nothing
 here is special at read time: an authored catalog is a §22.1 catalog like any other.
 
-**Create.** **New catalog…** (page header, and the empty state's MAKE YOUR OWN section)
-opens the native folder picker (the §3 `pick-folder` IPC; null cancels). The page POSTs
-`/marketplace/catalogs { folder }`: the backend refuses a folder that already holds a
-`marketplace-catalog.yaml` (409 - the user should **Add** it instead) and otherwise writes
-`format_version: 1`, `name: <folder name>`, `entries: []` and adds the file as a source.
-Success refetches, toasts "Created <name>.", and opens the editor on the new source.
+**Create.** **Create catalog…** (page header, and the empty state's MAKE YOUR OWN
+section) opens the **catalog editor** modal (below) empty, in create mode: title "Create
+catalog", and above the fields a SAVE LOCATION section - the chosen folder's path (mono,
+muted; "No folder chosen yet" until one is) beside a dashed **Choose folder…** button
+that opens the native folder picker (the §3 `pick-folder` IPC; null cancels), with the
+caption "The catalog file and the automations you export land here.". Choosing a folder
+fills NAME with the folder's name when NAME is still empty. **Save** (labelled
+**Create**, "Creating…" while busy) is disabled until a folder is chosen; it POSTs
+`/marketplace/catalogs` with the folder and the editor's content - the backend refuses a
+folder that already holds a `marketplace-catalog.yaml` (409 - the user should **Add** it
+instead), otherwise writes the catalog and the exported archives there through the
+§22.7 save steps and adds the file as a source. Success refetches, closes, and toasts
+"Created <name>.". A 422 or 409 shows inline like a save's.
 
 **Edit.** The **Edit** button on a `file` source opens the **catalog editor** modal
 (width 640) on `GET …/catalog`, which reads the file on disk (the truth for editing),

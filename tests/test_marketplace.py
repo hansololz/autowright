@@ -773,6 +773,53 @@ def test_create_refuses_a_taken_folder_and_a_bad_path(market, tmp_path):
         market.create_catalog("")
 
 
+def test_create_writes_the_editors_content(market, tmp_path):
+    """§22.7: the create body is a save's - the exported archive lands beside
+    the catalog, listed by its absolute path, and the added source shows it."""
+    folder = tmp_path / "shelf"
+    folder.mkdir()
+    calls: list = []
+    source = market.create_catalog(str(folder), {
+        "name": "Shelf", "description": "What I run.", "url": CATALOG_URL,
+        "entries": [{"title": "First", "description": "Runs daily",
+                     "automationId": "a1"}]},
+        _exporter({"a1": ("Daily/Report", b"archive-bytes")}, calls))
+    assert calls == ["a1"]
+    archive = folder / "Daily Report.autowright"
+    assert archive.read_bytes() == b"archive-bytes"
+    written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
+    assert written["name"] == "Shelf" and written["description"] == "What I run."
+    assert written["url"] == CATALOG_URL
+    assert written["entries"] == [{"title": "First", "description": "Runs daily",
+                                   "path": str(archive)}]
+    assert source["kind"] == "file" and source["name"] == "Shelf"
+    assert source["origin"] == str(folder / marketplace.CATALOG_FILENAME)
+    assert source["entries"] == [{"index": 0, "title": "First", "description": "Runs daily",
+                                  "archive": str(archive), "image": False}]
+
+
+def test_create_writes_nothing_when_an_entry_fails(market, tmp_path):
+    """§22.7: the same check-everything-first rule a save runs - a folder that
+    failed holds neither a catalog nor an export, and no source was added."""
+    folder = tmp_path / "shelf"
+    folder.mkdir()
+
+    def create(entries):
+        return market.create_catalog(str(folder), {
+            "name": "Shelf", "description": "", "url": "", "entries": entries},
+            _exporter({"a1": ("Fine", b"archive-bytes")}))
+
+    with pytest.raises(MarketplaceError) as e:
+        create([{"title": "Fine", "description": "", "automationId": "a1"},
+                {"title": "Gone", "description": "", "automationId": "deleted"}])
+    assert str(e.value) == "entry 1: no automation has that id"
+    with pytest.raises(MarketplaceError) as e:
+        create([{"title": "  ", "description": "", "automationId": "a1"}])
+    assert str(e.value) == "entry 0: it has no title"
+    assert list(folder.iterdir()) == []
+    assert market.sources == []
+
+
 def test_read_catalog_answers_the_file_as_written(market, tmp_path, monkeypatch):
     """§22.7 GET: the file on disk, references unresolved - a `url` source has
     no file on this machine to edit."""
@@ -1012,6 +1059,42 @@ def test_catalog_create_route(client, tmp_path):
     assert client.post("/marketplace/catalogs",
                        json={"folder": "shelves/mine"}).status_code == 422
     assert client.post("/marketplace/catalogs", json={}).status_code == 422
+
+
+def test_catalog_create_route_takes_the_editors_content(client, tmp_path):
+    """§22.7: the create body carries the same content a save does - the
+    automation is exported into the folder, and a taken folder is the 409
+    before anything else is written there."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), name="Watcher", agent_id="mock")
+    store.patch_automation(a, {"paramValues": {"greeting": "super-secret-value"}})
+    folder = tmp_path / "shelf"
+    folder.mkdir()
+
+    body = {"folder": str(folder), "name": "Shelf", "description": "What I run.",
+            "url": CATALOG_URL,
+            "entries": [{"title": "Watcher", "description": "Watches things",
+                         "automationId": a["id"]}]}
+    r = client.post("/marketplace/catalogs", json=body)
+    assert r.status_code == 200
+    source = r.json()
+    archive = folder / "Watcher.autowright"
+    data = archive.read_bytes()
+    manifest = yaml.safe_load(zipfile.ZipFile(io.BytesIO(data)).read("manifest.yaml"))
+    assert "param_values" not in manifest
+    assert b"super-secret-value" not in data
+    assert source["name"] == "Shelf" and source["url"] == CATALOG_URL
+    assert source["entries"] == [{"index": 0, "title": "Watcher",
+                                  "description": "Watches things",
+                                  "archive": str(archive), "image": False}]
+
+    # §22.4: the folder now holds a catalog - add it instead, and nothing new lands
+    r = client.post("/marketplace/catalogs", json=body)
+    assert r.status_code == 409 and r.json()["detail"] == marketplace.FOLDER_TAKEN
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "Watcher.autowright", marketplace.CATALOG_FILENAME]
+    assert len(client.get("/marketplace").json()["sources"]) == 1
 
 
 def test_catalog_read_route(client, tmp_path, monkeypatch):

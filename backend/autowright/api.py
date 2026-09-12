@@ -2359,12 +2359,25 @@ async def marketplace_add(body: models.MarketplaceAdd) -> dict:
     return source
 
 
+def _marketplace_export(automation_id: str) -> tuple[str, bytes]:
+    """§22.7: an automation in this app as a marketplace archive - for other
+    people, so without parameter values."""
+    with store.lock:
+        a = store.autos.get(automation_id)
+    if a is None:
+        raise KeyError(automation_id)
+    return a["name"], transfer.export_automation(store, a, include_values=False)
+
+
 @app.post("/marketplace/catalogs", dependencies=[Depends(auth)])
 async def marketplace_catalog_create(body: models.MarketplaceCatalogCreate) -> dict:
-    """§22.7 create: the empty catalog written into the folder, then added as
-    a file source. 409 for a folder that already holds one."""
+    """§22.7 create: the editor's content written into the folder through the
+    save steps, then added as a file source. 409 for a folder that already
+    holds one."""
+    content = body.model_dump(exclude={"folder"})
     try:
-        source = await run_in_threadpool(marketplace_store.create_catalog, body.folder)
+        source = await run_in_threadpool(
+            lambda: marketplace_store.create_catalog(body.folder, content, _marketplace_export))
     except marketplace.MarketplaceDuplicate as e:
         raise HTTPException(409, str(e)) from e
     except marketplace.MarketplaceError as e:
@@ -2390,17 +2403,10 @@ def marketplace_catalog_read(source_id: str) -> dict:
 async def marketplace_catalog_save(source_id: str, body: models.MarketplaceCatalogSave) -> dict:
     """§22.7 save: exports and copies land beside the catalog, the file is
     rewritten, the cache rebuilt. Nothing is written on a 422."""
-    def _export(automation_id: str) -> tuple[str, bytes]:
-        with store.lock:
-            a = store.autos.get(automation_id)
-        if a is None:
-            raise KeyError(automation_id)
-        # §22.7: a marketplace archive is for other people - no parameter values.
-        return a["name"], transfer.export_automation(store, a, include_values=False)
-
     try:
         source = await run_in_threadpool(
-            lambda: marketplace_store.save_catalog(source_id, body.model_dump(), _export))
+            lambda: marketplace_store.save_catalog(source_id, body.model_dump(),
+                                                   _marketplace_export))
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
     except marketplace.MarketplaceNotEditable as e:

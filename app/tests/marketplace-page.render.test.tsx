@@ -2,8 +2,8 @@
 // itself (the §4.9 developerMode setting), the empty state's example catalog,
 // a seeded source's grid, Install opening the §9.1 import modal on its preview
 // step, the add modal's inline 422, and the §22.7 authoring flow (the Edit
-// button, the catalog editor, the automation picker, Save's body, and the
-// discard confirm). App renders for real (happy-dom) with the api module
+// button, the catalog editor, the automation picker, Save's body, the discard
+// confirm, and create mode's folder chooser). App renders for real (happy-dom) with the api module
 // mocked, `settings-gating` style.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -46,7 +46,7 @@ vi.mock('../src/api', () => ({
     marketplaceRemove: vi.fn(),
     marketplaceEntryPreview: (id: string, index: number) => marketplaceEntryPreview(id, index),
     marketplaceImage: () => marketplaceImage(),
-    marketplaceCatalogCreate: (folder: string) => marketplaceCatalogCreate(folder),
+    marketplaceCatalogCreate: (body: unknown) => marketplaceCatalogCreate(body),
     marketplaceCatalogRead: (id: string) => marketplaceCatalogRead(id),
     marketplaceCatalogSave: (id: string, body: unknown) => marketplaceCatalogSave(id, body),
   },
@@ -386,25 +386,43 @@ describe('§22.7 catalog authoring', () => {
     expect(marketplaceCatalogSave).not.toHaveBeenCalled()
   })
 
-  it('New catalog… creates in the picked folder and opens the editor on it', async () => {
+  it('Create catalog… opens the empty editor and POSTs the chosen folder', async () => {
     pickFolder.mockResolvedValue('/Users/x/shelf')
     marketplaceCatalogCreate.mockResolvedValue(fileSource({ id: 's9', name: 'shelf' }))
-    marketplaceCatalogRead.mockResolvedValue(catalog({ name: 'shelf', url: null, entries: [] }))
     render(<MarketplacePage />)
-    fireEvent.click(await screen.findByTestId('marketplace-new'))
-    await waitFor(() => expect(marketplaceCatalogCreate).toHaveBeenCalledWith('/Users/x/shelf'))
-    expect(pickFolder).toHaveBeenCalled()
+    fireEvent.click(await screen.findByTestId('marketplace-create'))
+    // §22.7 create mode: no GET, empty fields, and nothing to save into yet.
     expect(await screen.findByTestId('catalog-editor')).toBeTruthy()
-    await waitFor(() => expect(marketplaceCatalogRead).toHaveBeenCalledWith('s9'))
-    expect(await screen.findByText('No automations yet.')).toBeTruthy()
+    expect(screen.getByText('Create catalog')).toBeTruthy()
+    expect(marketplaceCatalogRead).not.toHaveBeenCalled()
+    expect(screen.getByTestId('catalog-folder').textContent).toBe('No folder chosen yet')
+    expect(screen.getByText('No automations yet.')).toBeTruthy()
+    expect((screen.getByTestId('catalog-save') as HTMLButtonElement).disabled).toBe(true)
+    // §22.7: choosing a folder names the catalog after it
+    fireEvent.click(screen.getByTestId('catalog-choose-folder'))
+    await waitFor(() => expect(screen.getByTestId('catalog-folder').textContent)
+      .toBe('/Users/x/shelf'))
+    expect((screen.getByTestId('catalog-name') as HTMLInputElement).value).toBe('shelf')
+    const save = screen.getByTestId('catalog-save') as HTMLButtonElement
+    expect(save.disabled).toBe(false)
+    expect(save.textContent).toBe('Create')
+    fireEvent.click(save)
+    await waitFor(() => expect(marketplaceCatalogCreate).toHaveBeenCalledWith({
+      folder: '/Users/x/shelf', name: 'shelf', description: '', url: '', entries: [],
+    }))
   })
 
-  it('a cancelled folder picker creates nothing', async () => {
+  it('a cancelled folder picker leaves Create disabled and posts nothing', async () => {
     pickFolder.mockResolvedValue(null)
     render(<MarketplacePage />)
-    fireEvent.click(await screen.findByTestId('marketplace-new'))
+    fireEvent.click(await screen.findByTestId('marketplace-create'))
+    fireEvent.click(await screen.findByTestId('catalog-choose-folder'))
     await waitFor(() => expect(pickFolder).toHaveBeenCalled())
+    expect(screen.getByTestId('catalog-folder').textContent).toBe('No folder chosen yet')
+    expect((screen.getByTestId('catalog-name') as HTMLInputElement).value).toBe('')
+    expect((screen.getByTestId('catalog-save') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByTestId('catalog-save'))
     expect(marketplaceCatalogCreate).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('catalog-editor')).toBeNull()
+    expect(screen.getByTestId('catalog-editor')).toBeTruthy()
   })
 })

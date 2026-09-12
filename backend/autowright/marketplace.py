@@ -509,10 +509,12 @@ class MarketplaceStore:
         shutil.rmtree(previous, ignore_errors=True)
 
     # ---------- authoring (§22.7) ----------
-    def create_catalog(self, folder: str) -> dict:
-        """§22.7 create: write the empty catalog into an existing folder and
-        add it as a file source. A folder that already holds one is refused -
-        the user should add it instead."""
+    def create_catalog(self, folder: str, body: dict | None = None, export=None) -> dict:
+        """§22.7 create: write the editor's content (or an empty catalog named
+        after the folder) into an existing folder through the same steps a
+        save runs, then add the file as a source. A folder that already holds
+        a catalog is refused before anything is written - the user should add
+        it instead."""
         target = Path((folder or "").strip())
         if not str(target) or not target.is_absolute():
             raise MarketplaceError("give the folder's absolute path")
@@ -522,11 +524,11 @@ class MarketplaceStore:
         catalog = target / CATALOG_FILENAME
         if catalog.exists():
             raise MarketplaceDuplicate(FOLDER_TAKEN)
-        try:
-            atomic_write_text(catalog, dump_catalog(target.name or "marketplace", "", None, []))
-        except OSError as e:
-            raise MarketplaceError(
-                f"couldn't write the catalog file - {e.strerror or e}") from None
+        with self.lock:
+            if any(s["origin"] == str(catalog) for s in self.sources):
+                raise MarketplaceDuplicate("that marketplace is already added")
+        text, writes = self._prepare_catalog(str(catalog), body or {}, export)
+        self._write_catalog(catalog, text, writes)
         return self.add(path=str(catalog))
 
     def _file_source(self, source_id: str) -> dict:
@@ -551,106 +553,113 @@ class MarketplaceStore:
                              "image": e["image"]} for e in catalog["entries"]]}
 
     def save_catalog(self, source_id: str, body: dict, export) -> dict:
-        """§22.7 save. `export(automation_id)` answers `(name, bytes)` for an
-        automation in this app - the §5.1 export without parameter values - or
-        raises KeyError / transfer.TransferError. An export lands beside the
+        """§22.7 save: the content prepared and written over the source's own
+        catalog file, then the cache rebuilt from it."""
+        with self.lock:
+            source = self._file_source(source_id)
+            text, writes = self._prepare_catalog(source["origin"], body, export)
+            self._write_catalog(Path(source["origin"]), text, writes)
+            self._refresh_cache(source)
+            self._save()
+            return self.serialize(source)
+
+    def _prepare_catalog(self, origin: str, body: dict, export) -> tuple[str, list]:
+        """§22.7 steps 1-4. `export(automation_id)` answers `(name, bytes)` for
+        an automation in this app - the §5.1 export without parameter values -
+        or raises KeyError / transfer.TransferError. An export lands beside the
         catalog and is listed by its absolute path; an `archiveFile` is
         validated and listed where it is. Everything is checked before anything
         is written: fields, every entry's one-of rule, the exports and archive
         files, the planned file names, then the catalog text itself through
-        the §22.1 parser."""
-        with self.lock:
-            source = self._file_source(source_id)
-            origin = source["origin"]
-            folder = Path(origin).parent
-            # 1. the top-level fields
-            top = {"name": body.get("name") or "", "description": body.get("description") or "",
-                   "url": body.get("url") or ""}
-            name = _text(top, "name", "", MAX_NAME) or default_name("file", origin)
-            description = _text(top, "description", "", MAX_DESCRIPTION)
-            url = _text(top, "url", "", MAX_URL) or None
-            if url and not url.lower().startswith("https://"):
-                raise MarketplaceError("`url` must be an https link")
-            # 2. every entry: the one-of rule, then the bytes it brings
-            planned: list[dict] = []          # the yaml entries, in order
-            pending: list[tuple[str, bytes]] = []   # (base name, bytes) to write
-            for index, raw in enumerate(body.get("entries") or []):
-                where = f"entry {index}: "
-                item = {"title": raw.get("title") or "",
-                        "description": raw.get("description") or "",
-                        "image": raw.get("image") or ""}
-                title = _text(item, "title", where, MAX_TITLE)
-                if not title:
-                    raise MarketplaceError(f"{where}it has no title")
-                entry_description = _text(item, "description", where, MAX_ENTRY_DESCRIPTION)
-                image = _text(item, "image", where)
-                given = [k for k in ("path", "automationId", "archiveFile") if raw.get(k)]
-                if len(given) != 1:
-                    raise MarketplaceError(
-                        f"{where}give one of path, automationId, or archiveFile")
-                entry = {"title": title, "description": entry_description, "image": image}
-                if given[0] == "path":
-                    entry["path"] = str(raw["path"]).strip()
-                elif given[0] == "automationId":
-                    try:
-                        auto_name, data = export(str(raw["automationId"]))
-                    except KeyError:
-                        raise MarketplaceError(f"{where}no automation has that id") from None
-                    except transfer.TransferError as e:
-                        raise MarketplaceError(f"{where}{e}") from None
-                    entry["path"] = None
-                    pending.append((transfer.safe_filename(auto_name), data))
-                else:
-                    archive = Path(str(raw["archiveFile"]).strip())
-                    if not archive.is_absolute() or not archive.is_file():
-                        raise MarketplaceError(f"{where}there's no file at {archive}")
-                    if archive.suffix.lower() != ARCHIVE_EXTENSION:
-                        raise MarketplaceError(
-                            f"{where}{archive.name} isn't an {ARCHIVE_EXTENSION} file")
-                    try:
-                        data = archive.read_bytes()
-                    except OSError as e:
-                        raise MarketplaceError(
-                            f"{where}couldn't read {archive.name} - {e.strerror or e}") from None
-                    try:
-                        transfer.validate_archive(data)
-                    except transfer.TransferError as e:
-                        raise MarketplaceError(f"{where}{e}") from None
-                    # §22.7: listed where it is, never copied.
-                    entry["path"] = str(archive)
-                planned.append(entry)
-            # 3. a free file name beside the catalog for every export - never
-            #    overwrite; the entry lists the file by its absolute path
-            taken: set[str] = set()
-            writes: list[tuple[Path, bytes]] = []
-            new = iter(pending)
-            for entry in planned:
-                if entry["path"] is not None:
-                    continue
-                base, data = next(new)
-                candidate = f"{base}{ARCHIVE_EXTENSION}"
-                n = 2
-                while candidate.lower() in taken or (folder / candidate).exists():
-                    candidate = f"{base} {n}{ARCHIVE_EXTENSION}"
-                    n += 1
-                taken.add(candidate.lower())
-                entry["path"] = str(folder / candidate)
-                writes.append((folder / candidate, data))
-            # 4. the text, through the same parser a fetch runs
-            text = dump_catalog(name, description, url, planned)
-            parse_catalog(text, kind="file", origin=origin)
-            # 5. the exports, then the catalog atomically
-            try:
-                for target, data in writes:
-                    target.write_bytes(data)
-                atomic_write_text(Path(origin), text)
-            except OSError as e:
+        the §22.1 parser. Answers the text plus the archive files to write."""
+        folder = Path(origin).parent
+        # 1. the top-level fields
+        top = {"name": body.get("name") or "", "description": body.get("description") or "",
+               "url": body.get("url") or ""}
+        name = _text(top, "name", "", MAX_NAME) or default_name("file", origin)
+        description = _text(top, "description", "", MAX_DESCRIPTION)
+        url = _text(top, "url", "", MAX_URL) or None
+        if url and not url.lower().startswith("https://"):
+            raise MarketplaceError("`url` must be an https link")
+        # 2. every entry: the one-of rule, then the bytes it brings
+        planned: list[dict] = []          # the yaml entries, in order
+        pending: list[tuple[str, bytes]] = []   # (base name, bytes) to write
+        for index, raw in enumerate(body.get("entries") or []):
+            where = f"entry {index}: "
+            item = {"title": raw.get("title") or "",
+                    "description": raw.get("description") or "",
+                    "image": raw.get("image") or ""}
+            title = _text(item, "title", where, MAX_TITLE)
+            if not title:
+                raise MarketplaceError(f"{where}it has no title")
+            entry_description = _text(item, "description", where, MAX_ENTRY_DESCRIPTION)
+            image = _text(item, "image", where)
+            given = [k for k in ("path", "automationId", "archiveFile") if raw.get(k)]
+            if len(given) != 1:
                 raise MarketplaceError(
-                    f"couldn't write into the catalog's folder - {e.strerror or e}") from None
-            # 6. the cache, from the file just written
-            self._refresh_cache(source)
-            self._save()
-            return self.serialize(source)
+                    f"{where}give one of path, automationId, or archiveFile")
+            entry = {"title": title, "description": entry_description, "image": image}
+            if given[0] == "path":
+                entry["path"] = str(raw["path"]).strip()
+            elif given[0] == "automationId":
+                try:
+                    auto_name, data = export(str(raw["automationId"]))
+                except KeyError:
+                    raise MarketplaceError(f"{where}no automation has that id") from None
+                except transfer.TransferError as e:
+                    raise MarketplaceError(f"{where}{e}") from None
+                entry["path"] = None
+                pending.append((transfer.safe_filename(auto_name), data))
+            else:
+                archive = Path(str(raw["archiveFile"]).strip())
+                if not archive.is_absolute() or not archive.is_file():
+                    raise MarketplaceError(f"{where}there's no file at {archive}")
+                if archive.suffix.lower() != ARCHIVE_EXTENSION:
+                    raise MarketplaceError(
+                        f"{where}{archive.name} isn't an {ARCHIVE_EXTENSION} file")
+                try:
+                    data = archive.read_bytes()
+                except OSError as e:
+                    raise MarketplaceError(
+                        f"{where}couldn't read {archive.name} - {e.strerror or e}") from None
+                try:
+                    transfer.validate_archive(data)
+                except transfer.TransferError as e:
+                    raise MarketplaceError(f"{where}{e}") from None
+                # §22.7: listed where it is, never copied.
+                entry["path"] = str(archive)
+            planned.append(entry)
+        # 3. a free file name beside the catalog for every export - never
+        #    overwrite; the entry lists the file by its absolute path
+        taken: set[str] = set()
+        writes: list[tuple[Path, bytes]] = []
+        new = iter(pending)
+        for entry in planned:
+            if entry["path"] is not None:
+                continue
+            base, data = next(new)
+            candidate = f"{base}{ARCHIVE_EXTENSION}"
+            n = 2
+            while candidate.lower() in taken or (folder / candidate).exists():
+                candidate = f"{base} {n}{ARCHIVE_EXTENSION}"
+                n += 1
+            taken.add(candidate.lower())
+            entry["path"] = str(folder / candidate)
+            writes.append((folder / candidate, data))
+        # 4. the text, through the same parser a fetch runs
+        text = dump_catalog(name, description, url, planned)
+        parse_catalog(text, kind="file", origin=origin)
+        return text, writes
+
+    def _write_catalog(self, catalog: Path, text: str, writes: list) -> None:
+        """§22.7 step 5: the exports, then the catalog atomically."""
+        try:
+            for target, data in writes:
+                target.write_bytes(data)
+            atomic_write_text(catalog, text)
+        except OSError as e:
+            raise MarketplaceError(
+                f"couldn't write into the catalog's folder - {e.strerror or e}") from None
 
     # ---------- serialization (§22.4) ----------
     def _cached(self, source: dict) -> dict | None:
