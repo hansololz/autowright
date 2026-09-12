@@ -2649,20 +2649,23 @@ def test_find_source_ambiguity_and_no_match_exit_with_the_candidates():
 
 CATALOG_PATH = "/marketplace/sources/m2222222-b/catalog"
 
-# The §22.7 GET: the catalog file on disk, its references as written.
+# The §22.7 GET: the catalog file on disk, its references as written - §22.1
+# absolute paths, beside the catalog at /Users/x/shared.
 CATALOG = {"name": "Mine", "description": "What I share.", "url": None,
            "entries": [
                {"index": 0, "title": "Daily Report", "description": "Reports daily",
-                "path": "Daily Report.autowright", "image": "images/report.png"},
+                "path": "/Users/x/shared/Daily Report.autowright",
+                "image": "/Users/x/shared/images/report.png"},
                {"index": 1, "title": "Backup", "description": "",
-                "path": "Backup.autowright", "image": ""}]}
+                "path": "/Users/x/shared/Backup.autowright", "image": ""}]}
 
 # The entries above as the PUT takes them back - the reference and the image
 # kept exactly as written.
 CATALOG_SENT = [
-    {"title": "Daily Report", "description": "Reports daily", "path": "Daily Report.autowright",
-     "image": "images/report.png"},
-    {"title": "Backup", "description": "", "path": "Backup.autowright"},
+    {"title": "Daily Report", "description": "Reports daily",
+     "path": "/Users/x/shared/Daily Report.autowright",
+     "image": "/Users/x/shared/images/report.png"},
+    {"title": "Backup", "description": "", "path": "/Users/x/shared/Backup.autowright"},
 ]
 
 

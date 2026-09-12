@@ -120,14 +120,15 @@ const fileSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource =>
   kind: 'file', origin: '/Users/x/shelf/marketplace-catalog.yaml', url: null, ...over,
 })
 
-// §22.7 GET …/catalog: the catalog file as written, references unresolved.
+// §22.7 GET …/catalog: the catalog file as written - §22.1 references, so an
+// absolute path beside the catalog.
 const catalog = (over: Partial<MarketplaceCatalog> = {}): MarketplaceCatalog => ({
   name: 'Community', description: 'Automations I use.',
   url: 'https://example.com/shelf/marketplace-catalog.yaml',
   entries: [{
     index: 0, title: 'Manga chapter watcher',
     description: 'Checks the series you follow every morning at 8.',
-    path: 'automations/manga.autowright', image: '',
+    path: '/Users/x/shelf/automations/manga.autowright', image: '',
   }],
   ...over,
 })
@@ -316,7 +317,7 @@ describe('§22.7 catalog authoring', () => {
     expect(screen.getAllByTestId('catalog-row')).toHaveLength(1)
     expect((screen.getAllByTestId('catalog-row-title')[0] as HTMLInputElement).value)
       .toBe('Manga chapter watcher')
-    expect(screen.getByText('automations/manga.autowright')).toBeTruthy()
+    expect(screen.getByText('/Users/x/shelf/automations/manga.autowright')).toBeTruthy()
   })
 
   it('Add automation… lists this app’s automations, filters, and appends a row', async () => {
@@ -355,7 +356,7 @@ describe('§22.7 catalog authoring', () => {
         {
           title: 'Manga chapter watcher',
           description: 'Checks the series you follow every morning at 8.',
-          path: 'automations/manga.autowright',
+          path: '/Users/x/shelf/automations/manga.autowright',
         },
         { title: 'Watcher', description: 'Checks the feed.', automationId: 'a1' },
       ],

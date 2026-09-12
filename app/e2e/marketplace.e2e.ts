@@ -36,7 +36,8 @@ describe('marketplace e2e', () => {
     const archive = await backend.apiBytes('GET', `/automations/${id}/export?values=0`)
     const shelf = path.join(backend.home, 'shelf')
     await mkdir(shelf, { recursive: true })
-    await writeFile(path.join(shelf, 'watcher.autowright'), archive)
+    const archiveFile = path.join(shelf, 'watcher.autowright')
+    await writeFile(archiveFile, archive)
     const catalog = path.join(shelf, 'marketplace-catalog.yaml')
     await writeFile(catalog, [
       'format_version: 1',
@@ -44,7 +45,8 @@ describe('marketplace e2e', () => {
       'entries:',
       '  - title: "Watcher"',
       '    description: "From the e2e shelf."',
-      '    path: watcher.autowright',
+      // §22.1: a reference is an https link or an absolute path, never relative.
+      `    path: '${archiveFile}'`,
       '',
     ].join('\n'), 'utf-8')
 
