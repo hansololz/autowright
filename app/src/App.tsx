@@ -21,6 +21,14 @@ import SecretsPage from './pages/SecretsPage'
 import SettingsPage from './pages/SettingsPage'
 import WhatsNewModal from './pages/WhatsNewModal'
 
+// §22 visibility - REMINDER (2026-09-12): the marketplace is hidden for
+// everyone for now. It is not polished and its design is not settled; David
+// parked it to deal with later. Flip this to false to restore the §22.3
+// preview gate (the page and its nav row behind the §4.9 developerMode
+// setting). Nothing else is gated by it: the routes, the store, and the CLI
+// group stay live (§2, one code path for every mode).
+export const MARKETPLACE_HIDDEN = true
+
 const NAV: { page: string; label: string; icon: string }[] = [
   { page: 'automations', label: 'Automations', icon: 'fa-bolt' },
   { page: 'executions', label: 'Executions', icon: 'fa-clock-rotate-left' },
@@ -60,6 +68,8 @@ function Sidebar() {
   const updateAvailable = useStore((s) => s.updateAvailable)
   // §22.3 preview gate: the Marketplace row shows only in developer mode.
   const developerMode = useStore((s) => s.settings?.developerMode) ?? false
+  // §22.3: the nav row needs Developer mode AND the feature not parked.
+  const marketplaceShown = developerMode && !MARKETPLACE_HIDDEN
   const platformOs = useStore((s) => s.platformOs)
   const activeRoot = page === 'automation' ? 'automations' : page === 'execution' ? 'executions' : page === 'agentNew' ? 'agents' : page
   const counts: Record<string, number> = {
@@ -91,7 +101,7 @@ function Sidebar() {
           <span className="ad-rail-reveal" style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-.01em', whiteSpace: 'nowrap' }}>Autowright</span>
         </div>
         {[
-          { rows: developerMode ? NAV : NAV.filter((n) => n.page !== 'marketplace'), style: { padding: '0 10px' } },
+          { rows: marketplaceShown ? NAV : NAV.filter((n) => n.page !== 'marketplace'), style: { padding: '0 10px' } },
           { rows: BOTTOM_NAV, style: { padding: '0 10px 12px', marginTop: 'auto' } },
         ].map((group, i) => (
           <nav key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2, ...group.style }}>
@@ -238,9 +248,11 @@ export default function App() {
 
   // §22.3 preview gate: Developer mode turning off (the §4.9 toggle, or a §20
   // `settings set` seen through the store refresh) leaves the Marketplace page
-  // for Automations - the same shape as the §9.3 overlay closing itself.
+  // for Automations - the same shape as the §9.3 overlay closing itself. While
+  // MARKETPLACE_HIDDEN holds, the page is left the same way however it was
+  // reached.
   useEffect(() => {
-    if (page === 'marketplace' && developerMode === false) go('automations')
+    if (page === 'marketplace' && (MARKETPLACE_HIDDEN || developerMode === false)) go('automations')
   }, [page, developerMode])
 
   // §4.9: the shell owns the OS-side settings effects (login item, tray icon,

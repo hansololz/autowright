@@ -319,6 +319,19 @@ export const api = {
     req<import('./types').MarketplaceSource>('PUT', `/marketplace/sources/${id}/catalog`, body),
   // §22.3 preview images ride the authenticated route (a plain <img src> can
   // carry no bearer header), so the page fetches the bytes and shows a blob URL.
+  // §22.4 file route - the copy's bytes for the §22.3 Export (same error
+  // convention as exportAutomation: the API's `detail` reaches the toast).
+  marketplaceCatalogFile: async (id: string): Promise<ArrayBuffer> => {
+    const r = await fetch(`${base}/marketplace/sources/${id}/file`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!r.ok) {
+      let detail = ''
+      try { detail = (await r.json()).detail } catch { /* ignore */ }
+      throw Object.assign(new Error(detail || r.statusText), { status: r.status })
+    }
+    return r.arrayBuffer()
+  },
   marketplaceImage: async (id: string, index: number): Promise<Blob> => {
     const r = await fetch(`${base}/marketplace/sources/${id}/entries/${index}/image`, {
       headers: { Authorization: `Bearer ${token}` },

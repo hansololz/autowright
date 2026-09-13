@@ -2405,6 +2405,22 @@ async def marketplace_catalog_create(body: models.MarketplaceCatalogCreate) -> d
     return source
 
 
+@app.get("/marketplace/sources/{source_id}/file", dependencies=[Depends(auth)])
+def marketplace_catalog_file(source_id: str):
+    """§22.4: the app's copy of the catalog as a file - the §22.3 Export hands
+    it to the native save dialog. 404 unknown; 422 when the copy is unreadable."""
+    from fastapi.responses import Response
+
+    try:
+        data = marketplace_store.file_bytes(source_id)
+    except KeyError:
+        raise HTTPException(404, "marketplace not found") from None
+    except marketplace.MarketplaceError as e:
+        raise HTTPException(422, str(e)) from e
+    return Response(content=data, media_type="application/yaml", headers={
+        "Content-Disposition": f'attachment; filename="{marketplace.CATALOG_FILENAME}"'})
+
+
 @app.get("/marketplace/sources/{source_id}/catalog", dependencies=[Depends(auth)])
 def marketplace_catalog_read(source_id: str) -> dict:
     """§22.7: the catalog as the editor sees it, references as written."""

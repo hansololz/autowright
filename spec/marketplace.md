@@ -11,19 +11,25 @@ under its own uuid and keeps one row about it in the **catalog table** (§22.2):
 catalog lives (its **location**: a link, a file path, or nothing), whether it is shown on
 the page, and whether it refreshes on its own. **Refresh** re-reads the location; a catalog
 with no location is a copy the app holds by itself. The user can also **author** a catalog
-in the app: create one, add automations from this app or from `.autowright` files, and
-edit it later (§22.7).
+in the app: create one (Autowright keeps it and lists it right away), add automations
+from this app, from other catalogs, or from `.autowright` files, edit it later, and
+**export** its file to share it (§22.7, §22.3 Export).
 Installing an entry is the §5.1/§5.2 import, unchanged: the archive is fetched at install
 time, previewed, and confirmed through the same two-phase flow, so every §5.1 guarantee
 holds (triggers land off, no records are ever created, only matched records are granted).
 
-**Visibility (preview gate).** The Marketplace page and its nav row render only while the
-§4.9 `developerMode` setting is on. That is the only thing the setting gates here: the §19
-routes, the §5 store, and the §20 CLI group are always live, in every mode - the §2 rule
-that developer and production mode run the same code, with no dev-only paths. Turning
-Developer mode off while the page is open navigates to Automations (§22.3). The gate is
-lifted by removing the condition, nothing else; the feature is built as a normal surface
-that happens to be hidden.
+**Visibility - HIDDEN FOR EVERYONE (2026-09-12).** REMINDER: the marketplace is not
+polished and its design is not settled; David parked it to deal with later. Until then
+the Marketplace page and its nav row render for nobody, Developer mode or not: one
+renderer constant, `MARKETPLACE_HIDDEN` in `App.tsx`, is `true`, and the nav filter and
+the redirect below read it. Flipping it to `false` restores the **preview gate**: the page
+and its nav row render only while the §4.9 `developerMode` setting is on. That is the only
+thing the setting gates here: the §19 routes, the §5 store, and the §20 CLI group are
+always live, in every mode - the §2 rule that developer and production mode run the same
+code, with no dev-only paths. Turning Developer mode off while the page is open navigates
+to Automations (§22.3). The gate is lifted by removing the condition, nothing else; the
+feature is built as a normal surface that happens to be hidden. The §22.6 e2e drive is
+skipped while the constant is `true` (it reaches the page through the nav row).
 
 ### 22.1 Catalog format
 
@@ -161,11 +167,13 @@ folder the user chose, never under the data root.
 ### 22.3 Marketplace page
 
 **Nav.** A "Marketplace" row (icon `fa-store`) sits between Secrets and Settings in the §9
-rail, rendered only while `settings.developerMode` is true; it carries no count pill. The
-`Page` union gains `marketplace`. When the setting turns off while `page` is `marketplace`
-(the Settings toggle, or a §20 `settings set` seen through the store refresh), an effect
-in the app shell calls `go('automations')` - the same shape as the §9.3 overlay closing
-itself when the setting drops.
+rail, rendered only while `settings.developerMode` is true **and** `MARKETPLACE_HIDDEN`
+is false (§22 visibility - it is `true` for now, so the row renders for nobody); it
+carries no count pill. The `Page` union gains `marketplace`. When the row's condition
+stops holding while `page` is `marketplace` (the Settings toggle, a §20 `settings set`
+seen through the store refresh, or the constant), an effect in the app shell calls
+`go('automations')` - the same shape as the §9.3 overlay closing itself when the setting
+drops.
 
 **Page.** Title "Marketplace" with header actions: a ghost **Create catalog…** (§22.7;
 always rendered), a ghost **Refresh all** (rendered only when at least one catalog is
@@ -201,7 +209,13 @@ has seen the shape.
   so it reads red - never the accent-filled §12 execute shape, two orange squares beside
   a title read as a call to action): **Edit** (`fa-pen`, `aria-label` "Edit catalog";
   rendered when the location is a path or `null` - the copy is on this machine - and
-  opening the §22.7 editor), **Refresh** (`fa-rotate`, spinner while running,
+  opening the §22.7 editor), **Export** (`fa-file-export`, `aria-label` "Export catalog";
+  rendered while `cached` is true, for every kind of location - it saves the catalog
+  file the app holds: §19 `GET …/file` for the bytes, then the §3 `save-file` dialog with
+  the default name `marketplace-catalog.yaml`; a saved file toasts "Exported to
+  <path>.", a cancelled dialog does nothing, a failed fetch toasts the reason. This is
+  how a catalog created in the app leaves the app: the user puts the file wherever they
+  share from), **Refresh** (`fa-rotate`, spinner while running,
   `aria-label` "Refresh"; rendered only when the catalog has a location), **Settings**
   (`fa-gear`, `aria-label` "Catalog settings"; always) and **Remove** (`fa-trash`,
   `aria-label` "Remove") - Remove opens a danger `ConfirmModal`, title "Remove
@@ -335,6 +349,11 @@ still cached).
   the §22.7 save steps (422 with the reason and nothing written on any failure). Content
   may be omitted (the §22.5 CLI `create` sends none): an empty catalog named after the
   folder (or "My catalog" without one).
+- `GET /marketplace/sources/{id}/file` → the app's copy of the catalog, byte for byte
+  (`Content-Type: application/yaml`, `Content-Disposition: attachment;
+  filename="marketplace-catalog.yaml"`) - the §22.3 Export. Every kind of location: for
+  a path the copy mirrors the file, for a link it is the last successful read. 404
+  unknown id; 422 with the §22.2 unreadable-copy message when the copy can't be read.
 - `GET /marketplace/sources/{id}/catalog` → `{ name, description, entries: [{ index,
   title, description, path, image }] }` (§22.7): the catalog as the editor should see it
   - the file at the location for a path, the copy for `null` - references as written.
@@ -423,7 +442,8 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   and every §22.4 route with the network monkeypatched (add 422/409, PATCH 422/409,
   refresh 200-with-error, the image route reading a local path and an https reference on
   demand, 404 for no image, 502 for an unreadable one, entry preview producing a
-  confirmable token).
+  confirmable token, the file route answering the copy's bytes with the yaml content
+  type - 404 unknown, 422 when the copy is unreadable).
 - Backend authoring (§22.7, same file): create with a folder writes the catalog there and
   the row's location is that file, 409 on a folder that already holds one, 422 on a
   missing folder; create without a folder writes the copy and the location is `null`; GET
@@ -459,23 +479,31 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   Save on the offending entry with the reason in the footer, Save sending the §22.7 body
   (`path` for a kept row, `archiveFile` for an unedited exported or picked file, `image`
   when set), a backend `entry <i>:` 422 viewing that entry, the discard
-  confirm on Escape with unsaved edits, and Create catalog… opening the empty editor whose
-  Create button works with or without a chosen folder.
+  confirm on Escape with unsaved edits, Create catalog… opening the empty editor (no
+  folder anywhere; LOCATION reads "Kept by Autowright") whose Create button POSTs the
+  content alone, and the Export button fetching the file and handing it to `saveFile` as
+  `marketplace-catalog.yaml` with the "Exported to <path>." toast (absent while `cached`
+  is false).
 - e2e: one drive with a file-based catalog under the test data root (a catalog plus one
   archive exported in the same test), asserting the page lists it and Install lands the
-  automation with its triggers off; then, with the native folder dialog stubbed to a temp
-  folder and the native save dialog stubbed to `Watcher.autowright` inside it, **Create
-  catalog…** opens the editor, **Choose folder…** picks the location, **Add automation…**
-  picks the seeded automation on the THIS MAC tab (the export lands through the stubbed
-  save dialog) and Add accepts the prefilled details, the navigator lists the new row,
-  Create lands the catalog beside the archive in that folder (listed by its absolute
-  path), and the new section lists one entry.
+  automation with its triggers off; then, with the native save dialog stubbed to
+  `Watcher.autowright` in a temp folder, **Create catalog…** opens the editor, **Add
+  automation…** picks the seeded automation on the THIS MAC tab (the export lands through
+  the stubbed save dialog) and Add accepts the prefilled details, the navigator lists the
+  new row, Create lands the catalog as a second section kept by Autowright listing one
+  entry by the archive's absolute path; then, with the save dialog re-stubbed to
+  `marketplace-catalog.yaml` in that folder, **Export catalog** on the new section writes
+  the file beside the archive.
 
 ### 22.7 Catalog authoring
 
-A catalog the user writes in the app is a §22.2 row whose copy the app edits in place,
-with a location that is either a **file path** (the catalog lives in a folder the user
-chose, and the copy mirrors it) or **`null`** (the copy is the only copy). Either way the
+A catalog the user writes in the app is a §22.2 row whose copy the app edits in place.
+One created in the app has a **`null`** location - Autowright keeps the only copy, lists
+it on the page at once, and the §22.3 Export hands the file out whenever the user wants
+to share it (the editor never asks where to save; a folder is only ever chosen through
+the §22.5 CLI `create <folder>` or the §22.3 settings' LOCATION). A row with a **file
+path** location (added from a file, or given one) is edited the same way, with the copy
+mirroring the file. Either way the
 catalog only **references** archives, by absolute path or https link (§22.1): an archive
 file the user picks is listed where it is, and an automation from this app is exported
 **where the user saves it** - the picker runs the §9.2 export's native save dialog at
@@ -488,7 +516,8 @@ catalog with a link location is not editable here (the file isn't on this machin
 **Create** and **Edit** share one surface, the **catalog editor** (redesigned 2026-09-12
 as a two-column form; the earlier single-column list of input cards is gone).
 **Create catalog…** (page header, and the empty state's MAKE YOUR OWN section) opens it
-empty in create mode; the **Edit** button on a catalog with a path or `null` location
+empty in create mode - no location to choose, the catalog is kept by Autowright; the
+**Edit** button on a catalog with a path or `null` location
 opens it in edit mode on `GET …/catalog` (the file at the location, or the copy; the §14
 `PageLoading` well in the form pane until it lands - a 409 or 422 toasts the reason and
 closes). The catalog open in the editor is the **working catalog**.
@@ -503,8 +532,7 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   CREATE CATALOG / EDIT CATALOG. Then the **details row**: the catalog's name as typed
   (600 when viewed, 500 muted otherwise; the muted "Untitled catalog" while blank) over a
   muted one-line sub naming where it lives - the catalog file's path for a path location,
-  "Kept by Autowright" for `null`; in create mode the chosen folder's catalog path once
-  one is chosen, "Kept by Autowright" until then. Then the eyebrow AUTOMATIONS · <n>
+  "Kept by Autowright" for `null` and in create mode. Then the eyebrow AUTOMATIONS · <n>
   (`padding: 14px 18px 4px`) and one **entry row** per entry in catalog order: the title
   (the muted "Untitled" while blank) over a muted sub naming the reference - the hostname
   for an https link, the file name for a path, "No archive yet" while the reference is
@@ -522,17 +550,12 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   guard below). Beneath, a scroll pane padded `18px 22px` holding the viewed form, every
   field under a §14 eyebrow with the §14 caption under it where one is named:
   - **Details form** (viewed when the editor opens, and after the last entry is removed).
-    In edit mode first a LOCATION line: the catalog file's full path (mono, muted, 12 px,
-    wrapping - the navigator row only has room for its tail) with the caption "The file
-    this editor writes.", or "Kept by Autowright" with the caption "Autowright keeps the
-    only copy; there is no file of yours to point at.". In create mode first the SAVE
-    LOCATION row: the chosen folder's path (mono, muted;
-    "Kept by Autowright" until one is chosen) beside a dashed **Choose folder…** button
-    (the §3 `pick-folder` IPC; null cancels) and, once chosen, a quiet **Clear** text
-    button, caption "Optional. Choose a folder to keep the catalog file yourself;
-    otherwise Autowright keeps the only copy.". Choosing a folder fills NAME with the
-    folder's name when NAME is still empty. Then NAME (`ad-input`, placeholder the
-    folder's name, or "My catalog") and DESCRIPTION (`ad-input`).
+    First a LOCATION line: the catalog file's full path (mono, muted, 12 px, wrapping -
+    the navigator row only has room for its tail) with the caption "The file this editor
+    writes." for a path location; otherwise (a `null` location, and always in create
+    mode) "Kept by Autowright" with the caption "Autowright keeps the catalog. Export its
+    file from the Marketplace page to share it.". Then NAME (`ad-input`, placeholder "My
+    catalog") and DESCRIPTION (`ad-input`).
   - **Entry form**: TITLE (`ad-input`), DESCRIPTION (`ad-input`), then AUTOMATION: a mono
     `ad-input` holding the reference exactly as written (placeholder
     `https://…/name.autowright or /path/to/name.autowright`, caption "An https link, or
@@ -555,10 +578,10 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   the wrong form ("Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp,
   or .gif image."). A 422 or 409 from the backend shows in the footer as it comes, and one
   whose message starts `entry <i>:` views entry `i` as well. Create POSTs
-  `/marketplace/catalogs` with the folder (when chosen) and the content - the backend
-  refuses a folder that already holds a `marketplace-catalog.yaml` (409 - the user should
-  **Add** it instead), otherwise writes the catalog through the save steps and adds the
-  row; success refetches, closes, and toasts "Created <name>.". Save PUTs `…/catalog`,
+  `/marketplace/catalogs` with the content alone (never a `folder` - that option is the
+  §22.5 CLI's): the backend writes the catalog to the new row's copy through the save
+  steps and adds the row; success refetches (the new catalog is on the page at once),
+  closes, and toasts "Created <name>.". Save PUTs `…/catalog`,
   refetches, closes, and toasts "Saved <name>.". Escape, a backdrop click, the Close
   button, or Cancel with unsaved edits (any field, folder, or entry differs from what the
   editor opened on) raises the §14 in-modal discard confirm ("Discard your catalog

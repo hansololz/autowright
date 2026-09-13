@@ -845,6 +845,35 @@ def test_url_add_route(client, monkeypatch):
     assert client.get("/marketplace").json()["sources"][0]["id"] == source["id"]
 
 
+def test_file_route_hands_out_the_copy(client, tmp_path):
+    """§22.4 file route (the §22.3 Export): the app's copy byte for byte, with
+    the yaml content type and the catalog's file name."""
+    f = write_catalog(tmp_path, [{"title": "One",
+                                  "path": str(tmp_path / "one.autowright")}],
+                      name="Shelf")
+    source = client.post("/marketplace/sources", json={"path": str(f)}).json()
+    copy = paths.marketplace_dir() / source["id"] / marketplace.CATALOG_FILENAME
+
+    r = client.get(f"/marketplace/sources/{source['id']}/file")
+    assert r.status_code == 200 and r.content == copy.read_bytes()
+    assert r.headers["content-type"].startswith("application/yaml")
+    assert marketplace.CATALOG_FILENAME in r.headers["content-disposition"]
+
+    assert client.get("/marketplace/sources/nope/file").status_code == 404
+
+    # §22.2: no copy to hand out - a location can be refreshed, a `null` one can't
+    copy.unlink()
+    r = client.get(f"/marketplace/sources/{source['id']}/file")
+    assert r.status_code == 422
+    assert r.json()["detail"] == marketplace.COPY_UNREADABLE_REFRESH
+
+    kept = client.post("/marketplace/catalogs", json={}).json()
+    (paths.marketplace_dir() / kept["id"] / marketplace.CATALOG_FILENAME).unlink()
+    r = client.get(f"/marketplace/sources/{kept['id']}/file")
+    assert r.status_code == 422
+    assert r.json()["detail"] == marketplace.COPY_UNREADABLE_REMOVE
+
+
 # ---------- §22.7 catalog authoring ----------
 def _shelf(market, tmp_path, name="shelf"):
     """§22.7 create: an empty catalog in its own folder, whose location is that

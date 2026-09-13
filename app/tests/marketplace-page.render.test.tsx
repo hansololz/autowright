@@ -2,10 +2,11 @@
 // itself (the §4.9 developerMode setting), the empty state's example catalog,
 // a seeded catalog's grid, a hidden catalog collapsing to its header, the
 // settings modal's PATCH, Install opening the §9.1 import modal on its preview
-// step, the add modal's three ways in, and the §22.7 authoring flow (the Edit
-// button, the two-column catalog editor, the picker's three tabs with This
-// Mac exporting through the native save dialog at pick time, Save's body, the
-// discard confirm, and create mode's folder chooser). App renders for real
+// step, Export handing the catalog file to the save dialog, the add modal's
+// three ways in, and the §22.7 authoring flow (the Edit button, the two-column
+// catalog editor, the picker's three tabs with This Mac exporting through the
+// native save dialog at pick time, Save's body, the discard confirm, and
+// create mode, which has no save location at all). App renders for real
 // (happy-dom) with the api module mocked, `settings-gating` style.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -28,6 +29,8 @@ const marketplaceAdd = vi.fn()
 const marketplaceSettings = vi.fn()
 const marketplaceEntryPreview = vi.fn()
 const marketplaceImage = vi.fn(() => Promise.reject(new Error('no image')))
+// §22.3 Export: the app's copy of the catalog, handed to the save dialog.
+const marketplaceCatalogFile = vi.fn<(id: string) => Promise<ArrayBuffer>>()
 // §22.7 authoring
 const marketplaceCatalogCreate = vi.fn()
 const marketplaceCatalogRead = vi.fn<(id: string) => Promise<MarketplaceCatalog>>()
@@ -53,6 +56,7 @@ vi.mock('../src/api', () => ({
     marketplaceRemove: vi.fn(),
     marketplaceEntryPreview: (id: string, index: number) => marketplaceEntryPreview(id, index),
     marketplaceImage: () => marketplaceImage(),
+    marketplaceCatalogFile: (id: string) => marketplaceCatalogFile(id),
     marketplaceCatalogCreate: (body: unknown) => marketplaceCatalogCreate(body),
     marketplaceCatalogRead: (id: string) => marketplaceCatalogRead(id),
     marketplaceCatalogSave: (id: string, body: unknown) => marketplaceCatalogSave(id, body),
@@ -62,13 +66,15 @@ vi.mock('../src/api', () => ({
 
 let storeMod: typeof import('../src/store')
 let App: typeof import('../src/App').default
+let MARKETPLACE_HIDDEN: boolean
 let MarketplacePage: typeof import('../src/pages/MarketplacePage').default
 
 const openCatalog = vi.fn()
 // §22.3: the dropped file's path, which is all that ever travels.
 const pathForFile = vi.fn<(file: File) => string>()
-// §22.7: the native pickers the create flow and the editor's file button use,
-// and the save dialog a This Mac pick exports through.
+// §22.7: the native picker the editor's file button uses, and the save dialog
+// a This Mac pick exports through (the §22.3 Export saves through it too). The
+// editor never chooses a folder, so `pickFolder` is only here to stay unused.
 const pickFolder = vi.fn()
 const openArchivePath = vi.fn()
 const saveFile = vi.fn<(defaultName: string, data: ArrayBuffer) => Promise<string | null>>()
@@ -104,7 +110,9 @@ beforeAll(async () => {
   if (!u.createObjectURL) u.createObjectURL = () => 'blob:stub'
   if (!u.revokeObjectURL) u.revokeObjectURL = () => {}
   storeMod = await import('../src/store')
-  App = (await import('../src/App')).default
+  const appMod = await import('../src/App')
+  App = appMod.default
+  MARKETPLACE_HIDDEN = appMod.MARKETPLACE_HIDDEN
   MarketplacePage = (await import('../src/pages/MarketplacePage')).default
 })
 
@@ -189,6 +197,8 @@ beforeEach(() => {
   marketplaceSettings.mockReset()
   marketplaceSettings.mockResolvedValue(source())
   marketplaceEntryPreview.mockReset()
+  marketplaceCatalogFile.mockReset()
+  marketplaceCatalogFile.mockResolvedValue(new ArrayBuffer(4))
   openCatalog.mockReset()
   pathForFile.mockReset()
   marketplaceCatalogCreate.mockReset()
@@ -209,8 +219,24 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); storeMod.useStore.getState().disconnect() })
 
+// §22 visibility: MARKETPLACE_HIDDEN parks the feature for everyone for now
+// (unpolished, design not settled). While it holds, the nav row renders for
+// nobody and the page is left however it was reached; the preview-gate tests
+// below cover the constant's other value so flipping it back is a one-line
+// change here too.
 describe('§22.3 preview gate', () => {
+  it('while parked, the nav row renders for nobody and the page is left', async () => {
+    if (!MARKETPLACE_HIDDEN) return
+    setDeveloperMode(true)
+    storeMod.useStore.setState({ page: 'marketplace' })
+    render(<App />)
+    await screen.findByTestId('nav-rail')
+    expect(screen.queryByTestId('nav-marketplace')).toBeNull()
+    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
+  })
+
   it('the nav row renders only while Developer mode is on', async () => {
+    if (MARKETPLACE_HIDDEN) return
     setDeveloperMode(false)
     render(<App />)
     await screen.findByTestId('nav-rail')
@@ -222,6 +248,7 @@ describe('§22.3 preview gate', () => {
   })
 
   it('the setting dropping while the page is open lands on Automations', async () => {
+    if (MARKETPLACE_HIDDEN) return
     storeMod.useStore.setState({ page: 'marketplace' })
     render(<App />)
     await screen.findByText('Marketplace', { selector: 'h1' })
@@ -318,6 +345,39 @@ describe('§22.3 Marketplace page', () => {
       "Couldn't load: the saved copy couldn't be read - remove this marketplace and add it again."))
       .toBeTruthy()
     expect(screen.getByText('This marketplace lists no automations yet.')).toBeTruthy()
+  })
+
+  it('Export hands the catalog file to the save dialog and says where it landed', async () => {
+    const data = new ArrayBuffer(16)
+    marketplaceCatalogFile.mockResolvedValue(data)
+    saveFile.mockResolvedValue('/Users/x/out/marketplace-catalog.yaml')
+    marketplaceList.mockResolvedValue({ sources: [keptSource()] })
+    render(<MarketplacePage />)
+    fireEvent.click(await screen.findByLabelText('Export catalog'))
+    // §22.3: the bytes come from the §19 file route, the name is the catalog's.
+    await waitFor(() => expect(marketplaceCatalogFile).toHaveBeenCalledWith('s1'))
+    await waitFor(() => expect(saveFile)
+      .toHaveBeenCalledWith('marketplace-catalog.yaml', data))
+    await waitFor(() => expect(storeMod.useStore.getState().toast)
+      .toBe('Exported to /Users/x/out/marketplace-catalog.yaml.'))
+  })
+
+  it('Export is absent with nothing cached, and a failed fetch toasts the reason', async () => {
+    // §22.3: there is no copy to hand out until a refresh lands one.
+    marketplaceList.mockResolvedValue({ sources: [source({ cached: false, entries: [] })] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
+    expect(screen.queryByLabelText('Export catalog')).toBeNull()
+    cleanup()
+    marketplaceCatalogFile.mockRejectedValue(
+      Object.assign(new Error("the saved copy couldn't be read - refresh to fetch it again"),
+        { status: 422 }))
+    marketplaceList.mockResolvedValue({ sources: [fileSource()] })
+    render(<MarketplacePage />)
+    fireEvent.click(await screen.findByLabelText('Export catalog'))
+    await waitFor(() => expect(storeMod.useStore.getState().toast)
+      .toBe("the saved copy couldn't be read - refresh to fetch it again"))
+    expect(saveFile).not.toHaveBeenCalled()
   })
 
   it('Install previews the entry and opens the import modal on its preview step', async () => {
@@ -770,54 +830,36 @@ describe('§22.7 catalog authoring', () => {
     expect(marketplaceCatalogSave).not.toHaveBeenCalled()
   })
 
-  it('Create catalog… opens the empty editor and POSTs the chosen folder', async () => {
-    pickFolder.mockResolvedValue('/Users/x/shelf')
-    marketplaceCatalogCreate.mockResolvedValue(fileSource({ id: 's9', name: 'shelf' }))
-    render(<MarketplacePage />)
-    // The empty state renders a second Create catalog… button - the header's is first.
-    fireEvent.click((await screen.findAllByTestId('marketplace-create'))[0])
-    // §22.7 create mode: no GET, empty fields, and the app keeping the copy
-    // until a folder is chosen.
-    expect(await screen.findByTestId('catalog-editor')).toBeTruthy()
-    expect(screen.getByText('CREATE CATALOG')).toBeTruthy()
-    expect(marketplaceCatalogRead).not.toHaveBeenCalled()
-    expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
-    expect(screen.getByTestId('catalog-folder').textContent).toBe('Kept by Autowright')
-    expect(screen.getByText('No automations yet.')).toBeTruthy()
-    // §22.7: choosing a folder names the catalog after it, and says where the
-    // catalog file will land.
-    fireEvent.click(screen.getByTestId('catalog-choose-folder'))
-    await waitFor(() => expect(screen.getByTestId('catalog-folder').textContent)
-      .toBe('/Users/x/shelf'))
-    expect((screen.getByTestId('catalog-name') as HTMLInputElement).value).toBe('shelf')
-    expect(screen.getByTestId('catalog-where').textContent)
-      .toBe('/Users/x/shelf/marketplace-catalog.yaml')
-    const save = screen.getByTestId('catalog-save') as HTMLButtonElement
-    expect(save.disabled).toBe(false)
-    expect(save.textContent).toBe('Create')
-    fireEvent.click(save)
-    await waitFor(() => expect(marketplaceCatalogCreate).toHaveBeenCalledWith({
-      folder: '/Users/x/shelf', name: 'shelf', description: '', entries: [],
-    }))
-  })
-
-  it('Create with no folder keeps the only copy in the app', async () => {
-    pickFolder.mockResolvedValue(null)
+  it('Create catalog… opens the empty editor, kept by Autowright', async () => {
     marketplaceCatalogCreate.mockResolvedValue(keptSource({ id: 's9', name: 'Mine' }))
     render(<MarketplacePage />)
     // The empty state renders a second Create catalog… button - the header's is first.
     fireEvent.click((await screen.findAllByTestId('marketplace-create'))[0])
-    // §22.7: a cancelled picker leaves the save location as it was.
-    fireEvent.click(await screen.findByTestId('catalog-choose-folder'))
-    await waitFor(() => expect(pickFolder).toHaveBeenCalled())
-    expect(screen.getByTestId('catalog-folder').textContent).toBe('Kept by Autowright')
+    // §22.7 create mode: no GET, empty fields, and no save location to choose -
+    // Autowright keeps the catalog and Export hands the file out later.
+    expect(await screen.findByTestId('catalog-editor')).toBeTruthy()
+    expect(screen.getByText('CREATE CATALOG')).toBeTruthy()
+    expect(marketplaceCatalogRead).not.toHaveBeenCalled()
     expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
-    expect((screen.getByTestId('catalog-name') as HTMLInputElement).value).toBe('')
-    fireEvent.change(screen.getByTestId('catalog-name'), { target: { value: 'Mine' } })
-    fireEvent.click(screen.getByTestId('catalog-save'))
-    // §22.7: no folder means no `folder` in the body - the row's copy is it.
+    expect(screen.getByTestId('catalog-location').textContent).toBe('Kept by Autowright')
+    expect(screen.getByText(
+      'Autowright keeps the catalog. Export its file from the Marketplace page to share it.'))
+      .toBeTruthy()
+    expect(screen.queryByTestId('catalog-folder')).toBeNull()
+    expect(screen.queryByTestId('catalog-choose-folder')).toBeNull()
+    expect(screen.getByText('No automations yet.')).toBeTruthy()
+    const name = screen.getByTestId('catalog-name') as HTMLInputElement
+    expect(name.value).toBe('')
+    expect(name.placeholder).toBe('My catalog')
+    fireEvent.change(name, { target: { value: 'Mine' } })
+    const save = screen.getByTestId('catalog-save') as HTMLButtonElement
+    expect(save.disabled).toBe(false)
+    expect(save.textContent).toBe('Create')
+    fireEvent.click(save)
+    // §22.7: the create body is the content alone - never a `folder`.
     await waitFor(() => expect(marketplaceCatalogCreate).toHaveBeenCalledWith({
       name: 'Mine', description: '', entries: [],
     }))
+    expect(pickFolder).not.toHaveBeenCalled()
   })
 })

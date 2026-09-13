@@ -1104,7 +1104,8 @@ notifications: attention | all — "Only when something needs attention" / "Afte
 days: int ≥ 1 (default 90) — history retention; keepForever: bool disables cleanup
 developerMode: bool (default false) — "Developer mode" ("Logs every backend request and every AI
   request, including the full prompt, to the backend log. Press `` ` `` to show the logs
-  panel. Also shows the Marketplace page, which is in preview.") — gates request logging,
+  panel." - the sentence "Also shows the Marketplace page, which is in preview." returns
+  to the caption when §22 is un-parked) — gates request logging,
   the per-request log files under `<logs>/requests/` (§5),
   the §5 build-failure records under `<logs>/build-failures/`, the `` ` ``-key log
   overlay (§9.3), and the visibility of the §22 Marketplace page and nav row (visibility

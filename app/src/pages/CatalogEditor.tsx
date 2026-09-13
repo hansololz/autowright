@@ -103,42 +103,6 @@ function referenceLabel(e: EditorEntry): string {
 
 const eyebrowMargin = (first: boolean): React.CSSProperties => ({ margin: first ? '0 0 6px' : '16px 0 6px' })
 
-/** A folder chooser row (§22.7 SAVE LOCATION): the chosen path
- * beside a dashed Choose folder… button, through the §3 pick-folder IPC. */
-function FolderRow({ value, empty, testId, chooseTestId, onChoose, onClear, onError }: {
-  value: string | null; empty: string; testId: string; chooseTestId: string
-  onChoose: (folder: string) => void; onClear?: () => void; onError: (msg: string) => void
-}) {
-  const choose = async () => {
-    let picked: string | null | undefined
-    try {
-      picked = await window.autowright?.pickFolder()
-    } catch (e) { onError((e as Error).message); return }
-    if (picked) onChoose(picked)
-  }
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-      <span
-        data-testid={testId}
-        style={{
-          flex: 1, minWidth: 0, font: '400 12px var(--mono)', color: value ? 'var(--text)' : 'var(--text-muted)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}
-      >
-        {value ?? empty}
-      </span>
-      {value && onClear && (
-        <button className="ad-btn-text dim small" data-testid={`${testId}-clear`} onClick={onClear}>Clear</button>
-      )}
-      <button className="ad-btn-dashed" data-testid={chooseTestId} onClick={() => { void choose() }}
-        style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 9 }}>
-        <i className="fa-solid fa-folder-open" style={{ fontSize: 11, color: 'var(--text-faint)' }} />
-        Choose folder…
-      </button>
-    </div>
-  )
-}
-
 /** §22.7 add-automation picker: three tabs (this machine, another catalog, a
  * file), then a details step that fixes the title and description before the
  * entry joins the working catalog. */
@@ -367,8 +331,8 @@ function NavRow({ viewed, onView, testId, children }: {
 }
 
 /** §22.7 catalog editor. Edit mode opens on the catalog as the editor sees it
- * (GET) and PUTs it whole on Save; create mode opens empty with an optional
- * SAVE LOCATION and POSTs the content on Create. Every entry is a reference
+ * (GET) and PUTs it whole on Save; create mode opens empty and POSTs the
+ * content on Create - the new catalog is kept by Autowright. Every entry is a reference
  * as written - the editor never exports on save (a This Mac pick exports
  * through the save dialog at pick time, in the picker). */
 export default function CatalogEditorModal({ source, sources, onClose, onSaved }: {
@@ -383,7 +347,6 @@ export default function CatalogEditorModal({ source, sources, onClose, onSaved }
   const showToast = useStore((s) => s.showToast)
   const creating = source === null
   const [loaded, setLoaded] = useState<string | null>(creating ? '' : null)
-  const [folder, setFolder] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [rows, setRows] = useState<EditorEntry[]>([])
@@ -394,14 +357,14 @@ export default function CatalogEditorModal({ source, sources, onClose, onSaved }
   const [confirm, setConfirm] = useState(false)
   const nextKey = useRef(1)
 
-  const snapshot = (s: { folder: string | null; name: string; description: string; rows: EditorEntry[] }) =>
+  const snapshot = (s: { name: string; description: string; rows: EditorEntry[] }) =>
     JSON.stringify({ ...s, rows: s.rows.map(({ key: _key, ...rest }) => rest) })
-  const folderName = source?.location ? lastSegment(source.location.replace(/[\\/][^\\/]*$/, ''))
-    : folder ? lastSegment(folder) : ''
-  const where = source ? (source.location ?? KEPT_LABEL) : folder ? `${folder}/${CATALOG_FILE}` : KEPT_LABEL
+  // §22.7: a catalog created here is kept by Autowright - there is no
+  // location to choose; Export on the page hands the file out.
+  const where = source?.location ?? KEPT_LABEL
 
   useEffect(() => {
-    if (creating) { setLoaded(snapshot({ folder: null, name: '', description: '', rows: [] })); return }
+    if (creating) { setLoaded(snapshot({ name: '', description: '', rows: [] })); return }
     let gone = false
     void (async () => {
       try {
@@ -411,7 +374,7 @@ export default function CatalogEditorModal({ source, sources, onClose, onSaved }
           key: nextKey.current++, title: e.title, description: e.description, image: e.image || '', path: e.path,
         }))
         setName(c.name); setDescription(c.description); setRows(initial)
-        setLoaded(snapshot({ folder: null, name: c.name, description: c.description, rows: initial }))
+        setLoaded(snapshot({ name: c.name, description: c.description, rows: initial }))
       } catch (e) {
         // §22.4: a 409 (not on this machine) or 422 (unreadable file) - the
         // modal can't open on nothing, so it toasts and closes.
@@ -423,7 +386,7 @@ export default function CatalogEditorModal({ source, sources, onClose, onSaved }
     return () => { gone = true }
   }, [source?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const dirty = loaded !== null && snapshot({ folder, name, description, rows }) !== loaded
+  const dirty = loaded !== null && snapshot({ name, description, rows }) !== loaded
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
   const pending = useRef<'save' | 'discard'>('discard')
@@ -466,7 +429,7 @@ export default function CatalogEditorModal({ source, sources, onClose, onSaved }
       const body = { name, description, entries: rows.map(toSaveEntry) }
       saved.current = source
         ? await api.marketplaceCatalogSave(source.id, body)
-        : await api.marketplaceCatalogCreate({ ...(folder ? { folder } : {}), ...body })
+        : await api.marketplaceCatalogCreate(body)
       pending.current = 'save'
       closeRef.current()
     } catch (e) {
@@ -580,35 +543,16 @@ export default function CatalogEditorModal({ source, sources, onClose, onSaved }
                         </>
                       ) : (
                         <>
-                          {!creating && (
-                            <>
-                              <Eyebrow style={eyebrowMargin(true)}>LOCATION</Eyebrow>
-                              <div data-testid="catalog-location" style={{ font: '400 12px/1.5 var(--mono)', color: 'var(--text-muted)', overflowWrap: 'anywhere' }}>
-                                {where}
-                              </div>
-                              <p style={caption}>
-                                {source?.location ? 'The file this editor writes.' : 'Autowright keeps the only copy; there is no file of yours to point at.'}
-                              </p>
-                            </>
-                          )}
-                          {creating && (
-                            <>
-                              <Eyebrow style={eyebrowMargin(true)}>SAVE LOCATION</Eyebrow>
-                              <FolderRow
-                                value={folder} empty={KEPT_LABEL} testId="catalog-folder" chooseTestId="catalog-choose-folder"
-                                onChoose={(picked) => {
-                                  setFolder(picked); setError(null)
-                                  if (!name.trim()) setName(lastSegment(picked))
-                                }}
-                                onClear={() => setFolder(null)}
-                                onError={setError}
-                              />
-                              <p style={caption}>Optional. Choose a folder to keep the catalog file yourself; otherwise Autowright keeps the only copy.</p>
-                            </>
-                          )}
+                          <Eyebrow style={eyebrowMargin(true)}>LOCATION</Eyebrow>
+                          <div data-testid="catalog-location" style={{ font: '400 12px/1.5 var(--mono)', color: 'var(--text-muted)', overflowWrap: 'anywhere' }}>
+                            {where}
+                          </div>
+                          <p style={caption}>
+                            {source?.location ? 'The file this editor writes.' : 'Autowright keeps the catalog. Export its file from the Marketplace page to share it.'}
+                          </p>
                           <Eyebrow style={eyebrowMargin(false)}>NAME</Eyebrow>
                           <input className="ad-input" value={name} onChange={(e) => setName(e.target.value)}
-                            placeholder={folderName || 'My catalog'} spellCheck={false} data-testid="catalog-name" style={inputStyle} />
+                            placeholder="My catalog" spellCheck={false} data-testid="catalog-name" style={inputStyle} />
                           <Eyebrow style={eyebrowMargin(false)}>DESCRIPTION</Eyebrow>
                           <input className="ad-input" value={description} onChange={(e) => setDescription(e.target.value)}
                             data-testid="catalog-description" style={inputStyle} />

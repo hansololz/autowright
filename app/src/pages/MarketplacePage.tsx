@@ -12,7 +12,7 @@ import {
   Modal, Notice, PageLoading, PageTitle, Spinner, Toggle,
 } from '../ui'
 import CatalogEditorModal, {
-  KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel, monoInput,
+  CATALOG_FILE, KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel, monoInput,
 } from './CatalogEditor'
 import ImportModal from './ImportModal'
 import { ImportSummaryModal } from './AutomationsList'
@@ -358,6 +358,15 @@ export default function MarketplacePage() {
 
   // §22.2: a single refresh answers 200 either way - a failure rides on the
   // source's own `error`, which the Notice below the header shows.
+  // §22.3 Export: the catalog file the app holds, through the same native
+  // save dialog as an automation export - the user decides where it lives.
+  const exportCatalog = async (id: string) => {
+    try {
+      const data = await api.marketplaceCatalogFile(id)
+      const path = await window.autowright?.saveFile(CATALOG_FILE, data)
+      if (path) showToast(`Exported to ${path}.`)
+    } catch (e) { showToast((e as Error).message) }
+  }
   const refreshOne = async (id: string) => {
     if (refreshing) return
     setRefreshing(id)
@@ -513,6 +522,8 @@ export default function MarketplacePage() {
                 </div>
                 {/* §22.7: a path or null location is on this machine, so it can be edited. */}
                 {s.kind !== 'url' && iconButton('fa-pen', 'Edit catalog', () => setEditing(s))}
+                {/* §22.3: every readable copy can leave the app as a file. */}
+                {s.cached && iconButton('fa-file-export', 'Export catalog', () => { void exportCatalog(s.id) })}
                 {s.location !== null && iconButton('fa-rotate', 'Refresh', () => { void refreshOne(s.id) }, {
                   busy: refreshing === s.id || refreshingAll, disabled: refreshing === s.id || refreshingAll,
                 })}

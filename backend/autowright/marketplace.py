@@ -598,6 +598,18 @@ class MarketplaceStore:
         location, the row's copy for `null`."""
         return Path(source["location"]) if source["location"] else self.catalog_file(source["id"])
 
+    def file_bytes(self, source_id: str) -> bytes:
+        """§22.4 file route (the §22.3 Export): the app's copy, byte for byte,
+        for every kind of location. KeyError for an unknown id; the §22.2
+        unreadable-copy message when there is nothing readable to hand out."""
+        with self.lock:
+            source = self._find(source_id)
+        try:
+            return self.catalog_file(source_id).read_bytes()
+        except OSError:
+            raise MarketplaceError(COPY_UNREADABLE_REFRESH if source["location"] is not None
+                                   else COPY_UNREADABLE_REMOVE) from None
+
     def read_catalog(self, source_id: str) -> dict:
         """§22.7 GET: the catalog as the editor should see it, references
         unresolved."""
