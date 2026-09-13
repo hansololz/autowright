@@ -246,6 +246,15 @@ def safe_step_filename(fname, i: int, name, taken: set[str]) -> str:
     return out
 
 
+def mtime_ns(p: Path) -> int:
+    """`p`'s modification time in nanoseconds, 0 when it can't be stat'd — the
+    cheap "has this changed?" reading a memo key rides on."""
+    try:
+        return p.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 def iter_file_stats(d: Path):
     """stat results of the regular files under `d`, recursively. Retention
     sweeps, deletes, and memory clears run concurrently with these walks —
@@ -454,8 +463,11 @@ class Store:
             # §4.7: an agent entry without its uuid can't be referenced (steps
             # and the default pointer bind by id): skipped with a warning
             # (§5 lenient load), never healed, never fatal.
+            # One parse of agents.yaml for both keys below (the entries and
+            # the default pointer) — the load path never reads a file twice.
+            agents_doc = self._load_toplevel_mapping(paths.agents_file())
             self.agents = []
-            for g in self._load_toplevel_list(paths.agents_file(), "agents"):
+            for g in self._toplevel_entries(agents_doc, paths.agents_file(), "agents"):
                 if not g.get("id"):
                     log.warning("skipping agents.yaml entry %r — it has no id and "
                                 "can't be referenced", g.get("name"))
@@ -463,7 +475,7 @@ class Store:
                 self.agents.append(g)
             # §4.7 default pointer — a dangling/absent value (hand-edited file)
             # falls back to the first agent so the invariant self-heals at load.
-            default = self._load_toplevel_mapping(paths.agents_file()).get("default_agent")
+            default = agents_doc.get("default_agent")
             self.default_agent_id = (default if any(a.get("id") == default for a in self.agents)
                                      else (self.agents[0]["id"] if self.agents else None))
             # §4.8: every secret carries a uuid — the reference identity steps
@@ -539,12 +551,19 @@ class Store:
         log.warning("%s doesn't hold a mapping — reading it as absent", path)
         return default
 
-    def _load_toplevel_list(self, path: Path, key: str) -> list[dict]:
-        raw = self._load_toplevel_mapping(path).get(key, [])
+    @staticmethod
+    def _toplevel_entries(doc: dict, path: Path, key: str) -> list[dict]:
+        """The entry list under `key` of an already-parsed top-level mapping —
+        the half of `_load_toplevel_list` a caller that needs two keys off one
+        file (agents.yaml: `agents` + `default_agent`) reuses."""
+        raw = doc.get(key, [])
         if not isinstance(raw, list):
             log.warning("%s: %r isn't a list — using the default", path, key)
             return []
         return [x for x in raw if isinstance(x, dict)]
+
+    def _load_toplevel_list(self, path: Path, key: str) -> list[dict]:
+        return self._toplevel_entries(self._load_toplevel_mapping(path), path, key)
 
     def _open_exec_index(self) -> tuple[ExecDB, dict[str, dict]]:
         """§5: the DB is a disposable index. A corrupt file is deleted and
@@ -755,7 +774,10 @@ class Store:
             elif isinstance(t, dict) and _valid(t):
                 out.append({"id": t.get("id") or new_id(), "kind": t["kind"],
                             "enabled": bool(t.get("enabled", True)),
-                            **({"expression": t["expression"], "source": t["source"]}
+                            # §4.3: trimmed on load, like normalize_triggers — a
+                            # hand-edited expression with stray spaces stores as
+                            # the one spelling every reader compares.
+                            **({"expression": t["expression"].strip(), "source": t["source"]}
                                if t["kind"] == "cron" else
                                # §4.3: re-canonicalized on load, so a hand-edited
                                # spelling never survives to the merge or the API.
@@ -810,7 +832,10 @@ class Store:
             # itself — read_text on it would crash startup (§5: hand-edited
             # disk never bricks the load).
             if s.get("file") and f.is_file():
-                code = f.read_text(encoding="utf-8")
+                # errors="replace": §5 lenient load — a step script saved in
+                # another encoding loads with the bad bytes replaced rather
+                # than making the whole version unreadable.
+                code = f.read_text(encoding="utf-8", errors="replace")
             steps.append({**s, "code": code})
         notes = ""
         if (vd / "notes.md").exists():
@@ -839,18 +864,58 @@ class Store:
             "out_of_sync": bool(meta.get("out_of_sync")) or None,
         }
 
+    def _version_from_memory(self, ver: dict) -> dict:
+        """The version dict just handed to `_write_version_folder`, in the
+        shape `_load_version_folder` returns — the fallback when the reload
+        can't read the folder back (§5: a stored version is never None, which
+        would serialize as a version that runs zero steps)."""
+        return {
+            "when": ver.get("when"),
+            "note": ver.get("note"),
+            "params": strip_param_values(ver.get("params")),
+            "packages": manifest_packages(ver),
+            # The manifest entry plus the code, exactly as the loader rebuilds
+            # it; `file` is the name the caller carried (the writer's sanitized
+            # spelling is not observable from here).
+            "steps": [{**manifest_step_entry(s, s.get("file") or ""), "code": s.get("code", "")}
+                      for s in ver.get("steps", []) or []],
+            "spec": ver.get("spec") or [],
+            "notes": (ver.get("notes") or "").strip(),
+            "step_agents": ver.get("step_agents"),
+            "allowed_secrets": ver.get("allowed_secrets"),
+            "triggers": ver.get("triggers"),
+            "param_values": ver.get("param_values"),
+            "concurrency": ver.get("concurrency"),
+            "test_values": ver.get("test_values"),
+            "out_of_sync": bool(ver.get("out_of_sync")) or None,
+        }
+
+    def _reload_version(self, vd: Path, ver: dict) -> dict:
+        """Read a just-written version folder back, falling back to what was
+        written when it can't be read (§5)."""
+        loaded = self._load_version_folder(vd)
+        if loaded is None:
+            log.warning("just-written version folder %s can't be read back — "
+                        "keeping the version as written", vd)
+            loaded = self._version_from_memory(ver)
+        return loaded
+
     def _refresh_exec_derived(self) -> None:
         """Fill last_status / last_exec_at / live / latest-header per automation
         (§5 load model); the result chip rides on the execution header itself.
         `_latest` is kept current by create/update_execution so serialization
         never re-scans all executions per automation."""
         live: dict[str, set[str]] = {}
+        # §5: the automation's own execution ids, so latest_result_json reads
+        # its records directly instead of walking the whole table per automation.
+        exec_ids: dict[str, set[str]] = {}
         # §5 "filled by one startup query": one linear pass over every header
-        # fills both maps, instead of re-scanning the whole table once per
+        # fills every map, instead of re-scanning the whole table once per
         # automation (the per-automation `_latest_exec` stays for the
         # incremental callers, which rescan a single automation).
         latest_by_automation: dict[str, dict] = {}
         for h in self.execs.values():
+            exec_ids.setdefault(h["automation_id"], set()).add(h["id"])
             # §4.1 `live` is every in-progress execution, not just the newest —
             # maxParallel may allow several, and the startup sweep needs them all.
             if h["status"] == "executing" and not is_test(h):
@@ -868,6 +933,7 @@ class Store:
             a["_last_status"] = latest["status"] if latest else "none"
             a["_last_exec_at"] = latest["started_at"] if latest else None
             a["_live"] = live.get(a["id"], set())
+            a["_exec_ids"] = exec_ids.get(a["id"], set())
 
     @staticmethod
     def never_ran(h: dict) -> bool:
@@ -1021,11 +1087,13 @@ class Store:
                 "versions": {}, "draft": None,
                 # §4.1 `live` is a set: maxParallel may allow several at once.
                 "_last_status": "none", "_last_exec_at": None, "_live": set(),
+                "_exec_ids": set(),
             }
             ver = {**ver, "when": now, "note": ver.get("note") or "Created"}
-            self._write_version_folder(self.auto_dir(a) / "versions" / "v1", ver)
+            vd = self.auto_dir(a) / "versions" / "v1"
+            self._write_version_folder(vd, ver)
             (self.auto_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
-            a["versions"][1] = self._load_version_folder(self.auto_dir(a) / "versions" / "v1")
+            a["versions"][1] = self._reload_version(vd, ver)
             self._write_toplevel(a)
             self.autos[automation_id] = a
             return a
@@ -1076,7 +1144,7 @@ class Store:
             ver = {**ver, "when": timefmt.now_iso()}
             vd = self.auto_dir(a) / "versions" / f"v{n}"
             self._write_version_folder(vd, ver)
-            a["versions"][n] = self._load_version_folder(vd)
+            a["versions"][n] = self._reload_version(vd, ver)
             a["current_version"] = n
             a["updated_at"] = timefmt.now_iso()
             # §4.1: an edit save clears originOs — a local rework supersedes
@@ -1098,10 +1166,10 @@ class Store:
             # loaded content — never a tree copy — so the manifest lands last
             # as the commit point and a crash mid-restore leaves no adoptable
             # folder, just an incomplete directory the next save overwrites.
-            self._write_version_folder(dst, {**a["versions"][v],
-                                             "when": timefmt.now_iso(),
-                                             "note": f"Restored from v{v}"})
-            a["versions"][n] = self._load_version_folder(dst)
+            restored = {**a["versions"][v], "when": timefmt.now_iso(),
+                        "note": f"Restored from v{v}"}
+            self._write_version_folder(dst, restored)
+            a["versions"][n] = self._reload_version(dst, restored)
             a["current_version"] = n
             a["updated_at"] = timefmt.now_iso()
             self._write_toplevel(a)
@@ -1176,7 +1244,12 @@ class Store:
             if dd.exists():
                 dd.rename(old)
             new.rename(dd)
-            shutil.rmtree(old, ignore_errors=True)
+            # §6: the replaced working copy goes through the reaper like every
+            # other tree the store deletes — never an rmtree under store.lock.
+            # Aside beside the CONTAINER, not inside it: the automation dir and
+            # the app-support root are what the load-time leftover sweeps walk,
+            # so a crash between the rename and the reap can't strand it.
+            self._remove_tree(old, aside_parent=container.parent)
             if a is not None:
                 a["draft"] = self._load_version_folder(dd)
 
@@ -1286,13 +1359,14 @@ class Store:
                     "agent_id": meta.get("agent_id"),
                     "triggers": meta.get("triggers", []) or []}
 
-    def delete_draft(self, a: dict | None) -> None:
+    def delete_draft(self, a: dict | None) -> list[str]:
         """§19: ONE delete path for both /draft/{owner} owners. Settles the
         container (discard, save, Create, or Start over); §11 test records die
         with it (automationId null for the pending owner). The §11 chat thread
         never dies with the draft (§4.4 thread lifetime): an automation's
         chat.jsonl lives outside draft/, and the pending slot's — at the slot
-        root — is deliberately spared here."""
+        root — is deliberately spared here. Returns the §4.5 test execution ids
+        that died with the container — §19 publishes one `execution.deleted` each."""
         with self.lock:
             dd = self.draft_dir(a)
             if a is None:
@@ -1311,7 +1385,7 @@ class Store:
                 # aside here and reaped outside the lock, never walked under it.
                 self._remove_tree(dd)
                 a["draft"] = None
-            self.delete_test_execs(a["id"] if a is not None else None)
+            return self.delete_test_execs(a["id"] if a is not None else None)
 
     def pending_draft_summary(self) -> dict | None:
         """§19 GET /state `pendingDraft`: the slot's identity summary — backs
@@ -1476,6 +1550,11 @@ class Store:
             self.write_exec_yaml(h)
             self.execdb.upsert(h)
             self.execs[h["id"]] = h
+            # §5: kept current here and in delete_execution. Resolved through
+            # self.autos, not `auto`: a §11 test passes a shadow automation
+            # dict, and the set belongs to the stored record.
+            if (owner := self.autos.get(h["automation_id"])) is not None:
+                owner.setdefault("_exec_ids", set()).add(h["id"])
             # §4.5/§5: test executions never touch the automation's derived
             # display state or the §6 concurrency gate. A `queued` record doesn't
             # either — it hasn't run, so it must not claim a slot or shadow
@@ -1770,6 +1849,8 @@ class Store:
             # to remember to recompute after deleting.
             if h:
                 a = self.autos.get(h["automation_id"])
+                if a is not None:
+                    a.setdefault("_exec_ids", set()).discard(execution_id)
                 if a and (a.get("_latest") or {}).get("id") == execution_id:
                     latest = self._latest_exec(a["id"])
                     a["_latest"] = latest
@@ -1778,12 +1859,13 @@ class Store:
         if aside is not None:
             self._reap_later(aside)
 
-    def delete_test_execs(self, automation_id: str | None) -> None:
+    def delete_test_execs(self, automation_id: str | None) -> list[str]:
         """§11: test executions live only as long as their draft container —
         called when a draft settles, when a new test starts (keep-latest), and
         when the automation is deleted. `automation_id` None targets create-mode test
         records (§4.5 null automationId). Live records are skipped (the §19 409
-        keeps one from existing at draft-settle time in practice)."""
+        keeps one from existing at draft-settle time in practice). Returns the
+        ids it deleted — §19 publishes one `execution.deleted` per row."""
         with self.lock:
             doomed = [h["id"] for h in self.execs.values()
                       if is_test(h) and h["automation_id"] == automation_id
@@ -1794,6 +1876,7 @@ class Store:
         # than being rmtree'd here.)
         for eid in doomed:
             self.delete_execution(eid)
+        return doomed
 
     def retention_cleanup(self) -> int:
         with self.lock:
@@ -1991,18 +2074,38 @@ class Store:
     def list_snapshots(self, a: dict) -> list[dict]:
         """§6.3: read from disk on demand, newest first; orphan dirs (no
         snapshot.yaml), aside dirs awaiting the §6 reaper, and damaged metadata
-        skipped."""
-        out = []
+        skipped.
+
+        Memoized per automation (in-memory `_` key, never persisted) on the
+        snapshots dir's mtime plus each entry's name and snapshot.yaml mtime:
+        /state and the §7 admission path ask for this list repeatedly, and
+        every miss opens one snapshot.yaml per snapshot. One stat per entry
+        costs far less than that parse, and it keeps the §5 hand-edit rule —
+        a damaged snapshot.yaml is seen on the next call, not after the dir
+        changes."""
         root = self.snapshots_dir(a)
-        if root.exists():
-            for d in root.iterdir():
-                if d.is_dir() and not d.name.startswith(self.DELETED_PREFIX):
-                    meta = self._load_mapping(d / "snapshot.yaml")
-                    if self._snapshot_meta_ok(meta):
-                        out.append(meta)
-                    elif meta:
-                        log.warning("snapshot %s has unusable snapshot.yaml — skipping it", d.name)
-        return sorted(out, key=lambda m: m.get("created_at") or "", reverse=True)
+        try:
+            names = sorted(d.name for d in root.iterdir())
+            key = (mtime_ns(root),
+                   tuple((n, mtime_ns(root / n / "snapshot.yaml")) for n in names))
+        except OSError:
+            names, key = [], None  # no snapshots dir yet — nothing to memoize
+        memo = a.get("_snapshots")
+        if key is not None and memo is not None and memo[0] == key:
+            return list(memo[1])
+        out = []
+        for name in names:
+            d = root / name
+            if d.is_dir() and not name.startswith(self.DELETED_PREFIX):
+                meta = self._load_mapping(d / "snapshot.yaml")
+                if self._snapshot_meta_ok(meta):
+                    out.append(meta)
+                elif meta:
+                    log.warning("snapshot %s has unusable snapshot.yaml — skipping it", name)
+        out.sort(key=lambda m: m.get("created_at") or "", reverse=True)
+        if key is not None:
+            a["_snapshots"] = (key, out)
+        return list(out)
 
     def get_snapshot(self, a: dict, sid: str) -> dict | None:
         d = self._snapshot_dir(a, sid)
@@ -2260,9 +2363,10 @@ class Store:
                 "stepsFingerprint": fp if isinstance(fp, str) and fp else None}
 
     def latest_result_json(self, a: dict) -> dict | None:
-        hs = [h for h in self.execs.values()
-              if h["automation_id"] == a["id"] and h["status"] != "executing"
-              and not is_test(h)]
+        # `_exec_ids` (§5, kept by create/delete_execution): the automation's
+        # own records, so a long history on another automation costs nothing here.
+        hs = [h for i in a.get("_exec_ids", ()) if (h := self.execs.get(i))
+              if h["status"] != "executing" and not is_test(h)]
         # Memoized per automation (in-memory `_` key, never persisted): the
         # walk below costs one result-dir listing per no-result execution,
         # and /state pays it per automation under store.lock. Terminal
@@ -2424,7 +2528,9 @@ class Store:
         return out
 
     def auto_json(self, a: dict, full: bool = True) -> dict:
-        cur = a["versions"].get(a["current_version"], {})
+        # `or {}`: §5 says an unreadable version folder is absent, and the
+        # serializer must read an absent current version as an empty one.
+        cur = a["versions"].get(a["current_version"]) or {}
         last_at = a.get("_last_exec_at")
         last_dt = lenient_local(last_at) if last_at else None
         # §4.1 `live` is a list (maxParallel may allow several), ordered oldest
@@ -2440,7 +2546,10 @@ class Store:
         elif latest_h and latest_h["status"] == "failed":
             chip = "Needs attention"
             chip_status = "attention"
-        nxt = triggerlib.next_at(a["triggers"], run_baseline=self.run_baseline(a))
+        # §4.3: the epoch comes from the occurrence's instant — an interval's
+        # occurrence is one, and a local naive reading in the fall-back fold
+        # would hand the UI the earlier hour.
+        next_ms = triggerlib.next_at_ms(a["triggers"], run_baseline=self.run_baseline(a))
         when = a["versions"].get(a["current_version"], {}).get("when")
         spec_meta = f"v{a['current_version']}"
         if when and (dt := lenient_local(when)):
@@ -2453,7 +2562,7 @@ class Store:
             "triggers": [self.trigger_json(t) for t in a["triggers"]],
             "triggerChip": triggerlib.trigger_chip(a["triggers"]),
             "allTriggersOff": bool(a["triggers"]) and all(not t["enabled"] for t in a["triggers"]),
-            "nextAtMs": int(nxt.timestamp() * 1000) if nxt else None,
+            "nextAtMs": next_ms,
             "notes": cur.get("notes") or "",
             "lastStatus": a.get("_last_status", "none"),
             "live": live_ids,

@@ -105,7 +105,23 @@ def start(engine: Engine, draft: dict, auto: dict | None,
         # §11 stale-outcome rule: the renderer's opaque steps fingerprint rides
         # the record to the summary write below (`steps_fingerprint`, §5).
         h["_test"] = {"vdir": str(steps_dir), "mem": str(mem_dir), "fp": steps_fingerprint}
-        state = {"proc": None, "cancel": False}
+
+        def _on_spawn(pgid: int) -> None:
+            # §7: a test run persists `pgid` exactly like a scheduled execution,
+            # so §3 orphan recovery can kill its step group after a crash.
+            with store.lock:
+                h["pgid"] = pgid
+                store.update_execution(h)
+
+        def _on_agent_groups(groups: list[int]) -> None:
+            # §4.5 agentPgids: the same for an in-flight agent call's own-session
+            # group — recovery sweeps a test's agent groups too.
+            with store.lock:
+                h["agent_pgids"] = groups
+                store.update_execution(h)
+
+        state = {"proc": None, "cancel": False, "on_spawn": _on_spawn,
+                 "on_agent_groups": _on_agent_groups}
         with engine._lock:
             engine._live[h["id"]] = state
         # §4.5: test executions never change display state — no automation row.
@@ -194,7 +210,11 @@ def executions_context(auto: dict | None, current_steps: list[dict],
             f = store.execs.get(execution_id)
             if (f and f["automation_id"] == container_id
                     and f["status"] not in ("executing", "queued")):
-                picked.append(f)
+                # §8: the forced-in run takes the last of the EXECUTIONS_CAP
+                # slots rather than adding a sixth block, and the list is
+                # re-sorted so the section stays newest-first.
+                picked = hs[:EXECUTIONS_CAP - 1] + [f]
+                picked.sort(key=lambda h: h.get("started_at") or "", reverse=True)
     if not picked:
         return None
     cur_shas = [_step_sha(s) for s in current_steps or []]
@@ -243,7 +263,13 @@ def _execution_block(h: dict, cur_shas: list[str], detail: bool) -> str:
         lines.append("result files: " + ", ".join(f["name"] for f in files))
     rmd = store.exec_dir(h["id"]) / "result" / "result.md"
     if rmd.is_file():
-        text = rmd.read_text(encoding="utf-8").strip()
+        try:
+            # A step writes result.md itself — any encoding, and it can vanish or
+            # be unreadable between the check and the read. Never fail the §8
+            # context over it: the run just contributes no result text.
+            text = rmd.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            text = ""
         if len(text) > RESULT_EXCERPT:
             text = text[:RESULT_EXCERPT] + "\n… [result.md truncated]"
         if text:

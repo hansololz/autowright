@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
+from .marketplace import MAX_ENTRIES
+
 # A recurring pattern below: `field: StrictX = None` (no `| None` in the
 # annotation). Pydantic never validates defaults, so this reads "the key may be
 # absent, but when sent it must be a strict X — an explicit null is rejected".
@@ -246,7 +248,9 @@ class MarketplaceAdd(BaseModel):
 
 class MarketplaceSettings(BaseModel):
     """PATCH /marketplace/sources/{id} (§22.4): every field optional, only the
-    given ones change. `location` is text - blank means null."""
+    given ones change. `location` is text - blank, or an explicit null, means
+    null; the handler tells an absent key from a null one by `model_fields_set`
+    (§22.4), so `| None` here is a real value, not just the default."""
 
     location: StrictStr | None = None
     shown: StrictBool | None = None
@@ -273,7 +277,9 @@ class MarketplaceCatalogSave(BaseModel):
     exportFolder: StrictStr | None = None
     name: StrictStr = ""
     description: StrictStr = ""
-    entries: list[MarketplaceCatalogEntry] = Field(default_factory=list)
+    # §22.1/§22.7: the request is bounded before any export runs.
+    entries: list[MarketplaceCatalogEntry] = Field(default_factory=list,
+                                                   max_length=MAX_ENTRIES)
 
 
 class MarketplaceCatalogCreate(MarketplaceCatalogSave):

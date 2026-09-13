@@ -77,6 +77,34 @@ async function downloaded() {
   return screen.findByText('Restart to update')
 }
 
+describe('About updates row, rejected main-process calls (§9.4)', () => {
+  it('a rejected download lands the card in its failed state, not an unhandled rejection', async () => {
+    updateDownload.mockReset()
+    updateDownload.mockRejectedValue(new Error('bridge gone'))
+    render(<AboutPage />)
+    fireEvent.click(await screen.findByText('Download update'))
+    expect(await screen.findByText('Update failed: updater unavailable')).toBeTruthy()
+    expect(screen.getByText('Check for updates')).toBeTruthy()
+  })
+
+  it('a rejected install reverts the button the same way a refused one does', async () => {
+    updateInstall.mockRejectedValueOnce(new Error('bridge gone'))
+    fireEvent.click(await downloaded())
+    expect(await screen.findByText('Update failed: updater unavailable')).toBeTruthy()
+    expect(screen.queryByText('Restart to update')).toBeNull()
+  })
+
+  it('a rejected check reads as an error, never a row stuck on Checking…', async () => {
+    const autowright = (window as unknown as Record<string, Record<string, unknown>>).autowright
+    const check = autowright.updateCheck as ReturnType<typeof vi.fn>
+    check.mockRejectedValueOnce(new Error('bridge gone'))
+    storeMod.useStore.setState({ updateAvailable: null })
+    render(<AboutPage />)
+    fireEvent.click(await screen.findByText('Check for updates'))
+    expect(await screen.findByText("Couldn't reach GitHub. Try again later.")).toBeTruthy()
+  })
+})
+
 describe('About updates row, install answers (§9.4)', () => {
   it('a refused install renders the failed sub-line and reverts the button', async () => {
     updateInstall.mockResolvedValueOnce({ error: 'spawn ENOENT' })

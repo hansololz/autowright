@@ -1420,6 +1420,11 @@ def test_member_yaml_and_text_parse_rejects(store):
     # spec.md is read as text - non-UTF-8 bytes are named, not decoded lossily
     rejects("automation/spec.md isn't valid UTF-8",
             lambda nm, b: b"\xff\xfe broken" if nm == "automation/spec.md" else None)
+    # deeply nested collections blow the parser's stack instead of raising a
+    # YAMLError - the archive is untrusted input, so it answers the ordinary
+    # rejection rather than a 500
+    rejects("manifest.yaml is nested too deeply to read",
+            lambda nm, b: b"[" * 1200 if nm == "manifest.yaml" else None)
     assert len(store.autos) == before
 
 

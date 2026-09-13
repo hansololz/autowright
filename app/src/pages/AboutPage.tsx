@@ -84,7 +84,7 @@ export default function AboutPage() {
   const [brew, setBrew] = useState(false)
 
   useEffect(() => {
-    void window.autowright?.updateBrewManaged?.().then((b) => setBrew(!!b))
+    void window.autowright?.updateBrewManaged?.().then((b) => setBrew(!!b)).catch(() => {})
   }, [])
 
   // Checks run manually from the button here, or daily via the §3 automatic
@@ -93,8 +93,11 @@ export default function AboutPage() {
   // leaves it alone.
   const checkForUpdates = async () => {
     setUpd({ state: 'checking' })
-    void window.autowright?.updateBrewManaged?.().then((b) => setBrew(!!b))
-    const r = await window.autowright?.updateCheck()
+    void window.autowright?.updateBrewManaged?.().then((b) => setBrew(!!b)).catch(() => {})
+    // A main-process call that rejects (the bridge gone, the handler throwing)
+    // lands the card in `error` like any other failed check — never a row stuck
+    // on "Checking…" behind an unhandled rejection.
+    const r = await window.autowright?.updateCheck().catch(() => null)
     if (!r) setUpd({ state: 'error' })
     else if (r.state === 'error') setUpd({ state: 'error', error: r.error })
     else if (r.state === 'available') {
@@ -126,7 +129,9 @@ export default function AboutPage() {
 
   const downloadUpdate = async (v: string) => {
     setUpd({ state: 'downloading', version: v, percent: null })
-    const r = await window.autowright?.updateDownload()
+    // A rejected call is a failed download — the card must never sit on a
+    // progress bar that can no longer move.
+    const r = await window.autowright?.updateDownload().catch(() => null)
     if (r && 'ok' in r) setUpd({ state: 'downloaded', version: v })
     else setUpd({ state: 'failed', error: r && 'error' in r ? r.error : 'updater unavailable' })
   }
@@ -134,11 +139,14 @@ export default function AboutPage() {
   const installUpdate = async (v: string) => {
     // A `busy` answer means an automation is executing (§3) — the app keeps
     // running; the update installs on a later restart attempt.
-    const r = await window.autowright?.updateInstall()
+    const r = await window.autowright?.updateInstall().catch(() => (
+      { error: 'updater unavailable' } as const
+    ))
     if (r && 'busy' in r) setUpd({ state: 'downloaded', version: v, busy: true })
     // §9.4: the updater refused to quit (nothing staged, a stale download, a
-    // failed installer spawn) — the same "Update failed" sub-line and button
-    // revert as a download error, never a card stuck on "Restart to update".
+    // failed installer spawn) or the call itself rejected — the same "Update
+    // failed" sub-line and button revert as a download error, never a card
+    // stuck on "Restart to update".
     else if (r && 'error' in r) setUpd({ state: 'failed', error: r.error })
   }
 

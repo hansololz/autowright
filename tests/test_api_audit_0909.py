@@ -413,12 +413,14 @@ def test_settling_a_draft_publishes_execution_deleted(client, monkeypatch):
     from autowright import api
     from autowright.storage import store
 
+    # §4.5: create-mode test records — automationId null, the pending owner's.
+    doomed = [store.create_execution({"id": None, "name": "Draft"}, "test", None, "test",
+                                     [], status="succeeded")["id"] for _ in range(2)]
     published = []
     monkeypatch.setattr(api.hub, "publish", lambda ev, **kw: published.append({"event": ev, **kw}))
-    monkeypatch.setattr(store, "delete_draft", lambda a: ["exec-1", "exec-2"])
     assert client.delete("/draft/pending").status_code == 200
-    assert [e["executionId"] for e in published if e["event"] == "execution.deleted"] \
-        == ["exec-1", "exec-2"]
+    assert [e["executionId"] for e in published if e["event"] == "execution.deleted"] == doomed
+    assert not any(eid in store.execs for eid in doomed)
 
 
 def test_starting_a_test_publishes_execution_deleted_for_the_superseded_record(client, monkeypatch):
@@ -426,9 +428,10 @@ def test_starting_a_test_publishes_execution_deleted_for_the_superseded_record(c
     from autowright import api
     from autowright.storage import store
 
+    superseded = store.create_execution({"id": None, "name": "Draft"}, "test", None, "test",
+                                        [], status="succeeded")["id"]
     published = []
     monkeypatch.setattr(api.hub, "publish", lambda ev, **kw: published.append({"event": ev, **kw}))
-    monkeypatch.setattr(store, "delete_test_execs", lambda automation_id: ["old-test"])
     r = client.post("/tests", json={"draft": {"name": "Quick", "steps": [
         {"file": "01-ok.py", "name": "Ok", "description": "",
          "code": "from autowright import result\nresult.status('ok')\n"}]}})
@@ -440,7 +443,8 @@ def test_starting_a_test_publishes_execution_deleted_for_the_superseded_record(c
                for e in published):
             break
         time.sleep(0.05)
-    assert [e["executionId"] for e in published if e["event"] == "execution.deleted"] == ["old-test"]
+    assert [e["executionId"] for e in published if e["event"] == "execution.deleted"] == [superseded]
+    assert superseded not in store.execs
 
 
 # ---------- §19 GET /executions/{id}/logs?sinceSequence= ----------

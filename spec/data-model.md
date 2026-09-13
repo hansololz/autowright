@@ -419,7 +419,12 @@ interval must be at least 15 seconds", "an interval can be at most 365 days".
 seconds/minutes/hours/days" ("Every 6 hours", "Every 90 seconds", "Every 36 hours"), and
 when `N` is 1 the bare unit ("Every minute", "Every hour", "Every day"); `short` "Every
 N<u>" with `u` ∈ s/m/h/d ("Every 6h", "Every 90s", "Every 1d"). No timezone suffix — an
-interval has none.
+interval has none. **Occurrence arithmetic runs on instants**, never on local wall-clock
+datetimes: `anchor + n × every` is computed on the anchor's UTC instant and only the result is
+rendered back to local time, so a DST shift never stretches or shrinks an interval (a `P1D`
+anchored at noon the day before spring-forward is due at 1 PM, 24 real hours later, not at
+noon 23 hours later), and `nextAtMs` for an interval is that instant's epoch, unaffected by the
+fall-back fold.
 
 **Interval semantics** — an interval fires `every` after the automation's **last run**,
 not on a wall-clock grid. Each enabled interval trigger has an **anchor**: the later of

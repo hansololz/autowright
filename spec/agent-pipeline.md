@@ -105,8 +105,9 @@ can override it.
   step `PATH` (§6.1, stated per OS since the macOS, Linux, and Windows fallback dirs
   differ — why a `shutil.which` pre-flight works under a Dock launch), the SDK's hard
   limits (`reply` raises above 200 k characters; `notify` and `result.chip` silently
-  truncate at 10 000 and 1 000; `secrets.NAME` attribute access and an unknown
-  `result.status` value raise), the cancel semantics a persistent step observes (SIGTERM
+  truncate at 10 000 and 1 000; a step attempt may send at most 100 replies, later ones
+  dropped with one err line — the §6.1 reply budget; `secrets.NAME` attribute access and an
+  unknown `result.status` value raise), the cancel semantics a persistent step observes (SIGTERM
   to the step's process group, SIGKILL 5 s later, in-flight agent calls dying with the
   step), which
   secrets a step actually receives (only the ones it declares or literally subscripts; an

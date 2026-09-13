@@ -18,7 +18,7 @@ from typing import Any
 
 from . import harness, keychain, listeners, notify, packages as pkglib, paths, platform, timefmt
 from .events import hub
-from .executor import CTRL
+from .executor import CTRL, _LineWriter
 from .firing import finish_queued
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
                       clamp_max_parallel, exec_version_label, is_test, new_id,
@@ -56,6 +56,10 @@ def step_timeout_for(s: dict) -> float | None:
 
 
 MAX_ATTEMPTS = 20  # §4.5: attempts retained per step — older ones prune with their log files
+
+# §7: the executor's own per-line cap, reused so a child writing to the inherited
+# fd (which never passes through _LineWriter) gets the same bound.
+MAX_LOG_LINE_CHARS = _LineWriter.MAX_LINE
 
 REPLY_BUDGET = 100  # §6.1: replies one step attempt may send; the rest are dropped
 
@@ -437,10 +441,22 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         _close_pipe(proc.stdin)
         state["proc"] = None
         state.pop("hard_kill", None)
-        # §7: the executor is gone, so its agent calls are over — a done event
-        # that never arrived (killed mid-call) must not leave stale group ids
-        # for a later step's kill to re-signal (pid-reuse hazard).
-        if state.pop("agent_pgids", None):
+        # §7: the executor is gone, so its agent calls are over — a group still
+        # listed here always means a call was in flight when it died (a normal
+        # return retracts it), so the harness CLI in its own session is killed
+        # BEFORE the list is cleared: a cancel/skip SIGTERM takes the executor
+        # down at once and this teardown cancels the grace timer that would
+        # otherwise have done it. Clearing first would wipe the only record of
+        # the group and orphan the CLI. A stale id must not survive the clear
+        # either — a later step's kill re-signalling it is a pid-reuse hazard.
+        leftover = state.pop("agent_pgids", None)
+        if leftover:
+            procs = _processes()
+            for g in sorted(leftover):
+                try:
+                    procs.kill_group(g)
+                except Exception:  # noqa: BLE001 — an already-gone group is fine
+                    pass
             persist = state.get("on_agent_groups")
             if persist:
                 persist([])
@@ -849,7 +865,14 @@ class Engine:
         every caller on the step thread wants; an off-thread caller (the §6.1
         reply worker) passes the attempt that was current when it was queued,
         so its line can never land in the next attempt's file."""
+        # §7: one line is redacted, THEN clipped before storage and the live
+        # event — a newline-free flood from a child on the inherited fd
+        # arrives here in 2 MB readline chunks and must not reach the log file
+        # or the pane. Redaction first: a secret straddling the cut would
+        # otherwise leave its head in the log as a fragment no pattern matches.
         text = self._redact(h, text, redactions)
+        if len(text) > MAX_LOG_LINE_CHARS:
+            text = text[:MAX_LOG_LINE_CHARS] + "… [line truncated]"
         if cur is _CUR_NOW:
             cur = h.get("_cur")
         name = cur["log"] if cur else self.store.EXEC_LOG

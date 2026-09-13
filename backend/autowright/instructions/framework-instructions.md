@@ -285,9 +285,10 @@ Facts about results and the process:
   `/usr/bin`, `/snap/bin`, `~/.nix-profile/bin`. Windows: `~/.local/bin`,
   `~/.opencode/bin`, and npm's global bin under `%APPDATA%`.
 - Hard limits: `reply(text)` raises above 200,000 characters; `notify(text)` is cut
-  at 10,000 characters and `result.chip(text)` at 1,000, silently; `secrets.NAME`
-  attribute access raises (subscript by id); `result.status` with any value other
-  than the three above raises.
+  at 10,000 characters and `result.chip(text)` at 1,000, silently; a step attempt may
+  send at most 100 replies — the 101st and later are dropped with one err line;
+  `secrets.NAME` attribute access raises (subscript by id); `result.status` with any
+  value other than the three above raises.
 - Cancel or skip sends SIGTERM to the step's whole process group and SIGKILL 5 s
   later; an in-flight agent call dies with the step. A persistent step that must
   clean up does it inside those 5 s.

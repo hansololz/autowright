@@ -41,7 +41,11 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   "Step N: name" header, since the §7 LOGS pane already names the selected step in its header,
   and a step that prints nothing shows the "No log lines here." empty state rather than a
   header-only log. Execution-level lines (package installs, secret failures, the manual in-place retry
-  marker, the final failure line) go to `logs/execution.ndjson`. Then the execution gets its final status,
+  marker, the final failure line) go to `logs/execution.ndjson`; a single line is clipped to
+  128 KB (the executor's own per-line cap, so a child writing to the inherited fd gets the
+  same bound; a clipped line ends in "… [line truncated]") **after** redaction and before
+  storage and the live event — redaction runs on the whole line first, so a secret straddling
+  the cut can never leave its head behind as an unmatched fragment. Then the execution gets its final status,
   duration, result object; automation gets latest/resultChip/lastExecutionLabel "Today"; toast
   summarizes. An execution whose steps include `skipped` ones but no failures finishes
   `succeeded`.
@@ -61,7 +65,14 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   engine over the event stream when the call starts and retracts it when the call returns;
   the engine keeps the live set in the execution's kill state and persists it on the record
   (`agentPgids`, §4.5), so cancel/timeout/skip kill the agent group(s) right after the step
-  group, and §3 orphan recovery sweeps them with the same pid-reuse guard as `pgid`. Without
+  group, and §3 orphan recovery sweeps them with the same pid-reuse guard as `pgid`. The
+  step teardown enforces this on its own: a group still listed when the executor has exited
+  always means a call was in flight when it died (a normal return retracts the group), so
+  the teardown kills every listed group **before** clearing the list — a cancel/skip whose
+  SIGTERM takes the executor down inside the grace window (the default handler exits at
+  once) can never leave the harness CLI running with its group id wiped from the record.
+  Draft test runs (§11) persist `pgid`/`agentPgids` exactly like scheduled executions, so
+  §3 recovery sweeps a test's step and agent groups after a crash too. Without
   this, killing the step would orphan a running harness CLI mid-call.
   On Windows the executor spawns via the console interpreter with a hidden console (§2 spawn
   policy: `paths.console_python()` + `CREATE_NO_WINDOW`), so a step's console-subsystem

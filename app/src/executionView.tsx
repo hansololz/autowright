@@ -320,11 +320,14 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   useEffect(() => {
     if (closing) return
     const onKey = (e: KeyboardEvent) => {
-      // §7 ⌘F / Ctrl+F opens the find bar (an open one refocuses); the page
-      // yields to any open modal and to the §9.3 developer-log overlay,
-      // exactly as the flip keys do.
+      // §9.3: every shortcut here yields to the developer-log overlay, in both
+      // layouts — the overlay is drawn above the modal card too, so a run
+      // opened in one must not eat the keys underneath it.
+      if (devlogOverlayOpen()) return
+      // §7 ⌘F / Ctrl+F opens the find bar (an open one refocuses); on the page
+      // the shortcut also yields to any open modal, exactly as the flip keys do.
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
-        if (layout === 'page' && (anyModalOpen() || devlogOverlayOpen())) return
+        if (layout === 'page' && anyModalOpen()) return
         e.preventDefault()
         showFind.current()
         return
@@ -333,7 +336,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
       const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown'
       if (!back && !forward) return
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
-      if (layout === 'page' && (anyModalOpen() || devlogOverlayOpen())) return
+      if (layout === 'page' && anyModalOpen()) return
       if (!flipRef.current(back ? -1 : 1)) return
       e.preventDefault()
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur()

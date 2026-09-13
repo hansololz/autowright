@@ -756,7 +756,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   can't be undone.") with red Clear / quiet Keep. Snapshot swaps it to a name input
   (placeholder "Name — optional", Enter saves) with
   Save / quiet Cancel; the button is disabled when memory is empty (title "Memory is empty").
-  Below the info row, the §6.3 snapshot list (absent when there are none): one row per
+  Below the info row, the §6.3 snapshot list (the §14 `EmptyLine` "No snapshots yet." when
+  there are none): one row per
   snapshot — title (the name, else "Snapshot"), mono meta "reason · version · size · files ·
   when", quiet row actions Restore / Rename / Delete. Restore swaps the row to an inline
   confirm "Replaces current memory — the current state is snapshotted first." (pre-restore

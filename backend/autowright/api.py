@@ -642,8 +642,10 @@ def triggers_preview(body: models.TriggersPreview) -> dict:
         n = norm[0]
         label, short = triggerlib.trigger_display(n)
         nxt = triggerlib.trigger_next(n)  # None for app_start/message kinds and elapsed one-shots
+        # §4.3: the epoch comes from the occurrence's instant (an interval
+        # in the fall-back fold would otherwise read an hour early).
         entry = {"valid": True, "label": label, "short": short,
-                 "nextAtMs": int(nxt.timestamp() * 1000) if nxt else None}
+                 "nextAtMs": triggerlib.next_at_ms([n]) if nxt else None}
         if nxt:
             entry["nextLabel"] = f"{nxt.strftime('%b')} {nxt.day}, {timefmt.clock(nxt)}"
         out.append(entry)
@@ -1203,8 +1205,10 @@ def version_diff(automation_id: str,
     """§19 version diff: what changed between two stored versions, computed
     once here (versions_diff.py) for the §9.2 modal and the §20 CLI alike.
     Both labels are "vN" naming a stored version (404 otherwise, the current
-    one included) and must differ (400). Read under store.lock so a concurrent
-    save never yields a half-read pair."""
+    one included) and must differ (400). The pair is taken under store.lock
+    (a concurrent save never yields a half-read pair); the diff itself runs
+    outside it — versions are immutable, and difflib over every file of a
+    large automation must never stall firings or /state (§19)."""
     a = _auto_or_404(automation_id)
     x = versions_diff.parse_version_label(from_version)
     y = versions_diff.parse_version_label(to_version)
@@ -1214,7 +1218,8 @@ def version_diff(automation_id: str,
                 raise HTTPException(404, f"version {label} not found")
         if x == y:
             raise HTTPException(400, "from and to must be different versions")
-        files = versions_diff.diff_versions(a["versions"][x], a["versions"][y])
+        va, vb = a["versions"][x], a["versions"][y]
+    files = versions_diff.diff_versions(va, vb)
     return {"from": x, "to": y, "files": files}
 
 
@@ -2361,7 +2366,7 @@ async def marketplace_add(body: models.MarketplaceAdd) -> dict:
         # Threadpool, not the loop: an add downloads.
         source = await run_in_threadpool(
             lambda: marketplace_store.add(url=url or None, path=path or None))
-    except marketplace.MarketplaceDuplicate as e:
+    except (marketplace.MarketplaceDuplicate, marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     except marketplace.MarketplaceError as e:
         raise HTTPException(422, str(e)) from e
@@ -2376,11 +2381,13 @@ def marketplace_settings(source_id: str, body: models.MarketplaceSettings) -> di
     try:
         source = marketplace_store.update_settings(
             source_id,
-            location=body.location if body.location is not None else ...,
+            # §22.4: an absent `location` leaves it alone, an explicit null
+            # clears it - only the set of sent fields tells the two apart.
+            location=(body.location if "location" in body.model_fields_set else ...),
             shown=body.shown, auto_refresh=body.autoRefresh)
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
-    except marketplace.MarketplaceDuplicate as e:
+    except (marketplace.MarketplaceDuplicate, marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     except marketplace.MarketplaceError as e:
         raise HTTPException(422, str(e)) from e
@@ -2397,7 +2404,7 @@ async def marketplace_catalog_create(body: models.MarketplaceCatalogCreate) -> d
     try:
         source = await run_in_threadpool(
             lambda: marketplace_store.create_catalog(body.folder, content, _marketplace_export))
-    except marketplace.MarketplaceDuplicate as e:
+    except (marketplace.MarketplaceDuplicate, marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     except marketplace.MarketplaceError as e:
         raise HTTPException(422, str(e)) from e
@@ -2444,7 +2451,8 @@ async def marketplace_catalog_save(source_id: str, body: models.MarketplaceCatal
                                                    _marketplace_export))
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
-    except marketplace.MarketplaceNotEditable as e:
+    except (marketplace.MarketplaceNotEditable,
+            marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     except marketplace.MarketplaceError as e:
         raise HTTPException(422, str(e)) from e
@@ -2460,7 +2468,8 @@ async def marketplace_refresh(source_id: str) -> dict:
         source = await run_in_threadpool(marketplace_store.refresh, source_id)
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
-    except marketplace.MarketplaceNotRefreshable as e:
+    except (marketplace.MarketplaceNotRefreshable,
+            marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     hub.publish("marketplace.changed")
     return source
@@ -2470,7 +2479,10 @@ async def marketplace_refresh(source_id: str) -> dict:
 async def marketplace_refresh_all() -> dict:
     """§22.4: every catalog with a location, in order; one event covers the
     sweep."""
-    sources = await run_in_threadpool(marketplace_store.refresh_all)
+    try:
+        sources = await run_in_threadpool(marketplace_store.refresh_all)
+    except marketplace.MarketplaceUnwritable as e:
+        raise HTTPException(409, str(e)) from e
     hub.publish("marketplace.changed")
     return {"sources": sources}
 
@@ -2481,6 +2493,8 @@ def marketplace_remove(source_id: str) -> dict:
         marketplace_store.remove(source_id)
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
+    except marketplace.MarketplaceUnwritable as e:
+        raise HTTPException(409, str(e)) from e
     hub.publish("marketplace.changed")
     return {"ok": True}
 

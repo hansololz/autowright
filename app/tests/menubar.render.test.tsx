@@ -1,8 +1,8 @@
 // Component test for the §13 menu-bar panel's attention count: the aggregate
 // line matches the tray dot exactly: failed automations plus the §4.1
 // `overdue` problem, and nothing else.
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Automation } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -38,6 +38,14 @@ const auto = (over: Partial<Automation> = {}): Automation => ({
   ...over,
 })
 
+let mockedApi: Record<string, ReturnType<typeof vi.fn>>
+
+beforeEach(async () => {
+  mockedApi = (await import('../src/api')).api as unknown as Record<string, ReturnType<typeof vi.fn>>
+  mockedApi.executeNow.mockReset()
+  mockedApi.executeNow.mockResolvedValue({})
+  storeMod.useStore.setState({ toast: null })
+})
 afterEach(() => cleanup())
 
 describe('§13 menu-bar attention count', () => {
@@ -70,5 +78,40 @@ describe('§13 menu-bar attention count', () => {
     })
     render(<MenuBarPanel />)
     expect(screen.getByText('All good · 1 automation')).toBeTruthy()
+  })
+})
+
+// §7: the no-free-slot 409 reads the same here as on every other execute
+// surface — what happens next depends on the automation's §6 slots.
+describe('§13 menu-bar execute now', () => {
+  const execute = () => fireEvent.click(screen.getByRole('button', { name: 'Execute now' }))
+  const reject = (status: number, message = 'already executing') => {
+    mockedApi.executeNow.mockRejectedValue(Object.assign(new Error(message), { status }))
+  }
+
+  it('a 409 with the default slots toasts the one-at-a-time line', async () => {
+    storeMod.useStore.setState({ automations: [auto({ maxParallel: 1, maxQueued: 0 })] })
+    reject(409)
+    render(<MenuBarPanel />)
+    execute()
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe(
+      'Already executing — one execution at a time. A trigger firing now would be skipped.'))
+  })
+
+  it('a 409 with a queue says the firing would be queued', async () => {
+    storeMod.useStore.setState({ automations: [auto({ maxParallel: 2, maxQueued: 5 })] })
+    reject(409)
+    render(<MenuBarPanel />)
+    execute()
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe(
+      'All 2 slots are busy. A trigger firing now would be queued.'))
+  })
+
+  it('any other failure still toasts its own message', async () => {
+    storeMod.useStore.setState({ automations: [auto()] })
+    reject(500, 'backend is restarting')
+    render(<MenuBarPanel />)
+    execute()
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('backend is restarting'))
   })
 })

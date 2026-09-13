@@ -81,8 +81,9 @@ version that writes the new shape, and the oldest shape still read.
   existing file changes shape, data written before this date holds no such directory, and a
   release without the feature never reads it (the directory is inert on downgrade). The
   catalog people share carries its own `format_version: 1` hard gate, like §5.1 archives
-  and outside the §21 promise; `marketplaces.yaml` loads under the §5 lenient rule (an entry
-  missing `id`, `kind`, or `origin` skips with a warning). No migration. First version
+  and outside the §21 promise; `marketplaces.yaml` loads under the §22.2 lenient rule (a row
+  missing `id` or with an id that isn't uuid-shaped skips with a warning, a malformed
+  `location` skips, missing `shown`/`auto_refresh` default). No migration. First version
   writing the new shape: the next release after 2026-09-11; oldest shape still read: the
   same (the store did not exist before). Fixture test:
   `tests/test_marketplace.py::test_sources_yaml_lenient_load`.

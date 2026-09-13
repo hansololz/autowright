@@ -54,6 +54,16 @@ export default function AutomationDetail() {
   useEffect(() => {
     if (automationId) void loadAuto(automationId)
   }, [automationId])
+  // Detail → detail keeps this page mounted, so every popover, confirm and
+  // modal that names the automation has to let go of the one it was opened for.
+  useEffect(() => {
+    setDiffFrom(null)
+    setExportAsk(false)
+    setDelAsk(false)
+    setExecAsk(null)
+    setVerOpen(false)
+    setActOpen(false)
+  }, [automationId])
   // §9.2: this automation's execution headers — the §19 /state window may hold
   // none of an old automation's rows, so RECENT EXECUTIONS and the failure
   // notice read a per-automation fetch merged with the window (window wins:
@@ -269,7 +279,7 @@ export default function AutomationDetail() {
                 <MenuItemRow
                   key={v.version} mono
                   title={`v${v.version}`}
-                  sub={(v.note ? `${v.note} — ` : '') + v.when}
+                  sub={v.when + (v.note ? ` · ${v.note}` : '')}
                   // §4.4: read-only history — the compare icon is the row's one
                   // control (a diff changes nothing)
                   trailing={(
@@ -509,7 +519,7 @@ export default function AutomationDetail() {
       )}
 
       {exportAsk && (
-        <Modal onClose={() => setExportAsk(false)} width={440}>
+        <Modal onClose={() => setExportAsk(false)} width={440} ariaLabel={`Export ${auto.name}`}>
           {(close) => {
             // §5.1/§9.2: fetch the archive, then hand it to the native save dialog.
             const doExport = async () => {

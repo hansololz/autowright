@@ -115,6 +115,17 @@ describe('§6 memory-conflict caution', () => {
     )
   })
 
+  it('names a repeated step name once — two steps may legally share one', () => {
+    render(<ConcurrencyCard
+      auto={auto({ maxParallel: 2, steps: [step('Save it', 'memory.save(x)'), step('Save it', 'memory.save(y)')] })}
+      showToast={showToast}
+    />)
+    expect(cautionText()).toBe(
+      'Save it writes to memory. Parallel executions share one memory directory, '
+      + 'so two runs updating the same value can lose one of the updates.',
+    )
+  })
+
   it('is absent while only one execution may run at a time', () => {
     render(<ConcurrencyCard auto={auto({ maxParallel: 1, steps })} showToast={showToast} />)
     expect(cautionText()).toBeUndefined()

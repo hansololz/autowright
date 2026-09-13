@@ -1626,7 +1626,8 @@ class DraftJobs:
             self._check_cancel(job)  # a cancel must never start the installs
             draft["packages"] = pkglib.ensure(
                 draft["packages"],
-                on_progress=lambda spec: self._event(job, f"Installing {spec}…"))
+                on_progress=lambda spec: self._event(job, f"Installing {spec}…"),
+                should_stop=lambda: bool(job.get("_cancel")))
 
         # §19: the job payload is an API payload — its steps leave the
         # manifest's snake_case (`no_timeout` / `infinite_retries`) here, in the

@@ -120,6 +120,20 @@ describe('report modal (§9.5)', () => {
     expect(body()).not.toContain('Autowright v\n')
   })
 
+  it('a rejected platform-info call falls back to the unknown-OS line, never an unhandled rejection', async () => {
+    const autowright = (window as unknown as Record<string, Record<string, unknown>>).autowright
+    const real = autowright.platformInfo
+    autowright.platformInfo = () => Promise.reject(new Error('bridge gone'))
+    try {
+      await openModal()
+      const body = new URL(openHref()).searchParams.get('body')!
+      expect(body).toContain('Autowright v0.3.0')
+      expect(body).toContain('Unknown OS (version unknown)')
+    } finally {
+      autowright.platformInfo = real
+    }
+  })
+
   it('feature toggle switches label, prompt, and body heading; text survives; info toggle drops the environment', async () => {
     await openModal()
     fireEvent.change(screen.getByPlaceholderText(/^What did you expect, and what happened instead\?/),

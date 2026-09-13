@@ -103,14 +103,25 @@ def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime) 
     return max(cands) if cands else fallback
 
 
-def interval_next(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
-    """First `anchor + n × every` (n ≥ 1) strictly after `after`."""
+def interval_instant(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
+    """The first `anchor + n × every` (n ≥ 1) strictly after `after`, as the
+    aware UTC instant it really is. §4.3: the arithmetic runs on instants,
+    never on local naive datetimes — a DST shift must not stretch or shrink an
+    interval, and the epoch a fall-back reading would resolve wrongly comes
+    from here."""
     every = timedelta(seconds=parse_duration(t["every"]))
-    anchor = interval_anchor(t, run_baseline, after)
+    anchor = interval_anchor(t, run_baseline, after).astimezone(UTC)
+    after = after.astimezone(UTC)
     if after < anchor:
         return anchor + every
     n = int((after - anchor) / every) + 1
     return anchor + n * every
+
+
+def interval_next(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
+    """First `anchor + n × every` (n ≥ 1) strictly after `after`, local naive —
+    the instant above rendered back to local time."""
+    return interval_instant(t, after, run_baseline).astimezone().replace(tzinfo=None)
 
 
 # ---------- cron dialect (§4.3): 5 fields, numbers only, * , - / ----------
@@ -632,6 +643,25 @@ def next_at(triggers: list[dict], after: datetime | None = None,
     `run_baseline` anchors interval triggers (trigger_next)."""
     nxts = [n for t in triggers if t["enabled"] if (n := trigger_next(t, after, run_baseline))]
     return min(nxts) if nxts else None
+
+
+def next_at_ms(triggers: list[dict], after: datetime | None = None,
+               run_baseline: datetime | None = None) -> int | None:
+    """§4.3 `nextAtMs`: the next occurrence's epoch milliseconds, None when
+    nothing is coming. Taken from each occurrence's instant rather than from
+    `next_at`'s local naive minimum: an interval's occurrence is an instant
+    (§4.3), and a naive reading inside the fall-back fold resolves to the
+    earlier hour, which is not the moment the scheduler fires."""
+    base = after or datetime.now()
+    insts = []
+    for t in triggers:
+        if not t["enabled"]:
+            continue
+        if t["kind"] == "interval":
+            insts.append(interval_instant(t, base, run_baseline))
+        elif (n := trigger_next(t, after, run_baseline)) is not None:
+            insts.append(n.astimezone())
+    return int(min(insts).timestamp() * 1000) if insts else None
 
 
 def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = None) -> bool:

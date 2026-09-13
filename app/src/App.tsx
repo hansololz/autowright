@@ -169,7 +169,9 @@ function Content() {
     case 'agents': return <AgentsPage />
     case 'agentNew': return <AgentNewPage />
     case 'secrets': return <SecretsPage />
-    case 'marketplace': return <MarketplacePage />
+    // §22: parked - the redirect below leaves the page, and this keeps even
+    // the frame before it from mounting (and from firing GET /marketplace).
+    case 'marketplace': return MARKETPLACE_HIDDEN ? <AutomationsList /> : <MarketplacePage />
     case 'settings': return <SettingsPage />
     case 'about': return <AboutPage />
     default: return <AutomationsList />
@@ -198,8 +200,12 @@ function BootSplash({ waiting }: { waiting: boolean }) {
   useEffect(() => {
     if (!waiting) return
     const id = window.setInterval(async () => {
-      const s = await window.autowright?.backendStatus()
-      setFailDetail(s?.state === 'failed' ? s.detail : null)
+      // The bridge can throw (no handler registered yet, a main process on its
+      // way down) - a rejection here would repeat every 2 s, unhandled.
+      try {
+        const s = await window.autowright?.backendStatus()
+        setFailDetail(s?.state === 'failed' ? s.detail : null)
+      } catch { /* the hint line just stays as it is */ }
     }, 2000)
     return () => clearInterval(id)
   }, [waiting])

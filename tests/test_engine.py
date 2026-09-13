@@ -1268,6 +1268,50 @@ def test_draft_test_is_a_test_execution_record(store, monkeypatch):
     assert eid2 not in store.execs
 
 
+def test_draft_test_persists_its_kill_state(store, monkeypatch, tmp_path):
+    """§7: a draft test persists `pgid` and `agentPgids` exactly like a
+    scheduled execution, so §3 recovery sweeps a test's step and agent groups
+    after a crash too."""
+    from autowright import testexec as tr
+    from autowright.engine import Engine
+
+    monkeypatch.setattr(tr, "store", store)
+    engine = Engine(store)
+    ver = make_version()
+    gate = tmp_path / "go"
+    ver["steps"] = [{
+        "file": "01-wait.py", "name": "Wait", "description": "",
+        "code": ("import time\n"
+                 "from pathlib import Path\n"
+                 f"gate = Path({str(gate)!r})\n"
+                 "for _ in range(600):\n"
+                 "    if gate.exists():\n"
+                 "        break\n"
+                 "    time.sleep(0.05)\n"),
+    }]
+    a = store.create_automation(ver, "Kill State", None)
+    store.save_draft(a, ver)
+
+    eid = tr.start(engine, ver, a, [], [], {})
+    try:
+        t0 = time.time()
+        while store.read_exec_yaml(eid).get("pgid") is None:
+            assert time.time() - t0 < 30, "the test record never persisted its step group"
+            time.sleep(0.05)
+        assert store.read_exec_yaml(eid)["pgid"] == engine._live[eid]["proc"].pid
+        # §4.5 agentPgids: the same persist an in-flight agent call drives
+        engine._live[eid]["on_agent_groups"]([4242])
+        assert store.read_exec_yaml(eid)["agent_pgids"] == [4242]
+    finally:
+        gate.write_text("go", encoding="utf-8")
+    wait_done(engine, eid)
+    wait_test_summary(store.auto_dir(a) / "draft")
+
+    # §3: nothing left to recover once the test has finished
+    assert store.read_exec_yaml(eid)["pgid"] is None
+    assert store.read_exec_yaml(eid)["agent_pgids"] == []
+
+
 def test_create_mode_test_records_without_automation(store, monkeypatch):
     """§11 create mode: no automation yet — the record carries automation_id None
     and the summary lands in the §4.4 pending slot."""
@@ -2322,6 +2366,69 @@ def test_stale_grace_timer_never_kills_the_next_steps_agent_group(monkeypatch, t
     state["agent_pgids"] = {4242}
     captured["hard_kill"]()  # the stale timer fires
     assert killed == []
+
+
+def test_step_teardown_kills_an_agent_group_left_in_flight(monkeypatch, tmp_path):
+    """§7 kill semantics: the executor exited with a call still in flight (no
+    `agent_group_done`), so the teardown kills the harness CLI's own-session
+    group BEFORE clearing the list — a cancel/skip SIGTERM takes the executor
+    down at once and cancels the grace timer that would otherwise have done it."""
+    import subprocess
+    import sys
+
+    from autowright import engine as engmod
+
+    real = subprocess.Popen
+    # stand-in for the executor: one agent call opens and the process dies
+    # without ever retracting the group (what a SIGTERM mid-call looks like).
+    emitter = ("import json, sys\n"
+               "sys.stdin.read()\n"
+               f"CTRL = {engmod.CTRL!r}\n"
+               "print(CTRL + json.dumps({'op': 'agent_group', 'pgid': 4242}), flush=True)\n")
+    monkeypatch.setattr(engmod.subprocess, "Popen",
+                        lambda argv, **kw: real([sys.executable, "-c", emitter], **kw))
+    killed = []
+    real_procs = engmod._processes()
+
+    class _Recorder:
+        def kill_group(self, pgid):
+            killed.append(pgid)
+
+        def __getattr__(self, name):
+            return getattr(real_procs, name)
+
+    monkeypatch.setattr(engmod, "_processes", lambda: _Recorder())
+    script = tmp_path / "01-ask.py"
+    script.write_text("pass\n", encoding="utf-8")
+    persisted = []
+    state = {"proc": None, "cancel": False, "on_agent_groups": persisted.append}
+
+    rc = engmod.run_step_process(script, {}, state, lambda kind, text: None,
+                                 {"status": None, "chip": None}, {}, None)
+
+    assert rc == 0
+    assert killed == [4242]  # the orphaned harness CLI dies with the step
+    assert persisted == [[4242], []]  # …before the record's list is cleared
+    assert not state.get("agent_pgids")
+
+
+def test_a_huge_log_line_is_clipped_before_it_is_stored(store):
+    """§7: one log line is clipped at 128 KB before redaction, storage and the
+    live event — a newline-free flood must not land in the log file whole."""
+    from autowright.engine import MAX_LOG_LINE_CHARS, Engine
+
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [{"file": "01-flood.py", "name": "Flood", "description": "",
+                     "code": "import sys\nsys.stdout.write('x' * 300_000)\n"}]
+    a = store.create_automation(ver, "Flooder", None)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+
+    assert h["status"] == "succeeded"
+    flood = [l["text"] for l in read_all_logs(store, h["id"]) if l["text"].startswith("x")]
+    assert flood and all(l.endswith("… [line truncated]") for l in flood)
+    assert all(len(l) == MAX_LOG_LINE_CHARS + len("… [line truncated]") for l in flood)
 
 
 def test_on_spawn_failure_reaps_the_step_group(monkeypatch, tmp_path):

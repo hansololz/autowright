@@ -5,7 +5,7 @@
 // since the pane holds two code columns. The backend diffs (§19
 // GET /automations/{id}/diff); this file only renders. The comparison is always
 // chronological: the older version left, the newer right.
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { StepKeys } from './steps'
 import type { DiffFile, DiffRow, VersionDiff } from './types'
@@ -130,7 +130,12 @@ function useSideLines(file: DiffFile, side: 'left' | 'right'): (React.ReactNode 
 const CELL_GUTTER: React.CSSProperties = { textAlign: 'right', padding: '0 12px 0 14px', color: 'var(--text-deco)', userSelect: 'none' }
 const CELL_TEXT: React.CSSProperties = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', paddingRight: 12 }
 
-function DiffRows({ file, expanded, onExpand }: { file: DiffFile; expanded: ReadonlySet<number>; onExpand: (start: number) => void }) {
+// One shared empty set for "this file has nothing expanded": a fresh Set per
+// render would be a new prop identity every time, and the memoized grid below
+// would rebuild on every unrelated state change (opening the "to" picker).
+const EMPTY_SET: ReadonlySet<number> = Object.freeze(new Set<number>())
+
+const DiffRows = React.memo(function DiffRows({ file, expanded, onExpand }: { file: DiffFile; expanded: ReadonlySet<number>; onExpand: (start: number) => void }) {
   const items = useMemo(() => diffItems(file, expanded), [file, expanded])
   const leftLines = useSideLines(file, 'left')
   const rightLines = useSideLines(file, 'right')
@@ -171,7 +176,7 @@ function DiffRows({ file, expanded, onExpand }: { file: DiffFile; expanded: Read
       })}
     </div>
   )
-}
+})
 
 export function VersionDiffModal({ automationId, versions, current, from, other: initialOther, onClose }: {
   automationId: string
@@ -224,6 +229,13 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
   const label = (v: number) => `v${v}${v === current ? ' · current' : ''}`
   const others = versions.filter((v) => v.version !== from).sort((a, b) => b.version - a.version)
   const onNav = (i: number) => setViewed(Math.max(0, Math.min(files.length - 1, i)))
+  // Stable while the viewed file is: the memoized grid only re-renders when the
+  // file or its expansions change, never when the picker opens.
+  const onExpand = useCallback((start: number) => setExpanded((m) => {
+    const next = new Map(m)
+    next.set(viewed, new Set([...(m.get(viewed) ?? []), start]))
+    return next
+  }), [viewed])
 
   return (
     <Modal
@@ -232,7 +244,7 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
     >
       {(close, closing) => (
         <div className="ad-stepmodal" style={{ height: frame, display: 'flex', minWidth: 0 }}>
-          <StepKeys i={viewed} count={files.length} closing={closing} onNav={onNav} />
+          <StepKeys i={viewed} count={files.length} closing={closing} paused={pickOpen} onNav={onNav} />
           {/* file navigator */}
           <div className="ad-stepnav" style={{
             width: 280, flex: 'none', minHeight: 0, display: 'flex', flexDirection: 'column',
@@ -309,12 +321,8 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
               <ScrollArea key={`${x}-${y}-${viewed}`} className="ad-anim-fade" wrapStyle={{ flex: 1, minHeight: 0 }}>
                 <DiffRows
                   file={file}
-                  expanded={expanded.get(viewed) ?? new Set()}
-                  onExpand={(start) => setExpanded((m) => {
-                    const next = new Map(m)
-                    next.set(viewed, new Set([...(m.get(viewed) ?? []), start]))
-                    return next
-                  })}
+                  expanded={expanded.get(viewed) ?? EMPTY_SET}
+                  onExpand={onExpand}
                 />
               </ScrollArea>
             )}

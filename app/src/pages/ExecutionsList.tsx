@@ -7,7 +7,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
-import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageTitle, PULSE, waitedLabel } from '../ui'
+import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageLoading, PageTitle, PULSE, waitedLabel } from '../ui'
 import type { Execution } from '../types'
 import FilterModal, {
   DEFAULT_FILTERS, LIVE_STATUSES, activeCount, filtersActive, resolveRange, statusLabel, timeLabel,
@@ -321,7 +321,8 @@ export default function ExecutionsList() {
       )}
 
       {nothing ? (
-        firstFetchDone ? <EmptyNotice title={emptyTitle} body={emptyBody} /> : null
+        // §9: never a blank pane — the first page is still on the wire.
+        firstFetchDone ? <EmptyNotice title={emptyTitle} body={emptyBody} /> : <PageLoading />
       ) : (
         <>
           {executing.length > 0 && (

@@ -33,8 +33,10 @@ export function ConcurrencyCard({ auto, showToast }: { auto: Automation; showToa
 
   // §6/§9.2: the caution is specific or it isn't shown — an automation whose
   // steps never touch memory has nothing to warn about.
+  // Names are deduped: two steps may legally carry the same name, and naming
+  // one twice in the caution reads as a mistake.
   const memSteps = auto.maxParallel > 1
-    ? (auto.steps ?? []).filter(s => /\bmemory\b/.test(s.code ?? '')).map(s => s.name)
+    ? [...new Set((auto.steps ?? []).filter(s => /\bmemory\b/.test(s.code ?? '')).map(s => s.name))]
     : []
 
   return (
@@ -54,7 +56,7 @@ export function ConcurrencyCard({ auto, showToast }: { auto: Automation; showToa
         />
         {memSteps.length > 0 && (
           <Notice tone="amber" className="ad-anim-item" style={{ margin: '12px 18px' }}>
-            {memSteps.map(n => <code key={n} style={{ fontFamily: 'var(--mono)' }}>{n}</code>)
+            {memSteps.map((n, i) => <code key={`${i}:${n}`} style={{ fontFamily: 'var(--mono)' }}>{n}</code>)
               .reduce<React.ReactNode[]>((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], [])}
             {memSteps.length === 1 ? ' writes' : ' write'} to memory. Parallel executions share one
             memory directory, so two runs updating the same value can lose one of the updates.

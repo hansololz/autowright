@@ -121,7 +121,12 @@ folder the user chose, never under the data root.
   marketplace and add it again" when it has none) rather than vanishing. §5 lenient load
   applies to the table itself: a row missing `id` skips with a warning; a `location` that
   is neither `null`, an absolute path, nor an `https://` link skips with a warning; a
-  missing `shown` reads `true`, a missing `auto_refresh` reads `false`.
+  missing `shown` reads `true`, a missing `auto_refresh` reads `false`; an `id` that isn't
+  uuid-shaped skips with a warning (the id names the row's directory, so it is never joined
+  into a path unchecked). A table file that exists but can't be parsed (or whose root isn't a
+  mapping, or whose `sources` isn't a list) follows the §5 read-only rule for the other stores: the table loads empty for the
+  session and every write to it answers 409 "the marketplace table on disk couldn't be read;
+  fix or remove marketplaces.yaml" — the file is never overwritten with the empty default.
 - `kind` is **derived** from `location` wherever a surface needs it: `url`, `file`, or
   `none`. Nothing stores it.
 - **Add** takes a link or a file path (the §22.3 modal's three ways - a dropped or chosen
@@ -139,8 +144,11 @@ folder the user chose, never under the data root.
   invalid) nothing in the copy changes, `refreshed_at` keeps its old value, and `error`
   records the message - the page keeps showing the last good copy with the error beside
   it. A single-row refresh answers 200 with the row either way (`error` says what
-  happened) so a refresh-all never stops at the first bad row. One refresh runs at a time
-  per backend (a store-wide lock); a refresh runs on the threadpool.
+  happened) so a refresh-all never stops at the first bad row. A refresh runs on the
+  threadpool and the **download runs outside the table lock**: the location is read and
+  validated first, then the lock is taken only to swap the copy and stamp the row (a row
+  removed while its download was in flight is dropped, nothing written), so a slow host
+  never blocks `GET /marketplace`, settings, or the editor.
 - **Auto refresh.** The backend refreshes every row with `auto_refresh` true and a
   location **at startup** (30 s after the store loads, off the boot path) **and every 6
   hours** after that, in table order, through the same refresh; a failure lands in
@@ -240,7 +248,10 @@ has seen the shape.
   renderer talks to the backend with a bearer header, so a plain `<img src>` can't carry
   it, and a local path can't be loaded from the page at all): for an entry whose `image`
   is set, the page fetches the bytes and shows a blob URL, cached in memory per (catalog
-  id, index, `refreshedAt`) for the session and revoked when the page unmounts. Nothing
+  id, index, `image` reference, `refreshedAt`) for the session — the reference is part of
+  the key so an edit that points an entry at another picture (a catalog kept by Autowright
+  never stamps `refreshedAt`) shows the new one — and revoked when the page unmounts (a
+  fetch that lands after the unmount is revoked at once, never kept). Nothing
   is written to disk. A failed fetch (404, 502, network) keeps the no-image icon.
 
 **Catalog settings modal** (width 460, from the gear): title "Catalog settings", the
@@ -313,7 +324,7 @@ still cached).
   readable file.
 - `PATCH /marketplace/sources/{id}` `{ location?, shown?, autoRefresh? }` → `Source`
   (§22.2 settings; every field optional, only the given ones change). `location` is a
-  string: empty or blank means `null`, otherwise an `https://` link or an absolute path
+  string or `null`: empty, blank, or an explicit `null` means `null`, otherwise an `https://` link or an absolute path
   (`~` expanded; 422 "give an https link or an absolute path" otherwise); a location
   already on another row → 409 "that marketplace is already added"; `null` on a row
   whose copy is unreadable → 422 "there's no saved copy to keep - refresh first".
@@ -394,7 +405,8 @@ exact name (case-insensitive); ambiguity and no-match are the standard §20 erro
 path given to `add` is made absolute against the current directory before it travels.
 `list` prints one block per catalog - `<name> [<id8>]  <location>` (`(kept by Autowright)`
 for `null`), with ` hidden` and/or ` auto-refresh` appended to that line when set; then
-`  refreshed <when>` for a catalog with a location, `  added <when> (no location to
+`  refreshed <when>` for a catalog with a location (`  added <when>` while it has never been
+refreshed — a folder just created with `create`), `  added <when> (no location to
 refresh from)` for one without, or `  couldn't refresh: <error>` when the last refresh
 failed; then each entry as `  <n>. <title> - <description>` (1-based; the description
 omitted when empty; "  no automations listed" for an empty catalog). `add` prints `added
@@ -455,9 +467,11 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   copied), keeps a `path` entry and its `image` as written, rewrites the file with the
   §22.1 keys only, refreshes the copy, writes nothing on a 422, and leaves the archive
   file behind when its entry is removed.
-- Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): the nav
-  row hidden while `developerMode` is false and shown when true, the redirect to
-  Automations when the setting drops mid-page, the empty state with the example catalog,
+- Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): while
+  `MARKETPLACE_HIDDEN` holds, the nav row renders for nobody and the `marketplace` page
+  redirects to Automations for everyone (the developer-mode pair — row hidden while
+  `developerMode` is false and shown when true, redirect when the setting drops mid-page
+  — is dormant behind the flag and returns with it), the empty state with the example catalog,
   a catalog with entries rendering its grid, the Refresh button and Refresh all present
   only for a catalog with a location, a hidden catalog collapsing to its header with the
   "Hidden" chip, the settings modal PATCHing the three fields with AUTO REFRESH disabled
@@ -661,10 +675,19 @@ is written before everything has been checked**:
    `description` when non-empty, `path`, `image` when non-empty) and runs it through the
    §22.1 parser. Unknown keys and hand-written comments in the previous file don't
    survive a save - the editor owns the file.
-5. Writes the exported archives, then the catalog atomically (temp file + rename): to the
-   location for a path, to the row's copy for `null`.
+5. Writes the exported archives (each created exclusively — a file that appeared under the
+   planned name since step 3 takes the next free suffix instead of being overwritten), then
+   the catalog atomically (temp file + rename): to the location for a path, to the row's
+   copy for `null`. A failure here unlinks the archives written by this save and answers
+   422; before this step nothing has touched the disk.
 6. For a path location, refreshes the copy from the file (the §22.2 refresh) and stamps
-   `refreshed_at`; for `null`, the copy is what was just written.
+   `refreshed_at`; a refresh failure after the catalog is on disk is recorded as the row's
+   `error` (the save itself answers 200 with the row — the file is written); for `null`, the
+   copy is what was just written.
+
+The request is bounded before any export runs: more than the §22.1 200 entries is the 422
+"the catalog file lists more than 200 automations" up front, never after the archives
+were built.
 
 Removing an entry never deletes its archive file (the UI row says so: a removed entry's
 file stays where it is). `PUT` on a link location is the 409 above.

@@ -155,6 +155,21 @@ describe('VersionDiffModal', () => {
     expect(screen.getByTestId('diff-picker').textContent).toContain('vs v1')
   })
 
+  it('the arrow keys stand down while the "to" picker is open', async () => {
+    mockedApi.versionDiff.mockResolvedValue(DIFF)
+    open()
+    await waitFor(() => expect(screen.getByText('FILE 3 OF 5')).toBeTruthy())
+    fireEvent.click(screen.getByTestId('diff-picker'))
+    // the open menu owns the arrows — flipping the file underneath it would
+    // swap the comparison out from under the version the user is picking
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(screen.getByText('FILE 3 OF 5')).toBeTruthy()
+    // closing it hands the keys back
+    fireEvent.click(screen.getByTestId('diff-picker'))
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(screen.getByText('FILE 4 OF 5')).toBeTruthy()
+  })
+
   it('Escape with the picker open closes the picker, not the modal', async () => {
     mockedApi.versionDiff.mockResolvedValue(DIFF)
     const onClose = vi.fn()

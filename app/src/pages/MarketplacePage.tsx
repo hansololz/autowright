@@ -48,25 +48,36 @@ const locationIcon = (source: MarketplaceSource) =>
 
 // §22.3 preview images load by reference, on demand, through the
 // authenticated §19 image route, and are shown as blob URLs cached in memory
-// per (source, entry, refreshedAt) for the session - nothing on disk. The page
-// revokes and drops every URL it made when it unmounts, which also re-arms the
-// cache for the next mount (tests/setup.ts StrictMode).
+// per (source, entry, image reference, refreshedAt) for the session - nothing
+// on disk. The reference is part of the key because a catalog kept by
+// Autowright never stamps refreshedAt, so an edited image would otherwise keep
+// showing the old picture. The page revokes and drops every URL it made when
+// it unmounts, which also re-arms the cache for the next mount (tests/setup.ts
+// StrictMode).
 const imageUrls = new Map<string, string>()
+// §22.3: bumped by the page's unmount cleanup. A fetch that resolves after it
+// belongs to a map that is already cleared - its URL is revoked at once rather
+// than repopulating the cache nothing will ever revoke again.
+let imageGeneration = 0
 
-function EntryImage({ sourceId, index, refreshedAt, has }: {
-  sourceId: string; index: number; refreshedAt: string | null; has: boolean
+function EntryImage({ sourceId, index, image, refreshedAt, has }: {
+  sourceId: string; index: number; image: string | null; refreshedAt: string | null; has: boolean
 }) {
-  const key = `${sourceId}:${index}:${refreshedAt ?? ''}`
+  const key = `${sourceId}:${index}:${image}:${refreshedAt ?? ''}`
   const [url, setUrl] = useState<string | null>(() => imageUrls.get(key) ?? null)
   useEffect(() => {
     if (!has) return
     const cached = imageUrls.get(key)
     if (cached) { setUrl(cached); return }
     let gone = false
+    const generation = imageGeneration
     void (async () => {
       try {
         const blob = await api.marketplaceImage(sourceId, index)
         const made = URL.createObjectURL(blob)
+        // The page unmounted while this was in flight - the cache it would
+        // land in is gone, so this URL dies with it.
+        if (generation !== imageGeneration) { URL.revokeObjectURL(made); return }
         // A remount can have won the race - keep the first URL for the key and
         // drop this one, so the map never leaks a second URL per image.
         const first = imageUrls.get(key)
@@ -110,9 +121,10 @@ function AddMarketplaceModal({ onClose, onAdded }: {
   const [busy, setBusy] = useState<false | 'field' | 'drop'>(false)
   const [over, setOver] = useState(false)
   const [error, setError] = useState<{ msg: string; src: 'field' | 'drop' } | null>(null)
+  const added = useRef<MarketplaceSource | null>(null)
 
   return (
-    <Modal onClose={onClose} width={460}>
+    <Modal onClose={() => (added.current ? onAdded(added.current) : onClose())} width={460}>
       {(close) => {
         // §22.4: a 422 (bad catalog) or 409 (already added) shows inline under
         // whichever control produced it.
@@ -121,8 +133,10 @@ function AddMarketplaceModal({ onClose, onAdded }: {
           setBusy(src); setError(null)
           try {
             const source = await api.marketplaceAdd(body)
+            // §14: the parent unmounts this portal the moment it hears, so the
+            // hand-off waits for the exit animation to finish.
+            added.current = source
             close()
-            onAdded(source)
           } catch (e) { setError({ msg: (e as Error).message, src }); setBusy(false) }
         }
         const submitField = () => {
@@ -326,24 +340,40 @@ export default function MarketplacePage() {
   const [imported, setImported] = useState<
     { name: string; automationId: string; summary: ImportSummary } | null>(null)
 
+  // §22.3: one list at a time wins - a stale answer (a slow first list, an
+  // unmounted page) never lands over a newer one. The ref is re-armed on every
+  // mount: StrictMode runs the cleanup between the two.
+  const alive = useRef(true)
+  const listSequence = useRef(0)
   const load = async () => {
+    const sequence = ++listSequence.current
+    const current = () => alive.current && sequence === listSequence.current
     try {
       const r = await api.marketplaceList()
+      if (!current()) return
       setSources(r.sources)
     } catch (e) {
+      if (!current()) return
       // A failed list leaves the page empty instead of spinning forever.
       setSources((prev) => prev ?? [])
       showToast((e as Error).message)
     }
   }
 
-  // §22.3: on mount, and again whenever a marketplace.changed event lands.
-  useEffect(() => { void load() }, [marketplaceVersion])
+  // §22.3: on mount, and again whenever a marketplace.changed event lands -
+  // every write the page makes publishes one, so nothing else asks for a list.
+  useEffect(() => {
+    alive.current = true
+    void load()
+    return () => { alive.current = false }
+  }, [marketplaceVersion])
 
-  // §22.3: every blob URL this page made dies with it.
+  // §22.3: every blob URL this page made dies with it, and the generation bump
+  // sends the ones still in flight the same way.
   useEffect(() => () => {
     for (const made of imageUrls.values()) URL.revokeObjectURL(made)
     imageUrls.clear()
+    imageGeneration++
   }, [])
 
   const refreshAll = async () => {
@@ -557,7 +587,7 @@ export default function MarketplacePage() {
                       data-testid="marketplace-entry"
                       style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
                     >
-                      <EntryImage sourceId={s.id} index={e.index} refreshedAt={s.refreshedAt} has={e.image !== null} />
+                      <EntryImage sourceId={s.id} index={e.index} image={e.image} refreshedAt={s.refreshedAt} has={e.image !== null} />
                       <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 7, flex: 1 }}>
                         <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>{e.title}</div>
                         {e.description && (
@@ -597,7 +627,6 @@ export default function MarketplacePage() {
           onClose={() => setAddOpen(false)}
           onAdded={(source) => {
             setAddOpen(false)
-            void load()
             showToast(`Added ${source.name}.`)
           }}
         />
@@ -606,7 +635,7 @@ export default function MarketplacePage() {
         <CatalogSettingsModal
           source={settings}
           onClose={() => setSettings(null)}
-          onSaved={() => { setSettings(null); void load() }}
+          onSaved={() => setSettings(null)}
         />
       )}
       {editing && (
@@ -617,7 +646,6 @@ export default function MarketplacePage() {
           onSaved={(source) => {
             const created = editing === 'create'
             setEditing(null)
-            void load()
             showToast(created ? `Created ${source.name}.` : `Saved ${source.name}.`)
           }}
         />

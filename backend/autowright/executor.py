@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -36,9 +37,17 @@ for _stream in (sys.stdout, sys.stderr):
 _real_stdout = sys.stdout
 
 
+# Control lines are emitted from the step thread AND from the harness spawn
+# callback thread (§7 agent_group) — an interleaved write loses the op the
+# engine needs, so one line goes out at a time.
+_emit_lock = threading.Lock()
+
+
 def emit(op: str, **kw) -> None:
-    _real_stdout.write(CTRL + json.dumps({"op": op, **kw}, ensure_ascii=False) + "\n")
-    _real_stdout.flush()
+    line = CTRL + json.dumps({"op": op, **kw}, ensure_ascii=False) + "\n"
+    with _emit_lock:
+        _real_stdout.write(line)
+        _real_stdout.flush()
 
 
 class MissingSecret(Exception):

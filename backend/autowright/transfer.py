@@ -356,6 +356,11 @@ def _yaml_or_reject(z: zipfile.ZipFile, path: str, required: bool = True) -> dic
         data = yaml.safe_load(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as e:
         raise TransferError(f"{path} isn't valid YAML: {e}") from None
+    except RecursionError:
+        # Deeply nested collections blow the parser's stack instead of raising
+        # a YAMLError — the §5.1 archive is untrusted input, so it answers the
+        # ordinary rejection, never a 500.
+        raise TransferError(f"{path} is nested too deeply to read") from None
     if data is None:
         return {}
     if not isinstance(data, dict):

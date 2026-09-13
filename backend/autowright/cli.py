@@ -32,7 +32,7 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 def _exit_http(e: urllib.error.HTTPError) -> None:
     # §20: print the API's detail message, never the raw JSON body.
-    body = e.read().decode()
+    body = e.read().decode("utf-8", errors="replace")
     try:
         detail = json.loads(body).get("detail")
     except (ValueError, AttributeError):
@@ -110,29 +110,34 @@ class Client:
 
 # ---------------------------------------------------------------- lookups
 
-def find_automation(c: Client, ref: str) -> dict:
-    autos = c.req("GET", "/automations")
-    for a in autos:
-        if a["id"] == ref:
-            return a
+def _resolve(items: list[dict], ref: str, noun: str) -> dict:
+    """§20 reference rule, shared by every id-and-name lookup: the id, then an
+    id prefix, then an exact name, then a unique name substring."""
+    for it in items:
+        if it["id"] == ref:
+            return it
     # §20: the short ids the CLI prints must resolve back — try id prefix
     # before names.
-    matches = [a for a in autos if a["id"].startswith(ref)]
+    matches = [it for it in items if it["id"].startswith(ref)]
     # §4.1 names are unique at write time, but duplicates already on disk
     # still load — §20: ambiguity exits with the candidate list, never a
     # silent first-match (substring matches can still collide anyway).
     if not matches:
-        matches = [a for a in autos if a["name"].lower() == ref.lower()]
+        matches = [it for it in items if it["name"].lower() == ref.lower()]
     if not matches:
-        matches = [a for a in autos if ref.lower() in a["name"].lower()]
+        matches = [it for it in items if ref.lower() in it["name"].lower()]
     if len(matches) == 1:
         return matches[0]
     if matches:
-        sys.exit(f"{ref!r} is ambiguous — matches: "
-                 + ", ".join(f"{a['name']} ({a['id'][:8]})" for a in matches)
-                 + " — use the id instead")
-    sys.exit(f"no automation matches {ref!r} — "
-             f"have: {', '.join(a['name'] for a in autos) or '(none)'}")
+        sys.exit(f"{ref!r} is ambiguous - matches: "
+                 + ", ".join(f"{it['name']} ({it['id'][:8]})" for it in matches)
+                 + " - use the id instead")
+    sys.exit(f"no {noun} matches {ref!r} - "
+             f"have: {', '.join(it['name'] for it in items) or '(none)'}")
+
+
+def find_automation(c: Client, ref: str) -> dict:
+    return _resolve(c.req("GET", "/automations"), ref, "automation")
 
 
 def find_execution(c: Client, ref: str | None) -> dict:
@@ -155,29 +160,22 @@ def find_execution(c: Client, ref: str | None) -> dict:
 
 def find_source(c: Client, ref: str) -> dict:
     """§22.5: a marketplace source resolves like every other §20 reference."""
-    sources = c.req("GET", "/marketplace")["sources"]
-    for s in sources:
-        if s["id"] == ref:
-            return s
-    # §20: the short ids the CLI prints must resolve back - try id prefix
-    # before names.
-    matches = [s for s in sources if s["id"].startswith(ref)]
-    if not matches:
-        matches = [s for s in sources if s["name"].lower() == ref.lower()]
-    if not matches:
-        matches = [s for s in sources if ref.lower() in s["name"].lower()]
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
-        sys.exit(f"{ref!r} is ambiguous - matches: "
-                 + ", ".join(f"{s['name']} ({s['id'][:8]})" for s in matches)
-                 + " - use the id instead")
-    sys.exit(f"no marketplace matches {ref!r} - "
-             f"have: {', '.join(s['name'] for s in sources) or '(none)'}")
+    return _resolve(c.req("GET", "/marketplace")["sources"], ref, "marketplace")
 
 
 def _pjson(data) -> None:
     print(json.dumps(data, indent=2))
+
+
+def _toggle(name: str, raw: str) -> bool:
+    """§20 on|off parse, shared by `param set`, `marketplace set` and
+    `settings set` — strict, so a typo never silently becomes False."""
+    low = raw.strip().lower()
+    if low in ("on", "true", "1", "yes"):
+        return True
+    if low in ("off", "false", "0", "no"):
+        return False
+    sys.exit(f"{name} takes on|off, got {raw!r}")
 
 
 # ---------------------------------------------------------------- log follow
@@ -772,10 +770,12 @@ def cmd_automation_restore(c: Client, args) -> None:
 
 
 def _version_arg(label: str) -> int:
-    v = label.lstrip("vV")
-    if not v.isdigit():
+    # isdigit() is true for digits int() refuses ("³"), so the parse itself is
+    # the check — a usage error, never a traceback.
+    try:
+        return int(label.lstrip("vV"))
+    except ValueError:
         sys.exit(f"version must be vN, got {label!r}")
-    return int(v)
 
 
 DIFF_CONTEXT = 3       # §20/§9.2: same-rows kept on each side of a collapsed run
@@ -948,12 +948,7 @@ def parse_param_value(p: dict, raw: str):
     """§20: parse a `param set` VALUE by the definition's kind."""
     kind = p["kind"]
     if kind == "toggle":
-        low = raw.strip().lower()
-        if low in ("on", "true", "1", "yes"):
-            return True
-        if low in ("off", "false", "0", "no"):
-            return False
-        sys.exit(f"param {p['name']}: toggle takes on|off, got {raw!r}")
+        return _toggle(f"param {p['name']}: toggle", raw)
     if kind == "number":
         try:
             return int(raw)
@@ -1045,12 +1040,28 @@ def _stored_triggers(c: Client, automation_id: str) -> list[dict]:
 
 
 def _trigger_at_index(triggers: list[dict], n: str) -> dict:
-    if not n.isdigit() or not 1 <= int(n) <= len(triggers):
+    # isdigit() is true for digits int() refuses ("³"), so the parse itself is
+    # the check — a usage error, never a traceback.
+    try:
+        i = int(n)
+    except ValueError:
+        i = 0
+    if not 1 <= i <= len(triggers):
         sys.exit(f"trigger index must be 1..{len(triggers)} (see `automation trigger list`)")
-    return triggers[int(n) - 1]
+    return triggers[i - 1]
 
 
 def cmd_trigger_add(c: Client, args) -> None:
+    # §4.3: a trigger is exactly one kind — the chain below would keep the
+    # first and silently drop the rest, so name the conflict instead.
+    kinds = [label for label, given in (("a cron expression", args.expression),
+                                        ("--every", args.every),
+                                        ("--at", args.at),
+                                        ("--app-start", args.app_start),
+                                        ("--discord", args.discord),
+                                        ("--imessage", args.imessage)) if given]
+    if len(kinds) > 1:
+        sys.exit(f"a trigger is one kind: {' and '.join(kinds)} can't go together")
     a = find_automation(c, args.automation)
     if args.discord:
         if not args.secret:
@@ -1335,7 +1346,10 @@ def cmd_execution_result(c: Client, args) -> None:
     try:
         sys.stdout.buffer.write(data)
     except BrokenPipeError:
-        # Piped into `head` and the reader closed early — a normal end.
+        # Piped into `head` and the reader closed early — a normal end. Point
+        # stdout at /dev/null first so the interpreter's own final flush can't
+        # print "Exception ignored" over the closed pipe.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         sys.exit(0)
 
 
@@ -1444,6 +1458,10 @@ def cmd_marketplace_list(c: Client, args) -> None:
             print(f"  added {s.get('addedAt') or '?'} (no location to refresh from)")
         elif s.get("refreshedAt"):
             print(f"  refreshed {s['refreshedAt']}")
+        else:
+            # §22.5: a location never read yet (a folder just created) - say
+            # when the row was made.
+            print(f"  added {s.get('addedAt') or '?'}")
         entries = s.get("entries") or []
         if not entries:
             print("  no automations listed")
@@ -1484,15 +1502,7 @@ def cmd_marketplace_set(c: Client, args) -> None:
         if k not in SOURCE_KEYS:
             sys.exit(f"unknown marketplace key {k!r} - have: {', '.join(SOURCE_KEYS)}")
         if SOURCE_KEYS[k] is bool:
-            low = raw.strip().lower()
-            # Strict like `settings set`'s toggle parse - a typo must not
-            # silently become False.
-            if low in ("on", "true", "1", "yes"):
-                patch[k] = True
-            elif low in ("off", "false", "0", "no"):
-                patch[k] = False
-            else:
-                sys.exit(f"{k} takes on|off, got {raw!r}")
+            patch[k] = _toggle(k, raw)
         else:
             # §22.4: an empty location clears it - the copy stays, there is
             # just nothing to refresh from any more.
@@ -1536,17 +1546,21 @@ def cmd_marketplace_remove(c: Client, args) -> None:
     print(f"removed {s['name']}")
 
 
+def _entry_index(n: int, entries: list, name: str) -> int:
+    """§22.5: the number on the command line is the 1-based one the catalog
+    lists; §22.4 addresses entries by 0-based index."""
+    if n < 1:
+        sys.exit("entry numbers start at 1 - see `autowright marketplace list`")
+    if n > len(entries):
+        sys.exit(f"{name!r} lists {len(entries)} automation(s) - "
+                 f"there is no entry {n}")
+    return n - 1
+
+
 def cmd_marketplace_install(c: Client, args) -> None:
     s = find_source(c, args.source)
-    # §22.5: the number on the command line is the 1-based one `list` prints;
-    # §22.4 addresses entries by 0-based index.
-    if args.n < 1:
-        sys.exit("entry numbers start at 1 - see `autowright marketplace list`")
-    entries = s.get("entries") or []
-    if args.n > len(entries):
-        sys.exit(f"{s.get('name', '?')!r} lists {len(entries)} automation(s) - "
-                 f"there is no entry {args.n}")
-    pr = c.req("POST", f"/marketplace/sources/{s['id']}/entries/{args.n - 1}/preview",
+    i = _entry_index(args.n, s.get("entries") or [], s.get("name", "?"))
+    pr = c.req("POST", f"/marketplace/sources/{s['id']}/entries/{i}/preview",
                timeout=600)
     # §20 import rule: the typed command is the user's go-ahead - preview and
     # confirm in one, exactly as `automation import` does with a link.
@@ -1653,16 +1667,10 @@ def cmd_marketplace_catalog_add(c: Client, args) -> None:
 
 def cmd_marketplace_catalog_remove(c: Client, args) -> None:
     s = find_source(c, args.source)
-    # §22.5: the number on the command line is the 1-based one the catalog
-    # lists, checked the way `install` checks its own.
-    if args.n < 1:
-        sys.exit("entry numbers start at 1 - see `autowright marketplace list`")
     catalog = _read_catalog(c, s)
     entries = _catalog_entries(catalog)
-    if args.n > len(entries):
-        sys.exit(f"{s.get('name', '?')!r} lists {len(entries)} automation(s) - "
-                 f"there is no entry {args.n}")
-    dropped = entries.pop(args.n - 1)
+    # Checked the way `install` checks its own.
+    dropped = entries.pop(_entry_index(args.n, entries, s.get("name", "?")))
     saved = _save_catalog(c, s, catalog, entries)
     # §22.7: removing an entry never deletes the archive it named.
     print(f"removed entry {args.n} ({dropped['title']}) from {saved['name']} - "
@@ -1709,15 +1717,7 @@ def cmd_settings_set(c: Client, args) -> None:
             sys.exit(f"unknown setting {k!r} — have: {', '.join(SETTINGS_KEYS)}, dataPath")
         kind = SETTINGS_KEYS[k]
         if kind is bool:
-            low = raw.strip().lower()
-            # Strict like `param set`'s toggle parse — a typo must not
-            # silently become False.
-            if low in ("on", "true", "1", "yes"):
-                patch[k] = True
-            elif low in ("off", "false", "0", "no"):
-                patch[k] = False
-            else:
-                sys.exit(f"{k} takes on|off, got {raw!r}")
+            patch[k] = _toggle(k, raw)
         elif kind is int:
             try:
                 patch[k] = int(raw)
@@ -2086,8 +2086,7 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p = _sub(ag, "show", cmd_automation_show,
              "print one automation in full: spec, steps, triggers, params", json_flag=True,
              description="One automation's whole record: what it does, every step, its "
-                         "triggers, its parameters and their current values, the agents and "
-                         "secrets it is allowed to use, its memory snapshots, and anything "
+                         "triggers, its parameters and their current values, and anything "
                          "that needs fixing before it can execute."
                          "\n\n"
                          "This is the read-only view. To change what an automation does, "
@@ -2794,8 +2793,9 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                           "keeps the only copy."
                           "\n\n"
                           "`set` changes what a catalog does: where it is read from, whether "
-                          "`list` shows the automations it lists (hidden), and whether it is "
-                          "refreshed on its own (auto refresh, at launch and every 6 hours)."
+                          "the app's Marketplace page shows its automations (hidden), and "
+                          "whether it is refreshed on its own (auto refresh, at launch and "
+                          "every 6 hours)."
                           "\n\n"
                           "Wherever a verb takes a marketplace, name it by its name "
                           "(case-insensitive), a unique part of its name, its id, or a "
@@ -2837,7 +2837,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "reads the catalog again - an https link or the path of a catalog "
                          "file on this machine; an empty value clears it, which keeps the "
                          "copy Autowright has and turns auto refresh off. `shown` is whether "
-                         "`list` prints the automations it lists. `autoRefresh` is whether "
+                         "the app's Marketplace page shows its automations. `autoRefresh` is "
+                         "whether "
                          "Autowright refreshes it on its own, at launch and every 6 hours."
                          "\n\n"
                          "Only the keys you type change; the copy of the catalog is left "

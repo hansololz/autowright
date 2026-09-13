@@ -199,6 +199,11 @@ export const LOG_TAIL = 2000
 // this is what makes it one and not a loop.
 const executionRefetched = new Set<string>()
 
+// §19: ids whose missing body is being fetched because a step event arrived
+// with nothing to apply it to. In-flight only — the entry is dropped when the
+// fetch settles, so a later eviction re-arms one fetch and never a loop.
+const executionStepFetching = new Set<string>()
+
 function touchExecutionMru(id: string) {
   executionMru = [id, ...executionMru.filter((x) => x !== id)].slice(0, EXECUTION_CACHE_KEEP)
 }
@@ -334,7 +339,7 @@ export const useStore = create<Model>((set, get) => ({
       window.autowright?.onUpdateAvailable?.((version) => set({ updateAvailable: version }))
       void window.autowright?.updateAvailable?.().then((version) => {
         if (version) set({ updateAvailable: version })
-      })
+      }).catch(() => {}) // the main process may answer late or not at all — never an unhandled rejection
       updateTrayAlert(s.automations)
     } catch {
       set({ connected: false })
@@ -493,6 +498,9 @@ export const useStore = create<Model>((set, get) => ({
       delete executionFull[executionId]
       delete execLogs[executionId]
       executionRefetched.delete(executionId)
+      // the MRU is what eviction keeps — a deleted id left there would hold a
+      // slot for a record that can never come back
+      executionMru = executionMru.filter((x) => x !== executionId)
       set({
         executions: m.executions.filter((e) => e.id !== executionId),
         executionsTotal: Math.max(0, m.executionsTotal - 1),
@@ -512,6 +520,20 @@ export const useStore = create<Model>((set, get) => ({
             [executionId]: { ...full, steps: full.steps.map((s, i) => (i === idx ? step : s)) },
           },
         })
+        return
+      }
+      // No body to apply it to: a page opened mid-run whose first GET is still
+      // on the wire, or an evicted record still streaming. Dropping the event
+      // would leave the steps frozen until something else refetches — fetch the
+      // body once for a record someone is actually looking at (the viewed
+      // execution, or one the MRU still keeps).
+      if ((m.executionId === executionId || executionMru.includes(executionId))
+        && !executionStepFetching.has(executionId)) {
+        executionStepFetching.add(executionId)
+        setTimeout(() => {
+          void get().loadExecution(executionId)
+            .finally(() => executionStepFetching.delete(executionId))
+        }, 0)
       }
       return
     }

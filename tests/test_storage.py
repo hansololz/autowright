@@ -2444,3 +2444,136 @@ def test_interval_overdue_after_two_missed_occurrences(store):
     assert store.problems_json(a, cur)[0] == {
         "kind": "overdue",
         "label": "Scheduled executions are being missed — it has never run."}
+
+
+# ---------- §5 load/serialize hardening: version reload, per-automation indexes ----------
+
+def test_unreadable_version_reload_keeps_what_was_written(store, caplog):
+    """§5: a version folder that can't be read back right after it was written
+    is kept as written — never stored as None, which would serialize as a
+    version running zero steps."""
+    a = store.create_automation(make_version(), "Reloaded", None)
+    real = store._load_version_folder
+    calls = []
+
+    def once(vd):
+        calls.append(vd)
+        return None if len(calls) == 1 else real(vd)
+
+    with caplog.at_level("WARNING"):
+        store._load_version_folder = once
+        try:
+            n = store.save_new_version(a, make_version(note="Second"))
+        finally:
+            del store._load_version_folder
+    ver = a["versions"][n]
+    assert ver is not None and ver["note"] == "Second"
+    assert [s["name"] for s in ver["steps"]] == ["Say hello", "Finish"]
+    assert "params['greeting']" in ver["steps"][0]["code"]
+    assert "can't be read back" in caplog.text
+    j = store.auto_json(a)
+    assert j["version"] == n and j["specMeta"].startswith(f"v{n}")
+
+
+def test_exec_ids_track_each_automations_records(store):
+    """§5: every automation keeps its own execution ids, so latest_result_json
+    reads its records instead of walking the whole table."""
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Owner", None)
+    b = store.create_automation(make_version(), "Other", None)
+    first = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    first["chip"] = "Older"
+    store.update_execution(first)
+    mine = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
+    mine["chip"] = "Newest"
+    store.update_execution(mine)
+    theirs = store.create_execution(b, "version", 1, "manual", [], status="succeeded")
+    store.update_execution(theirs)
+
+    assert a["_exec_ids"] == {first["id"], mine["id"]}
+    assert b["_exec_ids"] == {theirs["id"]}
+    latest = store.latest_result_json(a)
+    assert latest["executionId"] == mine["id"] and latest["chip"] == "Newest"
+
+    store.delete_execution(mine["id"])
+    assert a["_exec_ids"] == {first["id"]}
+    assert store.latest_result_json(a)["executionId"] == first["id"]
+
+    # the load walk rebuilds the same sets
+    s2 = Store()
+    s2.load_all()
+    assert s2.autos[a["id"]]["_exec_ids"] == {first["id"]}
+    assert s2.autos[b["id"]]["_exec_ids"] == {theirs["id"]}
+
+
+def test_list_snapshots_memo_skips_the_yaml_reads(store, monkeypatch):
+    """§6.3/§19 /state cost: the listing is memoized on the snapshots dir, so
+    an unchanged dir never reopens one snapshot.yaml per snapshot."""
+    a = store.create_automation(make_version(), "Snapped", None)
+    _write_memory(store, a)
+    first = store.snapshot_memory(a, "manual", name="first")
+    assert [m["id"] for m in store.list_snapshots(a)] == [first["id"]]
+
+    reads = []
+    real = store._load_mapping
+    monkeypatch.setattr(store, "_load_mapping",
+                        lambda path, default=None: (reads.append(path), real(path, default))[1])
+    assert [m["id"] for m in store.list_snapshots(a)] == [first["id"]]
+    assert reads == []  # memo hit — nothing reopened
+
+    second = store.snapshot_memory(a, "manual", name="second")
+    assert {m["id"] for m in store.list_snapshots(a)} == {first["id"], second["id"]}
+    assert reads  # the new snapshot dir moved the key
+
+    reads.clear()
+    store.delete_snapshot(a, second["id"])
+    assert [m["id"] for m in store.list_snapshots(a)] == [first["id"]]
+    assert reads  # so does a delete
+
+
+def test_save_draft_leaves_no_stale_working_copy(store):
+    """§5/§6: the replaced working copy goes through the reaper — a re-save
+    leaves the container holding just the new copy (and memory/)."""
+    a = store.create_automation(make_version(), "Drafter", None)
+    store.save_draft(a, make_version(note="first"))
+    store.save_draft(a, make_version(note="second"))
+    store.drain_reaper()
+
+    container = store.auto_dir(a) / "draft"
+    assert a["draft"]["note"] == "second"
+    assert sorted(p.name for p in container.iterdir()) == ["automation"]
+    assert list(container.glob(f"{store.DELETED_PREFIX}*")) == []
+
+
+def test_step_file_with_undecodable_bytes_loads(store, home):
+    """§5 lenient load: a step script hand-saved in another encoding loads with
+    the bad bytes replaced — never a version the whole load drops."""
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Bytey", None)
+    (home / "automations" / a["id"] / "versions" / "v1" / "01-say.py") \
+        .write_bytes(b"log('caf\xe9')\n")
+    s2 = Store()
+    s2.load_all()
+    assert s2.autos[a["id"]]["versions"][1]["steps"][0]["code"] == "log('caf\ufffd')\n"
+
+
+def test_cron_expression_is_trimmed_on_load(store, home):
+    """§4.3: a hand-edited expression with stray spaces loads trimmed, exactly
+    as normalize_triggers stores one."""
+    from autowright.storage import Store, load_yaml, save_yaml
+
+    a = store.create_automation(make_version(), "Spacey", None, triggers=[
+        {"id": "t-1", "kind": "cron", "enabled": True, "expression": "30 7 * * *",
+         "source": "user"}])
+    top_path = home / "automations" / a["id"] / "automation.yaml"
+    top = load_yaml(top_path)
+    top["triggers"][0]["expression"] = "  30 7 * * *  "
+    save_yaml(top_path, top)
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    assert b["triggers"][0]["expression"] == "30 7 * * *"
+    assert s2.auto_json(b)["triggerChip"] == "Daily 7:30"

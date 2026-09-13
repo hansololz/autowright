@@ -24,7 +24,7 @@ export default function ReportModal() {
   const [os, setOs] = useState<{ platform: string; osName?: string; release: string; arch: string; version: string } | null>(null)
 
   useEffect(() => {
-    void window.autowright?.platformInfo?.().then(setOs)
+    void window.autowright?.platformInfo?.().then(setOs).catch(() => {}) // the block falls back to "Unknown OS"
   }, [])
 
   // §9.5 environment block — exactly two lines: app version + OS. Never the

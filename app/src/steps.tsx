@@ -10,7 +10,7 @@ import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
-import { Eyebrow, MiniBadge, Modal, ScrollArea, Tag, Toggle, agName, dispModel, highlightPythonLines, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, validUrl } from './ui'
+import { Eyebrow, MiniBadge, Modal, ScrollArea, Tag, Toggle, agName, dispModel, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, validUrl } from './ui'
 
 // §4.1/§6.1 code-reference scan: literal quoted uuid subscripts only.
 const SECRET_REF_RE = /\bsecrets\[\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']\s*\]/g
@@ -407,19 +407,24 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
 // mounted through the ~200 ms exit animation, and a key press then would act
 // on the fading card — same guard shape as the Modal's own Escape handler.
 // The flip keys ignore editable targets, so typing in the find field never
-// flips the step.
+// flips the step — and an open list or menu owns the arrows itself.
 // Shared by the §9.2 step-script modal and the version diff modal (versiondiff.tsx),
 // which flips files with the same keys and the same no-focus-ring rules.
-export function StepKeys({ i, count, closing, onNav, onFind }: {
-  i: number; count: number; closing: boolean; onNav: (i: number) => void; onFind?: () => void
+// `paused` is the card's own hand-off: a popover inside it (the diff modal's
+// "to" picker) takes the arrows for as long as it is open.
+export function StepKeys({ i, count, closing, paused, onNav, onFind }: {
+  i: number; count: number; closing: boolean; paused?: boolean; onNav: (i: number) => void; onFind?: () => void
 }) {
   useEffect(() => {
-    if (closing) return
+    if (closing || paused) return
     const onKey = (e: KeyboardEvent) => {
       // §9.3: both shortcuts yield to the developer-log overlay above the card
       if (devlogOverlayOpen()) return
+      // …and to a card stacked above this one, the way the Modal's own Escape
+      // handler yields to the stack.
+      if (!isTopModal()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { if (!onFind) return; e.preventDefault(); onFind(); return }
-      if (e.target instanceof HTMLElement && e.target.closest('input, textarea, [contenteditable="true"]')) return
+      if (e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable="true"], [role="listbox"], [role="menu"]')) return
       const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp'
       const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown'
       const flip = back ? (i > 0 ? i - 1 : null) : forward ? (i < count - 1 ? i + 1 : null) : null
@@ -435,7 +440,7 @@ export function StepKeys({ i, count, closing, onNav, onFind }: {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [i, count, closing]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [i, count, closing, paused]) // eslint-disable-line react-hooks/exhaustive-deps
   return null
 }
 

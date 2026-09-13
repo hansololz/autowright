@@ -136,6 +136,9 @@ function AddAutomationPicker({ sources, workingId, onAdd, onClose }: {
       const safe = a.name.replace(/[/\\:*?"<>|]+/g, ' ').trim() || 'automation'
       const path = await window.autowright?.saveFile(`${safe}.autowright`, data)
       if (path) {
+        // §22.1: the catalog can only name an .autowright file - a save dialog
+        // talked into any other name says so here, not at Save.
+        if (!archiveRefOk(path)) { setError(ARCHIVE_BAD); return }
         choose({ title: a.name, description: a.description, path, image: '', pickedFile: true, label: path, mono: true })
       }
     } catch (e) {
@@ -150,6 +153,7 @@ function AddAutomationPicker({ sources, workingId, onAdd, onClose }: {
       picked = await window.autowright?.openArchivePath()
     } catch (e) { setError((e as Error).message); return }
     if (picked) {
+      if (!archiveRefOk(picked.path)) { setError(ARCHIVE_BAD); return }
       choose({
         title: lastSegment(picked.path).replace(/\.autowright$/i, ''), description: '',
         path: picked.path, image: '', pickedFile: true, label: picked.path, mono: true,

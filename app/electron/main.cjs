@@ -777,7 +777,8 @@ function togglePanel() {
     load(panel, '/menubar')
     attachContextMenu(panel)
     hardenWindow(panel)
-    panel.on('blur', () => { panelHiddenAt = Date.now(); panel.hide() })
+    const w = panel
+    w.on('blur', () => { panelHiddenAt = Date.now(); if (!w.isDestroyed()) w.hide() })
     panel.on('closed', () => { panel = null })
   }
   const pt = screen.getCursorScreenPoint()
@@ -958,8 +959,14 @@ ipcMain.handle('save-file', async (_e, defaultName, data) => {
   // no-op, never a throw.
   if (typeof defaultName !== 'string' || !defaultName) return null
   if (!(Buffer.isBuffer(data) || data instanceof Uint8Array || data instanceof ArrayBuffer)) return null
+  const base = path.basename(defaultName)
   const r = await dialog.showSaveDialog(win, {
-    defaultPath: path.join(app.getPath('downloads'), path.basename(defaultName)),
+    defaultPath: path.join(app.getPath('downloads'), base),
+    // §5.1/§22.7: an archive save names its own type, so the picked path keeps
+    // the .autowright extension the catalog and the importer both require.
+    ...(base.toLowerCase().endsWith('.autowright')
+      ? { filters: [{ name: 'Autowright automation', extensions: ['autowright'] }] }
+      : null),
   })
   if (r.canceled || !r.filePath) return null
   // Async IO: archives run to 64 MB (§5.1) and the target can be a network

@@ -4,7 +4,7 @@
 // notice (no run option). AutomationDetail renders for real (happy-dom) with
 // the store seeded and the api module mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { Automation, Execution, ParamDef, Trigger, VersionInfo } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -436,6 +436,34 @@ describe('§9.2 PARAMETERS row writes', () => {
     }
   })
 
+  const numberParam: ParamDef = {
+    name: 'copies', kind: 'number', label: 'Copies', help: 'How many', value: 2, min: 1,
+  }
+
+  // §9.2: clearing the draft on blur would show the pre-PATCH value for the
+  // length of the round-trip — the same hold the CONCURRENCY rows keep.
+  const heldThroughBlur = async (p: ParamDef, typed: string, settled: string) => {
+    let settle!: () => void
+    mockedApi.patchAutomation.mockImplementationOnce(
+      () => new Promise((r) => { settle = () => r({}) }))
+    render(<ParamRow automationId="a1" p={p} last />)
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    fireEvent.change(input, { target: { value: typed } })
+    fireEvent.blur(input)
+    await waitFor(() => expect(mockedApi.patchAutomation).toHaveBeenCalledTimes(1))
+    expect(input.value).toBe(typed)          // still the committed value, mid-flight
+    await act(async () => { settle() })
+    await waitFor(() => expect(input.value).toBe(settled))
+  }
+
+  it('a blurred text row holds the committed value until the PATCH settles', async () => {
+    await heldThroughBlur(textParam, 'Daily digest', '')
+  })
+
+  it('a blurred number row holds the committed value until the PATCH settles', async () => {
+    await heldThroughBlur(numberParam, '7', '2')
+  })
+
   it('a rejected toggle PATCH rolls the switch back and toasts the reason', async () => {
     mockedApi.patchAutomation.mockRejectedValueOnce(new Error('backend is restarting'))
     storeMod.useStore.setState({ toast: null })
@@ -470,6 +498,33 @@ describe('§9.2 delete while the page is open', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  it('detail → detail closes the popups opened for the automation left behind', async () => {
+    storeMod.useStore.setState({
+      page: 'automation', automationId: 'a1', executions: [], toast: null,
+      automations: [auto(), auto({ id: 'a2', name: 'Other' })],
+    })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    fireEvent.click(screen.getByText('Export…'))
+    // §14: the dialog carries its own name
+    expect(screen.getByRole('dialog', { name: 'Export Job' })).toBeTruthy()
+
+    // the page stays mounted across detail → detail — the modal must not
+    await act(async () => { storeMod.useStore.setState({ automationId: 'a2' }) })
+    expect(screen.queryByRole('dialog', { name: 'Export Job' })).toBeNull()
+    expect(screen.getByText('Other')).toBeTruthy()
+  })
+
+  it('version menu: an older row reads date · note (§4.4)', () => {
+    seed(auto({
+      version: 2,
+      versions: [{ version: 1, when: 'Jul 1, 2026', note: 'Before the rewrite', spec: [], steps: [], params: [], packages: [] }],
+    }))
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByText('v2'))
+    expect(screen.getByText('Jul 1, 2026 · Before the rewrite')).toBeTruthy()
   })
 
   it('version menu: an older row carries the compare icon, which opens the diff modal on vX → current', async () => {

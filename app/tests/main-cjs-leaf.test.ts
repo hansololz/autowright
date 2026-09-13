@@ -260,6 +260,9 @@ interface WinRecord {
   focuses: number
   loads: number
   destroys: number
+  // §13: hide() calls — a panel the tray toggle put away, and the one a late
+  // blur must not put away again.
+  hides: number
   // §13: restore() calls, and every setPosition the panel placement made.
   restores: number
   positions: [number, number][]
@@ -269,6 +272,8 @@ interface WinRecord {
   // §9.4 will-navigate handler with a real event object.
   minimize: () => void
   navigate: (url: string) => boolean
+  // §13: the window-level blur the OS can deliver after the window is gone.
+  blur: () => void
 }
 
 interface MainStub {
@@ -405,9 +410,10 @@ function loadMain(options: LoadOptions = {}): MainStub {
     listeners = new Map<string, (...a: unknown[]) => void>()
     destroyed = false
     record: WinRecord = {
-      shows: 0, focuses: 0, loads: 0, destroys: 0, restores: 0, positions: [],
+      shows: 0, focuses: 0, loads: 0, destroys: 0, hides: 0, restores: 0, positions: [],
       fire: (event, ...args) => { this.wcListeners.get(event)?.({}, ...args) },
       close: () => { this.listeners.get('closed')?.() },
+      blur: () => { this.listeners.get('blur')?.() },
       minimize: () => { this.minimized = true },
       navigate: (url) => {
         let prevented = false
@@ -429,7 +435,13 @@ function loadMain(options: LoadOptions = {}): MainStub {
     loadFile() { this.record.loads += 1 } loadURL() { this.record.loads += 1 }
     on(event: string, fn: (...a: unknown[]) => void) { this.listeners.set(event, fn) }
     minimized = false
-    show() { this.record.shows += 1 } focus() { this.record.focuses += 1 } hide() {}
+    show() { this.record.shows += 1 } focus() { this.record.focuses += 1 }
+    // The real one throws on a destroyed window, which is the whole point of
+    // the §13 blur guard.
+    hide() {
+      if (this.destroyed) throw new Error('Object has been destroyed')
+      this.record.hides += 1
+    }
     isMinimized() { return this.minimized }
     restore() { this.minimized = false; this.record.restores += 1 }
     setSize() {}
@@ -628,6 +640,22 @@ describe('main.cjs IPC argument validation', () => {
       .toBe(join(m.home, 'out.autowright'))
     expect(m.dialogs[0][1].defaultPath).toBe(join(m.home, 'evil.autowright'))
     expect(readFileSync(join(m.home, 'out.autowright'), 'utf-8')).toBe('hi')
+  })
+
+  it('save-file names the archive type, and leaves other files unfiltered (§5.1)', async () => {
+    const m = loadMain()
+    m.dialogAnswer.canceled = true
+    // §5.1/§22.7: an .autowright save offers its own type, so the path the
+    // user picks keeps the extension the importer and the §22.1 catalog need.
+    await m.invoke('save-file', 'Watcher.autowright', Buffer.from('x'))
+    expect(m.dialogs[0][1].filters)
+      .toEqual([{ name: 'Autowright automation', extensions: ['autowright'] }])
+    // §22.3 Export hands the catalog file to the same dialog under a .yaml
+    // name — that one keeps the unfiltered dialog.
+    await m.invoke('save-file', 'marketplace-catalog.yaml', Buffer.from('x'))
+    expect(m.dialogs[1][1]).not.toHaveProperty('filters')
+    // The name still only ever names a file inside the downloads dir.
+    expect(m.dialogs[1][1].defaultPath).toBe(join(m.home, 'marketplace-catalog.yaml'))
   })
 
   it('apply-settings never moves the §5 data root — only the backend sync does', async () => {
@@ -1531,6 +1559,21 @@ describe('main.cjs §13 panel placement and lifetime', () => {
       expect(mod.panelPosition({ x: -10, y: 8 }, display, 420).x)
         .toBe(display.workArea.x + display.workArea.width - 344 - 6)
     }
+  })
+
+  it('a blur that lands after the panel is destroyed hides nothing (§13)', async () => {
+    if (!caps.trayPanel) return // §13: Linux ships no tray surface at all
+    const m = loadMain()
+    await m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    const panel = m.wins[0]
+    // §4.9 "Show in the menu bar" off destroys the panel and drops the
+    // module-level reference - the blur the OS still delivers must act on the
+    // window the handler was armed for, and only while it is alive.
+    await m.invoke('apply-settings', { menuBarIcon: false })
+    expect(panel.destroys).toBe(1)
+    expect(() => panel.blur()).not.toThrow()
+    expect(panel.hides).toBe(0)
   })
 
   it('a destroyed panel forgets its measured height', async () => {

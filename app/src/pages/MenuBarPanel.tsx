@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
-import { badgeOf, Eyebrow, PULSE, ScrollArea } from '../ui'
+import { badgeOf, executingToast, Eyebrow, PULSE, ScrollArea } from '../ui'
 
 const dotColor = (s: string) => badgeOf(s).c
 
@@ -97,7 +97,11 @@ export default function MenuBarPanel() {
                 className="ad-btn-exec small"
                 onClick={(e) => {
                   e.stopPropagation()
-                  if (!live) void api.executeNow(a.id, undefined, 'menubar').catch((err: Error) => showToast(err.message))
+                  // §7: the no-free-slot 409 gets the same toast as every other
+                  // execute surface — what happens next depends on the §6 slots.
+                  if (!live) void api.executeNow(a.id, undefined, 'menubar').catch((err: Error & { status?: number }) => {
+                    showToast(err.status === 409 ? executingToast(a.maxParallel, a.maxQueued) : err.message)
+                  })
                 }}
                 disabled={live}
                 title={live ? 'Executing…' : 'Execute now'}

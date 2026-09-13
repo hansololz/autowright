@@ -254,6 +254,10 @@ def _pip_install(name: str, pin_installed: bool = False,
                 proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait()  # reap it — an unwaited pip stays a zombie
+                except OSError:
+                    pass
                 for pipe in (proc.stdout, proc.stderr):
                     try:
                         pipe.close()

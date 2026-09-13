@@ -9,16 +9,12 @@ included, so a consumer can show the whole folder with the changes marked.
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any
 
 from .specmd import blocks_to_md
 from .storage import manifest_packages, manifest_step_entry, strip_param_values
 from .yamlio import dump_yaml
-
-# The document files, in navigator order; steps follow.
-DOCUMENTS = (("manifest", "Manifest", "automation.yaml"),
-             ("spec", "Spec", "spec.md"),
-             ("notes", "Notes", "notes.md"))
 
 
 def manifest_text(ver: dict) -> str:
@@ -129,12 +125,14 @@ def diff_versions(old: dict, new: dict) -> list[dict]:
     return files
 
 
+_LABEL_RE = re.compile(r"^v(\d+)$", re.IGNORECASE)
+
+
 def parse_version_label(label: Any) -> int | None:
     """"vN" (case-insensitive, as §19 execute's `version`) → N; None when it
-    is anything else — the caller answers the 404."""
+    is anything else — the caller answers the 404. §19: a label is exactly `v`
+    followed by digits, so "vvv3", "v-1" and a bare "3" are all the 404."""
     if not isinstance(label, str):
         return None
-    try:
-        return int(label.strip().lower().lstrip("v"))
-    except ValueError:
-        return None
+    m = _LABEL_RE.match(label.strip())
+    return int(m.group(1)) if m else None

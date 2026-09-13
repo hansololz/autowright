@@ -229,6 +229,17 @@ describe('executions list live statuses (§7)', () => {
     expect(mockedApi.listExecutions).not.toHaveBeenCalled()
   })
 
+  it('holds the page loader, never a blank pane, while the filter\'s first page is on the wire', () => {
+    // §9: the empty card means "the server answered empty" — until it answers,
+    // the pane shows the page loader.
+    mockedApi.listExecutions.mockReturnValue(new Promise(() => {}))
+    seed([])
+    const { container } = render(<ExecutionsList />)
+    applyStatuses('Succeeded')
+    expect(screen.queryByText('No matching executions')).toBeNull()
+    expect(container.querySelector('[style*="adSpin"]')).toBeTruthy()
+  })
+
   it('reads the filtered empty card when a live status matches nothing', () => {
     seed([ex('e-run', { status: 'executing', duration: '', endedMs: 0 })])
     const { unmount } = render(<ExecutionsList />)
@@ -934,6 +945,29 @@ describe('execution page LOGS rail keys and selection (§7)', () => {
     expect(selectedRow().textContent).toContain('Parse it')
   })
 
+  it('the modal layout\'s rail yields to the §9.3 developer-log overlay too', async () => {
+    seedThree()
+    storeMod.useStore.setState({
+      settings: { developerMode: true } as unknown as import('../src/types').Settings,
+    })
+    const { ExecutionView } = await import('../src/executionView')
+    const full = storeMod.useStore.getState().executionFull.e1
+    render(
+      <>
+        <ExecutionView executionId="e1" full={full} summary={full} layout="modal" />
+        <DevLogOverlay />
+      </>,
+    )
+    expect(selectedRow().textContent).toContain('Send mail')
+    // §9.3: the overlay sits above the modal card, so it owns the keys there too
+    fireEvent.keyDown(window, { code: 'Backquote', key: '`' })
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Send mail')
+    fireEvent.keyDown(window, { code: 'Backquote', key: '`' })
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(selectedRow().textContent).toContain('Parse it')
+  })
+
   it('the page\'s rail yields to an open modal', async () => {
     seedThree()
     const { Modal } = await import('../src/ui')
@@ -1223,6 +1257,22 @@ describe('execution page retention-purged deep link (§7)', () => {
     expect(await screen.findByText('This execution no longer exists')).toBeTruthy()
     expect(screen.getByText('It was removed — most likely by retention cleanup.')).toBeTruthy()
     // the loading shell is gone with it: never a notice above a spinner
+    expect(container.querySelector('[style*="adSpin"]')).toBeNull()
+  })
+
+  it('a record dropped out from under the open page gets the notice, not a spinner', async () => {
+    const full: Execution = { ...ex('e1'), steps: [], result: null }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [ex('e1')], executionsTotal: 1,
+      executionFull: { e1: full }, execLogs: {},
+    })
+    const { container } = render(<ExecutionPage />)
+    expect(screen.getByText('e1')).toBeTruthy()
+    // §19 execution.deleted drops the body and the window row under the page
+    await act(async () => {
+      storeMod.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'e1' } as never)
+    })
+    expect(await screen.findByText('This execution no longer exists')).toBeTruthy()
     expect(container.querySelector('[style*="adSpin"]')).toBeNull()
   })
 })

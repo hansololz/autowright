@@ -257,7 +257,53 @@ describe('applyEvent', () => {
     expect(got).toHaveLength(2)
   })
 
-  it('exec.step is a no-op when no full record is loaded', () => {
+  it('exec.step with no body fetches the viewed execution, exactly once while that fetch is in flight (§19)', async () => {
+    vi.useFakeTimers()
+    const getExecution = vi.mocked(apiMod.api.getExecution)
+    getExecution.mockClear()
+    // the page opened mid-run: its first GET has landed nothing yet
+    store.useStore.setState({ executionId: 'e1', executionFull: {} })
+    const ev: WsEvent = {
+      event: 'execution.step', executionId: 'e1', automationId: null, index: 0,
+      step: { name: 's', status: 'succeeded', duration: '1s', attempts: [] },
+    }
+    store.useStore.getState().applyEvent(ev)
+    store.useStore.getState().applyEvent(ev)   // a second event must not stack a second GET
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getExecution).toHaveBeenCalledTimes(1)
+    expect(getExecution).toHaveBeenCalledWith('e1')
+  })
+
+  it('exec.step fetches an execution the MRU still keeps, and nothing once it is deleted', async () => {
+    vi.useFakeTimers()
+    const getExecution = vi.mocked(apiMod.api.getExecution)
+    const ev: WsEvent = {
+      event: 'execution.step', executionId: 'eT', automationId: null, index: 0,
+      step: { name: 's', status: 'succeeded', duration: '1s', attempts: [] },
+    }
+    // §11 beginTest counts as a view — the MRU is what keeps a body alive
+    store.useStore.getState().beginTest('eT')
+    store.useStore.getState().clearTest()
+    await vi.advanceTimersByTimeAsync(0)
+
+    getExecution.mockClear()
+    store.useStore.getState().applyEvent(ev)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getExecution).toHaveBeenCalledWith('eT')
+
+    // deleted: the id leaves the MRU with the row, so nothing refetches a
+    // record that can never come back
+    getExecution.mockClear()
+    store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'eT' })
+    store.useStore.getState().applyEvent(ev)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getExecution).not.toHaveBeenCalled()
+  })
+
+  it('exec.step is a no-op when no full record is loaded', async () => {
+    vi.useFakeTimers()
+    const getExecution = vi.mocked(apiMod.api.getExecution)
+    getExecution.mockClear()
     store.useStore.setState({ executionFull: { other: { ...ex('other', 1) } } }) // no steps either
     const before = store.useStore.getState().executionFull
     store.useStore.getState().applyEvent({
@@ -270,6 +316,9 @@ describe('applyEvent', () => {
       step: { name: 's', status: 'succeeded', duration: '1s', attempts: [] },
     })
     expect(store.useStore.getState().executionFull).toEqual(before)
+    // neither id is viewed or in the MRU — nobody is looking, so nothing fetches
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getExecution).not.toHaveBeenCalled()
   })
 
   it('beginTest tracks only the executionId and fetches the full record; clearTest drops it', () => {

@@ -277,7 +277,10 @@ remain plain dicts (§2).
   and `del` + `mod` rows. A file identical on both sides is still listed (`unchanged`,
   every row `same`), a file on one side only is `new` / `removed` with every row `add` /
   `del`; a file absent on both sides (no notes in either version) is `unchanged` with no rows.
-  Read under `store.lock`: a concurrent save never yields a half-read pair.
+  The two version records are taken under `store.lock` (a concurrent save never yields a
+  half-read pair) and the diff itself is computed **outside** it — versions are immutable,
+  and difflib over every file must never stall firings or `/state`. A label is exactly `v`
+  followed by digits; anything else is the 404.
 - `GET /automations/{id}/export?values=0|1` — the §5.1 transfer archive as `application/zip`
   (`Content-Disposition` filename `<name>.autowright`, name sanitized for the filesystem);
   `values=0` omits `param_values` from the manifest (default `1`)

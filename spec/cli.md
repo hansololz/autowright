@@ -45,10 +45,11 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   or unique name substring; executions and snapshots by id prefix. Every short id the CLI
   prints (the 8-character `[abcd1234]` forms in list/create/ambiguity output) must therefore
   resolve when passed back. Ambiguity or no match exits with the candidate list.
-- **`--json`** on every read verb (`status`, `instructions`, `automation list|show`,
+- **`--json`** on every read verb (`status`, `instructions`, `automation list|show|diff`,
   `param list`, `trigger list`, `memory show`, `snapshot list`, `execution list|show`,
   `secret list`, `agent list`, `settings show`) prints the raw API JSON instead of the human
-  columns — the machine mode agents parse.
+  columns — the machine mode agents parse. (`marketplace list`, §22.5, has no `--json` yet —
+  the marketplace is parked.)
 - **Help text:** `--help` is the CLI's own documentation — the §17 skill's agent discovers the
   surface by reading it, not by reading this spec. Every parser in the tree carries a
   `description` (the prose `<command> --help` prints, distinct from the one-line `help` its

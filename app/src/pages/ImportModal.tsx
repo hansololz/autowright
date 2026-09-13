@@ -2,7 +2,7 @@
 // Automations page (from the input step) and the §22.3 Marketplace page, which
 // hands it a preview it already fetched (`initial`) and so opens on the preview
 // step.
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { api } from '../api'
 import type { ImportPreview, ImportSummary } from '../types'
 import { BtnGhost, BtnPrimary, Eyebrow, MetaChip, MiniBadge, Modal } from '../ui'
@@ -40,6 +40,9 @@ export default function ImportModal({ onDone, onClose, initial }: {
   // §19: the preview's trigger chips label through POST /triggers/preview —
   // the renderer keeps no local trigger-math mirror (§4.3)
   const trigPreviews = useTriggerPreview(pv?.preview.triggers ?? [])
+  // §14: every caller unmounts this portal the moment it hears the import
+  // landed, so the hand-off waits for the exit animation to finish.
+  const done = useRef<{ name: string; automationId: string; summary: ImportSummary } | null>(null)
 
   const fetchUrl = async () => {
     if (!url.trim() || busy) return
@@ -94,15 +97,17 @@ export default function ImportModal({ onDone, onClose, initial }: {
   )
 
   return (
-    <Modal onClose={onClose} width={460}>
+    <Modal onClose={() => (done.current ? onDone(done.current) : onClose())} width={460}>
       {(close) => {
         const confirm = async () => {
           if (!pv || busy) return
           setBusy('confirm'); setError(null)
           try {
             const r = await api.importConfirm(pv.token)
+            done.current = {
+              name: r.automation.name, automationId: r.automation.id, summary: r.summary,
+            }
             close()
-            onDone({ name: r.automation.name, automationId: r.automation.id, summary: r.summary })
           } catch (e) { setError({ msg: (e as Error).message, src: pv.srcKind }); setBusy(false) }
         }
         return pv === null ? (

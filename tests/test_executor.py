@@ -23,6 +23,49 @@ def ctrl(monkeypatch):
     return lines
 
 
+# ---------- emit() ----------
+
+def test_emit_writes_one_control_line_at_a_time(monkeypatch):
+    """§7: control lines leave the step thread AND the harness spawn callback
+    thread — two writes interleaving would corrupt the line the engine reads an
+    `agent_group` op out of."""
+    import threading
+    import time
+
+    from autowright import executor
+
+    overlaps = []
+    written = []
+    inside = []
+
+    class SlowStdout:
+        def write(self, s):
+            overlaps.extend(inside)  # someone else already writing?
+            inside.append(s)
+            try:
+                time.sleep(0.01)  # a window wide enough for every other thread
+                written.append(s)
+            finally:
+                inside.remove(s)
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(executor, "_real_stdout", SlowStdout())
+    threads = [threading.Thread(target=executor.emit, args=("log",),
+                                kwargs={"kind": "out", "text": f"line {i}"})
+               for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+
+    assert overlaps == []
+    assert len(written) == 8
+    texts = {json.loads(ln[len(executor.CTRL):])["text"] for ln in written}
+    assert texts == {f"line {i}" for i in range(8)}
+
+
 # ---------- Secrets ----------
 
 # §4.8/§6.1: secrets are addressed by id subscript; errors label by NAME via

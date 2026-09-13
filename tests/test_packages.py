@@ -217,14 +217,14 @@ def test_pip_install_timeout_cancel_and_stderr_tail(home, monkeypatch):
             self.pid = 4242
             self.returncode = None
             self._killed = False
+            self.reaped = False
             # A survivor of the group kill holds the pipes open, so the drain
             # times out too and closes them directly.
             self.stdout, self.stderr = io.StringIO(), io.StringIO()
 
         def communicate(self, timeout=None):
-            # After the kill the pipes drain immediately; before it, hang.
-            if self._killed or timeout is None:
-                return "", ""
+            # The drain's own communicate hangs too — the pipes are held open
+            # by the survivor, so the direct kill + wait below is the way out.
             raise sp.TimeoutExpired("pip", timeout)
 
         def poll(self):
@@ -233,12 +233,20 @@ def test_pip_install_timeout_cancel_and_stderr_tail(home, monkeypatch):
         def kill(self):
             self._killed = True
 
-    monkeypatch.setattr(packages.subprocess, "Popen", HungProc)
+        def wait(self, timeout=None):
+            self.reaped = True
+            return 0
+
+    spawned = []
+    monkeypatch.setattr(packages.subprocess, "Popen",
+                        lambda cmd, **kw: spawned.append(HungProc(cmd, **kw)) or spawned[-1])
     # signal_group is a no-op recorder, so communicate() keeps hanging until
     # the deadline path fires — make the deadline immediate.
     monkeypatch.setattr(packages, "INSTALL_TIMEOUT", 0)
     assert packages._pip_install("leftpad") == "pip timed out after 0 s"
     assert killed == [4242]
+    # §6.2: the hard-killed pip is reaped — an unwaited one stays a zombie.
+    assert spawned[-1]._killed and spawned[-1].reaped
 
     # should_stop wins before the deadline — the run comes back "cancelled".
     monkeypatch.setattr(packages, "INSTALL_TIMEOUT", 600)

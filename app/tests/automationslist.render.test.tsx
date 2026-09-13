@@ -5,7 +5,7 @@
 // AutomationsList renders for real (happy-dom) with the store seeded and the
 // api module mocked.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Automation, ImportPreview, ImportSummary } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -19,6 +19,7 @@ vi.mock('../src/api', () => ({
     // §9.1 execute-from-card, and the §4.4 start-fresh discard pair
     executeNow: vi.fn(async () => ({ executionId: 'e-new', queued: false })),
     deleteDraft: vi.fn(async () => ({})),
+    cancelDraftJob: vi.fn(async () => ({})),
     putChat: vi.fn(async () => ({})),
   },
 }))
@@ -88,6 +89,8 @@ const confirmImport = async () => {
   const importBtns = screen.getAllByText('Import')
   fireEvent.click(importBtns[importBtns.length - 1])
   await waitFor(() => expect(screen.getByText('Imported “Shared job”')).toBeTruthy())
+  // §14: the dialog carries its own name
+  expect(screen.getByRole('dialog', { name: 'Imported Shared job' })).toBeTruthy()
 }
 
 describe('§9.1 Needs fixing chip', () => {
@@ -148,6 +151,30 @@ describe('§5.1/§9.1 import os-mismatch notes', () => {
     render(<AutomationsList />)
     await openPreview()
     expect(screen.queryByText(/Built on/)).toBeNull()
+  })
+})
+
+describe('§14 import modal exit animation', () => {
+  it('the summary follows the preview card’s exit, never replacing it mid-frame', async () => {
+    let land: (r: unknown) => void = () => {}
+    mockedApi.importFromUrl.mockResolvedValueOnce({ token: 't1', preview: preview() })
+    mockedApi.importConfirm.mockImplementationOnce(() => new Promise((res) => { land = res }))
+    seed([])
+    render(<AutomationsList />)
+    await openPreview()
+    const importBtns = screen.getAllByText('Import')
+    fireEvent.click(importBtns[importBtns.length - 1])
+    await waitFor(() => expect(mockedApi.importConfirm).toHaveBeenCalled())
+    await act(async () => {
+      land({ automation: { id: 'a-new', name: 'Shared job' }, summary: summary() })
+    })
+    // §14: the card the user dismissed is still on screen, running its exit -
+    // the caller hears only when the animation is done, so nothing unmounts
+    // the portal mid-frame.
+    expect(screen.getByText(/triggers arrive off/)).toBeTruthy()
+    expect(screen.queryByText('Imported “Shared job”')).toBeNull()
+    await waitFor(() => expect(screen.getByText('Imported “Shared job”')).toBeTruthy(),
+      { timeout: 3000 })
   })
 })
 
@@ -281,6 +308,29 @@ describe('§9.1 start fresh', () => {
     fireEvent.click(screen.getByText('Discard and start new'))
     finishModalAnim('Start a new automation?')
     await waitFor(() => expect(mockedApi.putChat).toHaveBeenCalledWith('pending', []))
+    expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending')
+    expect(storeMod.useStore.getState().surface).toBe('create')
+  })
+
+  it('confirms for a slot job with no draft yet, cancelling the job with the discard', async () => {
+    // §9.1: the slot owns a building job — the session is resumable, so New
+    // automation is a discard here too.
+    seed([])
+    storeMod.useStore.setState({
+      pendingDraft: null,
+      draftJobs: [{ owner: 'pending', jobId: 'j1', status: 'building', mode: 'chat' }],
+    })
+    render(<AutomationsList />)
+
+    fireEvent.click(screen.getByText('New automation'))
+    expect(screen.getByText(
+      "Your unsaved draft will be discarded. This can't be undone.")).toBeTruthy()
+
+    fireEvent.click(screen.getByText('Discard and start new'))
+    finishModalAnim('Start a new automation?')
+    await waitFor(() => expect(mockedApi.putChat).toHaveBeenCalledWith('pending', []))
+    // a job left building would land its draft back in the slot just emptied
+    expect(mockedApi.cancelDraftJob).toHaveBeenCalledWith('j1')
     expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending')
     expect(storeMod.useStore.getState().surface).toBe('create')
   })

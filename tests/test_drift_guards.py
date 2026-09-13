@@ -203,6 +203,17 @@ def test_framework_instructions_carry_the_manifest_reference():
     assert "Manifest section above" in drafting.STEPS_TASK
 
 
+def test_framework_instructions_name_the_reply_budget():
+    """§6.1/§8: the hard-limits bullet is where an authoring agent learns the
+    reply budget — it must carry the number the engine actually enforces."""
+    from autowright.engine import REPLY_BUDGET
+
+    text = _read("backend/autowright/instructions/framework-instructions.md")
+    assert f"at most {REPLY_BUDGET} replies" in text, (
+        "framework-instructions.md's hard-limits bullet disagrees with "
+        f"engine.REPLY_BUDGET ({REPLY_BUDGET})")
+
+
 def test_no_instructions_md_response_block_is_named_anywhere():
     """§8/§21.4: the per-automation build instructions are retired — neither
     instruction file nor any TASK directive may name an `instructions.md`

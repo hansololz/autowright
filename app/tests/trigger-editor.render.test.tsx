@@ -239,6 +239,27 @@ describe('§9.2 interval trigger', () => {
     expect(saveButton('Add').disabled).toBe(true)
   })
 
+  it('a kind switch drops the previous kind\'s preview — it can neither enable Add nor label the new form', async () => {
+    // §19: preview results are positional per kind, so a cron verdict must
+    // never stand under the interval form it was not asked about.
+    render(editor())
+    fireEvent.change(screen.getByPlaceholderText(/minute hour day month weekday/), {
+      target: { value: '0 8 * * *' },
+    })
+    await waitFor(() => expect(saveButton('Add').disabled).toBe(false))
+    expect(screen.getByText('Every day')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('Interval'))
+    fireEvent.change(amountInput(), { target: { value: '5' } })
+    pickUnit('seconds')
+    // the interval's own preview is still on the wire (§19 debounce)
+    expect(saveButton('Add').disabled).toBe(true)
+    expect(screen.queryByText('Every day')).toBeNull()
+    // …and it enables on its own verdict, not the cron one
+    await waitFor(() => expect(saveButton('Add').disabled).toBe(false))
+    expect(screen.getByText('Every 6 hours · next: in 6 hours')).toBeTruthy()
+  })
+
   it('an edit swap decomposes the stored canonical duration into the pair', () => {
     const { unmount } = render(editor(stored('PT90S')))
     expect(amountInput().value).toBe('90')

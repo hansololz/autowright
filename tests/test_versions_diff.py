@@ -194,13 +194,17 @@ def test_trailing_newline_and_empty_text_line_rules():
 
 
 def test_parse_version_label_takes_vN_only():
-    """§19: "vN" (case-insensitive, as execute's `version`) → N, anything else None —
-    the caller answers the 404."""
+    """§19: a label is exactly `v` followed by digits (case-insensitive, as
+    execute's `version`) → N; anything else is None and the caller 404s."""
     from autowright import versions_diff
 
     assert versions_diff.parse_version_label("v3") == 3
     assert versions_diff.parse_version_label("V3") == 3
-    assert versions_diff.parse_version_label("3") == 3
+    assert versions_diff.parse_version_label("v12") == 12
+    assert versions_diff.parse_version_label("3") is None   # the `v` is required
+    assert versions_diff.parse_version_label("vvv3") is None
+    assert versions_diff.parse_version_label("v-1") is None
+    assert versions_diff.parse_version_label("v3x") is None
     assert versions_diff.parse_version_label("v") is None
     assert versions_diff.parse_version_label("latest") is None
     assert versions_diff.parse_version_label(3) is None

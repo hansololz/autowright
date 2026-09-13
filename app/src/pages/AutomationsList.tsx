@@ -31,7 +31,7 @@ export function ImportSummaryModal({ name, automationId, summary, onClose }: {
     </div>
   )
   return (
-    <Modal onClose={onClose} width={460}>
+    <Modal onClose={onClose} width={460} ariaLabel={`Imported ${name}`}>
       {(close) => (
         <>
           <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>
@@ -225,18 +225,23 @@ export default function AutomationsList() {
   // §9.1/§19: the pending slot's building or held drafting job — the Resume
   // draft button shows for it too (a first message still in flight has landed
   // no draft yet, but the session is resumable all the same).
-  const hasSlotJob = useStore((s) => s.draftJobs.some((j) => j.owner === 'pending'))
+  const slotJobId = useStore((s) => s.draftJobs.find((j) => j.owner === 'pending')?.jobId)
+  const hasSlotJob = !!slotJobId
   const refresh = useStore((s) => s.refresh)
   const [confirmFresh, setConfirmFresh] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [imported, setImported] = useState<{ name: string; automationId: string; summary: ImportSummary } | null>(null)
 
-  // §4.4/§9.1: with a kept pending draft, New automation starts fresh —
-  // confirm, delete the slot, clear its chat thread, then open the create
-  // flow empty (the one discard that deletes the thread).
+  // §4.4/§9.1: with a kept pending draft — or a §19 drafting job the slot still
+  // owns — New automation starts fresh: confirm, cancel the job, delete the
+  // slot, clear its chat thread, then open the create flow empty (the one
+  // discard that deletes the thread).
   const startFresh = async () => {
     setConfirmFresh(false)
     try {
+      // a job left building would land its draft back in the slot the discard
+      // just emptied
+      if (slotJobId) await api.cancelDraftJob(slotJobId)
       await api.deleteDraft('pending')
       await api.putChat('pending', [])
     } catch { /* backend restarting */ }
@@ -264,7 +269,7 @@ export default function AutomationsList() {
               </BtnGhost>
             )}
             <BtnPrimary
-              onClick={() => (pendingDraft ? setConfirmFresh(true) : setSurface('create', 'app'))}
+              onClick={() => (pendingDraft || hasSlotJob ? setConfirmFresh(true) : setSurface('create', 'app'))}
             >
               New automation
             </BtnPrimary>
@@ -305,7 +310,7 @@ export default function AutomationsList() {
           text="No automations yet. Describe a job in plain words. Your AI writes it as scripts you can read, and Autowright executes them on your schedule."
           cta={(
             <BtnPrimary
-              onClick={() => (pendingDraft ? setConfirmFresh(true) : setSurface('create', 'app'))}
+              onClick={() => (pendingDraft || hasSlotJob ? setConfirmFresh(true) : setSurface('create', 'app'))}
             >
               Create your first automation
             </BtnPrimary>

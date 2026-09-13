@@ -9,7 +9,7 @@
 // create mode, which has no save location at all). App renders for real
 // (happy-dom) with the api module mocked, `settings-gating` style.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type {
   Automation, ImportPreview, MarketplaceCatalog, MarketplaceSource, Settings,
 } from '../src/types'
@@ -28,7 +28,7 @@ const marketplaceList = vi.fn<() => Promise<{ sources: MarketplaceSource[] }>>()
 const marketplaceAdd = vi.fn()
 const marketplaceSettings = vi.fn()
 const marketplaceEntryPreview = vi.fn()
-const marketplaceImage = vi.fn(() => Promise.reject(new Error('no image')))
+const marketplaceImage = vi.fn<() => Promise<Blob>>(() => Promise.reject(new Error('no image')))
 // §22.3 Export: the app's copy of the catalog, handed to the save dialog.
 const marketplaceCatalogFile = vi.fn<(id: string) => Promise<ArrayBuffer>>()
 // §22.7 authoring
@@ -154,6 +154,15 @@ const otherSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource =
   ...over,
 })
 
+// §22.3 preview image: a catalog kept by Autowright never stamps refreshedAt,
+// so the entry's own reference is all that changes when the image is edited.
+const imaged = (image: string): MarketplaceSource => keptSource({
+  entries: [{
+    index: 0, title: 'Manga chapter watcher', description: '',
+    archive: '/Users/x/shelf/automations/manga.autowright', image,
+  }],
+})
+
 const preview = (): ImportPreview => ({
   name: 'Manga chapter watcher', landsAs: 'Manga chapter watcher', description: 'Checks every morning.',
   steps: [], params: [], triggers: [], packages: [], agents: [], secrets: [],
@@ -197,6 +206,8 @@ beforeEach(() => {
   marketplaceSettings.mockReset()
   marketplaceSettings.mockResolvedValue(source())
   marketplaceEntryPreview.mockReset()
+  marketplaceImage.mockReset()
+  marketplaceImage.mockRejectedValue(new Error('no image'))
   marketplaceCatalogFile.mockReset()
   marketplaceCatalogFile.mockResolvedValue(new ArrayBuffer(4))
   openCatalog.mockReset()
@@ -233,6 +244,9 @@ describe('§22.3 preview gate', () => {
     await screen.findByTestId('nav-rail')
     expect(screen.queryByTestId('nav-marketplace')).toBeNull()
     await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
+    // §22: not one frame of the parked page mounts, so nothing ever asks the
+    // §19 marketplace routes for a list.
+    expect(marketplaceList).not.toHaveBeenCalled()
   })
 
   it('the nav row renders only while Developer mode is on', async () => {
@@ -393,6 +407,65 @@ describe('§22.3 Marketplace page', () => {
   })
 })
 
+describe('§22.3 preview images', () => {
+  it('an edited image reference fetches the new picture', async () => {
+    marketplaceImage.mockResolvedValue(new Blob(['one']))
+    marketplaceList.mockResolvedValue({ sources: [imaged('/Users/x/shelf/images/manga.png')] })
+    render(<MarketplacePage />)
+    await screen.findByTestId('marketplace-entry')
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalled())
+    const before = marketplaceImage.mock.calls.length
+    // The §22.7 editor pointed the entry at another file; marketplace.changed
+    // reloads the page with the same catalog, at the same (null) refreshedAt.
+    marketplaceList.mockResolvedValue({ sources: [imaged('/Users/x/shelf/images/manga-2.png')] })
+    act(() => { storeMod.useStore.setState({ marketplaceVersion: 1 }) })
+    // §22.3: the reference is part of the cache key, so the old blob is not
+    // shown for the new picture.
+    await waitFor(() => expect(marketplaceImage.mock.calls.length).toBeGreaterThan(before))
+  })
+
+  it('an image that lands after the page is gone is revoked, never cached', async () => {
+    let land: (b: Blob) => void = () => {}
+    marketplaceImage.mockImplementation(() => new Promise<Blob>((res) => { land = res }))
+    const created = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:late')
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    marketplaceList.mockResolvedValue({ sources: [imaged('/Users/x/shelf/images/manga.png')] })
+    render(<MarketplacePage />)
+    await screen.findByTestId('marketplace-entry')
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalled())
+    cleanup()
+    revoked.mockClear()
+    await act(async () => { land(new Blob(['late'])) })
+    // §22.3: the cache it would have landed in is cleared, so the URL dies now
+    // - nothing is left for the next mount to show and never revoke.
+    expect(created).toHaveBeenCalled()
+    expect(revoked).toHaveBeenCalledWith('blob:late')
+    const before = marketplaceImage.mock.calls.length
+    render(<MarketplacePage />)
+    await waitFor(() => expect(marketplaceImage.mock.calls.length).toBeGreaterThan(before))
+    created.mockRestore()
+    revoked.mockRestore()
+  })
+
+  it('a slow list answer never lands over a newer one', async () => {
+    const pending: ((r: { sources: MarketplaceSource[] }) => void)[] = []
+    marketplaceList.mockImplementation(() => new Promise((res) => { pending.push(res) }))
+    render(<MarketplacePage />)
+    await waitFor(() => expect(pending.length).toBeGreaterThan(0))
+    const stale = pending[pending.length - 1]
+    const asked = pending.length
+    // §22.4: a marketplace.changed event asks for the list again.
+    act(() => { storeMod.useStore.setState({ marketplaceVersion: 1 }) })
+    await waitFor(() => expect(pending.length).toBe(asked + 1))
+    await act(async () => { pending[pending.length - 1]({ sources: [source({ name: 'Newer' })] }) })
+    expect(screen.getByText('Newer')).toBeTruthy()
+    await act(async () => { stale({ sources: [source({ name: 'Older' })] }) })
+    // §22.3: the older answer is dropped, not painted over the newer list.
+    expect(screen.queryByText('Older')).toBeNull()
+    expect(screen.getByText('Newer')).toBeTruthy()
+  })
+})
+
 describe('§22.3 catalog settings', () => {
   // Opens the gear modal on the served catalog.
   const openSettings = async (s: MarketplaceSource) => {
@@ -508,6 +581,23 @@ describe('§22.3 add marketplace modal', () => {
     })
     expect(screen.getByTestId('marketplace-drop-error').textContent).toBe('Drop one .yaml file.')
     expect(marketplaceAdd).not.toHaveBeenCalled()
+  })
+
+  it('the added catalog reaches the page only after the §14 exit animation', async () => {
+    let land: (s: MarketplaceSource) => void = () => {}
+    marketplaceAdd.mockImplementation(() => new Promise((res) => { land = res }))
+    const field = await openAdd()
+    fireEvent.change(field, { target: { value: '/Users/x/shelf/marketplace-catalog.yaml' } })
+    fireEvent.click(screen.getByTestId('marketplace-add-submit'))
+    await waitFor(() => expect(marketplaceAdd).toHaveBeenCalled())
+    await act(async () => { land(fileSource()) })
+    // §14: the card is still on screen, running its exit - the page has not
+    // been told yet, so nothing unmounts the portal mid-animation.
+    expect(screen.getByText('Add marketplace')).toBeTruthy()
+    expect(storeMod.useStore.getState().toast).not.toBe('Added Community.')
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('Added Community.'),
+      { timeout: 3000 })
+    expect(screen.queryByText('Add marketplace')).toBeNull()
   })
 
   it('clicking the drop zone opens the native picker and adds the path', async () => {
@@ -648,6 +738,28 @@ describe('§22.7 catalog authoring', () => {
     // §22.7: nothing was written, so the picker returns to the list.
     expect(saveFile).toHaveBeenCalledWith('Watcher.autowright', expect.anything())
     expect(screen.getByTestId('catalog-picker-row')).toBeTruthy()
+    expect(screen.queryByTestId('catalog-picker-title')).toBeNull()
+    expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(1)
+  })
+
+  it('a pick that is not an .autowright file is refused at pick time', async () => {
+    storeMod.useStore.setState({ automations: [auto()] })
+    // §22.7: the save dialog answers whatever name the user typed into it.
+    saveFile.mockResolvedValue('/Users/x/archives/Watcher.txt')
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-add-automation'))
+    fireEvent.click(await screen.findByTestId('catalog-picker-row'))
+    // §22.1: the editor says so here, not at Save.
+    expect((await screen.findByTestId('catalog-picker-error')).textContent)
+      .toBe('Give an https link or an absolute path to an .autowright file.')
+    expect(screen.queryByTestId('catalog-picker-title')).toBeNull()
+    expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(1)
+    // …and the A FILE tab's pick is checked the same way.
+    openArchivePath.mockResolvedValue({ path: 'archives/Digest.autowright' })
+    fireEvent.click(screen.getByTestId('catalog-picker-tab-file'))
+    fireEvent.click(screen.getByTestId('catalog-add-file'))
+    expect((await screen.findByTestId('catalog-picker-error')).textContent)
+      .toBe('Give an https link or an absolute path to an .autowright file.')
     expect(screen.queryByTestId('catalog-picker-title')).toBeNull()
     expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(1)
   })

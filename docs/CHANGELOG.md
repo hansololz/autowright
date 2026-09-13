@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.0 - 2026-09-12
+
+- Cancelling or skipping a step now always stops the AI agent it was using, instead of leaving it running in the background.
+- An execution you open mid-run keeps its steps updating, and one removed while you are watching says so instead of spinning.
+- Automations that repeat on an interval keep their true spacing across daylight saving changes, so every 24 hours stays 24 hours.
+- Executing from the menu bar now explains when every slot is busy, instead of showing a raw error.
+- An update check or download that fails now says so, instead of leaving the card stuck on "Checking…".
+- Moving between automations no longer leaves a menu or confirmation from the last one open, and an edited parameter no longer flashes its old value.
+
 ## v0.11.5 - 2026-09-12
 
 - The marketplace preview is hidden for now while its design settles, and will come back in a later release.

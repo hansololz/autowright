@@ -163,7 +163,10 @@ export default function ExecutionPage() {
   const e = full ?? (executionId ? executions.find((x) => x.id === executionId) : undefined)
   const auto = e ? automations.find((a) => a.id === e.automationId) : undefined
 
-  const [missing, setMissing] = useState(false) // fetched and truly gone (retention-purged deep link)
+  // Fetched once, whatever the answer: until then the page is loading, after it
+  // an absent record is an absent record — a retention-purged deep link, or one
+  // the §19 execution.deleted event dropped out from under the open page.
+  const [loadedOnce, setLoadedOnce] = useState(false)
   // §7 in-place retry keeps the execution id — bumping this remounts the view
   // so its selection and live auto-follow start over with the new attempt.
   const [retryKey, setRetryKey] = useState(0)
@@ -186,14 +189,11 @@ export default function ExecutionPage() {
   useEffect(() => {
     if (!executionId) { go('executions'); return }
     let stale = false
-    setMissing(false)
-    void loadExecution(executionId).then(() => {
-      // loadExecution swallows the 404 — if nothing landed anywhere, the record is
-      // gone (deleted by retention): show that instead of a forever-spinner. A
-      // late resolution must not mark the execution the page moved on to missing.
-      const st = useStore.getState()
-      if (!stale && !st.executionFull[executionId] && !st.executions.some((x) => x.id === executionId)) setMissing(true)
-    })
+    setLoadedOnce(false)
+    // loadExecution swallows the 404 — once it settles, an execution the store
+    // does not hold is gone, and stays gone if it disappears later. A late
+    // resolution must not unlock the execution the page moved on to.
+    void loadExecution(executionId).then(() => { if (!stale) setLoadedOnce(true) })
     return () => { stale = true }
   }, [executionId])
 
@@ -208,7 +208,7 @@ export default function ExecutionPage() {
 
   if (!e) {
     return shell(
-      missing ? (
+      loadedOnce ? (
         <EmptyNotice
           title="This execution no longer exists"
           body="It was removed — most likely by retention cleanup."

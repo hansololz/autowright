@@ -20,13 +20,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 import yaml
 
 from . import paths, timefmt, transfer
 from .storage import new_id
-from .yamlio import atomic_write_text, load_yaml, save_yaml
+from .yamlio import atomic_write_text, load_yaml_checked, save_yaml
 
 log = logging.getLogger("autowright.marketplace")
 
@@ -55,9 +56,16 @@ _FETCH_CHUNK = 64 * 1024
 # §22.2 auto refresh: 30 s after the store loads, then every 6 hours.
 AUTO_REFRESH_DELAY_S = 30
 AUTO_REFRESH_INTERVAL_S = 6 * 60 * 60
+# How long a stop waits for the sweeper: a start after a stop must never leave
+# two threads sweeping the same table.
+AUTO_REFRESH_STOP_S = 5
 
 ARCHIVE_EXTENSION = ".autowright"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+# §22.2: the table's columns - the only keys a row is ever written with, so the
+# derived memo a row carries in memory (`_parsed`) never reaches disk.
+COLUMNS = ("id", "location", "shown", "auto_refresh", "added_at", "refreshed_at", "error")
 
 COPY_UNREADABLE_REFRESH = "the saved copy couldn't be read - refresh to fetch it again"
 COPY_UNREADABLE_REMOVE = ("the saved copy couldn't be read - remove this marketplace and "
@@ -70,6 +78,8 @@ NO_COPY_TO_KEEP = "there's no saved copy to keep - refresh first"
 AUTO_NEEDS_LOCATION = "auto refresh needs a location"
 BAD_LOCATION = "give an https link or an absolute path"
 NO_EXPORT_FOLDER = "say where to export the automations you added"
+TABLE_UNREADABLE = ("the marketplace table on disk couldn't be read; fix or remove "
+                    "marketplaces.yaml")
 
 
 class MarketplaceError(ValueError):
@@ -89,6 +99,12 @@ class MarketplaceNotRefreshable(MarketplaceError):
 class MarketplaceNotEditable(MarketplaceError):
     """§22.7: the catalog editor on a link location - the file isn't on this
     machine; the §19 route answers 409."""
+
+
+class MarketplaceUnwritable(MarketplaceError):
+    """§22.2 read-only degradation: the table file exists but failed to load
+    this session, so writing it back would replace the user's catalogs with the
+    empty default - every write answers 409 instead."""
 
 
 # ---------- locations (§22.2) ----------
@@ -174,7 +190,9 @@ def parse_catalog(text: str, *, location: str | None = None) -> dict:
     `location` only feeds the default name."""
     try:
         raw = yaml.safe_load(text)
-    except yaml.YAMLError as e:
+    except Exception as e:  # noqa: BLE001 - untrusted text: a deeply nested
+        # document raises RecursionError rather than a YAMLError, and the route
+        # must answer 422 with the reason either way, never 500.
         raise MarketplaceError(f"the catalog file isn't valid YAML - {e}") from None
     if not isinstance(raw, dict):
         raise MarketplaceError("the catalog file doesn't hold a YAML mapping")
@@ -279,16 +297,22 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
 
 def _read_reference(reference: str, *, cap: int, what: str) -> bytes:
     """§22.1: the bytes behind a reference - downloaded for an https link, read
-    from disk for a path, both under `cap`."""
+    from disk for a path, both under `cap`. An over-sized file is refused on
+    its size and never read whole (an untrusted reference may name a huge
+    file), and the read itself stops one byte past the cap, so a file that
+    grows between the two can't be loaded into memory either."""
     if kind_of(reference) == "url":
         return _fetch_url(reference, cap=cap)
+    over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
     try:
-        data = Path(reference).read_bytes()
+        if Path(reference).stat().st_size > cap:
+            raise MarketplaceError(over)
+        with open(reference, "rb") as f:
+            data = f.read(cap + 1)
     except OSError as e:
         raise MarketplaceError(f"couldn't read the {what} - {e.strerror or e}") from None
     if len(data) > cap:
-        raise MarketplaceError(
-            f"the {what} is larger than the {cap // (1024 * 1024)} MB limit")
+        raise MarketplaceError(over)
     return data
 
 
@@ -297,6 +321,45 @@ def _decode(data: bytes) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         raise MarketplaceError("the catalog file isn't UTF-8 text") from None
+
+
+# ---------- exported archive files (§22.7) ----------
+def _free_name(folder: Path, base: str, taken: set[str]) -> str:
+    """§22.7 step 3: `<base>.autowright` in the export folder, or ` 2`, ` 3`, …
+    before the extension while that name is on disk or planned by this save
+    already - a save never overwrites a file that is there. `taken` collects
+    the names this save has planned."""
+    candidate = f"{base}{ARCHIVE_EXTENSION}"
+    n = 2
+    while candidate.lower() in taken or (folder / candidate).exists():
+        candidate = f"{base} {n}{ARCHIVE_EXTENSION}"
+        n += 1
+    taken.add(candidate.lower())
+    return candidate
+
+
+def _unlink(path: Path) -> None:
+    """A file this save wrote, removed after the save failed - a failure to
+    remove it is logged, never raised over the failure being cleaned up."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("couldn't remove %s after a failed catalog save (%s)", path, e)
+
+
+def _write_new_archive(path: Path, data: bytes) -> Path:
+    """§22.7 step 5: the archive created exclusively - a file that appeared
+    under the planned name since step 3 takes the next free suffix instead of
+    being overwritten. Answers the path actually written."""
+    base = path.name[:-len(ARCHIVE_EXTENSION)]
+    taken: set[str] = set()
+    while True:
+        try:
+            with open(path, "xb") as f:
+                f.write(data)
+            return path
+        except FileExistsError:
+            path = path.parent / _free_name(path.parent, base, taken)
 
 
 # ---------- catalog table (§22.2) ----------
@@ -312,6 +375,10 @@ class MarketplaceStore:
         # a time per backend.
         self.lock = threading.Lock()
         self.sources: list[dict] = []
+        # §22.2 read-only degradation: the table file existed but failed to
+        # load this session, so every write refuses rather than replacing it
+        # with the empty default.
+        self._unreadable = False
         self._auto_stop = threading.Event()
         self._auto_thread: threading.Thread | None = None
 
@@ -328,17 +395,24 @@ class MarketplaceStore:
     # ---------- load / save (§5) ----------
     def load(self) -> None:
         """§5 lenient load: `marketplaces.yaml` is hand-editable and must never
-        raise at startup - a row missing `id`, or whose `location` is neither
-        null, an absolute path, nor an https link, skips with a warning; a
-        missing `shown` reads true, a missing `auto_refresh` false."""
-        raw = load_yaml(self.file(), {}) or {}
+        raise at startup - a row missing `id`, whose `id` isn't uuid-shaped (it
+        names the row's directory, so it is never joined into a path
+        unchecked), or whose `location` is neither null, an absolute path, nor
+        an https link, skips with a warning; a missing `shown` reads true, a
+        missing `auto_refresh` false. §5 read-only degradation: a file that
+        exists but can't be read at all (bad YAML, or a shape the table isn't
+        written in) loads empty and makes the table read-only for the session,
+        so the user's catalogs are never replaced by the empty default."""
+        raw, ok = load_yaml_checked(self.file(), {})
+        raw = raw or {}
+        unreadable = not ok
         if not isinstance(raw, dict):
             log.warning("%s doesn't hold a mapping - loading no marketplaces", self.file())
-            raw = {}
+            raw, unreadable = {}, True
         listed = raw.get("sources") or []
         if not isinstance(listed, list):
             log.warning("%s: `sources` isn't a list - loading no marketplaces", self.file())
-            listed = []
+            listed, unreadable = [], True
         sources = []
         for entry in listed:
             if not isinstance(entry, dict):
@@ -347,6 +421,12 @@ class MarketplaceStore:
             if not entry.get("id"):
                 log.warning("skipping a marketplaces.yaml row with no id (%r)",
                             entry.get("location"))
+                continue
+            try:
+                uuid.UUID(str(entry["id"]))
+            except ValueError:
+                log.warning("skipping marketplaces.yaml row %r - its id isn't a uuid",
+                            entry["id"])
                 continue
             location = entry.get("location")
             if location is not None:
@@ -363,11 +443,21 @@ class MarketplaceStore:
                             "error": entry.get("error") or None})
         with self.lock:
             self.sources = sources
+            self._unreadable = unreadable
 
     def _save(self) -> None:
-        """§22.2: the whole file, rewritten on every change. Caller holds the
-        lock."""
-        save_yaml(self.file(), {"sources": self.sources})
+        """§22.2: the whole file, rewritten on every change - the §22.2 columns
+        only, so the parsed-copy memo a row carries in memory stays out of the
+        file. Caller holds the lock."""
+        self._require_writable()
+        save_yaml(self.file(), {"sources": [{key: source[key] for key in COLUMNS}
+                                            for source in self.sources]})
+
+    def _require_writable(self) -> None:
+        """§22.2 read-only degradation: refuse every write while the table file
+        failed to load this session - the §19 routes answer 409."""
+        if self._unreadable:
+            raise MarketplaceUnwritable(TABLE_UNREADABLE)
 
     def _find(self, source_id: str) -> dict:
         for source in self.sources:
@@ -382,8 +472,10 @@ class MarketplaceStore:
 
     # ---------- add / refresh / settings / remove ----------
     def add(self, *, url: str | None = None, path: str | None = None) -> dict:
-        """§22.2 add: a link or a file path. It reads and validates first, so
-        any failure raises and stores nothing."""
+        """§22.2 add: a link or a file path. It reads and validates first -
+        outside the table lock, so a slow host never blocks the page - and any
+        failure raises with nothing stored."""
+        self._require_writable()
         if url and path:
             raise MarketplaceError("give a link or a file path, not both")
         given = (url or path or "").strip()
@@ -403,43 +495,61 @@ class MarketplaceStore:
             if not candidate.is_file():
                 raise MarketplaceError("there's no catalog file at that path")
             location = str(candidate)
-        with self.lock:
-            if self._taken(location):
-                raise MarketplaceDuplicate(ALREADY_ADDED)
-            source = {"id": new_id(), "location": location, "shown": True,
-                      "auto_refresh": False, "added_at": timefmt.now_iso(),
-                      "refreshed_at": None, "error": None}
-            try:
-                self._refresh_copy(source)
-            except MarketplaceError:
-                # Nothing is stored, so nothing may be left on disk either.
-                shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
-                raise
-            self.sources.append(source)
-            self._save()
-            return self.serialize(source)
+        # The read runs before the lock is ever taken, so a failure raises with
+        # no row to clean up at all.
+        text = self._read_location(location)
+        source = {"id": new_id(), "location": location, "shown": True,
+                  "auto_refresh": False, "added_at": timefmt.now_iso(),
+                  "refreshed_at": None, "error": None}
+        try:
+            with self.lock:
+                if self._taken(location):
+                    raise MarketplaceDuplicate(ALREADY_ADDED)
+                self._stamp_refresh(source, text)
+                self.sources.append(source)
+                self._save()
+                return self.serialize(source)
+        except BaseException:
+            # Nothing is stored, so nothing may be left on disk either - and
+            # §6: no rmtree ever runs under a store lock (the `with` above has
+            # released it by the time this runs).
+            shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
+            raise
 
     def refresh(self, source_id: str) -> dict:
         """§22.2 refresh: re-read the location. A `null` location raises
-        MarketplaceNotRefreshable with the row untouched. On failure nothing in
-        the copy changes, `refreshed_at` keeps its old value, and `error`
-        records the message - the page keeps showing the last good copy with
-        the error beside it."""
+        MarketplaceNotRefreshable with the row untouched. The read runs outside
+        the table lock, which is taken only to swap the copy and stamp the row.
+        On failure nothing in the copy changes, `refreshed_at` keeps its old
+        value, and `error` records the message - the page keeps showing the
+        last good copy with the error beside it."""
+        self._require_writable()
         with self.lock:
-            source = self._find(source_id)
-            if source["location"] is None:
+            location = self._find(source_id)["location"]
+            if location is None:
                 raise MarketplaceNotRefreshable(NOT_REFRESHABLE)
-            self._try_refresh(source)
+        text, error = self._fetch_catalog(location)
+        with self.lock:
+            # Removed while it downloaded: the KeyError is the route's 404 and
+            # nothing is written.
+            source = self._find(source_id)
+            self._apply_to_row(source_id, text, error)
             self._save()
             return self.serialize(source)
 
     def refresh_all(self) -> list[dict]:
         """§22.2: every catalog with a location, in table order; the others are
-        listed as they were."""
+        listed as they were. Every read runs outside the table lock, then one
+        hold writes the results in."""
+        self._require_writable()
         with self.lock:
-            for source in self.sources:
-                if source["location"] is not None:
-                    self._try_refresh(source)
+            targets = [(s["id"], s["location"]) for s in self.sources
+                       if s["location"] is not None]
+        fetched = [(source_id, *self._fetch_catalog(location))
+                   for source_id, location in targets]
+        with self.lock:
+            for source_id, text, error in fetched:
+                self._apply_to_row(source_id, text, error)
             self._save()
             return [self.serialize(s) for s in self.sources]
 
@@ -447,15 +557,20 @@ class MarketplaceStore:
         """§22.2 auto refresh: every row flagged `auto_refresh` with a location,
         in table order, through the ordinary refresh. Answers the ids it
         refreshed (a failure lands in `error` like a manual one)."""
+        self._require_writable()
         with self.lock:
-            swept = []
-            for source in self.sources:
-                if source["auto_refresh"] and source["location"] is not None:
-                    self._try_refresh(source)
-                    swept.append(source["id"])
+            targets = [(s["id"], s["location"]) for s in self.sources
+                       if s["auto_refresh"] and s["location"] is not None]
+        fetched = [(source_id, *self._fetch_catalog(location))
+                   for source_id, location in targets]
+        swept = []
+        with self.lock:
+            for source_id, text, error in fetched:
+                if self._apply_to_row(source_id, text, error):
+                    swept.append(source_id)
             if swept:
                 self._save()
-            return swept
+        return swept
 
     def start_auto_refresh(self, on_change) -> None:
         """§22.2: the sweep 30 s after the store loads and every 6 hours after
@@ -463,7 +578,9 @@ class MarketplaceStore:
         sweep that touched any row (the §19 `marketplace.changed` event)."""
         if self._auto_thread is not None:
             return
-        self._auto_stop.clear()
+        # A fresh event every time: a sweeper that outlived its stop still
+        # holds the old one, and clearing that would restart it.
+        self._auto_stop = threading.Event()
 
         def run() -> None:
             wait = AUTO_REFRESH_DELAY_S
@@ -480,14 +597,22 @@ class MarketplaceStore:
         self._auto_thread.start()
 
     def stop_auto_refresh(self) -> None:
+        """Waits for the sweeper, bounded, so a later start can never leave two
+        threads sweeping the same table."""
         self._auto_stop.set()
-        self._auto_thread = None
+        thread, self._auto_thread = self._auto_thread, None
+        if thread is not None:
+            thread.join(AUTO_REFRESH_STOP_S)
+            if thread.is_alive():
+                log.warning("the marketplace auto refresh sweep didn't stop within "
+                            "%s seconds", AUTO_REFRESH_STOP_S)
 
     def update_settings(self, source_id: str, *, location: str | None = ...,
                         shown: bool | None = None, auto_refresh: bool | None = None) -> dict:
         """§22.2 settings: only the given fields change; nothing is fetched.
-        `location` is the user's text (blank = null) or the `...` sentinel for
-        "not given"."""
+        `location` is the user's text (blank or None = null) or the `...`
+        sentinel for "not given"."""
+        self._require_writable()
         with self.lock:
             source = self._find(source_id)
             # Every check first, then every write: a refused patch changes
@@ -516,6 +641,7 @@ class MarketplaceStore:
     def remove(self, source_id: str) -> None:
         """§22.2 remove: the row and its directory (the copy, nothing more).
         Installed automations and referenced archive files are untouched."""
+        self._require_writable()
         with self.lock:
             source = self._find(source_id)
             self.sources.remove(source)
@@ -523,22 +649,40 @@ class MarketplaceStore:
         # §6: no rmtree ever runs under a store lock.
         shutil.rmtree(self.source_dir(source_id), ignore_errors=True)
 
-    def _try_refresh(self, source: dict) -> None:
-        """One §22.2 refresh with any failure recorded as the row's `error`.
-        Caller holds the lock."""
-        try:
-            self._refresh_copy(source)
-        except MarketplaceError as e:
-            source["error"] = str(e)
-
-    def _refresh_copy(self, source: dict) -> None:
-        """The §22.2 fetch-and-swap: read the location, validate, then rename
-        the new copy into place and stamp the row. Raises MarketplaceError
-        with the copy and the row untouched when anything fails before the
-        swap. Caller holds the lock."""
-        location = source["location"]
+    def _read_location(self, location: str) -> str:
+        """The read half of a §22.2 refresh: the location read and validated,
+        nothing written and no lock held - this is the half that can block on a
+        host for as long as the §22.1 deadline."""
         text = _decode(_read_reference(location, cap=MAX_CATALOG_BYTES, what="catalog file"))
         parse_catalog(text, location=location)
+        return text
+
+    def _fetch_catalog(self, location: str) -> tuple[str | None, str | None]:
+        """`_read_location` with its failure as a message instead of a raise,
+        so a refresh-all never stops at the first bad row. No lock held."""
+        try:
+            return self._read_location(location), None
+        except MarketplaceError as e:
+            return None, str(e)
+
+    def _apply_to_row(self, source_id: str, text: str | None, error: str | None) -> bool:
+        """The write half of a §22.2 refresh: the copy swapped and the row
+        stamped, or the failure recorded as its `error`. A row removed while
+        its read was in flight is dropped and nothing is written at all.
+        Answers whether the row was still there. Caller holds the lock."""
+        try:
+            source = self._find(source_id)
+        except KeyError:
+            return False
+        if text is None:
+            source["error"] = error
+        else:
+            self._stamp_refresh(source, text)
+        return True
+
+    def _stamp_refresh(self, source: dict, text: str) -> None:
+        """§22.2: the new copy renamed into place and the row stamped - the
+        last *successful* read. Caller holds the lock."""
         self._write_copy(source, text)
         source["refreshed_at"] = timefmt.now_iso()
         source["error"] = None
@@ -556,7 +700,9 @@ class MarketplaceStore:
         a folder the user chose - the row's location is that file - or, with
         no folder, straight to a new row's copy with a `null` location. A
         folder that already holds a catalog is refused before anything is
-        written."""
+        written, under the lock that appends the row, so two creates into one
+        folder can't both pass the check."""
+        self._require_writable()
         body = body or {}
         target: Path | None = None
         if (folder or "").strip():
@@ -566,24 +712,33 @@ class MarketplaceStore:
             target = target.resolve()
             if not target.is_dir():
                 raise MarketplaceError("there's no folder at that path")
-            if (target / CATALOG_FILENAME).exists():
-                raise MarketplaceDuplicate(FOLDER_TAKEN)
         location = str(target / CATALOG_FILENAME) if target else None
-        with self.lock:
-            if location is not None and self._taken(location):
-                raise MarketplaceDuplicate(ALREADY_ADDED)
-            source = {"id": new_id(), "location": location, "shown": True,
-                      "auto_refresh": False, "added_at": timefmt.now_iso(),
-                      "refreshed_at": None, "error": None}
-            text, writes = self._prepare_catalog(source, body, export)
-            try:
-                self._commit_catalog(source, text, writes)
-            except MarketplaceError:
-                shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
-                raise
-            self.sources.append(source)
-            self._save()
-            return self.serialize(source)
+        source = {"id": new_id(), "location": location, "shown": True,
+                  "auto_refresh": False, "added_at": timefmt.now_iso(),
+                  "refreshed_at": None, "error": None}
+        # Only what this create writes is cleaned up on a failure: the checks
+        # above it answer before the catalog file exists, so a folder's own
+        # catalog is never unlinked.
+        writing = False
+        try:
+            with self.lock:
+                if target is not None and (target / CATALOG_FILENAME).exists():
+                    raise MarketplaceDuplicate(FOLDER_TAKEN)
+                if location is not None and self._taken(location):
+                    raise MarketplaceDuplicate(ALREADY_ADDED)
+                catalog, writes = self._prepare_catalog(source, body, export)
+                writing = True
+                self._commit_catalog(source, catalog, writes)
+                self.sources.append(source)
+                self._save()
+                return self.serialize(source)
+        except BaseException:
+            # §6: no rmtree ever runs under a store lock - the `with` above has
+            # released it by the time this runs.
+            if writing and location is not None:
+                _unlink(Path(location))
+            shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
+            raise
 
     def _editable(self, source_id: str) -> dict:
         """The row the editor may touch: a path or `null` location, whose
@@ -626,28 +781,35 @@ class MarketplaceStore:
     def save_catalog(self, source_id: str, body: dict, export) -> dict:
         """§22.7 save: the content prepared and written over the catalog the
         editor sees, then the copy brought up to date."""
+        self._require_writable()
         with self.lock:
             source = self._editable(source_id)
-            text, writes = self._prepare_catalog(source, body, export)
-            self._commit_catalog(source, text, writes)
+            catalog, writes = self._prepare_catalog(source, body, export)
+            self._commit_catalog(source, catalog, writes)
             self._save()
             return self.serialize(source)
 
-    def _prepare_catalog(self, source: dict, body: dict, export) -> tuple[str, list]:
+    def _prepare_catalog(self, source: dict, body: dict, export) -> tuple[dict, list]:
         """§22.7 steps 1-4. `export(automation_id)` answers `(name, bytes)` for
         an automation in this app - the §5.1 export without parameter values -
         or raises KeyError / transfer.TransferError. An export lands in the
         export folder (beside the catalog for a path location, else the body's
         `exportFolder`) and is listed by its absolute path; an `archiveFile` is
         validated and listed where it is. Everything is checked before
-        anything is written. Answers the text plus the archive files to
-        write. Caller holds the lock."""
+        anything is written. Answers the catalog to write plus the archive
+        files it lists, each with the entry naming it. Caller holds the
+        lock."""
         location = source["location"]
+        raw_entries = body.get("entries") or []
+        # §22.7: bounded before any export runs - never after the archives were
+        # built. The §22.1 parser would answer the same, but only in step 4.
+        if len(raw_entries) > MAX_ENTRIES:
+            raise MarketplaceError(
+                f"the catalog file lists more than {MAX_ENTRIES} automations")
         # 1. the top-level fields, and the export folder when it will be needed
         top = {"name": body.get("name") or "", "description": body.get("description") or ""}
         name = _text(top, "name", "", MAX_NAME) or default_name(location)
         description = _text(top, "description", "", MAX_DESCRIPTION)
-        raw_entries = body.get("entries") or []
         needs_folder = any(e.get("automationId") for e in raw_entries)
         folder: Path | None = None
         if needs_folder:
@@ -698,15 +860,20 @@ class MarketplaceStore:
                 if archive.suffix.lower() != ARCHIVE_EXTENSION:
                     raise MarketplaceError(
                         f"{where}{archive.name} isn't an {ARCHIVE_EXTENSION} file")
+                # Refused on its size before it is read, like every other
+                # §22.1 read, and the read itself stops one byte past the cap.
+                over = (f"{where}{archive.name} is larger than the "
+                        f"{transfer.MAX_ARCHIVE_BYTES // (1024 * 1024)} MB limit")
                 try:
-                    data = archive.read_bytes()
+                    if archive.stat().st_size > transfer.MAX_ARCHIVE_BYTES:
+                        raise MarketplaceError(over)
+                    with open(archive, "rb") as f:
+                        data = f.read(transfer.MAX_ARCHIVE_BYTES + 1)
                 except OSError as e:
                     raise MarketplaceError(
                         f"{where}couldn't read {archive.name} - {e.strerror or e}") from None
                 if len(data) > transfer.MAX_ARCHIVE_BYTES:
-                    raise MarketplaceError(
-                        f"{where}{archive.name} is larger than the "
-                        f"{transfer.MAX_ARCHIVE_BYTES // (1024 * 1024)} MB limit")
+                    raise MarketplaceError(over)
                 try:
                     transfer.validate_archive(data)
                 except transfer.TransferError as e:
@@ -717,55 +884,87 @@ class MarketplaceStore:
         # 3. a free file name in the export folder for every export - never
         #    overwrite; the entry lists the file by its absolute path
         taken: set[str] = set()
-        writes: list[tuple[Path, bytes]] = []
+        writes: list[tuple[Path, bytes, dict]] = []
         new = iter(pending)
         for entry in planned:
             if entry["path"] is not None:
                 continue
             base, data = next(new)
-            candidate = f"{base}{ARCHIVE_EXTENSION}"
-            n = 2
-            while candidate.lower() in taken or (folder / candidate).exists():
-                candidate = f"{base} {n}{ARCHIVE_EXTENSION}"
-                n += 1
-            taken.add(candidate.lower())
-            entry["path"] = str(folder / candidate)
-            writes.append((folder / candidate, data))
-        # 4. the text, through the same parser a fetch runs
-        text = dump_catalog(name, description, planned)
-        parse_catalog(text, location=location)
-        return text, writes
+            target = folder / _free_name(folder, base, taken)
+            entry["path"] = str(target)
+            writes.append((target, data, entry))
+        # 4. the content, through the same parser a fetch runs - the text
+        #    itself is dumped in step 5, once every export's final name is known
+        parse_catalog(dump_catalog(name, description, planned), location=location)
+        return {"name": name, "description": description, "entries": planned}, writes
 
-    def _commit_catalog(self, source: dict, text: str, writes: list) -> None:
+    def _commit_catalog(self, source: dict, catalog: dict, writes: list) -> None:
         """§22.7 steps 5-6: the exports, then the catalog atomically - to the
         location for a path (and the copy refreshed from it), to the row's copy
-        for `null`. Caller holds the lock."""
+        for `null`. Every archive is created exclusively, so a file that
+        appeared under its planned name since step 3 takes the next free suffix
+        rather than being overwritten, and the entry lists the name actually
+        written. A failure unlinks the archives this save wrote. Caller holds
+        the lock."""
+        written: list[Path] = []
         try:
-            for target, data in writes:
-                target.write_bytes(data)
+            for target, data, entry in writes:
+                path = _write_new_archive(target, data)
+                written.append(path)
+                entry["path"] = str(path)
+            text = dump_catalog(catalog["name"], catalog["description"],
+                                catalog["entries"])
+            parse_catalog(text, location=source["location"])
             if source["location"] is not None:
                 atomic_write_text(Path(source["location"]), text)
-        except OSError as e:
-            raise MarketplaceError(
-                f"couldn't write into the catalog's folder - {e.strerror or e}") from None
+            else:
+                self._write_copy(source, text)
+                source["error"] = None
+        except BaseException as e:
+            # §22.7 step 5: nothing this save wrote may survive its failure.
+            for path in written:
+                _unlink(path)
+            if isinstance(e, OSError):
+                raise MarketplaceError(
+                    f"couldn't write into the catalog's folder - {e.strerror or e}") from None
+            raise
         if source["location"] is not None:
-            self._refresh_copy(source)
-        else:
-            self._write_copy(source, text)
-            source["error"] = None
+            # §22.7 step 6: the catalog file is on disk, so a failed re-read of
+            # it is the row's `error`, not the save's 422. The location is a
+            # file on this machine (the editor never sees a link), so nothing
+            # here blocks on a host.
+            text, error = self._fetch_catalog(source["location"])
+            if text is None:
+                source["error"] = error
+            else:
+                self._stamp_refresh(source, text)
 
     # ---------- serialization (§22.4) ----------
     def _cached(self, source: dict) -> dict | None:
         """The app's copy, or None when it is missing or no longer valid (§22.2
         - the row still lists, with zero entries, rather than vanishing).
-        `archive` is the entry's `path` as written."""
+        `archive` is the entry's `path` as written. The parse is memoized on
+        the row under the copy's (mtime, size) and the row's location, so
+        serializing a catalog of 200 entries, or reading several of its images,
+        parses the file once rather than once per entry; `_save` writes the
+        §22.2 columns only, so the memo never reaches disk. Any failure at all
+        answers None - one unreadable row must never 500 the list route.
+        Caller holds the lock."""
+        path = self.catalog_file(source["id"])
         try:
-            text = _decode(self.catalog_file(source["id"]).read_bytes())
-            catalog = parse_catalog(text, location=source["location"])
-        except (MarketplaceError, OSError):
+            info = path.stat()
+            stamp = (info.st_mtime_ns, info.st_size, source["location"])
+            memo = source.get("_parsed")
+            if memo is not None and memo[0] == stamp:
+                return memo[1]
+            catalog = parse_catalog(_decode(path.read_bytes()),
+                                    location=source["location"])
+        except Exception:  # noqa: BLE001 - the copy is a file the user can edit
+            source.pop("_parsed", None)
             return None
         for entry in catalog["entries"]:
             entry["archive"] = entry["path"]
+        source["_parsed"] = (stamp, catalog)
         return catalog
 
     def serialize(self, source: dict) -> dict:

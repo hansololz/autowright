@@ -654,6 +654,73 @@ def test_next_at_passes_the_run_baseline_to_intervals():
     assert next_at(off, after=now, run_baseline=baseline) is None
 
 
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="POSIX-only tzset")
+def test_interval_arithmetic_runs_on_instants():
+    """§4.3: `anchor + n × every` is computed on the anchor's UTC instant and
+    only the result is rendered back to local time, so a DST shift never
+    stretches or shrinks an interval — a P1D anchored at noon the day before
+    spring-forward is due at 1 PM, 24 real hours later, not at noon."""
+    import os
+    import time as _time
+
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    _time.tzset()
+    try:
+        daily = {"id": "d", "kind": "interval", "enabled": True, "every": "P1D",
+                 "source": "user"}
+        base = datetime(2026, 3, 7, 12, 0)  # the day before spring-forward
+        assert trigger_next(daily, after=base, run_baseline=base) == datetime(2026, 3, 8, 13, 0)
+        # an interval that steps across the gap keeps its six real hours
+        six = {"id": "s", "kind": "interval", "enabled": True, "every": "PT6H",
+               "source": "user"}
+        night = datetime(2026, 3, 7, 23, 0)
+        assert trigger_next(six, after=night, run_baseline=night) == datetime(2026, 3, 8, 6, 0)
+        # and 24 real hours the other way across the fall-back fold
+        fall = datetime(2026, 10, 31, 12, 0)
+        assert trigger_next(daily, after=fall, run_baseline=fall) == datetime(2026, 11, 1, 11, 0)
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        _time.tzset()
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="POSIX-only tzset")
+def test_next_at_ms_takes_the_epoch_from_the_instant():
+    """§4.3 nextAtMs: the epoch is the occurrence's instant. An interval landing
+    in the fall-back fold is due at the *second* 1:30 AM — the naive local
+    reading resolves to the earlier hour, an hour off."""
+    import os
+    import time as _time
+    from datetime import UTC
+
+    from autowright.triggers import next_at_ms
+
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    _time.tzset()
+    try:
+        trigs = [{"id": "iv", "kind": "interval", "enabled": True, "every": "PT3H",
+                  "source": "user"}]
+        base = datetime(2026, 10, 31, 23, 30)
+        assert trigger_next(trigs[0], after=base, run_baseline=base) == datetime(2026, 11, 1, 1, 30)
+        want = datetime(2026, 11, 1, 9, 30, tzinfo=UTC)  # PST, the fold's second reading
+        assert next_at_ms(trigs, after=base, run_baseline=base) == int(want.timestamp() * 1000)
+        # a cron still answers its own wall-clock occurrence's epoch
+        cron = [{"id": "c", "kind": "cron", "enabled": True, "expression": "0 20 * * *",
+                 "source": "user"}]
+        assert next_at_ms(cron, after=base) == \
+            int(datetime(2026, 11, 1, 20, 0).astimezone().timestamp() * 1000)
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        _time.tzset()
+
+
 def test_is_overdue_two_missed_interval_occurrences():
     """§4.1: an interval is overdue once `anchor + 2 × every` has passed with
     no run — one missed occurrence is the grace, two is the problem."""

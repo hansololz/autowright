@@ -1924,7 +1924,7 @@ def test_package_ensure_failure_is_nonfatal(monkeypatch):
     from autowright.drafting import DraftJobs
 
     monkeypatch.setattr(pkglib, "ensure",
-                        lambda entries, on_progress=None:
+                        lambda entries, on_progress=None, should_stop=None:
                         [{**e, "status": "failed", "error": "pip exploded"} for e in entries])
     monkeypatch.setattr(harness, "invoke",
                         lambda agent, prompt, **kw: STEPS_WITH_PACKAGES)
@@ -1941,6 +1941,40 @@ def test_package_ensure_failure_is_nonfatal(monkeypatch):
                                        "why": "pads the report",
                                        "status": "failed", "error": "pip exploded"}]
     assert [s["file"] for s in j["draft"]["steps"]] == ["01-a.py", "02-b.py"]
+
+
+def test_sync_package_ensure_takes_the_jobs_cancel_flag(monkeypatch):
+    # §6.2/§8: the sync's installs are cancellable like §7's — a cancel landing
+    # mid-install stops pip instead of waiting the whole run out.
+    import time
+
+    from autowright import harness
+    from autowright import packages as pkglib
+    from autowright.drafting import DraftJobs
+
+    captured = {}
+
+    def fake_ensure(entries, on_progress=None, should_stop=None):
+        captured["should_stop"] = should_stop
+        return entries
+
+    monkeypatch.setattr(pkglib, "ensure", fake_ensure)
+    monkeypatch.setattr(harness, "invoke",
+                        lambda agent, prompt, **kw: STEPS_WITH_PACKAGES)
+    jobs = DraftJobs()
+    job_id = jobs.start("sync", {"harness": "Claude Code"}, None,
+                        {"spec": "# T\n\nBody."}, GRANTS)
+    for _ in range(100):
+        j = jobs.get(job_id)
+        if j["status"] in ("done", "failed", "blocked"):
+            break
+        time.sleep(0.05)
+    assert j["status"] == "done", j
+
+    stop = captured["should_stop"]
+    assert stop() is False
+    jobs.jobs[job_id]["_cancel"] = True
+    assert stop() is True
 
 
 def test_sync_job_result_steps_use_api_spelling(monkeypatch):
@@ -2650,6 +2684,40 @@ def test_executions_context_execution_id_selection(home):
     foreign = _settled_run(store, b, 42, "failed", "2026-08-01T09:00:00+00:00")
     ctx = testexec.executions_context(a, cur, execution_id=foreign["id"])
     assert "v42 run" not in ctx  # another automation's run is rejected
+
+
+def test_executions_context_keeps_the_cap_when_a_run_is_forced_in(home):
+    # §8: the §19 executionId run takes one of the five slots instead of adding a
+    # sixth block, and the section stays newest-first.
+    from autowright import testexec
+
+    store = _runs_store()
+    a = store.create_automation(make_version(), "Runner", None)
+    runs = [_settled_run(store, a, v, "succeeded", f"2026-08-01T{v:02d}:00:00+00:00")
+            for v in range(1, 8)]
+
+    ctx = testexec.executions_context(a, make_version()["steps"], execution_id=runs[0]["id"])
+    assert ctx.count("--- ") == 5  # never more than EXECUTIONS_CAP blocks
+    for label in ("v7 execution", "v6 execution", "v5 execution", "v4 execution",
+                  "v1 execution"):
+        assert label in ctx
+    assert "v3 execution" not in ctx  # the oldest of the five makes way
+    assert ctx.index("v7 execution") < ctx.index("v4 execution") < ctx.index("v1 execution")
+
+
+def test_executions_context_survives_an_unreadable_result_md(home):
+    # §8: a step writes result.md itself — a non-UTF-8 one contributes replacement
+    # characters, never an exception out of the context build.
+    from autowright import testexec
+
+    store = _runs_store()
+    a = store.create_automation(make_version(), "Runner", None)
+    h = _settled_run(store, a, 1, "succeeded", "2026-08-01T08:00:00+00:00")
+    rmd = store.exec_dir(h["id"]) / "result" / "result.md"
+    rmd.write_bytes("caf\u00e9 au lait".encode("latin-1"))
+
+    ctx = testexec.executions_context(a, make_version()["steps"])
+    assert "result.md:\ncaf" in ctx and "au lait" in ctx
 
 
 def test_executions_context_success_detail_and_result_excerpt(home):

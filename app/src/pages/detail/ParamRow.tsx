@@ -17,6 +17,9 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pending = useRef<unknown>(undefined)
+  // The newest PATCH (plus the reload it triggers) — what a blur waits on
+  // before it lets go of its draft.
+  const inFlight = useRef<Promise<void> | null>(null)
 
   // Resync from the server value when it changes underneath (a restore, a new
   // version's defaults, an edit from another window) — but never while an edit
@@ -34,9 +37,10 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
   const commit = (value: unknown) => {
     if (timer.current) { clearTimeout(timer.current); timer.current = null }
     pending.current = undefined
-    runAction(automationId, async () => {
+    inFlight.current = runAction(automationId, async () => {
       await api.patchAutomation(automationId, { paramValues: { [p.name]: value } })
     })
+    return inFlight.current
   }
   // Debounced commit: saves as the user types, without one PATCH per keystroke.
   const commitSoon = (value: unknown) => {
@@ -44,8 +48,22 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
     if (timer.current) clearTimeout(timer.current)
     timer.current = setTimeout(() => { timer.current = null; commit(pending.current) }, 600)
   }
-  const flush = () => { if (timer.current) commit(pending.current) }
-  useEffect(() => () => { if (timer.current) { clearTimeout(timer.current); commit(pending.current) } }, [])
+  // A pending keystroke commits now; with nothing pending, the debounce has
+  // already fired and its round-trip is the one to wait on.
+  const flush = () => (timer.current ? commit(pending.current) : inFlight.current)
+  useEffect(() => () => { if (timer.current) { clearTimeout(timer.current); void commit(pending.current) } }, [])
+
+  // Hold the committed draft until the PATCH (and the store refresh) settles:
+  // clearing it now would flash the pre-PATCH value for the length of the
+  // round-trip. A draft the user has since re-typed is left alone.
+  const settle = (
+    done: Promise<void> | null,
+    committed: string | null,
+    setDraft: React.Dispatch<React.SetStateAction<string | null>>,
+  ) => {
+    if (!done) { setDraft(null); return }
+    void done.finally(() => setDraft((d) => (d === committed ? null : d)))
+  }
 
   const setLinesSaved = (next: string[], now = false) => { setLines(next); now ? commit(next) : commitSoon(next) }
   const setRowsSaved = (next: { key: string; value: string }[], now = false) => { setRows(next); now ? commit(next) : commitSoon(next) }
@@ -101,9 +119,9 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
           // every kind clears the guard on blur — a list/kv row that left it
           // set would freeze this row's resync for the rest of its life
           onBlur={p.kind === 'number'
-            ? () => { setFoc(false); flush(); setNum(null) }
+            ? () => { setFoc(false); settle(flush(), num, setNum) }
             : p.kind === 'text'
-              ? () => { setFoc(false); flush(); setText(null) }
+              ? () => { setFoc(false); settle(flush(), text, setText) }
               : () => { setFoc(false); flush() }}
         />
       </div>

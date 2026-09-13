@@ -221,6 +221,21 @@ def test_exit_http_renders_validation_list_detail():
     assert str(ei.value.code) == "422: boom"
 
 
+def test_exit_http_survives_a_body_that_is_not_utf8():
+    """§20: the error line is printed whatever bytes came back - a body that
+    isn't UTF-8 must not raise a UnicodeDecodeError over the HTTP error."""
+    import io
+    import urllib.error
+
+    from autowright.cli import _exit_http
+
+    err = urllib.error.HTTPError("http://x", 500, "Server Error", {},
+                                 io.BytesIO(b"boom \xff\xfe"))
+    with pytest.raises(SystemExit) as ei:
+        _exit_http(err)
+    assert str(ei.value.code).startswith("500: boom ")
+
+
 def test_exit_http_falls_back_to_body_when_detail_not_string():
     import io
     import urllib.error
@@ -967,6 +982,37 @@ def test_trigger_add_no_run_if_missed():
     assert len(c.posted) == sent_before
 
 
+def test_trigger_add_refuses_two_kinds():
+    """§20: a trigger is one kind - two kind inputs exit 1 naming both, rather
+    than keeping the first and silently dropping the second."""
+    from types import SimpleNamespace
+
+    from autowright import cli
+
+    def args(**over):
+        return SimpleNamespace(**{"automation": "Daily Report", "discord": None,
+                                  "secret": None, "pattern": None, "mention": False,
+                                  "author": None, "imessage": None, "app_start": False,
+                                  "at": None, "every": None, "expression": None,
+                                  "timezone": None, **over})
+
+    c = _WorkdirClient()
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_trigger_add(c, args(expression="0 8 * * *", every="PT6H"))
+    assert str(ei.value.code) == ("a trigger is one kind: a cron expression and --every "
+                                  "can't go together")
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_trigger_add(c, args(discord="123", secret="API_TOKEN",
+                                    imessage="+15551234567"))
+    assert str(ei.value.code) == ("a trigger is one kind: --discord and --imessage "
+                                  "can't go together")
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_trigger_add(c, args(at="2999-01-01T09:00", app_start=True))
+    assert str(ei.value.code) == ("a trigger is one kind: --at and --app-start "
+                                  "can't go together")
+    assert c.posted == []   # nothing sent, and no automation looked up
+
+
 # ---------------------------------------------------------------- param parsing
 
 @pytest.mark.parametrize("kind,raw,expected", [
@@ -1537,6 +1583,12 @@ def test_cmd_automation_restore_parses_vN(capsys):
         _run(_RouteClient(_auto_gets()), "automation", "restore", "Daily Report", "latest")
     assert "version must be vN" in str(ei.value.code)
 
+    # "³".isdigit() is True but int("³") raises - the parse is the check, so
+    # this is the usage error, never a traceback
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(_auto_gets()), "automation", "restore", "Daily Report", "v³")
+    assert "version must be vN" in str(ei.value.code)
+
 
 def test_cmd_automation_execute_posts_manual_trigger(capsys):
     c = _RouteClient(_auto_gets(), reply={"executionId": "e9"})
@@ -1939,6 +1991,12 @@ def test_cmd_trigger_bad_index_exits():
         _run(_RouteClient(_auto_gets()), "automation", "trigger", "off", "Daily Report", "9")
     assert "trigger index must be 1..2" in str(ei.value.code)
 
+    # "³".isdigit() is True but int("³") raises - the parse is the check, so
+    # this is the usage error, never a traceback
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(_auto_gets()), "automation", "trigger", "off", "Daily Report", "³")
+    assert "trigger index must be 1..2" in str(ei.value.code)
+
 
 def test_cmd_trigger_remove_by_index(capsys):
     c = _RouteClient(_auto_gets())
@@ -2268,6 +2326,33 @@ def test_cmd_execution_result_lists_then_streams(capsysbinary):
     assert capsysbinary.readouterr().out == b"\x00binary bytes"
 
 
+def test_cmd_execution_result_closes_stdout_on_a_broken_pipe(monkeypatch):
+    """§20: piped into `head`, the reader closing early is a normal end -
+    exit 0, with stdout pointed at /dev/null first so the interpreter's own
+    final flush can't print "Exception ignored" over the closed pipe."""
+    from autowright import cli
+
+    class _ClosedPipe:
+        def fileno(self):
+            return 7
+
+        class buffer:
+            @staticmethod
+            def write(data):
+                raise BrokenPipeError
+
+    duped = []
+    monkeypatch.setattr(cli.sys, "stdout", _ClosedPipe())
+    monkeypatch.setattr(cli.os, "open", lambda path, flags: 99)
+    monkeypatch.setattr(cli.os, "dup2", lambda a, b: duped.append((a, b)))
+
+    c = _RouteClient(_exec_gets(FULL_EXEC), raw=b"bytes")
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "execution", "result", "e12", "report.md")
+    assert ei.value.code == 0
+    assert duped == [(99, 7)]
+
+
 def test_cmd_secret_commands(monkeypatch, capsys):
     # §4.8: usedBy entries are { id, name } — the CLI prints the names
     secrets = [{"id": "s-1", "name": "API_TOKEN", "set": True,
@@ -2481,6 +2566,17 @@ def test_cmd_marketplace_list_names_a_catalog_the_app_keeps(capsys):
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "Kept [m3333333]  (kept by Autowright)"
     assert out[1] == "  added 2026-09-08T08:00:00Z (no location to refresh from)"
+    assert out[2] == "  no automations listed"
+
+
+def test_cmd_marketplace_list_dates_a_location_never_refreshed(capsys):
+    """§22.5: a catalog with a location that has never been refreshed - a
+    folder just created with `create` - prints `  added <when>` instead."""
+    _run(_MarketClient([{**SOURCES[0], "refreshedAt": None, "entries": []}]),
+         "marketplace", "list")
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "Community automations [m1111111]  https://example.com/marketplace.yaml"
+    assert out[1] == "  added 2026-09-10T08:00:00Z"
     assert out[2] == "  no automations listed"
 
 
