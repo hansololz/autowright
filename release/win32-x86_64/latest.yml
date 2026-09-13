@@ -1,8 +1,8 @@
-version: 0.11.0
+version: 0.12.0
 files:
-  - url: https://github.com/hansololz/autowright/releases/download/v0.11.0/Autowright.exe
-    sha512: Vupsr1DQ2AzzIAjT/Wq7nqd2uOTpKR+H8tQ/pX04NCSgA/CgAwKN2XM5nA61ICirL1bad0xDkUPcyF1jctG+zA==
-    size: 160044312
-path: https://github.com/hansololz/autowright/releases/download/v0.11.0/Autowright.exe
-sha512: Vupsr1DQ2AzzIAjT/Wq7nqd2uOTpKR+H8tQ/pX04NCSgA/CgAwKN2XM5nA61ICirL1bad0xDkUPcyF1jctG+zA==
-releaseDate: '2026-09-07T18:28:53.820Z'
+  - url: https://github.com/hansololz/autowright/releases/download/v0.12.0/Autowright.exe
+    sha512: V1ltqk74yuWvHRJlddxjxsty9Y4fR07qtHNv/qkGmKUKA4DKhUPGja3K+zvbhFclbbTg9DLzwFAJdt6ARKK5XA==
+    size: 151477824
+path: https://github.com/hansololz/autowright/releases/download/v0.12.0/Autowright.exe
+sha512: V1ltqk74yuWvHRJlddxjxsty9Y4fR07qtHNv/qkGmKUKA4DKhUPGja3K+zvbhFclbbTg9DLzwFAJdt6ARKK5XA==
+releaseDate: '2026-09-13T05:56:25.734Z'
