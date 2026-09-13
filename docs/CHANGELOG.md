@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.11.5 - 2026-09-12
+
+- The marketplace preview is hidden for now while its design settles, and will come back in a later release.
+
 ## v0.11.4 - 2026-09-11
 
 - Automations can now run on a repeating interval, such as every 30 minutes, instead of only on a fixed schedule.
