@@ -64,4 +64,6 @@ Or build from source - see §18 in [SPEC.md](SPEC.md).
 Early release, under active development. Feedback and issues are very welcome. `SPEC.md` is
 the source of truth for the whole app; see §18 for the dev workflow.
 
+Product ideas and feature requests: open a GitHub issue (see [CONTRIBUTING.md](CONTRIBUTING.md));
+accepted ideas are planned on the repo's GitHub Project.
 Found a security problem? Please report it privately; see [SECURITY.md](docs/SECURITY.md).
