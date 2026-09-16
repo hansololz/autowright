@@ -21,9 +21,6 @@ contextBridge.exposeInMainWorld('autowright', {
   // §22.3 add-marketplace drop zone: a dropped File's path on disk - only the
   // path travels to the backend, which reads the file itself. Synchronous.
   pathForFile: (file) => webUtils.getPathForFile(file),
-  // §22.7 catalog editor: pick an .autowright file - path only, the backend
-  // copies it.
-  openArchivePath: () => ipcRenderer.invoke('open-archive-path'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   // §9.5 report modal: OS details for the info block
   platformInfo: () => ipcRenderer.invoke('platform-info'),

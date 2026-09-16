@@ -18,18 +18,18 @@ Installing an entry is the §5.1/§5.2 import, unchanged: the archive is fetched
 time, previewed, and confirmed through the same two-phase flow, so every §5.1 guarantee
 holds (triggers land off, no records are ever created, only matched records are granted).
 
-**Visibility - HIDDEN FOR EVERYONE (2026-09-12).** REMINDER: the marketplace is not
-polished and its design is not settled; David parked it to deal with later. Until then
-the Marketplace page and its nav row render for nobody, Developer mode or not: one
-renderer constant, `MARKETPLACE_HIDDEN` in `App.tsx`, is `true`, and the nav filter and
-the redirect below read it. Flipping it to `false` restores the **preview gate**: the page
-and its nav row render only while the §4.9 `developerMode` setting is on. That is the only
-thing the setting gates here: the §19 routes, the §5 store, and the §20 CLI group are
-always live, in every mode - the §2 rule that developer and production mode run the same
-code, with no dev-only paths. Turning Developer mode off while the page is open navigates
-to Automations (§22.3). The gate is lifted by removing the condition, nothing else; the
-feature is built as a normal surface that happens to be hidden. The §22.6 e2e drive is
-skipped while the constant is `true` (it reaches the page through the nav row).
+**Visibility - preview gate.** The Marketplace page and its nav row render only while
+the §4.9 `developerMode` setting is on. That is the only thing the setting gates here: the
+§19 routes, the §5 store, and the §20 CLI group are always live, in every mode - the §2
+rule that developer and production mode run the same code, with no dev-only paths.
+Turning Developer mode off while the page is open navigates to Automations (§22.3). The
+gate is lifted by removing the condition, nothing else; the feature is built as a normal
+surface that happens to be hidden. One renderer constant, `MARKETPLACE_HIDDEN` in
+`App.tsx`, is the **parking switch** on top of the gate: while it is `true` the page and
+its nav row render for nobody, Developer mode or not, and the §22.6 e2e drive (which
+reaches the page through the nav row) is skipped; the constant and that skip flip
+together. It is `false` now. History: parked 2026-09-12 (unpolished, design not settled),
+un-parked 2026-09-14 when work on the design resumed.
 
 ### 22.1 Catalog format
 
@@ -101,8 +101,8 @@ marketplaces/
 
 Nothing else ever lives here. A marketplace **references** automations, it never stores
 them: every archive an entry names stays where it is (a link, or a file the user owns
-somewhere on the machine), and an automation exported for a catalog (§22.7) lands in a
-folder the user chose, never under the data root.
+somewhere on the machine), and an automation exported for a catalog (through the §9.2
+Export…, or the §22.5 CLI) lands in a folder the user chose, never under the data root.
 
 | column | values | meaning |
 |---|---|---|
@@ -176,8 +176,7 @@ folder the user chose, never under the data root.
 
 **Nav.** A "Marketplace" row (icon `fa-store`) sits between Secrets and Settings in the §9
 rail, rendered only while `settings.developerMode` is true **and** `MARKETPLACE_HIDDEN`
-is false (§22 visibility - it is `true` for now, so the row renders for nobody); it
-carries no count pill. The `Page` union gains `marketplace`. When the row's condition
+is false (§22 visibility - the parking switch, `false` now); it carries no count pill. The `Page` union gains `marketplace`. When the row's condition
 stops holding while `page` is `marketplace` (the Settings toggle, a §20 `settings set`
 seen through the store refresh, or the constant), an effect in the app shell calls
 `go('automations')` - the same shape as the §9.3 overlay closing itself when the setting
@@ -310,8 +309,8 @@ image }] }` - `kind` derived from `location` (`url`, `file`, `none`), `location`
 §22.2 column (null, a path, or a link), `archive` the entry's `path` as written (an https
 URL or an absolute local path), `image` the entry's image reference as written (an https
 URL or an absolute local path) or `null` when it lists none (the bytes come from the
-image route on demand; the reference itself is what the §22.7 picker copies when the
-entry is added to another catalog - a boolean before 2026-09-12), `cached` whether a
+image route on demand; the reference is what a §22.7 editor lists, as written - a
+boolean before 2026-09-12), `cached` whether a
 readable copy exists (false only for the §22.2 unreadable-copy case; an empty catalog is
 still cached).
 
@@ -467,11 +466,12 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   copied), keeps a `path` entry and its `image` as written, rewrites the file with the
   §22.1 keys only, refreshes the copy, writes nothing on a 422, and leaves the archive
   file behind when its entry is removed.
-- Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): while
-  `MARKETPLACE_HIDDEN` holds, the nav row renders for nobody and the `marketplace` page
-  redirects to Automations for everyone (the developer-mode pair — row hidden while
-  `developerMode` is false and shown when true, redirect when the setting drops mid-page
-  — is dormant behind the flag and returns with it), the empty state with the example catalog,
+- Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): the
+  developer-mode pair (row hidden while `developerMode` is false and shown when true,
+  redirect to Automations when the setting drops mid-page) and, dormant while the parking
+  switch is `false`, the parked case (while `MARKETPLACE_HIDDEN` holds, the nav row renders
+  for nobody and the `marketplace` page redirects to Automations for everyone; the tests
+  key on the constant so either value runs its own pair), the empty state with the example catalog,
   a catalog with entries rendering its grid, the Refresh button and Refresh all present
   only for a catalog with a location, a hidden catalog collapsing to its header with the
   "Hidden" chip, the settings modal PATCHing the three fields with AUTO REFRESH disabled
@@ -481,18 +481,14 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   and `null` locations only, the editor opening on the served catalog with the details
   form viewed (its LOCATION line naming the file) and one navigator row per entry (title over its reference label), clicking
   a row viewing its entry form with the title, description, and reference editable, the
-  picker's THIS MAC tab listing and filtering this app's automations, a pick exporting
-  the automation without values through `saveFile` and landing in the details step as
-  the saved file (a cancelled dialog returns to the list, a failed export shows its
-  reason) with the title and description prefilled before Add appends and views the row,
-  the A
-  CATALOG tab listing the other catalogs' entries (the working catalog and empty ones
-  left out) and a pick carrying the entry's `path` and `image` as written, the A FILE tab
-  going through `openArchivePath` into the details step with the file's stem, Remove from
+  add form taking a title, description, reference, and image and Add appending the entry
+  as typed (trimmed, viewed, the form closed; nothing exported, no dialog, no export
+  call), Add disabled while the title is blank, a malformed reference and a malformed
+  image stopping Add in place with the reason (nothing appended), Remove from
   catalog dropping the viewed entry, a blank title and a malformed reference stopping
   Save on the offending entry with the reason in the footer, Save sending the §22.7 body
-  (`path` for a kept row, `archiveFile` for an unedited exported or picked file, `image`
-  when set), a backend `entry <i>:` 422 viewing that entry, the discard
+  (`path` for every row as written, `image` when set, never `archiveFile`), a backend
+  `entry <i>:` 422 viewing that entry, the discard
   confirm on Escape with unsaved edits, Create catalog… opening the empty editor (no
   folder anywhere; LOCATION reads "Kept by Autowright") whose Create button POSTs the
   content alone, and the Export button fetching the file and handing it to `saveFile` as
@@ -500,14 +496,13 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   is false).
 - e2e: one drive with a file-based catalog under the test data root (a catalog plus one
   archive exported in the same test), asserting the page lists it and Install lands the
-  automation with its triggers off; then, with the native save dialog stubbed to
-  `Watcher.autowright` in a temp folder, **Create catalog…** opens the editor, **Add
-  automation…** picks the seeded automation on the THIS MAC tab (the export lands through
-  the stubbed save dialog) and Add accepts the prefilled details, the navigator lists the
-  new row, Create lands the catalog as a second section kept by Autowright listing one
-  entry by the archive's absolute path; then, with the save dialog re-stubbed to
-  `marketplace-catalog.yaml` in that folder, **Export catalog** on the new section writes
-  the file beside the archive.
+  automation with its triggers off; then, with the seeded automation exported to
+  `Watcher.autowright` in a temp folder through the §19 export route, **Create catalog…**
+  opens the editor, **Add automation…** opens the add form, the title and the archive's
+  absolute path are typed in and Add appends the row, the navigator lists it, Create
+  lands the catalog as a second section kept by Autowright listing one entry by that
+  path; then, with the native save dialog stubbed to `marketplace-catalog.yaml` in that
+  folder, **Export catalog** on the new section writes the file beside the archive.
 
 ### 22.7 Catalog authoring
 
@@ -518,14 +513,16 @@ to share it (the editor never asks where to save; a folder is only ever chosen t
 the §22.5 CLI `create <folder>` or the §22.3 settings' LOCATION). A row with a **file
 path** location (added from a file, or given one) is edited the same way, with the copy
 mirroring the file. Either way the
-catalog only **references** archives, by absolute path or https link (§22.1): an archive
-file the user picks is listed where it is, and an automation from this app is exported
-**where the user saves it** - the picker runs the §9.2 export's native save dialog at
-pick time, so the user manages where every archive lives and the editor never chooses a
-folder (the EXPORT FOLDER row and the editor's export-on-save were removed 2026-09-12;
-the §22.4 `automationId` / `exportFolder` save fields stay for the §22.5 CLI). Nothing
-here is special at read time: an authored catalog is a §22.1 catalog like any other. A
-catalog with a link location is not editable here (the file isn't on this machine).
+catalog only **references** archives, by absolute path or https link (§22.1): every
+entry is typed in as a reference, and an automation from this app reaches a catalog by
+being exported first (the §9.2 Export…, wherever the user saves it) and then listed by
+that path. The editor never exports, never reads an archive, and never chooses a folder:
+the user manages where every archive lives (the EXPORT FOLDER row and the editor's
+export-on-save were removed 2026-09-12, the export-at-pick / other-catalog / file-dialog
+picker 2026-09-15; the §22.4 `automationId` / `exportFolder` / `archiveFile` save fields
+stay for the §22.5 CLI). Nothing here is special at read time: an authored catalog is a
+§22.1 catalog like any other. A catalog with a link location is not editable here (the
+file isn't on this machine).
 
 **Create** and **Edit** share one surface, the **catalog editor** (redesigned 2026-09-12
 as a two-column form; the earlier single-column list of input cards is gone).
@@ -556,7 +553,7 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   `.ad-btn-bare.ad-hover-row.ad-focus-inset` button that views it. With no entries, the
   §14 `EmptyLine` "No automations yet." under the eyebrow. Pinned under the list (outside
   the scroll pane; `padding: 12px 14px`, dim-hairline top border): a full-width dashed
-  **Add automation…** button (`fa-plus`) opening the picker. Arrow keys are not bound
+  **Add automation…** button (`fa-plus`) opening the add form. Arrow keys are not bound
   here: the pane on the right is a form, and ↑ / ↓ belong to its inputs.
 - Right, the **form pane** (flex 1): a 44 px toolbar (dim-hairline bottom border) holding
   the eyebrow DETAILS or AUTOMATION <i> OF <n> (1-based) and, at the right, an
@@ -601,53 +598,25 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   editor opened on) raises the §14 in-modal discard confirm ("Discard your catalog
   edits?" / "The changes you made to this catalog will be lost."; Discard / Keep editing).
 
-**Add automation picker** (stacked over the editor, width 520, z 80): title "Add
-automation" (15/600). Beneath it a row of `.ad-btn-tab` chips (`aria-pressed` on the
-active one, gap 6): **This Mac**, **A catalog**, **A file**; This Mac is active when the
-picker opens.
+**Add automation form** (stacked over the editor, width 520, z 80; redesigned
+2026-09-15 - the earlier three-tab picker (This Mac / A catalog / A file) with its
+export-at-pick, other-catalog list, file dialog, and details step is gone; there is one
+way in, typing the reference): title "Add automation" (15/600), then the entry form's
+four fields in its order and voice - TITLE (`ad-input`, autofocused), DESCRIPTION
+(`ad-input`), AUTOMATION (mono `ad-input`, the entry form's placeholder and caption),
+IMAGE (mono `ad-input`, the entry form's placeholder and caption); Enter in any field
+adds. Footer row, 18 px under the fields, the editor footer's shape: at the left the
+inline error (red, 12.5 px) when one is set, at the right quiet **Cancel** / accent
+**Add** (disabled while TITLE is blank). Add runs the entry form's
+checks on what was typed - the reference, then the image, with the Save messages below -
+and shows the reason in place without adding; when they pass it appends the entry (fields
+trimmed) to the end of the working catalog, views it in the editor, and closes the form.
+The same reference may be added more than once. Reordering entries is deferred (edit the
+YAML by hand).
 
-- THIS MAC: a search input (placeholder "Search automations"; filters by name substring)
-  over a `.ad-card` list (padding 4, max-height 320, scrolling) of one `MenuItemRow` per
-  automation in this app (name, description muted on one line). Empty: "No automations
-  yet." / "No automations match.". Clicking a row **exports the automation now**: the §19
-  export **without parameter values** (a marketplace archive is for other people, the §5.1
-  `--no-values` rule) and then the §3 `save-file` dialog with the default name
-  `<transfer.safe_filename(name)>.autowright` - the same dialog the §9.2 Export… uses, so
-  the user chooses where the archive lives. While the export runs the list is replaced by
-  the line "Exporting <name>…" beside the §9 spinner. Cancelling the dialog returns to the
-  list with nothing written; a failed export shows its reason in red under the list. On
-  save the picker goes to the details step with the saved file as the pick.
-- A CATALOG: the same search (placeholder "Search catalogs"; matches an entry's title or
-  its catalog's name) over a list grouped by catalog in table order: an inert `header`
-  `MenuItemRow` per catalog (its name, sub the §22.3 location label - hostname, file name,
-  or "Kept by Autowright") followed by one pickable row per entry (title, description).
-  Hidden catalogs are listed like any other; the working catalog (edit mode) and a
-  catalog with no entries are left out. Empty: "No other catalogs list automations yet."
-  (create mode: "No catalogs list automations yet.") / "No automations match.".
-- A FILE: a dashed full-width **Choose an .autowright file…** (`fa-file-import`) opening
-  the native open dialog through the §3 `open-archive-path` IPC (filtered to
-  `autowright`; answers `{ path }` or null on cancel - the backend reads the file itself,
-  only the path travels), caption "The file is listed where it is, never copied.".
-
-Picking (a row, or a file) turns the picker to its **details step**: beneath the title a
-muted line naming the pick - the saved or chosen file's path (mono) for a This Mac export
-or a file, "<entry title> · <catalog name>" for a catalog entry - then TITLE (`ad-input`,
-prefilled with the automation's name / the entry's title / the file's stem) and
-DESCRIPTION (`ad-input`, prefilled with the automation's description / the entry's
-description / empty). Footer: quiet **Back** (returns to the list with the tab kept; an
-exported archive stays where it was saved) / accent **Add** (disabled while TITLE is
-blank; Enter in either field adds). Add appends the entry to the end of the working
-catalog, views it in the editor, and closes the picker: an exported automation and a
-chosen file carry the file's path; a catalog entry carries its `path` and `image` exactly
-as the other catalog lists them (never fetched or copied - a local path in someone else's
-catalog is listed as it is). The same automation may be exported and added more than
-once. Reordering entries is deferred (edit the YAML by hand).
-
-**Save body.** Each entry sends its title, description, and image (when non-empty), plus
-exactly one of: `archiveFile` (a file exported or picked in this editing session whose
-AUTOMATION field still holds that path - the backend then checks it is a real archive)
-or `path` (everything else, as written: a saved entry, a catalog pick, or a reference the
-user typed or edited). The editor never sends `automationId` or `exportFolder`.
+**Save body.** Each entry sends its title, description, `image` (when non-empty), and
+`path` exactly as written. The editor never sends `automationId`, `exportFolder`, or
+`archiveFile` (§22.5 CLI fields).
 
 **Save** (`PUT …/catalog`). Each entry names exactly one of `path` (a reference kept as
 written), `automationId` (an automation in this app, exported on save), or `archiveFile`

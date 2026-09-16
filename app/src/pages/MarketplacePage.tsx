@@ -641,7 +641,6 @@ export default function MarketplacePage() {
       {editing && (
         <CatalogEditorModal
           source={editing === 'create' ? null : editing}
-          sources={sources ?? []}
           onClose={() => setEditing(null)}
           onSaved={(source) => {
             const created = editing === 'create'

@@ -21,13 +21,13 @@ import SecretsPage from './pages/SecretsPage'
 import SettingsPage from './pages/SettingsPage'
 import WhatsNewModal from './pages/WhatsNewModal'
 
-// §22 visibility - REMINDER (2026-09-12): the marketplace is hidden for
-// everyone for now. It is not polished and its design is not settled; David
-// parked it to deal with later. Flip this to false to restore the §22.3
-// preview gate (the page and its nav row behind the §4.9 developerMode
+// §22 visibility parking switch: the marketplace is hidden for everyone
+// while true. False now (un-parked 2026-09-14): the §22.3 preview
+// gate applies (the page and its nav row behind the §4.9 developerMode
 // setting). Nothing else is gated by it: the routes, the store, and the CLI
-// group stay live (§2, one code path for every mode).
-export const MARKETPLACE_HIDDEN = true
+// group stay live (§2, one code path for every mode). Flip this and the
+// §22.6 e2e skip together.
+export const MARKETPLACE_HIDDEN = false
 
 const NAV: { page: string; label: string; icon: string }[] = [
   { page: 'automations', label: 'Automations', icon: 'fa-bolt' },

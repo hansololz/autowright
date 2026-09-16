@@ -438,7 +438,7 @@ export default function SettingsPage() {
             <div style={{ flex: 1 }}>
               <div style={rowTitle}>Developer mode</div>
               <div style={rowSub}>
-                Logs every backend request and every AI request, including the full prompt, to the backend log. Press ` to show the logs panel.
+                Logs every backend request and every AI request, including the full prompt, to the backend log. Press ` to show the logs panel. Also shows the Marketplace page, which is in preview.
               </div>
             </div>
             <Toggle on={settings.developerMode} onChange={(v) => patch({ developerMode: v })} />

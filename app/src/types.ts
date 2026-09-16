@@ -412,8 +412,8 @@ export interface MarketplaceSource {
 }
 
 // §22.7 catalog authoring - the catalog file on disk as written, references
-// unresolved, and the save body's entry rows (exactly one of path /
-// automationId / archiveFile each).
+// unresolved, and the save body's entry rows. The editor always sends `path`;
+// the backend's automationId / archiveFile alternatives are the §22.5 CLI's.
 export interface MarketplaceCatalogEntry {
   index: number
   title: string
@@ -431,10 +431,8 @@ export interface MarketplaceCatalog {
 export interface MarketplaceCatalogSaveEntry {
   title: string
   description: string
-  path?: string
+  path: string
   image?: string
-  automationId?: string
-  archiveFile?: string
 }
 
 export interface MarketplaceCatalogSave {

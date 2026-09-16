@@ -20,9 +20,6 @@ declare global {
       openCatalog(): Promise<{ path: string } | null>
       // §22.3 drop zone: a dropped File's on-disk path (Electron webUtils).
       pathForFile(file: File): string
-      // §22.7 catalog editor: an .autowright file's path only - the backend
-      // copies it into the catalog's folder.
-      openArchivePath(): Promise<{ path: string } | null>
       revealPath(p: string): Promise<void>
       // §9.5 report modal: OS details + bundle version for the info block
       platformInfo(): Promise<{ platform: string; osName?: string; release: string; arch: string; version: string; trayPanel?: boolean }>

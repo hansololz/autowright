@@ -49,7 +49,7 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   `param list`, `trigger list`, `memory show`, `snapshot list`, `execution list|show`,
   `secret list`, `agent list`, `settings show`) prints the raw API JSON instead of the human
   columns — the machine mode agents parse. (`marketplace list`, §22.5, has no `--json` yet —
-  the marketplace is parked.)
+  deferred until the §22 design settles.)
 - **Help text:** `--help` is the CLI's own documentation — the §17 skill's agent discovers the
   surface by reading it, not by reading this spec. Every parser in the tree carries a
   `description` (the prose `<command> --help` prints, distinct from the one-line `help` its

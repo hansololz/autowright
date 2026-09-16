@@ -5,11 +5,10 @@
 // §22.2 file location is refreshable like a link, and Install runs the ordinary
 // §5.2 two-phase import, landing the automation with its triggers off. Then the
 // §22.7 authoring half: Create catalog… opens the editor empty (no save
-// location - Autowright keeps the catalog), the automation picker exports the
-// automation on the pick (through the native save dialog, into a temp folder),
-// Create lands the catalog kept by the app, and the §22.3 Export writes its
-// file beside that archive. The native save dialog is stubbed in the main
-// process, where it can't be driven.
+// location - Autowright keeps the catalog), the add form takes an archive this
+// test exported into a temp folder by its path, Create lands the catalog kept
+// by the app, and the §22.3 Export writes its file beside that archive. The
+// native save dialog is stubbed in the main process, where it can't be driven.
 import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -26,11 +25,10 @@ describe('marketplace e2e', () => {
     backend = null
   })
 
-  // §22 visibility - REMINDER (2026-09-12): the marketplace is parked for
-  // everyone (unpolished, design not settled), and this drive reaches the page
-  // through its nav row, which renders for nobody while App.tsx's
-  // MARKETPLACE_HIDDEN is true. Flip that constant and this skip together.
-  it.skip('gates the page on developer mode, lists a file source, and installs an entry', async () => {
+  // §22 visibility: this drive reaches the page through its nav row, which
+  // renders for nobody while App.tsx's MARKETPLACE_HIDDEN parking switch is
+  // true. Flip that constant and an `it.skip` here together.
+  it('gates the page on developer mode, lists a file source, and installs an entry', async () => {
     backend = await new Backend().start()
     // The shelf the catalog ships from: one automation, exported to an
     // archive beside the catalog. It lives OUTSIDE the §22.2 marketplace/
@@ -142,37 +140,29 @@ describe('marketplace e2e', () => {
     expect(landed.triggers.every((t) => t.enabled)).toBe(false)
 
     // §22.7 authoring: Create catalog… opens the editor empty - there is no
-    // save location to choose, the app keeps the catalog. The save dialog the
-    // picker's export runs can't be driven, so the main-process dialog answers
-    // a file in this test's temp folder instead. The folder starts empty: the
-    // archive lands on the pick, the catalog file on the §22.3 Export. The
-    // callback runs in the main process, so the path is computed here and
-    // passed in.
+    // save location to choose, the app keeps the catalog. The editor never
+    // exports: the archive the catalog will list is exported here first (the
+    // same §19 route the §9.2 Export… uses) into this test's temp folder, and
+    // the add form takes its path. The catalog file lands beside it on the
+    // §22.3 Export.
     const authored = path.join(backend.home, 'authored')
     const archivePath = path.join(authored, 'Watcher.autowright')
     await mkdir(authored, { recursive: true })
-    await handle.app.evaluate(({ dialog }, archiveFilePath) => {
-      dialog.showSaveDialog = () => Promise.resolve({ canceled: false, filePath: archiveFilePath })
-    }, archivePath)
+    await writeFile(archivePath, await backend.apiBytes('GET', `/automations/${id}/export?values=0`))
 
     await clickNav(page, 'Marketplace')
     await page.getByTestId('marketplace-create').click()
     await page.getByTestId('catalog-editor').waitFor({ timeout: 20_000 })
     await page.getByTestId('catalog-add-automation').click()
-    // Both automations are here by now (the import landed "Watcher 2") - the
-    // seeded one is the row whose title is exactly "Watcher", on the THIS MAC
-    // tab the picker opens on.
-    await page.getByTestId('catalog-picker-row')
-      .filter({ has: page.getByText('Watcher', { exact: true }) })
-      .click()
-    // §22.7 details step: the pick exported the automation through the save
-    // dialog, and the title comes prefilled from the automation.
-    await page.getByTestId('catalog-picker-add').waitFor({ timeout: 20_000 })
+    // §22.7 add form: the title and the archive's absolute path, typed in.
+    await page.getByTestId('catalog-picker-title').fill('Watcher')
+    await page.getByTestId('catalog-picker-description').fill('From the authored catalog.')
+    await page.getByTestId('catalog-picker-path').fill(archivePath)
     await page.getByTestId('catalog-picker-add').click()
-    // §22.7: the entry is a file entry, named after the archive it landed on.
+    // §22.7: the entry is listed by the archive it names.
     await page.getByTestId('catalog-nav-row').filter({ hasText: 'Watcher.autowright' })
       .waitFor({ timeout: 10_000 })
-    // The picker stays mounted through its exit animation - shoot the settled editor.
+    // The form stays mounted through its exit animation - shoot the settled editor.
     await page.getByTestId('catalog-picker').waitFor({ state: 'detached', timeout: 10_000 })
     await shot(page, 'marketplace-editor.png')
 
@@ -199,8 +189,8 @@ describe('marketplace e2e', () => {
     await waitFor(async () => (await readdir(authored)).includes('marketplace-catalog.yaml'),
       20_000, 'the exported catalog file to land')
 
-    // §22.7: the catalog plus the archive it lists - the archive written by the
-    // picker's export, the catalog file by Export.
+    // §22.7: the catalog plus the archive it lists - the archive exported by
+    // this test, the catalog file by Export.
     expect((await readdir(authored)).sort())
       .toEqual(['Watcher.autowright', 'marketplace-catalog.yaml'])
 
