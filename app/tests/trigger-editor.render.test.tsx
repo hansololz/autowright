@@ -36,6 +36,7 @@ vi.mock('../src/api', () => ({
 
 let storeMod: typeof import('../src/store')
 let TriggerEditor: typeof import('../src/pages/detail/TriggerEditor').TriggerEditor
+let kindIcon: typeof import('../src/pages/detail/TriggerEditor').kindIcon
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -43,7 +44,19 @@ beforeAll(async () => {
     trayAlert: () => Promise.resolve(),
   }
   storeMod = await import('../src/store')
-  TriggerEditor = (await import('../src/pages/detail/TriggerEditor')).TriggerEditor
+  const editorMod = await import('../src/pages/detail/TriggerEditor')
+  TriggerEditor = editorMod.TriggerEditor
+  kindIcon = editorMod.kindIcon
+})
+
+describe('§9.2 kind icon', () => {
+  it('a kind this build has no chip for falls back to the clock', () => {
+    expect(kindIcon('interval')).toBe('fa-solid fa-stopwatch')
+    expect(kindIcon('discord')).toBe('fa-brands fa-discord')
+    // §4.3 reserves kinds this build doesn't offer - a record carrying one
+    // still renders its row.
+    expect(kindIcon('pubsub' as never)).toBe('fa-solid fa-clock')
+  })
 })
 
 const secret = (over: Partial<SecretMeta> = {}): SecretMeta =>

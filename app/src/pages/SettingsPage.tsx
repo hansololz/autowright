@@ -4,19 +4,14 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import { BlockingOverlay, CommandBlock, ConfirmModal, Eyebrow, PageLoading, PageTitle, RadioRing, Spinner, Toggle } from '../ui'
+import {
+  BlockingOverlay, CommandBlock, ConfirmModal, Eyebrow, PageLoading, PageTitle, RadioRing,
+  settingsRow as row, settingsRowDivided as rowDivided, settingsRowSub as rowSub,
+  settingsRowTitle as rowTitle, Spinner, Toggle,
+} from '../ui'
 
 // Card chrome comes from the shared .ad-card class; only overflow is local.
 const card: React.CSSProperties = { overflow: 'hidden' }
-
-// §14 settings row — the one geometry for every Settings and About row; the
-// About page imports these so the two pages can't drift.
-export const rowTitle: React.CSSProperties = { fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }
-export const rowSub: React.CSSProperties = { fontSize: 12, lineHeight: 1.55, color: 'var(--text-muted)', marginTop: 3 }
-export const row: React.CSSProperties = {
-  padding: '15px 18px', display: 'flex', alignItems: 'center', gap: 20,
-}
-export const rowDivided: React.CSSProperties = { ...row, borderBottom: '1px solid var(--hairline-dim)' }
 
 const pathBox: React.CSSProperties = {
   marginTop: 10, background: 'var(--bg-inset)', border: '1px solid var(--hairline)',

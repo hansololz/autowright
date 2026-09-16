@@ -1462,6 +1462,34 @@ def test_manifest_and_meta_shape_rejects(store):
     assert len(store.autos) == before
 
 
+def test_step_manifest_text_fields_must_be_text(store):
+    """§5.1: the archive is untrusted, so a step's name/description/why are
+    typed, not just truthy - a mapping, a list or a bool would otherwise land
+    verbatim in the stored version and white-screen the §9.2 detail page."""
+    a = _build(store)
+    data = transfer.export_automation(store, a)
+    before = len(store.autos)
+
+    def _first_step(**over):
+        return _rezip_meta(data, lambda m: {**m, "steps": [{**m["steps"][0], **over},
+                                                           *m["steps"][1:]]})
+
+    for bad in (_first_step(name={"a": 1}), _first_step(name=["x"]),
+                _first_step(name=True), _first_step(name="   "),
+                _first_step(description=3), _first_step(why=["because"])):
+        with pytest.raises(transfer.TransferError, match="invalid step manifest entry"):
+            transfer.import_automation(store, bad)
+    assert len(store.autos) == before
+
+    # an absent description or why still defaults to the empty string
+    stripped = _rezip_meta(data, lambda m: {
+        **m, "steps": [{k: v for k, v in s.items() if k not in ("description", "why")}
+                       for s in m["steps"]]})
+    b, _ = transfer.import_automation(store, stripped)
+    ver = b["versions"][b["current_version"]]
+    assert [s["description"] for s in ver["steps"]] == ["", ""]
+
+
 def test_import_drops_param_values_naming_no_param(store):
     """§5.1: archive param_values naming no param of the imported version drop,
     never store (the §19 PATCH rule) - only definitions the version carries can

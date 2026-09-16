@@ -367,6 +367,14 @@ def test_follow_exec_queued_can_settle_skipped(monkeypatch, capsys):
 # §4.8 fixture id: step entries and allowedSecrets reference secrets by uuid.
 API_TOKEN_ID = "11111111-1111-1111-1111-111111111111"
 
+def _validate_workdir(client, d):
+    """§20: the workdir validator, driven with the agent/secret stores its
+    command reads once (`_grant_stores`) and passes down."""
+    from autowright import cli
+
+    return cli.validate_workdir(d, *cli._grant_stores(client))
+
+
 FULL_AUTO = {
     "id": "abc12345-0000-0000-0000-000000000000", "name": "Daily Report",
     "description": "Reports daily",
@@ -393,10 +401,13 @@ class _WorkdirClient:
     def __init__(self, auto=None, install_result=None):
         self.auto = auto or FULL_AUTO
         self.posted = []
+        self.fetched = []  # every GET path, in order - a command's read count
         self.timeouts = []  # (method, path, timeout) per write, parallel to posted
         self.install_result = install_result
 
     def req(self, method, path, body=None, timeout=30):
+        if method == "GET":
+            self.fetched.append(path)
         if method == "GET" and path == "/automations":
             return [self.auto]
         if method == "GET" and path == f"/automations/{self.auto['id']}":
@@ -427,7 +438,7 @@ def test_workdir_pull_push_round_trip(tmp_path):
     assert set(written) == {"spec.md", "manifest.yaml", "01-fetch.py"}
     assert (d / "spec.md").read_text().startswith("# Daily Report")
 
-    draft = cli.validate_workdir(c, d)
+    draft = _validate_workdir(c, d)
     assert draft["spec"] == FULL_AUTO["spec"]
     assert [s["file"] for s in draft["steps"]] == ["01-fetch.py"]
     assert draft["steps"][0]["code"] == "import json\nprint('hi')\n"
@@ -471,7 +482,7 @@ def test_workdir_ignores_a_stray_instructions_file(tmp_path):
     assert "instructions.md" not in written
     (d / "instructions.md").write_text("- keep it short\n", encoding="utf-8")
 
-    draft = cli.validate_workdir(_WorkdirClient(), d)
+    draft = _validate_workdir(_WorkdirClient(), d)
     assert "instructions" not in draft
     assert [s["file"] for s in draft["steps"]] == ["01-fetch.py"]
 
@@ -496,7 +507,7 @@ def test_workdir_notes_round_trip(tmp_path):
     assert set(written) == {"spec.md", "manifest.yaml", "01-fetch.py", "notes.md"}
     assert (d / "notes.md").read_text() == "watch the rate limit\n"
 
-    draft = cli.validate_workdir(_WorkdirClient(auto), d)
+    draft = _validate_workdir(_WorkdirClient(auto), d)
     assert draft["notes"] == "watch the rate limit"
 
     c = _WorkdirClient(auto)
@@ -529,7 +540,7 @@ def test_workdir_manifest_step_camel_flags_become_snake(tmp_path):
     assert "noTimeout" not in manifest["steps"][0]
     assert "infiniteRetries" not in manifest["steps"][0]
 
-    draft = cli.validate_workdir(_WorkdirClient(auto), d)
+    draft = _validate_workdir(_WorkdirClient(auto), d)
     assert draft["steps"][0]["no_timeout"] is True
     assert draft["steps"][0]["infinite_retries"] is True
 
@@ -567,7 +578,7 @@ def test_workdir_run_if_missed_round_trip(tmp_path):
     assert manifest["triggers"] == [{"cron": "0 8 * * *", "timezone": "Asia/Tokyo",
                                      "run_if_missed": False}]
 
-    draft = cli.validate_workdir(_WorkdirClient(auto), d)
+    draft = _validate_workdir(_WorkdirClient(auto), d)
     drafted = next(t for t in draft["triggers"] if t["kind"] == "cron")
     assert drafted["runIfMissed"] is False
     merged = next(t for t in cli.merge_draft_triggers(auto["triggers"], draft["triggers"])
@@ -604,7 +615,7 @@ def test_workdir_interval_round_trip(tmp_path):
         {"every": "PT6H", "run_if_missed": False},
         {"every": "PT90S"}]
 
-    draft = cli.validate_workdir(_WorkdirClient(auto), d)
+    draft = _validate_workdir(_WorkdirClient(auto), d)
     assert [(t["kind"], t.get("every"), t.get("runIfMissed", "absent"))
             for t in draft["triggers"] if t["kind"] == "interval"] == [
         ("interval", "PT6H", False), ("interval", "PT90S", "absent")]
@@ -661,15 +672,13 @@ def test_lift_run_if_missed_strips_the_key_and_reports_misuse():
 
 
 def test_validate_workdir_prints_errors_and_exits(tmp_path, capsys):
-    from autowright import cli
-
     d = tmp_path / "wd"
     d.mkdir()
     (d / "spec.md").write_text("no title, just prose\n")
     (d / "manifest.yaml").write_text("steps:\n  - { file: 01-x.py, name: X }\n")
     (d / "01-x.py").write_text("import os\ndef broken(:\n")
     with pytest.raises(SystemExit) as ei:
-        cli.validate_workdir(_WorkdirClient(), d)
+        _validate_workdir(_WorkdirClient(), d)
     assert ei.value.code == 1
     err = capsys.readouterr().err
     assert "must start with a # title" in err
@@ -1235,11 +1244,13 @@ class _RouteClient:
         self.gets = {k: copy.deepcopy(v) for k, v in (gets or {}).items()}
         self.reply, self.raw = reply or {}, raw
         self.calls = []
+        self.fetched = []  # every GET path, in order - a command's read count
         self.timeouts = []  # (method, path, timeout) per write, parallel to calls
 
     def req(self, method, path, body=None, timeout=30):
         if method == "GET":
             assert path in self.gets, f"unexpected GET {path}"
+            self.fetched.append(path)
             return self.gets[path]
         self.calls.append((method, path, body))
         self.timeouts.append((method, path, timeout))
@@ -1784,6 +1795,27 @@ def test_cmd_automation_import_missing_file_exits():
     assert "missing.autowright" in str(ei.value.code)
 
 
+def test_push_and_create_read_each_grant_store_once(tmp_path, capsys):
+    """§20: the agents and secrets stores are read once per command and passed
+    down - the validator's existence context and the grant model share them."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, FULL_AUTO)
+
+    c = _WorkdirClient()
+    _run(c, "automation", "push", "Daily Report", str(d))
+    assert c.fetched.count("/agents") == 1
+    assert c.fetched.count("/secrets") == 1
+
+    c = _WorkdirClient()
+    _run(c, "automation", "create", str(d), "--agent", "fast local",
+         "--grant-secret", "API_TOKEN")
+    assert c.fetched.count("/agents") == 1
+    assert c.fetched.count("/secrets") == 1
+    capsys.readouterr()
+
+
 def test_cmd_automation_push_keeps_stored_grants(tmp_path, capsys):
     from autowright import cli
 
@@ -2026,6 +2058,35 @@ def test_trigger_marks_off_then_no_catch_up(capsys):
     assert "2. On app start\n" in out
 
 
+DIFF_AUTO = dict(FULL_AUTO, version=4)
+
+TINY_DIFF = {"from": 1, "to": 4,
+             "files": [{"kind": "step", "name": "Fetch", "file": "01-fetch.py",
+                        "status": "unchanged", "added": 0, "removed": 0, "rows": []}]}
+
+
+def test_trigger_verbs_and_diff_read_only_the_list_row(capsys):
+    """§19/§20: the list row the reference lookup already read carries
+    `triggers` and `version`, so neither the trigger verbs nor a `--to`-less
+    diff re-reads the full record (which carries every version body)."""
+    detail = f"/automations/{AUTO_ID}"
+
+    c = _RouteClient(_auto_gets())
+    _run(c, "automation", "trigger", "list", "Daily Report")
+    assert c.fetched == ["/automations"] and detail not in c.fetched
+
+    c = _RouteClient(_auto_gets())
+    _run(c, "automation", "trigger", "off", "Daily Report", "2")
+    assert c.fetched == ["/automations"] and detail not in c.fetched
+    assert c.calls[-1][2]["triggers"][1]["enabled"] is False
+
+    c = _RouteClient(_auto_gets(DIFF_AUTO,
+                                **{f"{detail}/diff?from=v1&to=v4": TINY_DIFF}))
+    _run(c, "automation", "diff", "Daily Report", "--from", "v1")
+    assert c.fetched == ["/automations", f"{detail}/diff?from=v1&to=v4"]
+    assert "Daily Report: v1 → v4" in capsys.readouterr().out
+
+
 SNAPS = [{"id": "s1111111-a", "when": "today 10:00", "reason": "manual", "version": "v2",
           "size": "1 KB", "name": "before cleanup"},
          {"id": "s2222222-b", "when": "today 11:00", "reason": "pre-clear", "version": "v2",
@@ -2149,6 +2210,21 @@ def test_cmd_execution_list_repeats_the_automation_filter(capsys):
     _run(_RouteClient(gets), "execution", "list",
          "--automation", "Daily Report", "--automation", "Weekly Digest")
     assert "[e0]" in capsys.readouterr().out
+
+
+def test_cmd_execution_list_resolves_every_automation_ref_from_one_read():
+    """§20: repeated --automation references resolve against a single
+    `GET /automations` - not one identical list read per flag."""
+    second = dict(FULL_AUTO, id="def45678-0000-0000-0000-000000000000",
+                  name="Weekly Digest")
+    third = dict(FULL_AUTO, id="ghi90123-0000-0000-0000-000000000000", name="Backup")
+    ids = "&".join(f"automation={a['id']}" for a in (FULL_AUTO, second, third))
+    gets = {"/automations": [FULL_AUTO, second, third],
+            f"/executions?limit=20&{ids}": {"executions": [], "total": 0}}
+    c = _RouteClient(gets)
+    _run(c, "execution", "list", "--automation", "Daily Report",
+         "--automation", "Weekly Digest", "--automation", "Backup")
+    assert c.fetched.count("/automations") == 1
 
 
 def test_cmd_execution_list_since_and_until_ride_as_the_inclusive_range():
@@ -2407,6 +2483,24 @@ def test_cmd_secret_set_stdin_takes_the_whole_input(monkeypatch, capsys):
     _run(c, "secret", "set", "API_TOKEN", "--stdin")
     assert c.calls == [("PUT", "/secrets/s-1", {"value": pem.rstrip("\n")})]
     capsys.readouterr()
+
+
+def test_cmd_secret_set_without_a_terminal_says_to_use_stdin(monkeypatch, capsys):
+    """§20 exit-code rule: with no terminal to prompt on, getpass raises
+    EOFError - that is a message on stderr naming --stdin, never a traceback."""
+    from autowright import cli
+
+    def _no_tty(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(cli.getpass, "getpass", _no_tty)
+    c = _RouteClient({"/secrets": []})
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "secret", "set", "API_TOKEN")
+    assert ei.value.code != 0 and ei.value.code != 2  # 2 stays the follow signal
+    assert "no terminal" in str(ei.value.code) and "--stdin" in str(ei.value.code)
+    assert c.calls == []                       # nothing written
+    assert capsys.readouterr().out == ""       # and nothing on stdout
 
 
 def test_cmd_secret_delete_all(capsys):
@@ -3016,9 +3110,9 @@ def test_cmd_settings_show_and_set(capsys):
     assert "keepAwake" in out
 
     c = _RouteClient()
-    _run(c, "settings", "set", "login=on", "days=14", "notifications=failures")
+    _run(c, "settings", "set", "login=on", "days=14", "notifications=all")
     assert c.calls == [("PATCH", "/settings",
-                        {"login": True, "days": 14, "notifications": "failures"})]
+                        {"login": True, "days": 14, "notifications": "all"})]
     assert "set login, days, notifications" in capsys.readouterr().out
 
     # keepAwake is a known bool key — both directions parse
@@ -3044,6 +3138,32 @@ def test_cmd_settings_set_data_path_and_errors(capsys):
     with pytest.raises(SystemExit) as ei:
         _run(_RouteClient(), "settings", "set", "days=ten")
     assert "days takes an integer" in str(ei.value.code)
+
+
+def test_cmd_settings_set_rejects_an_off_list_notifications_value():
+    """§20 help rule: a stated vocabulary is exactly what the command parses -
+    `notifications` takes attention or all, and refuses anything else in the
+    setting's own words."""
+    c = _RouteClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "settings", "set", "notifications=failures")
+    assert str(ei.value.code) == "notifications must be attention or all, got 'failures'"
+    assert c.calls == []
+    c = _RouteClient()
+    _run(c, "settings", "set", "notifications=attention")
+    assert c.calls == [("PATCH", "/settings", {"notifications": "attention"})]
+
+
+def test_cmd_settings_set_parses_every_item_before_applying_any(capsys):
+    """§20: a bad value anywhere in the command refuses the whole of it - the
+    dataPath move must not already have happened when a later value fails."""
+    c = _RouteClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "settings", "set", "dataPath=/Volumes/T7/aw", "days=ten")
+    assert ei.value.code != 0 and ei.value.code != 2  # 2 stays the follow signal
+    assert "days takes an integer" in str(ei.value.code)
+    assert c.calls == []                       # no data-path POST, no PATCH
+    assert capsys.readouterr().out == ""
 
 
 def test_cmd_service_dispatches_to_service_module(monkeypatch, capsys):

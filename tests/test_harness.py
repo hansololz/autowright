@@ -500,7 +500,7 @@ def test_signin_state_is_cheap_per_provider(monkeypatch):
     assert harness.signin_state("codex") == {"installed": True, "signedIn": True}
     assert harness.signin_state("gemini") == {"installed": True, "signedIn": False}
     monkeypatch.setattr(harness, "ollama_status",
-                        lambda: {"ready": False, "installed": False, "models": []})
+                        lambda **kw: {"ready": False, "installed": False, "models": []})
     assert harness.signin_state("ollama") == {"installed": False, "signedIn": None}
 
 

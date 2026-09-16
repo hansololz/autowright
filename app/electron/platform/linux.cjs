@@ -249,10 +249,15 @@ function revealPrefersOpen(abs, isDir) {
 const SERVICE_START_FAILED_DETAIL =
   'The backend service failed to start. Details in app.log.'
 
+// §2 spawn policy mirror (main.cjs SERVICE_CHILD_OPTIONS): systemctl can
+// block indefinitely on a wedged domain, so the capture is bounded and its
+// output capped — a diagnostics child must never outlive the app.
+const DIAGNOSTICS_CHILD_OPTIONS = { timeout: 120_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }
+
 // After a failed install verification, capture systemd's view of the unit.
 function serviceDiagnostics(log) {
   execFile('systemctl', ['--user', '--no-pager', 'status', 'ai.autowright.backend'],
-    (err, stdout, stderr) => {
+    DIAGNOSTICS_CHILD_OPTIONS, (err, stdout, stderr) => {
       log(`ensure-backend: systemctl status:\n${String(stdout || stderr || err?.message || '').trim()}`)
     })
 }

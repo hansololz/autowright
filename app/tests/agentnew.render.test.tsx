@@ -395,6 +395,30 @@ describe('AgentNewPage (§12)', () => {
     expect(await screen.findByText(/Finish signing in\. Autowright opened your browser/)).toBeTruthy()
   })
 
+  it('a re-delivered install event never opens a second sign-in (§12)', async () => {
+    // The card leaves 'installing' before the sign-in check is awaited: a
+    // second write to harnessInstall (a resumed stream, a repeated terminal
+    // event) would otherwise re-enter and open sign-in twice.
+    detect({ codex: false })
+    let settle!: (s: { installed: boolean; signedIn: boolean }) => void
+    ;(mockedApi.signinStatus as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => { settle = r as never }))
+    ;(mockedApi.loginHarness as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, method: 'browser' })
+    render(<AgentNewPage />)
+    fireEvent.click(screen.getByText('Codex'))
+    fireEvent.click(await screen.findByText('Download & set up'))
+    await waitFor(() => expect(mockedApi.installHarness).toHaveBeenCalledWith('codex'))
+
+    const done = { event: 'harness.install' as const, id: 'codex', done: true, ok: true }
+    act(() => { storeMod.useStore.getState().applyEvent(done) })
+    await waitFor(() => expect(mockedApi.signinStatus).toHaveBeenCalledTimes(1))
+    act(() => { storeMod.useStore.getState().applyEvent({ ...done, line: 'installed' }) })
+    expect(mockedApi.signinStatus).toHaveBeenCalledTimes(1)
+
+    await act(async () => { settle({ installed: true, signedIn: false }) })
+    await waitFor(() => expect(mockedApi.loginHarness).toHaveBeenCalledTimes(1))
+  })
+
   it('edit mode: Save changes patches the edited fields and returns to Agents', async () => {
     storeMod.useStore.setState({
       agents: [{

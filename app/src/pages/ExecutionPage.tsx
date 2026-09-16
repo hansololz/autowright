@@ -8,7 +8,7 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import { BackLink, Badge, EmptyNotice, Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, waitedLabel } from '../ui'
+import { BackLink, Badge, EmptyNotice, Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, settingsRow, settingsRowSub, settingsRowTitle, waitedLabel } from '../ui'
 import { ResultSection, ViewCard } from '../result'
 import { ExecutionView } from '../executionView'
 import type { Execution, ParamDef, TriggerPayload } from '../types'
@@ -73,10 +73,10 @@ function ParametersCard({ params }: { params: ParamDef[] }) {
   return (
     <ViewCard title={`PARAMETERS · ${params.length}`} defaultOpen={false}>
       {params.map((p) => (
-        <div key={p.name} style={{ display: 'flex', alignItems: 'flex-start', gap: 20, padding: '15px 18px', borderTop: '1px solid var(--hairline-dim)' }}>
+        <div key={p.name} style={{ ...settingsRow, alignItems: 'flex-start', borderTop: '1px solid var(--hairline-dim)' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600 }}>{p.label}</div>
-            {p.help && <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--text-muted)', marginTop: 3 }}>{p.help}</div>}
+            <div style={settingsRowTitle}>{p.label}</div>
+            {p.help && <div style={settingsRowSub}>{p.help}</div>}
           </div>
           <div style={{ flex: '0 1 50%', minWidth: 0, textAlign: 'right', fontSize: 12.5, fontWeight: 500, lineHeight: 1.5, color: 'var(--text-2)', overflowWrap: 'break-word' }}>
             {paramSummary(p)}

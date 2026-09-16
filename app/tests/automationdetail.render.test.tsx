@@ -277,6 +277,19 @@ describe('§9.2 PARAMETERS row', () => {
     name: 'sites', kind: 'list', label: 'Sites', help: 'One link per line', lines: ['a.io'],
   }
 
+  it('a value that moved while the row was focused lands on blur (§9.2)', () => {
+    // Nothing was typed, so there is no draft to protect - but the resync is
+    // held off while the input has focus, and only the blur can let it in.
+    const { rerender } = render(<ParamRow automationId="a1" p={listParam} last />)
+    fireEvent.focus(screen.getByDisplayValue('a.io'))
+    rerender(<ParamRow automationId="a1" p={{ ...listParam, lines: ['b.io'] }} last />)
+    expect(screen.getByDisplayValue('a.io')).toBeTruthy()
+
+    fireEvent.blur(screen.getByDisplayValue('a.io'))
+    expect(screen.getByDisplayValue('b.io')).toBeTruthy()
+    expect(mockedApi.patchAutomation).not.toHaveBeenCalled()
+  })
+
   it('a resync while a list row is focused keeps what was typed; blur re-arms it', async () => {
     const { rerender } = render(<ParamRow automationId="a1" p={listParam} last />)
     const input = screen.getByDisplayValue('a.io')
@@ -297,6 +310,22 @@ describe('§9.2 PARAMETERS row', () => {
 // §4.3 trigger status text: enabled app_start and message triggers have no
 // computable next occurrence, so the line says what the automation is waiting
 // for instead of a countdown.
+// §19: a reconnect missed every event the socket was down for, and this
+// page's own execution fetch is never replayed - it re-runs on each one.
+describe('§9.2 reconnect resync', () => {
+  it('a reconnect refetches this automation\u2019s executions', async () => {
+    seed(auto())
+    mockedApi.listExecutions.mockClear()
+    render(<AutomationDetail />)
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalled())
+    expect(mockedApi.listExecutions).toHaveBeenCalledWith({ automation: 'a1', limit: 200 })
+    const onMount = mockedApi.listExecutions.mock.calls.length
+
+    act(() => { storeMod.useStore.setState({ reconnects: storeMod.useStore.getState().reconnects + 1 }) })
+    await waitFor(() => expect(mockedApi.listExecutions.mock.calls.length).toBeGreaterThan(onMount))
+  })
+})
+
 describe('§9.2 trigger status text', () => {
   const discord: Trigger = {
     id: 't-discord', kind: 'discord', channel: '42', secret: 's1', enabled: true,

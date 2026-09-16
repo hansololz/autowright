@@ -506,19 +506,28 @@ def test_login_shell_path_splits_what_the_login_shell_printed(monkeypatch):
     monkeypatch.setenv("SHELL", "/bin/zsh")
     cmds = []
 
-    def fake_run(cmd, **kw):
-        cmds.append(list(cmd))
-        return subprocess.CompletedProcess(cmd, 0, stdout=os.pathsep.join(["/a", "/b"]),
+    def fake_run(argv, timeout, **kw):
+        cmds.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=os.pathsep.join(["/a", "/b"]),
                                            stderr="")
 
-    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+    monkeypatch.setattr(installer, "run_bounded", fake_run)
     assert installer._login_shell_path() == ["/a", "/b"]
     assert cmds == [["/bin/zsh", "-l", "-c", 'printf %s "$PATH"']]
 
-    def raising(cmd, **kw):
+    def raising(argv, timeout, **kw):
         raise OSError("no such shell")
 
-    monkeypatch.setattr(installer.subprocess, "run", raising)
+    monkeypatch.setattr(installer, "run_bounded", raising)
+    assert installer._login_shell_path() == []
+
+    def raising_anything(argv, timeout, **kw):
+        # §19: the probe is best-effort — whatever the spawn layer throws (a
+        # ValueError from an unsupported spawn kwarg included) reads as "no
+        # entries", never as a failed install.
+        raise ValueError("unsupported spawn policy")
+
+    monkeypatch.setattr(installer, "run_bounded", raising_anything)
     assert installer._login_shell_path() == []
 
 

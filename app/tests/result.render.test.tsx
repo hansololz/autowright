@@ -132,4 +132,24 @@ describe('FILES rows — text preview (§7 caps) and load failure', () => {
     section([f('result.md')])
     expect(await screen.findByText('Couldn’t load result.md — boom')).toBeTruthy()
   })
+
+  it('a mid-run read failure does not outlive the stamp refetch (§7)', async () => {
+    // A half-written file mid-execution fails the read; the execution settling
+    // changes `stamp`, and the view has to come back with the bytes, not the
+    // error it was showing.
+    vi.mocked(api.resultFile).mockRejectedValue(new Error('half-written'))
+    const body = (stamp: string) => (
+      <ResultSection
+        label="RESULT" executionId="e1" stamp={stamp}
+        result={{ chip: '1 change', chipStatus: 'changes', files: [f('result.md')], path: '/tmp/results' }}
+      />
+    )
+    const view = render(body('executing'))
+    expect(await screen.findByText('Couldn’t load result.md — half-written')).toBeTruthy()
+
+    vi.mocked(api.resultFile).mockResolvedValue(resp('# Done'))
+    view.rerender(body('succeeded'))
+    expect(await screen.findByText('Done')).toBeTruthy()
+    expect(screen.queryByText(/Couldn’t load/)).toBeNull()
+  })
 })

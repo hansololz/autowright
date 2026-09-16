@@ -375,6 +375,13 @@ class StoreUnwritableError(RuntimeError):
         self.path = path
 
 
+class AutomationGoneError(KeyError):
+    """§19 registered-object guard: the automation record a write targets is no
+    longer the registered one — a DELETE landed under it. The write is refused
+    instead of re-creating the directory the delete just removed (which would
+    resurrect the automation at the next boot); the API answers 404."""
+
+
 class LiveExecutionError(RuntimeError):
     """§6.3: an execution started while a memory operation was staging its
     copy outside store.lock — the operation is abandoned, nothing landed."""
@@ -444,8 +451,15 @@ class Store:
         aside = (aside_parent or d.parent) / f"{self.DELETED_PREFIX}{new_id()}"
         try:
             d.rename(aside)
-        except OSError:
+        except FileNotFoundError:
             return  # nothing on disk to move
+        except OSError as e:
+            # §19: anything else (a read-only or vanished volume, an open
+            # handle on Windows) is a real failure — reported, never read as
+            # "nothing there", which would drop the record while its directory
+            # survives to be re-adopted at the next startup.
+            log.warning("removing %s failed: %s", d, e.strerror or e)
+            raise
         self._reap_later(aside)
 
     # ---------- startup walk (§5 load model) ----------
@@ -945,17 +959,27 @@ class Store:
         back from the index, which carries no steps to inspect."""
         return h["status"] in ("skipped", "queued")
 
+    def _own_execs(self, automation_id: str) -> list[dict]:
+        """The automation's own execution headers — off its `_exec_ids` index
+        (§5, kept by create/delete_execution), like `latest_result_json`, so a
+        long history on another automation costs nothing here. A record whose
+        automation is gone (its executions outlive it) keeps the full scan:
+        there is no index left to read."""
+        a = self.autos.get(automation_id)
+        if a is None:
+            return [h for h in self.execs.values() if h["automation_id"] == automation_id]
+        return [h for i in a.get("_exec_ids", ()) if (h := self.execs.get(i))]
+
     def _latest_exec(self, automation_id: str) -> dict | None:
         # Test records (§4.5) are draft-scoped and never count either.
-        hs = [h for h in self.execs.values()
-              if h["automation_id"] == automation_id and not self.never_ran(h) and not is_test(h)]
+        hs = [h for h in self._own_execs(automation_id)
+              if not self.never_ran(h) and not is_test(h)]
         return max(hs, key=lambda h: h["started_at"] or "") if hs else None
 
     def queued_execs(self, automation_id: str) -> list[dict]:
         """§6 firing queue, oldest first — the queue *is* the automation's
         `queued` records, so there is no second structure to keep in sync."""
-        q = [h for h in self.execs.values()
-             if h["automation_id"] == automation_id and h["status"] == "queued"]
+        q = [h for h in self._own_execs(automation_id) if h["status"] == "queued"]
         q.sort(key=lambda h: h.get("queued_at") or h["started_at"] or "")
         return q
 
@@ -1138,6 +1162,7 @@ class Store:
     def save_new_version(self, a: dict, ver: dict) -> int:
         """§4.4/§5: write vN+1 folder, then flip the pointer atomically."""
         with self.lock:
+            self._still_registered(a)
             n = a["current_version"] + 1
             while n in a["versions"]:
                 n += 1
@@ -1158,6 +1183,7 @@ class Store:
 
     def restore_version(self, a: dict, v: int) -> int:
         with self.lock:
+            self._still_registered(a)
             n = a["current_version"] + 1
             while n in a["versions"]:
                 n += 1
@@ -1226,6 +1252,7 @@ class Store:
         keys in automation.yaml (§5) — no automation record exists to hold
         them; they are ignored for an automation owner."""
         with self.lock:
+            self._still_registered(a)
             container = self.draft_dir(a)
             self._recover_draft_swap(container)
             dd = container / "automation"
@@ -1272,6 +1299,7 @@ class Store:
         if chat is None:
             return
         with self.lock:
+            self._still_registered(a)
             container = self.chat_dir(a)
             f = container / "chat.jsonl"
             entries = [{k: e[k] for k in self._CHAT_KEYS if k in e}
@@ -1306,6 +1334,7 @@ class Store:
         """§4.4/§19 Create: the pending slot's thread moves onto the new
         automation — the conversation continues on its edit page."""
         with self.lock:
+            self._still_registered(a)
             src = paths.pending_draft_dir() / "chat.jsonl"
             if not src.exists():
                 return
@@ -1341,6 +1370,7 @@ class Store:
         the create flow calls it on open, before any drafting; never touches
         contents already there."""
         with self.lock:
+            self._still_registered(a)
             (self.draft_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
 
     def load_pending_draft(self) -> dict | None:
@@ -1414,6 +1444,7 @@ class Store:
     def patch_automation(self, a: dict, patch: dict) -> None:
         """User-owned fields only (§19 PATCH)."""
         with self.lock:
+            self._still_registered(a)
             if "name" in patch and (n := (patch["name"] or "").strip()) and n != a["name"]:
                 # §5: directories are named by id — a rename touches only the
                 # name field. §4.1 uniqueness is the API's check; names store
@@ -1451,6 +1482,16 @@ class Store:
                         a["memory_snapshots"][k_int] = bool(sent[k_api])
             a["updated_at"] = timefmt.now_iso()
             self._write_toplevel(a)
+
+    def _still_registered(self, a: dict | None) -> None:
+        """§19: called under self.lock by every write into an automation
+        directory — the caller's record must still be the registered one, or a
+        write racing a DELETE re-creates the removed tree. `None` is the §4.4
+        pending create-mode slot, which is no automation and always writable.
+        `consume_trigger` below carries the same check inline: a scheduler tick
+        has nobody to answer, so it returns instead of raising."""
+        if a is not None and self.autos.get(a["id"]) is not a:
+            raise AutomationGoneError(a["id"])
 
     def consume_trigger(self, a: dict, trigger_id: str) -> None:
         """§4.3 one-shot consumption: a fired or skipped `time` trigger leaves the list."""
@@ -1493,8 +1534,14 @@ class Store:
             shutil.rmtree(aside, ignore_errors=True)
             try:
                 self.auto_dir(a).rename(aside)
-            except OSError:
+            except FileNotFoundError:
                 aside = None  # nothing on disk to move
+            except OSError as e:
+                # §19: any other OS error leaves the record registered — the
+                # route answers 409 rather than losing the automation from the
+                # index while its directory is still on disk.
+                log.warning("deleting %s failed: %s", self.auto_dir(a), e.strerror or e)
+                raise
             self.autos.pop(a["id"], None)
         if aside is not None:
             self._reap_later(aside)
@@ -1837,8 +1884,14 @@ class Store:
             shutil.rmtree(aside, ignore_errors=True)
             try:
                 self.exec_dir(execution_id).rename(aside)
-            except OSError:
+            except FileNotFoundError:
                 aside = None  # no directory on disk (a header-only row)
+            except OSError as e:
+                # §19: same rule as the automation delete — the header stays in
+                # the index (and in the DB) when its directory couldn't go.
+                log.warning("deleting %s failed: %s", self.exec_dir(execution_id),
+                            e.strerror or e)
+                raise
             h = self.execs.pop(execution_id, None)
             self.execdb.delete(execution_id)
             # list(): a copy of the keys, so the filter can't trip over a
@@ -1874,9 +1927,18 @@ class Store:
         # long lock hold. (An API caller may already hold the RLock around the
         # whole settle, which is why the aside dirs go to the §6 reaper rather
         # than being rmtree'd here.)
+        deleted = []
         for eid in doomed:
-            self.delete_execution(eid)
-        return doomed
+            try:
+                self.delete_execution(eid)
+            except OSError:
+                # §19: the delete logged the path and the reason — the sweep
+                # moves on to the next record instead of abandoning the batch,
+                # and the record it couldn't remove stays registered (so it is
+                # not announced as deleted either).
+                continue
+            deleted.append(eid)
+        return deleted
 
     def retention_cleanup(self) -> int:
         with self.lock:
@@ -1927,7 +1989,12 @@ class Store:
             # The delete takes its own short hold and rmtrees after releasing
             # it — calling it from inside the re-check hold above would nest
             # the two (RLock) and put the rmtree back under the lock.
-            self.delete_execution(eid)  # maintains each automation's `_latest`
+            try:
+                self.delete_execution(eid)  # maintains each automation's `_latest`
+            except OSError:
+                # §19: the delete logged the path and the reason — one stuck
+                # directory must not keep the rest of the batch on disk.
+                continue
             removed += 1
         return removed
 
@@ -1996,6 +2063,8 @@ class Store:
         a.pop("_memory_stats", None)
 
     def clear_memory(self, a: dict) -> None:
+        with self.lock:
+            self._still_registered(a)
         # §6.3: a crash mid-restore can leave memory/ absent with the aside dir
         # the sole surviving copy. Put it back first — otherwise the mkdir
         # below recreates an empty memory/ while the aside dir lives on, and
@@ -2125,6 +2194,7 @@ class Store:
         `commit_snapshot` renames the staged dir into place; `discard_snapshot`
         drops it. A staged dir left behind by a crash is swept at load."""
         with self.lock:
+            self._still_registered(a)
             if reason != "manual" and not a["memory_snapshots"][reason.replace("-", "_")]:
                 return None
             base = self.auto_dir(a)
@@ -2153,6 +2223,7 @@ class Store:
         snapshot it is about to copy from)."""
         staging, size, files = staged
         with self.lock:
+            self._still_registered(a)
             root = self.snapshots_dir(a)
             root.mkdir(parents=True, exist_ok=True)
             # list(): the sweep renames entries aside (§6 reaper), so the
@@ -2193,6 +2264,7 @@ class Store:
 
     def rename_snapshot(self, a: dict, sid: str, name: str | None) -> dict | None:
         with self.lock:
+            self._still_registered(a)
             meta = self.get_snapshot(a, sid)
             if not meta:
                 return None
@@ -2202,6 +2274,7 @@ class Store:
 
     def delete_snapshot(self, a: dict, sid: str) -> bool:
         with self.lock:
+            self._still_registered(a)
             d = self._snapshot_dir(a, sid)
             if not d or not (d / "snapshot.yaml").exists():
                 return False
@@ -2218,6 +2291,7 @@ class Store:
         copy that raced an execution; the caller serializes concurrent memory
         operations on `memory_ops` (the fixed swap-dir names collide)."""
         with self.lock:
+            self._still_registered(a)
             meta = self.get_snapshot(a, sid)
             src = self.snapshots_dir(a) / sid / "memory"
             if not meta or not src.exists():

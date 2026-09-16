@@ -159,10 +159,15 @@ const SERVICE_START_FAILED_DETAIL =
   'The backend service was registered but never started — macOS '
   + 'Gatekeeper may be blocking an unsigned build. Details in app.log.'
 
+// §2 spawn policy mirror (main.cjs SERVICE_CHILD_OPTIONS): launchctl can
+// block indefinitely on a wedged domain, so the capture is bounded and its
+// output capped — a diagnostics child must never outlive the app.
+const DIAGNOSTICS_CHILD_OPTIONS = { timeout: 120_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }
+
 // After a failed install verification, capture launchd's view of the job.
 function serviceDiagnostics(log) {
   execFile('launchctl', ['print', `gui/${process.getuid()}/ai.autowright.backend`],
-    (err, stdout, stderr) => {
+    DIAGNOSTICS_CHILD_OPTIONS, (err, stdout, stderr) => {
       log(`ensure-backend: launchctl print:\n${String(stdout || stderr || err?.message || '').trim()}`)
     })
 }

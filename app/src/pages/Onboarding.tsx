@@ -147,6 +147,8 @@ export default function Onboarding() {
   const ivals = useRef<number[]>([])
   // §10 sign-in poll, one interval per provider (see pollSignin below)
   const signinPolls = useRef<Record<string, number>>({})
+  // §10 model-download poll, one interval at a time (see pollPull below)
+  const pullPoll = useRef<number | null>(null)
   const t = (fn: () => void, ms: number) => { const id = window.setTimeout(fn, ms); timers.current.push(id); return id }
   const iv = (fn: () => void, ms: number) => { const id = window.setInterval(fn, ms); ivals.current.push(id); return id }
   const up = (fn: (o: Ob) => void) => { fn(ob); bump() }
@@ -155,6 +157,7 @@ export default function Onboarding() {
     timers.current.forEach((id) => clearTimeout(id))
     ivals.current.forEach((id) => clearInterval(id))
     signinPolls.current = {}
+    pullPoll.current = null
   }, [])
 
   // ----- step 1: live self-check (prototype runSample timings) -----
@@ -318,8 +321,17 @@ export default function Onboarding() {
   // §10 model download completion: the model appearing in the installed list
   // is the source of truth (percent comes from the ollama.pull effect below).
   const pollPull = () => {
-    iv(() => {
-      if (card(LOCAL_ID).phase !== 'pulling') return
+    // One poll for the download: every retry (a failed pull, the Qwen
+    // fallback) comes back through here, and a phase that leaves the download
+    // stops it — otherwise each attempt would leave another 2 s fetch loop
+    // running for the life of the page.
+    if (pullPoll.current !== null) clearInterval(pullPoll.current)
+    pullPoll.current = iv(() => {
+      if (card(LOCAL_ID).phase !== 'pulling') {
+        if (pullPoll.current !== null) clearInterval(pullPoll.current)
+        pullPoll.current = null
+        return
+      }
       void api.ollamaStatus().then((s) => {
         if (s.models.includes(LOCAL_MODEL) && card(LOCAL_ID).phase === 'pulling') {
           markLocalPiece('model')

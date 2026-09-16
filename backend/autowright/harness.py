@@ -448,6 +448,10 @@ class Handler:
 class ClaudeCodeHandler(Handler):
     binname = "claude"
 
+    # Claude Code tool names → the normalized names drafting labels (§8);
+    # WebFetch and WebSearch already arrive normalized.
+    _TOOL_NAMES = {"Bash": "Shell"}
+
     def __init__(self, agent: dict, web: bool):
         super().__init__(agent, web)
         self._deltas: list[str] = []
@@ -480,7 +484,8 @@ class ClaudeCodeHandler(Handler):
             self._deltas.append(chunk)
             sink.text(chunk)
         for tool in tools:
-            sink.tool(tool["name"], tool["input"])
+            name = tool["name"]
+            sink.tool(self._TOOL_NAMES.get(name, name), tool["input"])
 
     def reply(self, raw: str) -> str:
         # The result event is authoritative; joined deltas cover a CLI that
@@ -667,6 +672,11 @@ class _ScratchWatcher:
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._thread.ident is None:
+            # Never started (the caller failed between construction and
+            # start()): join() would raise RuntimeError and mask the real
+            # error, and there is nothing to sweep — no poll ever ran.
+            return
         self._thread.join(timeout=5)
         if not self._thread.is_alive():
             # Final sweep — only after a successful join, so never concurrent
@@ -912,6 +922,10 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         # readline holds, which would wedge this watchdog instead of freeing
         # the loop.
         defuse_read_end(proc.stdout)
+        # Same for stderr: the drain thread blocks in a read an escaped child
+        # keeps alive, and it holds that pipe's buffer lock while it does —
+        # the cleanup below would then wedge on its own close().
+        defuse_read_end(proc.stderr)
         # §8 Windows delivery: a writer thread blocked on a prompt the dead
         # child will never drain unblocks on the closed pipe (and swallows
         # the resulting error), so the kill leaks no thread and no handle.
@@ -1063,6 +1077,12 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         # process. The last Popen is retained on the draft job (proc_holder)
         # for its whole ack lifetime, so without this two fds leak per held
         # job on the long-lived backend.
+        if drain.is_alive():
+            # A drain still blocked on a read holds the stderr buffer lock, so
+            # an ordinary close() here would wedge THIS thread on it (its join
+            # timed out, or an exception skipped the join entirely). Defuse
+            # first: the read sees EOF, lets the lock go, and the close is safe.
+            defuse_read_end(proc.stderr)
         for pipe in (proc.stdout, proc.stderr):
             try:
                 if pipe is not None:
@@ -1204,19 +1224,32 @@ def version_at_least(version: str | None, floor: tuple[int, ...]) -> bool:
 
 _serve_last_spawn = 0.0
 _SERVE_COOLDOWN_S = 30.0
+_serve_lock = threading.Lock()
 
 
-def ollama_status() -> dict:
+def _claim_serve_spawn() -> bool:
+    """Whether THIS caller gets the self-heal spawn. The cooldown check and
+    its stamp are one atomic step — §19 status polls run concurrently on the
+    API's thread pool, and two of them reading the old stamp would both
+    spawn `ollama serve`."""
     global _serve_last_spawn
+    with _serve_lock:
+        if time.time() - _serve_last_spawn <= _SERVE_COOLDOWN_S:
+            return False
+        _serve_last_spawn = time.time()
+        return True
+
+
+def ollama_status(want_version: bool = True) -> dict:
+    """§19 Ollama state. `want_version=False` skips the version lookup for
+    callers that don't report it (the §19 sign-in poll)."""
     models = _ollama_models()
     binpath = ollama_bin()
     local = "localhost" in OLLAMA_URL or "127.0.0.1" in OLLAMA_URL
-    if (models is None and binpath and local
-            and time.time() - _serve_last_spawn > _SERVE_COOLDOWN_S):
+    if models is None and binpath and local and _claim_serve_spawn():
         # Installed but the server isn't up — start it and wait. A cooldown
         # instead of a once-latch: the server dying later (or a failed spawn)
         # must not disable the self-heal for the backend's whole lifetime.
-        _serve_last_spawn = time.time()
         try:
             subprocess.Popen([binpath, "serve"], stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
@@ -1233,7 +1266,8 @@ def ollama_status() -> dict:
     return {"ready": models is not None,
             "installed": models is not None or binpath is not None,
             "models": models or [],
-            "version": _ollama_version() if models is not None else None}
+            "version": (_ollama_version()
+                        if want_version and models is not None else None)}
 
 
 def ollama_model_installed(model: str, installed: list[str]) -> bool:
@@ -1341,9 +1375,10 @@ def signed_in(provider_id: str) -> bool | None:
 
 
 def signin_state(provider_id: str) -> dict:
-    """§19 `GET /agents/signin/{id}` — cheap poll, no version lookups."""
+    """§19 `GET /agents/signin/{id}` — a poll: no version lookups (an Ollama
+    poll still self-heals a stopped server, at most once per cooldown)."""
     if provider_id == "ollama":
-        st = ollama_status()
+        st = ollama_status(want_version=False)
         return {"installed": st["installed"], "signedIn": None}
     binpath = resolve_bin(PROVIDER_BIN[provider_id])
     return {"installed": binpath is not None, "signedIn": signed_in(provider_id)}

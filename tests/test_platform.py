@@ -11,13 +11,14 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from autowright import paths, platform, service
-from autowright.platform import darwin, fallback, linux, posixproc, windows
+from autowright.platform import base, darwin, fallback, linux, posixproc, windows
 
 # The §15 `no_kill_matching` autouse fixture (conftest.py) swaps both sweep
 # bodies for a recorded no-op, so no test ever sweeps the developer's own
@@ -1362,3 +1363,37 @@ def test_windows_power_applies_inline_when_no_worker_can_start(monkeypatch):
     assert calls == [SET_AWAKE]  # the permanent hold still stands
     power.reconcile(False)
     assert calls == [SET_AWAKE, CLEAR]
+
+
+# ------------------------------------------------- §2 shared bounded run
+
+# Only the `sh` commands below are POSIX-bound — run_bounded itself composes
+# per-OS and is exercised on every host by the first test here.
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX shell command")
+
+
+def test_run_bounded_runs_on_this_platform():
+    """§2: the helper is OS-agnostic — it takes its whole spawn policy from the
+    composed platform, so it runs on whatever host this suite runs on."""
+    done = base.run_bounded([sys.executable, "-c", "print(1)"], timeout=10)
+    assert done is not None
+    assert (done.returncode, done.stdout.strip()) == (0, "1")
+
+
+@posix_only
+def test_run_bounded_returns_the_completed_run():
+    """§2: the normal path answers like `subprocess.run` — captured text
+    output under the §2 pipe-encoding contract."""
+    done = base.run_bounded(["sh", "-c", "printf hi; exit 3"], 10)
+    assert done is not None
+    assert (done.returncode, done.stdout) == (3, "hi")
+
+
+@posix_only
+def test_run_bounded_times_out_on_a_grandchild_holding_the_pipe():
+    """§2: `subprocess.run`'s own timeout kills only the DIRECT child and then
+    blocks forever in communicate() on a grandchild still holding stdout — the
+    shared helper kills the whole group and answers None on time."""
+    t0 = time.monotonic()
+    assert base.run_bounded(["sh", "-c", "sleep 30 & exec sleep 30"], 0.5) is None
+    assert time.monotonic() - t0 < 5  # never the child's own 30 s

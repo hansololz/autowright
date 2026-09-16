@@ -82,6 +82,13 @@ describe('§9.2 CONCURRENCY number rows', () => {
     expect(mockedApi.patchAutomation).toHaveBeenCalledWith('a1', { maxParallel: 1 })
   })
 
+  it('the row carries the §14 settings-row geometry', () => {
+    render(<ConcurrencyCard auto={auto({ maxParallel: 2 })} showToast={showToast} />)
+    const row = screen.getByDisplayValue('2').parentElement as HTMLElement
+    expect(row.style.gap).toBe('20px')
+    expect(row.style.padding).toBe('15px 18px')
+  })
+
   it('blurring an emptied field PATCHes nothing', async () => {
     render(<ConcurrencyCard auto={auto({ maxParallel: 2 })} showToast={showToast} />)
     const input = screen.getByDisplayValue('2')

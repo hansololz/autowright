@@ -365,7 +365,7 @@ export interface ImportPreview {
   description: string
   steps: { name: string; description: string; agent: boolean }[]
   params: { name: string; kind: string }[]
-  triggers: { kind: 'cron' | 'interval' | 'app_start' | 'discord' | 'imessage'; expression?: string; every?: string; timezone?: string; channel?: string; from?: string; pattern?: string }[]
+  triggers: TriggerKindFields[]
   packages: PackageDep[]
   agents: { name: string; harness: string; mode: string; model: string | null; matchedTo: string | null; matchedBy: MatchedBy | null }[]
   secrets: { name: string; description: string; matchedTo: string | null; matchedBy: MatchedBy | null }[]
@@ -436,9 +436,6 @@ export interface MarketplaceCatalogSaveEntry {
 }
 
 export interface MarketplaceCatalogSave {
-  // §22.7: where automations from this app are exported when the catalog has
-  // no location (beside the catalog otherwise).
-  exportFolder?: string
   name: string
   description: string
   entries: MarketplaceCatalogSaveEntry[]

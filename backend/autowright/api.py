@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import __version__, harness, imessage, installer, keychain, marketplace, models, paths, platform
@@ -24,9 +25,9 @@ from .engine import Engine, kill_orphan_agent_group, kill_orphan_group
 from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
-from .storage import (SECRET_REF_RE, LiveExecutionError, StoreUnwritableError, _kind_ok,
-                      is_test, exec_started_ms, iter_file_stats, new_id, size_label, store,
-                      strip_param_values)
+from .storage import (SECRET_REF_RE, AutomationGoneError, LiveExecutionError,
+                      StoreUnwritableError, _kind_ok, is_test, exec_started_ms,
+                      iter_file_stats, new_id, size_label, store, strip_param_values)
 from . import testexec, versions_diff
 
 log = logging.getLogger("autowright.api")
@@ -42,8 +43,11 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 def token_ok(candidate: str | None) -> bool:
-    """§19: constant-time — never leak the token through comparison timing."""
-    return bool(candidate) and pysecrets.compare_digest(candidate, AUTH_TOKEN)
+    """§19: constant-time — never leak the token through comparison timing.
+    `compare_digest` raises TypeError on a non-ASCII str, so a header (or a
+    §19 WebSocket query token) carrying one is rejected before the compare
+    rather than crashing the request."""
+    return bool(candidate) and candidate.isascii() and pysecrets.compare_digest(candidate, AUTH_TOKEN)
 
 
 def auth(cred: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
@@ -104,13 +108,25 @@ async def _lifespan(_: FastAPI):
     # §3: live step groups die with this backend — the successor's startup
     # recovery marks their records interrupted, and an orphan must not keep
     # writing memory/ beside the second copy the next cron tick starts.
-    engine.kill_all_live()
+    # Each sweep is guarded on its own, like the callback loops around it: one
+    # raising kill must not skip the sweeps after it — or the shutdown
+    # callbacks below, which unlink backend.json.
+    try:
+        engine.kill_all_live()
+    except Exception:  # noqa: BLE001
+        log.exception("shutdown: killing live step groups failed")
     # §3: drafting harnesses die with it too — a stopping backend must never
     # leave an agent harness session group running with nobody to collect it.
-    draft_jobs.kill_all_building()
+    try:
+        draft_jobs.kill_all_building()
+    except Exception:  # noqa: BLE001
+        log.exception("shutdown: killing drafting harnesses failed")
     # §19: and a CLI-mode Ollama pull child — quit-all and reset must never
     # leave a multi-GB download running with nobody watching it.
-    _kill_pull_procs()
+    try:
+        _kill_pull_procs()
+    except Exception:  # noqa: BLE001
+        log.exception("shutdown: killing model-pull children failed")
     # §3: main()'s registered cleanup (guard thread, backend.json unlink) —
     # error-tolerant, a failing callback must not keep the next one from
     # running.
@@ -205,6 +221,34 @@ async def _unwritable_handler(request: Request, exc: StoreUnwritableError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# §19: a model-level 422 answers in the same shape as a handler's — `detail` is
+# one sentence, pydantic's per-field entries flattened to `<field>: <reason>`,
+# so clients render every 422 the same way instead of special-casing a list.
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(request: Request, exc: RequestValidationError):
+    from fastapi.responses import JSONResponse
+
+    parts = []
+    for e in exc.errors():
+        loc = list(e.get("loc") or ())
+        if loc and loc[0] == "body":
+            loc = loc[1:]
+        where = ".".join(str(p) for p in loc)
+        parts.append(f"{where}: {e.get('msg')}" if where else str(e.get("msg")))
+    return JSONResponse(status_code=422,
+                        content={"detail": "; ".join(parts) or "invalid request body"})
+
+
+# §19 registered-object guard: a store write whose automation record was
+# deleted under it answers 404 like any other unknown automation — the request
+# lost the race, and the store refused to re-create the removed directory.
+@app.exception_handler(AutomationGoneError)
+async def _automation_gone_handler(request: Request, exc: AutomationGoneError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=404, content={"detail": "automation not found"})
 
 
 def _auto_or_404(automation_id: str) -> dict:
@@ -665,6 +709,14 @@ def delete_auto(automation_id: str) -> dict:
         live = list(a.get("_live") or ())
     try:
         _delete_auto(a, automation_id, live)
+    except OSError as e:
+        # §19: the directory couldn't be moved aside (a read-only volume, an
+        # open handle) — the record is still registered, so the flag goes back
+        # and the client is told why instead of the automation vanishing from
+        # the index while its tree survives to be re-adopted at the next boot.
+        with store.lock:
+            a.pop("_deleting", None)
+        raise HTTPException(409, f"couldn't remove it from disk: {e.strerror or e}") from e
     except BaseException:
         # §19: a delete that fails partway (a write error, a kill that raised)
         # must not leave the record silently refusing every firing forever —
@@ -1449,7 +1501,13 @@ def clear_memory(automation_id: str) -> dict:
                 raise HTTPException(409, "an execution is in progress")
             if staged is not None:
                 store.commit_snapshot(a, staged, "pre-clear")
-            store.clear_memory(a)
+            try:
+                store.clear_memory(a)
+            except OSError as e:
+                # §19: same rule as the delete routes — memory/ couldn't be
+                # moved aside, so nothing was cleared and the client is told.
+                raise HTTPException(
+                    409, f"couldn't remove it from disk: {e.strerror or e}") from e
     _publish_auto_changed(a)
     return {"ok": True}
 
@@ -2451,7 +2509,7 @@ async def marketplace_catalog_save(source_id: str, body: models.MarketplaceCatal
                                                    _marketplace_export))
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
-    except (marketplace.MarketplaceNotEditable,
+    except (marketplace.MarketplaceNotEditable, marketplace.MarketplaceMoved,
             marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     except marketplace.MarketplaceError as e:
@@ -2590,7 +2648,9 @@ def set_data_path(body: models.DataPath) -> dict:
             raise HTTPException(409, "a queued execution is waiting — try again when the queue is empty")
     try:
         target.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
+    except (OSError, ValueError) as e:
+        # ValueError: pathlib raises it (not an OSError) for a path with an
+        # embedded NUL byte — a bad path either way, never a 500.
         raise HTTPException(422, f"can't create that directory: {e}") from e
     # §19: the store must own its directory exclusively — dataSize sums it,
     # the startup reconcile scans it, and the §3 reset deletes execution

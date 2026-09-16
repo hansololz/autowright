@@ -4,7 +4,7 @@
 // the plain textarea. Add mode also carries the §4.8 name rules and the
 // keyboard saves.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useStore } from '../src/store'
 import { SecretModal } from '../src/SecretModal'
 
@@ -109,6 +109,22 @@ describe('§4.8 SecretModal add-mode name rules', () => {
     await vi.waitFor(() => expect(useStore.getState().toast)
       .toBe('MAIL_PASSWORD already exists. Edit it from the list instead.'))
     expect(createSecret).not.toHaveBeenCalled()
+  })
+
+  it('two quick saves post the secret once (§12)', async () => {
+    let settle!: () => void
+    createSecret.mockImplementationOnce(
+      () => new Promise((r) => { settle = () => r({ id: 's2', name: 'MAIL_PASSWORD', description: '', set: false, usedBy: [] }) }) as never)
+    render(<SecretModal modal={{ mode: 'add' }} onClose={() => {}} />)
+    fireEvent.change(nameInput(), { target: { value: 'MAIL_PASSWORD' } })
+
+    save()
+    save()
+    expect(createSecret).toHaveBeenCalledTimes(1)
+    expect((screen.getByRole('button', { name: 'Save to Keychain' }) as HTMLButtonElement).disabled).toBe(true)
+
+    await act(async () => { settle() })
+    expect(createSecret).toHaveBeenCalledTimes(1)
   })
 
   it('Enter saves from the name field; the value textarea needs Cmd/Ctrl+Enter', async () => {

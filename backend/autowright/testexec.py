@@ -34,6 +34,11 @@ def start(engine: Engine, draft: dict, auto: dict | None,
     Raises RuntimeError while the container already has a live test (§19 409)."""
     container_id = auto["id"] if auto else None  # §4.5: null automationId on create-mode tests
     with store.lock:
+        # §3 shutdown: past the kill sweep nothing new may start — the same
+        # refusal `engine.start` makes, so a test lands on the §19 409 instead
+        # of spawning a step group with nobody left to collect it.
+        if engine._stopping:
+            raise RuntimeError("the backend is shutting down")
         if any(is_test(h) and h["automation_id"] == container_id
                and h["status"] == "executing" for h in store.execs.values()):
             raise RuntimeError("a test is already executing — cancel it or wait for it to finish")
@@ -80,6 +85,7 @@ def start(engine: Engine, draft: dict, auto: dict | None,
     # delete_test_execs skips executing records), so only a backend restart
     # would ever unblock testing again.
     scratch: Path | None = None
+    started_published = False
     try:
         # The sent draft's scripts, as executed (§5 steps/) — a real version
         # folder serves this role for ordinary executions.
@@ -127,6 +133,7 @@ def start(engine: Engine, draft: dict, auto: dict | None,
         # §4.5: test executions never change display state — no automation row.
         hub.publish("execution.started", executionId=h["id"], automationId=container_id,
                     execution=store.exec_json(h), automation=None)
+        started_published = True
         t = threading.Thread(target=_run, args=(engine, shadow, ver, h, state, dbase, scratch),
                              daemon=True)
         # §19 delete waits on `engine.wait_finished`, which finds the thread
@@ -141,6 +148,12 @@ def start(engine: Engine, draft: dict, auto: dict | None,
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
         store.delete_execution(h["id"])
+        if started_published:
+            # §19 execution.deleted: the row the `execution.started` above put
+            # in the §7 list has to leave it again — a failure between the two
+            # events would otherwise strand an executing row until the next
+            # fetch.
+            hub.publish("execution.deleted", executionId=h["id"])
         raise
 
 

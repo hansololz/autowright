@@ -59,8 +59,8 @@ const ARCHIVE_BAD = 'Give an https link or an absolute path to an .autowright fi
 const IMAGE_BAD = 'Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif image.'
 
 // §22.7 working-catalog entry: a reference as written. Every entry travels as
-// `path`; the editor never sends automationId, exportFolder, or archiveFile
-// (those are the §22.5 CLI's).
+// `path`; the editor never sends the §22.5 CLI-only fields (automationId,
+// archiveFile, an export folder).
 export interface EditorEntry {
   key: number
   title: string

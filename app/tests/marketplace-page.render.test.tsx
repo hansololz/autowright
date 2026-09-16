@@ -4,11 +4,12 @@
 // settings modal's PATCH, Install opening the §9.1 import modal on its preview
 // step, Export handing the catalog file to the save dialog, the add modal's
 // three ways in, and the §22.7 authoring flow (the Edit button, the two-column
-// catalog editor, the picker's three tabs with This Mac exporting through the
-// native save dialog at pick time, Save's body, the discard confirm, and
-// create mode, which has no save location at all). App renders for real
-// (happy-dom) with the api module mocked, `settings-gating` style.
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+// catalog editor, the typed add form - title, description, path, image - that
+// appends an entry without exporting or opening anything, Save's body, the
+// discard confirm, and create mode, which has no save location at all). App
+// renders for real (happy-dom) with the api module mocked, `settings-gating`
+// style.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type {
   Automation, ImportPreview, MarketplaceCatalog, MarketplaceSource, Settings,
@@ -35,8 +36,8 @@ const marketplaceCatalogFile = vi.fn<(id: string) => Promise<ArrayBuffer>>()
 const marketplaceCatalogCreate = vi.fn()
 const marketplaceCatalogRead = vi.fn<(id: string) => Promise<MarketplaceCatalog>>()
 const marketplaceCatalogSave = vi.fn()
-// §22.7: a This Mac pick exports the automation there and then, without
-// parameter values.
+// §22.7: the editor never exports - the add form takes a reference as typed.
+// The mock is here so the tests can prove it stays unused.
 const exportAutomation = vi.fn<(automationId: string, values: boolean) => Promise<ArrayBuffer>>()
 
 vi.mock('../src/api', () => ({
@@ -64,10 +65,6 @@ vi.mock('../src/api', () => ({
   },
 }))
 
-let storeMod: typeof import('../src/store')
-let App: typeof import('../src/App').default
-let MARKETPLACE_HIDDEN: boolean
-let MarketplacePage: typeof import('../src/pages/MarketplacePage').default
 
 const openCatalog = vi.fn()
 // §22.3: the dropped file's path, which is all that ever travels.
@@ -77,7 +74,9 @@ const pathForFile = vi.fn<(file: File) => string>()
 const pickFolder = vi.fn()
 const saveFile = vi.fn<(defaultName: string, data: ArrayBuffer) => Promise<string | null>>()
 
-beforeAll(async () => {
+// Module scope, not `beforeAll`: the §22 visibility constant gates the tests
+// below through `it.skipIf`, which vitest reads while it collects them.
+;(() => {
   ;(window as unknown as Record<string, unknown>).autowright = {
     onOpenTarget: () => {},
     trayAlert: () => Promise.resolve(),
@@ -106,12 +105,12 @@ beforeAll(async () => {
   const u = URL as unknown as Record<string, unknown>
   if (!u.createObjectURL) u.createObjectURL = () => 'blob:stub'
   if (!u.revokeObjectURL) u.revokeObjectURL = () => {}
-  storeMod = await import('../src/store')
-  const appMod = await import('../src/App')
-  App = appMod.default
-  MARKETPLACE_HIDDEN = appMod.MARKETPLACE_HIDDEN
-  MarketplacePage = (await import('../src/pages/MarketplacePage')).default
-})
+})()
+const storeMod = await import('../src/store')
+const appMod = await import('../src/App')
+const App = appMod.default
+const MARKETPLACE_HIDDEN = appMod.MARKETPLACE_HIDDEN
+const MarketplacePage = (await import('../src/pages/MarketplacePage')).default
 
 // §22.2 catalog-table row as §22.4 serves it: a link location by default.
 const source = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => ({
@@ -232,8 +231,7 @@ afterEach(() => { cleanup(); storeMod.useStore.getState().disconnect() })
 // below cover the constant's other value so flipping it back is a one-line
 // change here too.
 describe('§22.3 preview gate', () => {
-  it('while parked, the nav row renders for nobody and the page is left', async () => {
-    if (!MARKETPLACE_HIDDEN) return
+  it.skipIf(!MARKETPLACE_HIDDEN)('while parked, the nav row renders for nobody and the page is left', async () => {
     setDeveloperMode(true)
     storeMod.useStore.setState({ page: 'marketplace' })
     render(<App />)
@@ -245,8 +243,7 @@ describe('§22.3 preview gate', () => {
     expect(marketplaceList).not.toHaveBeenCalled()
   })
 
-  it('the nav row renders only while Developer mode is on', async () => {
-    if (MARKETPLACE_HIDDEN) return
+  it.skipIf(MARKETPLACE_HIDDEN)('the nav row renders only while Developer mode is on', async () => {
     setDeveloperMode(false)
     render(<App />)
     await screen.findByTestId('nav-rail')
@@ -257,8 +254,7 @@ describe('§22.3 preview gate', () => {
     expect(await screen.findByTestId('nav-marketplace')).toBeTruthy()
   })
 
-  it('the setting dropping while the page is open lands on Automations', async () => {
-    if (MARKETPLACE_HIDDEN) return
+  it.skipIf(MARKETPLACE_HIDDEN)('the setting dropping while the page is open lands on Automations', async () => {
     storeMod.useStore.setState({ page: 'marketplace' })
     render(<App />)
     await screen.findByText('Marketplace', { selector: 'h1' })
@@ -594,6 +590,19 @@ describe('§22.3 add marketplace modal', () => {
     await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('Added Community.'),
       { timeout: 3000 })
     expect(screen.queryByText('Add marketplace')).toBeNull()
+  })
+
+  it('the page refetches its list after an add (§22.3)', async () => {
+    marketplaceAdd.mockResolvedValue(fileSource())
+    const field = await openAdd()
+    const listed = marketplaceList.mock.calls.length
+    fireEvent.change(field, { target: { value: '/Users/x/shelf/marketplace-catalog.yaml' } })
+    fireEvent.click(screen.getByTestId('marketplace-add-submit'))
+    await waitFor(() => expect(marketplaceAdd).toHaveBeenCalled())
+    // §22.3: every action the page takes is followed by its own list - the
+    // new row lands without waiting for anything else to ask.
+    await waitFor(() => expect(marketplaceList.mock.calls.length).toBeGreaterThan(listed),
+      { timeout: 3000 })
   })
 
   it('clicking the drop zone opens the native picker and adds the path', async () => {

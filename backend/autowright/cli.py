@@ -271,18 +271,24 @@ def read_workdir(d: Path) -> dict[str, str]:
     return files
 
 
-def _all_grants(c: Client) -> dict:
+def _grant_stores(c: Client) -> tuple[list[dict], list[dict]]:
+    """§20: the configured agents (§4.7) and the stored secrets (§4.8) a workdir
+    command validates and grants against - read once per command and passed
+    down, so `push`/`create` fetch each list exactly once."""
+    return c.req("GET", "/agents"), c.req("GET", "/secrets")
+
+
+def _all_grants(agents: list[dict], secrets: list[dict]) -> dict:
     """§20: the validators' *existence* context — all configured agents + all
     stored secrets (ids; names ride along for the §8 error copy), so a
     manifest referencing an unknown one fails with the §8
     message. Which known ids the automation may use is `_grants`'s job."""
-    agents = [{"id": a["id"], "name": a.get("name") or a["harness"]}
-              for a in c.req("GET", "/agents")]
-    secrets = [{"id": s["id"], "name": s["name"]} for s in c.req("GET", "/secrets")]
-    return {"agents": agents, "secrets": secrets}
+    return {"agents": [{"id": a["id"], "name": a.get("name") or a["harness"]}
+                       for a in agents],
+            "secrets": [{"id": s["id"], "name": s["name"]} for s in secrets]}
 
 
-def validate_workdir(c: Client, d: Path) -> dict:
+def validate_workdir(d: Path, agents: list[dict], secrets: list[dict]) -> dict:
     """§8 validation of a workdir; prints every error and exits 1 on failure.
     Returns the draft payload (spec blocks + steps/params/packages/triggers)."""
     from . import drafting
@@ -302,7 +308,7 @@ def validate_workdir(c: Client, d: Path) -> dict:
     # (a cron's (expression, timezone), an interval's canonical `every`).
     step_files, opted_out, errs = _lift_run_if_missed(step_files)
     errors += errs
-    draft, errs = drafting.validate_steps(step_files, _all_grants(c))
+    draft, errs = drafting.validate_steps(step_files, _all_grants(agents, secrets))
     errors += errs
     for t in draft.get("triggers") or []:
         if _schedule_key(t) in opted_out:
@@ -543,7 +549,7 @@ def _step_grant_ids(draft: dict, key: str) -> set[str]:
             if (v.get("id") if isinstance(v, dict) else v)}
 
 
-def _grants(c: Client, args, draft: dict,
+def _grants(args, draft: dict, agents: list[dict], secrets: list[dict],
             stored_agents: list[str] = (), stored_secrets: list[str] = ()) -> tuple[list[str], list[str]]:
     """§20 grant model: the saved grants are the stored lists plus the explicit
     --grant-agent/--grant-secret flags — no all-on seed, no silent widening.
@@ -551,9 +557,8 @@ def _grants(c: Client, args, draft: dict,
     needed-vs-granted comparison is id-set against id-set. Every id the
     workdir needs (per-step agents; per-step secrets plus
     code-referenced secretReferences) must be granted, or this exits 1 naming the
-    exact flags to add. Unknown flag names exit with the candidate list."""
-    agents = c.req("GET", "/agents")
-    secrets = c.req("GET", "/secrets")
+    exact flags to add. Unknown flag names exit with the candidate list.
+    `agents`/`secrets` are the stores the command read once (`_grant_stores`)."""
     known_agents = [a.get("name") or a["harness"] for a in agents]
     known_secrets = [s["name"] for s in secrets]
     # id → name maps, for the flag suggestions in error copy — names appear
@@ -704,13 +709,14 @@ def cmd_automation_pull(c: Client, args) -> None:
 def cmd_automation_push(c: Client, args) -> None:
     a = find_automation(c, args.automation)
     full = c.req("GET", f"/automations/{a['id']}")
-    draft = validate_workdir(c, Path(args.dir))
+    agents, secrets = _grant_stores(c)
+    draft = validate_workdir(Path(args.dir), agents, secrets)
     if args.note:
         draft["note"] = args.note
     draft["triggers"] = merge_draft_triggers(full.get("triggers") or [], draft["triggers"])
     # §20 grant model: stored grants plus explicit --grant-* flags, never
     # widened by what the pushed steps happen to reference.
-    step_agents, allowed_secrets = _grants(c, args, draft,
+    step_agents, allowed_secrets = _grants(args, draft, agents, secrets,
                                            stored_agents=full.get("stepAgents") or [],
                                            stored_secrets=full.get("allowedSecrets") or [])
     body = {"draft": draft, "stepAgents": step_agents, "allowedSecrets": allowed_secrets}
@@ -731,9 +737,9 @@ def cmd_automation_push(c: Client, args) -> None:
 
 def cmd_automation_create(c: Client, args) -> None:
     d = Path(args.dir)
-    draft = validate_workdir(c, d)
+    agents, secrets = _grant_stores(c)
+    draft = validate_workdir(d, agents, secrets)
     name = args.name or draft.get("name") or d.resolve().name
-    agents = c.req("GET", "/agents")
     agent_id = None
     if args.agent:
         match = [a for a in agents
@@ -743,7 +749,7 @@ def cmd_automation_create(c: Client, args) -> None:
                      f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
         agent_id = match[0]["id"]
     # §20 grant model: create grants exactly the --grant-* flags — no all-on seed.
-    step_agents, allowed_secrets = _grants(c, args, draft)
+    step_agents, allowed_secrets = _grants(args, draft, agents, secrets)
     body = {"draft": draft, "name": name, "agentId": agent_id,
             "stepAgents": step_agents, "allowedSecrets": allowed_secrets}
     r = c.req("POST", "/automations", body)
@@ -820,7 +826,9 @@ def cmd_automation_diff(c: Client, args) -> None:
     if args.to_version:
         y = _version_arg(args.to_version)
     else:
-        y = c.req("GET", f"/automations/{a['id']}")["version"]
+        # §19: the list row the reference lookup already read carries the
+        # current version, so the default `--to` costs no second request.
+        y = a["version"]
     d = c.req("GET", f"/automations/{a['id']}/diff?from=v{x}&to=v{y}")
     if args.json:
         _pjson(d)
@@ -1013,7 +1021,7 @@ def cmd_param_set(c: Client, args) -> None:
 
 def cmd_trigger_list(c: Client, args) -> None:
     a = find_automation(c, args.automation)
-    triggers = c.req("GET", f"/automations/{a['id']}")["triggers"]
+    triggers = _stored_triggers(a)
     if args.json:
         _pjson(triggers)
         return
@@ -1033,10 +1041,12 @@ def _trigger_marks(t: dict) -> str:
             + (" (no catch-up)" if t.get("runIfMissed") is False else ""))
 
 
-def _stored_triggers(c: Client, automation_id: str) -> list[dict]:
+def _stored_triggers(a: dict) -> list[dict]:
     # label/short are §4.3 display derivations — the PATCH normalizer ignores
-    # extra keys, so stored entries round-trip as-is.
-    return c.req("GET", f"/automations/{automation_id}")["triggers"]
+    # extra keys, so stored entries round-trip as-is. The list row the
+    # reference lookup already read carries them (§19), so nothing re-reads the
+    # full record - every version body - for the triggers alone.
+    return a["triggers"]
 
 
 def _trigger_at_index(triggers: list[dict], n: str) -> dict:
@@ -1114,14 +1124,14 @@ def cmd_trigger_add(c: Client, args) -> None:
             sys.exit("--no-run-if-missed applies to a cron schedule, --every "
                      "interval, or --at one-shot only")
         entry["runIfMissed"] = False  # §4.3: stored only when false
-    triggers = _stored_triggers(c, a["id"]) + [entry]
+    triggers = _stored_triggers(a) + [entry]
     r = c.req("PATCH", f"/automations/{a['id']}", {"triggers": triggers})
     print(f"added — now: {r['triggerChip']}")
 
 
 def cmd_trigger_toggle(c: Client, args) -> None:
     a = find_automation(c, args.automation)
-    triggers = _stored_triggers(c, a["id"])
+    triggers = _stored_triggers(a)
     t = _trigger_at_index(triggers, args.index)
     t["enabled"] = args.fn_enabled
     c.req("PATCH", f"/automations/{a['id']}", {"triggers": triggers})
@@ -1130,7 +1140,7 @@ def cmd_trigger_toggle(c: Client, args) -> None:
 
 def cmd_trigger_remove(c: Client, args) -> None:
     a = find_automation(c, args.automation)
-    triggers = _stored_triggers(c, a["id"])
+    triggers = _stored_triggers(a)
     t = _trigger_at_index(triggers, args.index)
     triggers.remove(t)
     c.req("PATCH", f"/automations/{a['id']}", {"triggers": triggers})
@@ -1249,8 +1259,12 @@ def cmd_execution_list(c: Client, args) -> None:
     # §20: -n rides to the server as the §19 limit — only the printed rows
     # cross the wire.
     q = [f"limit={args.n}"]
-    for ref in args.automation or []:
-        q.append(f"automation={find_automation(c, ref)['id']}")
+    if args.automation:
+        # §20: one list read resolves every reference - a lookup per reference
+        # would re-fetch the same list once per flag.
+        autos = c.req("GET", "/automations")
+        for ref in args.automation:
+            q.append(f"automation={_resolve(autos, ref, 'automation')['id']}")
     for value in args.status or []:
         q.append(f"status={value}")
     if since is not None:
@@ -1378,8 +1392,16 @@ def cmd_secret_set(c: Client, args) -> None:
     # in every local process's view of the process list.
     # §20: --stdin takes the WHOLE of stdin, so a multi-line value (a PEM key)
     # lands intact; only the trailing newline is trimmed.
-    value = sys.stdin.read().rstrip("\n") if args.stdin \
-        else getpass.getpass(f"value for {args.name}: ")
+    if args.stdin:
+        value = sys.stdin.read().rstrip("\n")
+    else:
+        try:
+            value = getpass.getpass(f"value for {args.name}: ")
+        except EOFError:
+            # §20 exit-code rule: a prompt with no terminal to read from is a
+            # message on stderr, never a traceback.
+            sys.exit("there's no terminal to type the value into - "
+                     "pipe it in with --stdin")
     if not value:
         # §20: errors go to stderr through sys.exit, like every other exit-1 path.
         sys.exit("no value given, nothing saved")
@@ -1689,9 +1711,12 @@ def _menu_bar_icon_help() -> str:
     return f"show the {surface} icon"
 
 
+# key → how its value parses: bool (§20 on|off), int, or the tuple of words it
+# accepts. §20 help rule: a stated vocabulary is exactly what the command parses,
+# so `notifications` lists the same two words the `settings set` epilog does.
 SETTINGS_KEYS = {"login": bool, "menuBarIcon": bool, "keepAwake": bool, "automaticUpdateCheck": bool,
-                 "notifications": str, "days": int, "keepForever": bool, "developerMode": bool,
-                 "cliEnabled": bool}
+                 "notifications": ("attention", "all"), "days": int, "keepForever": bool,
+                 "developerMode": bool, "cliEnabled": bool}
 
 
 def cmd_settings_show(c: Client, args) -> None:
@@ -1704,14 +1729,16 @@ def cmd_settings_show(c: Client, args) -> None:
 
 
 def cmd_settings_set(c: Client, args) -> None:
+    # §20: every KEY=VALUE parses before anything applies, so a bad value late
+    # in the command can't leave an earlier one already written.
     patch: dict = {}
+    data_path: str | None = None
     for item in args.values:
         k, sep, raw = item.partition("=")
         if not sep:
             sys.exit(f"expected KEY=VALUE, got {item!r}")
         if k == "dataPath":
-            c.req("POST", "/settings/data-path", {"path": raw})
-            print(f"execution data now at {raw}")
+            data_path = raw
             continue
         if k not in SETTINGS_KEYS:
             sys.exit(f"unknown setting {k!r} — have: {', '.join(SETTINGS_KEYS)}, dataPath")
@@ -1723,8 +1750,15 @@ def cmd_settings_set(c: Client, args) -> None:
                 patch[k] = int(raw)
             except ValueError:
                 sys.exit(f"{k} takes an integer, got {raw!r}")
-        else:
+        elif raw in kind:
             patch[k] = raw
+        else:
+            # §20: an off-list value is refused in the setting's own words, the
+            # way `execution list --status` refuses one outside its choices.
+            sys.exit(f"{k} must be {' or '.join(kind)}, got {raw!r}")
+    if data_path is not None:
+        c.req("POST", "/settings/data-path", {"path": data_path})
+        print(f"execution data now at {data_path}")
     if patch:
         c.req("PATCH", "/settings", patch)
         print(f"set {', '.join(patch)}")

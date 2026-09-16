@@ -91,8 +91,8 @@ draft/                         # THE pending create-mode draft (§4.4) — a sin
                                # (name, description, agent_id, triggers, created_at, updated_at —
                                # no automation record exists yet to hold them); the grant
                                # selections ride the same draft-only step_agents /
-                               # allowed_secrets / param_values / concurrency keys (and the
-                               # §4.4 out_of_sync flag) as the
+                               # allowed_secrets / param_values / test_values / concurrency
+                               # keys (and the §4.4 out_of_sync flag) as the
                                # edit-mode container below —
                                # there is no enabled_agents key anywhere in the slot:
   automation/                  #   the working copy (version-folder shape)
@@ -162,9 +162,10 @@ automations/<uuid>/
                                # a mix; loads and saves repair a half-finished swap first);
                                # its automation.yaml also holds
                                # draft-only step_agents / allowed_secrets / triggers /
-                               # param_values / concurrency / out_of_sync keys (§4.4 — the
-                               # editor's grant
-                               # selections, trigger list, §4.2 chat-staged value map, §8
+                               # param_values / test_values / concurrency / out_of_sync keys
+                               # (§4.4 — the editor's grant
+                               # selections, trigger list, §4.2 chat-staged value map, the
+                               # §11 test-value map, §8
                                # chat-staged concurrency object, and
                                # §11 dirty-gate state;
                                # never written for real versions)

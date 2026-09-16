@@ -1517,13 +1517,23 @@ describe('main.cjs tail-logs (§9.3)', () => {
 
   it('stringifies only what was really read — no NUL padding', async () => {
     const realFs = realRequire('fs') as typeof import('node:fs')
-    // The rotation race: fstat sees the file at its old size, so the buffer is
-    // bigger than anything the read can fill.
+    // The rotation race: the stat sees the file at its old size, so the buffer
+    // is bigger than anything the read can fill.
     const m = loadMain({
       fs: {
-        fstatSync: (fd: number) => {
-          const st = realFs.fstatSync(fd)
-          return { ...st, size: st.size + 200 }
+        promises: {
+          ...realFs.promises,
+          open: async (file: string, flags: string) => {
+            const handle = await realFs.promises.open(file, flags)
+            return {
+              stat: async () => {
+                const st = await handle.stat()
+                return { ...st, size: st.size + 200 }
+              },
+              read: handle.read.bind(handle),
+              close: handle.close.bind(handle),
+            }
+          },
         },
       },
     })
@@ -1533,6 +1543,66 @@ describe('main.cjs tail-logs (§9.3)', () => {
     const tail = out.find((f) => f.name === 'app.log')
     expect(tail?.text).toBe('one line\n')
     expect(tail?.text).not.toContain('\u0000')
+  })
+
+  it('answers every readable log, newest 64 KB only, and skips the missing ones', async () => {
+    const m = loadMain()
+    mkdirSync(join(m.home, 'logs'), { recursive: true })
+    writeFileSync(join(m.home, 'logs', 'app.log'), 'app line\n')
+    // Over the 64 KB bound: the tail starts after the first newline inside the
+    // window, so a half line never opens the overlay's text.
+    const long = `${'x'.repeat(70 * 1024)}\nlast line\n`
+    writeFileSync(join(m.home, 'logs', 'backend.out.log'), long)
+    const out = await m.invoke('tail-logs') as { name: string, text: string }[]
+    // backend.err.log and vite.log were never written — no entry at all.
+    expect(out.map((f) => f.name)).toEqual(['app.log', 'backend.out.log'])
+    expect(out[0].text).toBe('app line\n')
+    expect(out[1].text).toBe('last line\n')
+  })
+})
+
+// ---- §9.3 request logs ---------------------------------------------------
+
+describe('main.cjs request-log handlers (§9.3)', () => {
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('lists .log basenames newest first and reads one by name', async () => {
+    const m = loadMain()
+    const dir = join(m.home, 'logs', 'requests')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '20260101-000000-aaa.log'), 'older')
+    writeFileSync(join(dir, '20260102-000000-bbb.log'), 'newer')
+    writeFileSync(join(dir, 'notes.txt'), 'not a request log')
+    expect(await m.invoke('list-request-logs'))
+      .toEqual(['20260102-000000-bbb.log', '20260101-000000-aaa.log'])
+    expect(await m.invoke('read-request-log', '20260101-000000-aaa.log')).toBe('older')
+    // `name` must be a plain basename, and an unreadable one answers null
+    // rather than throwing into the overlay.
+    expect(await m.invoke('read-request-log', '../app.log')).toBe(null)
+    expect(await m.invoke('read-request-log', 42)).toBe(null)
+    expect(await m.invoke('read-request-log', 'gone.log')).toBe(null)
+  })
+
+  it('a missing requests directory lists empty', async () => {
+    const m = loadMain()
+    expect(await m.invoke('list-request-logs')).toEqual([])
+  })
+
+  it('the developer-log handlers never block the main process (§2 async IO)', () => {
+    // The overlay polls at 1 Hz while it is open: a sync open/stat/read of
+    // four log files (plus the requests directory) would stall every frame,
+    // every timer and every other IPC call behind it.
+    const from = src.indexOf("ipcMain.handle('tail-logs'")
+    const to = src.indexOf("ipcMain.handle('platform-info'")
+    expect(from).toBeGreaterThan(0)
+    expect(to).toBeGreaterThan(from)
+    const block = src.slice(from, to)
+    expect(block).toContain("ipcMain.handle('list-request-logs'")
+    expect(block).toContain("ipcMain.handle('read-request-log'")
+    expect(block).not.toMatch(/Sync\(/)
   })
 })
 

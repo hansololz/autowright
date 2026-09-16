@@ -334,6 +334,44 @@ def test_add_stores_nothing_when_validation_fails(market, tmp_path):
     assert market.sources == []
 
 
+def test_a_path_with_a_nul_byte_is_refused_rather_than_raising(market, tmp_path):
+    """§22.2/§22.1: pathlib answers a path holding a NUL byte with a
+    ValueError, not an OSError - every place a path is resolved or read
+    answers its ordinary message, never a 500."""
+    bad = str(tmp_path / "a\x00b.yaml")
+    with pytest.raises(MarketplaceError) as e:
+        marketplace.normalize_location(bad)
+    assert str(e.value) == marketplace.BAD_LOCATION
+    with pytest.raises(MarketplaceError) as e:
+        market.add(path=bad)
+    assert str(e.value) == "give the catalog file's absolute path"
+    with pytest.raises(MarketplaceError) as e:
+        marketplace._read_reference(bad, cap=marketplace.MAX_CATALOG_BYTES,
+                                    what="catalog file")
+    assert str(e.value).startswith("couldn't read the catalog file - ")
+    assert market.sources == []
+
+
+def test_a_row_is_never_left_behind_when_the_table_cant_be_written(market, tmp_path,
+                                                                   monkeypatch):
+    """§22.2: the copy is removed when the table write fails, so the row goes
+    with it - a table still listing it would show a catalog with no copy until
+    restart, and write it back on the next successful save."""
+    f = write_catalog(tmp_path, [])
+
+    def boom():
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(market, "_save", boom)
+    with pytest.raises(OSError):
+        market.add(path=str(f))
+    assert market.sources == []
+    with pytest.raises(OSError):
+        market.create_catalog(None)
+    with market.lock:
+        assert [market.serialize(s) for s in market.sources] == []
+
+
 def test_refresh_rereads_the_location(market, tmp_path, monkeypatch):
     """§22.2: a refresh re-reads the row's location - a path is read, a link is
     downloaded."""
@@ -620,6 +658,37 @@ def test_stopping_auto_refresh_waits_for_the_sweep(market, tmp_path, monkeypatch
         assert changed.wait(5)
     finally:
         market.stop_auto_refresh()
+
+
+def test_a_stopped_sweep_skips_the_rows_still_to_come(market, tmp_path, monkeypatch):
+    """§22.2: one row can block for the whole §22.1 fetch deadline, so a sweep
+    asked to stop drops the rows it hasn't read yet and writes nothing at all -
+    the stopped sweeper never keeps sweeping past its stop."""
+    first = write_catalog(tmp_path, [{"title": "One",
+                                      "path": str(tmp_path / "one.autowright")}],
+                          filename="one.yaml")
+    second = write_catalog(tmp_path, [{"title": "Two",
+                                       "path": str(tmp_path / "two.autowright")}],
+                           filename="two.yaml")
+    one = market.add(path=str(first))
+    two = market.add(path=str(second))
+    market.update_settings(one["id"], auto_refresh=True)
+    market.update_settings(two["id"], auto_refresh=True)
+    read: list = []
+    real = marketplace._read_reference
+
+    def stopping(reference, *, cap, what):
+        # the stop lands while the first row is being read
+        read.append(reference)
+        market._auto_stop.set()
+        return real(reference, cap=cap, what=what)
+
+    monkeypatch.setattr(marketplace, "_read_reference", stopping)
+    saves: list = []
+    monkeypatch.setattr(market, "_save", lambda: saves.append(True))
+    assert market.auto_refresh_sweep() == []
+    assert read == [str(first)]
+    assert saves == []
 
 
 def test_an_unreadable_copy_still_lists_the_row(market, tmp_path):
@@ -1616,6 +1685,115 @@ def test_removing_an_entry_leaves_its_archive_file(market, tmp_path):
     assert (folder / "One.autowright").read_bytes() == b"archive-bytes"
     written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
     assert written["entries"] == []
+
+
+def test_a_refused_create_never_exports(market, tmp_path):
+    """§22.7: the folder-taken refusal answers before any export runs - a
+    create that can't land never exports an automation."""
+    folder, source = _shelf(market, tmp_path)
+    calls: list = []
+    with pytest.raises(marketplace.MarketplaceDuplicate) as e:
+        market.create_catalog(str(folder), {
+            "name": "Shelf", "description": "",
+            "entries": [{"title": "One", "description": "", "automationId": "a1"}]},
+            _exporter({"a1": ("One", b"archive-bytes")}, calls))
+    assert str(e.value) == marketplace.FOLDER_TAKEN
+    assert calls == []
+    assert sorted(p.name for p in folder.iterdir()) == [marketplace.CATALOG_FILENAME]
+    assert [s["id"] for s in market.sources] == [source["id"]]
+
+
+def test_a_catalog_moved_while_a_save_exports_is_refused(market, tmp_path):
+    """§22.7: the archives were placed beside the location the save started
+    from, so a row whose location changed meanwhile is refused - with those
+    archives removed again."""
+    folder, source = _shelf(market, tmp_path)
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    (folder / marketplace.CATALOG_FILENAME).rename(moved / marketplace.CATALOG_FILENAME)
+
+    def export(automation_id):
+        # the user points the row somewhere else while the export runs
+        market.update_settings(source["id"],
+                               location=str(moved / marketplace.CATALOG_FILENAME))
+        return "Watcher", b"archive-bytes"
+
+    with pytest.raises(marketplace.MarketplaceMoved) as e:
+        market.save_catalog(source["id"], {
+            "name": "Shelf", "description": "",
+            "entries": [{"title": "One", "description": "",
+                         "automationId": "a1"}]}, export)
+    assert str(e.value) == marketplace.CATALOG_MOVED
+    assert list(folder.glob("*.autowright")) == []
+    assert list(moved.glob("*.autowright")) == []
+
+
+def test_a_slow_export_never_blocks_the_table(market, tmp_path):
+    """§22.7: the exports and the archive writes run outside the table lock
+    (§22.2) - the page can serialize the table while a save is exporting."""
+    folder, source = _shelf(market, tmp_path)
+    started, release = threading.Event(), threading.Event()
+
+    def export(automation_id):
+        started.set()
+        assert release.wait(5)
+        return "Watcher", b"archive-bytes"
+
+    saved: list = []
+    worker = threading.Thread(target=lambda: saved.append(market.save_catalog(
+        source["id"], {"name": "Shelf", "description": "",
+                       "entries": [{"title": "One", "description": "",
+                                    "automationId": "a1"}]}, export)))
+    worker.start()
+    try:
+        assert started.wait(5)
+        assert market.lock.acquire(timeout=5), "the table lock is held while exporting"
+        try:
+            assert [market.serialize(s)["id"] for s in market.sources] == [source["id"]]
+        finally:
+            market.lock.release()
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert saved[0]["entries"][0]["archive"] == str(folder / "Watcher.autowright")
+
+
+def test_a_row_removed_while_a_save_exports_leaves_no_archives(market, tmp_path):
+    """§22.7: a source removed while the save was exporting answers the
+    not-found its route reads as a 404, and the archives that save had already
+    written are removed again."""
+    folder, source = _shelf(market, tmp_path)
+    started, release = threading.Event(), threading.Event()
+
+    def export(automation_id):
+        started.set()
+        assert release.wait(5)
+        return "Watcher", b"archive-bytes"
+
+    failed: list = []
+
+    def save():
+        try:
+            market.save_catalog(source["id"], {
+                "name": "Shelf", "description": "",
+                "entries": [{"title": "One", "description": "",
+                             "automationId": "a1"}]}, export)
+        except BaseException as e:   # noqa: BLE001 - the thread reports it back
+            failed.append(e)
+
+    worker = threading.Thread(target=save)
+    worker.start()
+    try:
+        assert started.wait(5)
+        market.remove(source["id"])
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert isinstance(failed[0], KeyError)
+    assert list(folder.glob("*.autowright")) == []
+    assert market.sources == []
 
 
 # ---------- §22.4 authoring routes ----------

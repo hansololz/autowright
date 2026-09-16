@@ -107,12 +107,17 @@ const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 // fine); electron.app.Electron is the generic dev-shell name and may belong
 // to another app, so it goes only when its command references this very
 // binary. Best-effort: reg.exe failures are reconciled again next run.
+// §2 spawn policy: reg.exe is a console program, so without `windowsHide`
+// the sweep flashes a console window at every launch; and a wedged registry
+// must not leave the child running for the life of the app.
+const REG_CHILD_OPTIONS = { windowsHide: true, timeout: 10_000 }
+
 function sweepLegacyLoginItems(exec) {
-  exec('reg', ['delete', RUN_KEY, '/v', 'electron.app.Autowright', '/f'], () => {})
-  exec('reg', ['query', RUN_KEY, '/v', 'electron.app.Electron'], (err, stdout) => {
+  exec('reg', ['delete', RUN_KEY, '/v', 'electron.app.Autowright', '/f'], REG_CHILD_OPTIONS, () => {})
+  exec('reg', ['query', RUN_KEY, '/v', 'electron.app.Electron'], REG_CHILD_OPTIONS, (err, stdout) => {
     if (err || typeof stdout !== 'string') return
     if (stdout.toLowerCase().includes(process.execPath.toLowerCase())) {
-      exec('reg', ['delete', RUN_KEY, '/v', 'electron.app.Electron', '/f'], () => {})
+      exec('reg', ['delete', RUN_KEY, '/v', 'electron.app.Electron', '/f'], REG_CHILD_OPTIONS, () => {})
     }
   })
 }

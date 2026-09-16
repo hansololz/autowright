@@ -130,6 +130,33 @@ describe('§9 ensure-backend failure copy is per-OS', () => {
       .toBe('The backend service failed to start. Details in app.log.')
   })
 
+  it.skipIf(process.platform === 'win32')('bounds the diagnostics capture like the §2 service-child policy', () => {
+    // launchctl/systemctl can block indefinitely on a wedged domain, so the
+    // capture carries main.cjs's SERVICE_CHILD_OPTIONS shape. The modules
+    // destructure execFile at load, so the double goes on the builtin module
+    // and each platform module is re-required underneath it.
+    const childProcess = require('node:child_process')
+    const realExecFile = childProcess.execFile
+    const calls: [string, Record<string, unknown>][] = []
+    childProcess.execFile = (cmd: string, _args: string[], options: Record<string, unknown>) => {
+      calls.push([cmd, options])
+    }
+    try {
+      for (const name of ['darwin.cjs', 'linux.cjs']) {
+        const id = require.resolve(`../electron/platform/${name}`)
+        delete require.cache[id]
+        require(id).serviceDiagnostics(() => {})
+        delete require.cache[id]
+      }
+    } finally {
+      childProcess.execFile = realExecFile
+    }
+    expect(calls.map(([cmd]) => cmd)).toEqual(['launchctl', 'systemctl'])
+    for (const [, options] of calls) {
+      expect(options).toEqual({ timeout: 120_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true })
+    }
+  })
+
   it('every platform module answers the whole shell surface', () => {
     // A missing export is a silent `undefined` in main.cjs, so the modules are
     // pinned to one another's shape.
@@ -423,29 +450,41 @@ describe('§4.9 login item is per-OS (applyLoginItem)', () => {
     const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
     // Drives sweepLegacyLoginItems with a recording fake exec: the query's
     // callback is held so each case can answer it differently.
-    function sweep(): { calls: [string, string[]][], answer: (err: Error | null, stdout?: string) => void } {
-      const calls: [string, string[]][] = []
+    type SweepCall = [string, string[], Record<string, unknown>]
+    function sweep(): { calls: SweepCall[], answer: (err: Error | null, stdout?: string) => void } {
+      const calls: SweepCall[] = []
       let query: ((err: Error | null, stdout?: string) => void) | null = null
-      win32.sweepLegacyLoginItems((cmd: string, args: string[],
+      win32.sweepLegacyLoginItems((cmd: string, args: string[], options: Record<string, unknown>,
         cb: (err: Error | null, stdout?: string) => void) => {
-        calls.push([cmd, args])
+        calls.push([cmd, args, options])
         if (args[0] === 'query') query = cb
       })
       return { calls, answer: (err, stdout) => query?.(err, stdout) }
     }
 
+    // §2 spawn policy: reg.exe is a console program, so every call in the
+    // sweep hides the window (a flash at every launch otherwise) and is bounded.
+    function expectPolicy(calls: SweepCall[]) {
+      expect(calls).not.toHaveLength(0)
+      for (const [, , options] of calls) {
+        expect(options).toEqual({ windowsHide: true, timeout: 10_000 })
+      }
+    }
+
     // Autowright's own stale slot goes unconditionally; the generic dev-shell
     // name is only queried until its command is known.
     const own = sweep()
-    expect(own.calls).toEqual([
+    expect(own.calls.map(([cmd, args]) => [cmd, args])).toEqual([
       ['reg', ['delete', RUN_KEY, '/v', 'electron.app.Autowright', '/f']],
       ['reg', ['query', RUN_KEY, '/v', 'electron.app.Electron']],
     ])
+    expectPolicy(own.calls)
     // A command naming this very binary is ours — matched case-insensitively,
     // because reg.exe echoes whatever casing the value was written with.
     own.answer(null, `electron.app.Electron  REG_SZ  "${process.execPath.toUpperCase()}"`)
-    expect(own.calls[2]).toEqual(
+    expect(own.calls[2].slice(0, 2)).toEqual(
       ['reg', ['delete', RUN_KEY, '/v', 'electron.app.Electron', '/f']])
+    expectPolicy(own.calls)
 
     // Another app's dev shell owns the generic name: never deleted.
     const foreign = sweep()

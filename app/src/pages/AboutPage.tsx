@@ -5,11 +5,12 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import { CommandBlock, DocModal, Eyebrow, PageTitle, ProgressBar, Toggle } from '../ui'
+import {
+  CommandBlock, DocModal, Eyebrow, PageTitle, ProgressBar, settingsRow as row,
+  settingsRowDivided as rowDivided, settingsRowSub as rowSub, settingsRowTitle as rowTitle, Toggle,
+} from '../ui'
 import { Markdown } from '../result'
 import { REPO_URL } from '../config'
-// §14 settings-row geometry lives in one place — the Settings page owns it.
-import { row, rowDivided, rowSub, rowTitle } from './SettingsPage'
 
 // Card chrome comes from the shared .ad-card class; only overflow is local.
 const card: React.CSSProperties = { overflow: 'hidden' }

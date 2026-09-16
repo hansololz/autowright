@@ -72,6 +72,7 @@ COPY_UNREADABLE_REMOVE = ("the saved copy couldn't be read - remove this marketp
                           "add it again")
 NOT_REFRESHABLE = "this catalog has no location to refresh from"
 NOT_EDITABLE = "only a catalog on this machine can be edited"
+CATALOG_MOVED = "the catalog moved while saving - try again"
 FOLDER_TAKEN = "that folder already holds a marketplace catalog - add it instead"
 ALREADY_ADDED = "that marketplace is already added"
 NO_COPY_TO_KEEP = "there's no saved copy to keep - refresh first"
@@ -99,6 +100,12 @@ class MarketplaceNotRefreshable(MarketplaceError):
 class MarketplaceNotEditable(MarketplaceError):
     """§22.7: the catalog editor on a link location - the file isn't on this
     machine; the §19 route answers 409."""
+
+
+class MarketplaceMoved(MarketplaceError):
+    """§22.7: the row's location changed while a save was exporting - the
+    archives went beside the location it started from, so the save is refused
+    rather than written to the new place; the §19 route answers 409."""
 
 
 class MarketplaceUnwritable(MarketplaceError):
@@ -129,7 +136,12 @@ def normalize_location(value: str | None) -> str | None:
     expanded = os.path.expanduser(text)
     if not Path(expanded).is_absolute():
         raise MarketplaceError(BAD_LOCATION)
-    return str(Path(expanded).resolve())
+    try:
+        return str(Path(expanded).resolve())
+    except (OSError, ValueError):
+        # A path pathlib refuses outright - an embedded NUL byte raises
+        # ValueError, not OSError - is a bad location, never a 500.
+        raise MarketplaceError(BAD_LOCATION) from None
 
 
 def default_name(location: str | None) -> str:
@@ -309,8 +321,13 @@ def _read_reference(reference: str, *, cap: int, what: str) -> bytes:
             raise MarketplaceError(over)
         with open(reference, "rb") as f:
             data = f.read(cap + 1)
-    except OSError as e:
-        raise MarketplaceError(f"couldn't read the {what} - {e.strerror or e}") from None
+    except MarketplaceError:
+        raise  # the over-size refusal above, not a failure to read
+    except (OSError, ValueError) as e:
+        # A path pathlib refuses outright - an embedded NUL byte raises
+        # ValueError, not OSError - is an unreadable reference, never a 500.
+        raise MarketplaceError(
+            f"couldn't read the {what} - {getattr(e, 'strerror', None) or e}") from None
     if len(data) > cap:
         raise MarketplaceError(over)
     return data
@@ -491,7 +508,11 @@ class MarketplaceStore:
             expanded = os.path.expanduser(given)
             if not Path(expanded).is_absolute():
                 raise MarketplaceError("give the catalog file's absolute path")
-            candidate = Path(expanded).resolve()
+            try:
+                candidate = Path(expanded).resolve()
+            except (OSError, ValueError):
+                # pathlib refuses an embedded NUL byte with a ValueError.
+                raise MarketplaceError("give the catalog file's absolute path") from None
             if not candidate.is_file():
                 raise MarketplaceError("there's no catalog file at that path")
             location = str(candidate)
@@ -507,7 +528,14 @@ class MarketplaceStore:
                     raise MarketplaceDuplicate(ALREADY_ADDED)
                 self._stamp_refresh(source, text)
                 self.sources.append(source)
-                self._save()
+                try:
+                    self._save()
+                except BaseException:
+                    # The copy is about to be removed, so the row goes with it:
+                    # a table still listing it would show a catalog with no
+                    # copy until restart, and write it back on the next save.
+                    self.sources.remove(source)
+                    raise
                 return self.serialize(source)
         except BaseException:
             # Nothing is stored, so nothing may be left on disk either - and
@@ -561,9 +589,19 @@ class MarketplaceStore:
         with self.lock:
             targets = [(s["id"], s["location"]) for s in self.sources
                        if s["auto_refresh"] and s["location"] is not None]
-        fetched = [(source_id, *self._fetch_catalog(location))
-                   for source_id, location in targets]
+        fetched = []
+        for source_id, location in targets:
+            # A stop asked for mid-sweep: one row can block for the whole
+            # §22.1 60-second deadline, so the rows still to come are skipped
+            # rather than swept long past the daemon's lifespan.
+            if self._auto_stop.is_set():
+                break
+            fetched.append((source_id, *self._fetch_catalog(location)))
         swept = []
+        if self._auto_stop.is_set():
+            # A stopped sweeper writes nothing at all - not the copies, not
+            # the table: what it read on the way out is dropped.
+            return swept
         with self.lock:
             for source_id, text, error in fetched:
                 if self._apply_to_row(source_id, text, error):
@@ -699,9 +737,10 @@ class MarketplaceStore:
         """§22.7 create: the editor's content (or an empty catalog) written to
         a folder the user chose - the row's location is that file - or, with
         no folder, straight to a new row's copy with a `null` location. A
-        folder that already holds a catalog is refused before anything is
-        written, under the lock that appends the row, so two creates into one
-        folder can't both pass the check."""
+        folder that already holds a catalog is refused under the lock that
+        writes the catalog text and appends the row, so two creates into one
+        folder can't both pass the check; the exports and the archives they
+        write run outside that lock (§22.2)."""
         self._require_writable()
         body = body or {}
         target: Path | None = None
@@ -716,29 +755,54 @@ class MarketplaceStore:
         source = {"id": new_id(), "location": location, "shown": True,
                   "auto_refresh": False, "added_at": timefmt.now_iso(),
                   "refreshed_at": None, "error": None}
+        # §22.7: both refusals answer before any export runs - a refused
+        # create never exports - and again under the commit lock below.
+        with self.lock:
+            self._check_folder_free(target, location)
+        # §22.7: the exports and the archives they write happen outside the
+        # lock, so a slow export never blocks the page.
+        catalog, writes = self._prepare_catalog(source, body, export)
         # Only what this create writes is cleaned up on a failure: the checks
-        # above it answer before the catalog file exists, so a folder's own
+        # below answer before the catalog file exists, so a folder's own
         # catalog is never unlinked.
+        written: list[Path] = []
         writing = False
         try:
+            self.source_dir(source["id"]).mkdir(parents=True, exist_ok=True)
+            written = self._write_archives(writes)
             with self.lock:
-                if target is not None and (target / CATALOG_FILENAME).exists():
-                    raise MarketplaceDuplicate(FOLDER_TAKEN)
-                if location is not None and self._taken(location):
-                    raise MarketplaceDuplicate(ALREADY_ADDED)
-                catalog, writes = self._prepare_catalog(source, body, export)
+                self._check_folder_free(target, location)
                 writing = True
-                self._commit_catalog(source, catalog, writes)
+                self._commit_catalog(source, catalog, written)
                 self.sources.append(source)
-                self._save()
+                try:
+                    self._save()
+                except BaseException:
+                    # As in `add`: the copy is about to be removed, so the row
+                    # goes with it rather than lingering until restart.
+                    self.sources.remove(source)
+                    raise
                 return self.serialize(source)
         except BaseException:
             # §6: no rmtree ever runs under a store lock - the `with` above has
             # released it by the time this runs.
+            for path in written:
+                _unlink(path)
             if writing and location is not None:
                 _unlink(Path(location))
             shutil.rmtree(self.source_dir(source["id"]), ignore_errors=True)
             raise
+
+    def _check_folder_free(self, target: Path | None, location: str | None) -> None:
+        """§22.7 create: the two refusals - a folder that already holds a
+        catalog, and a location already in the table. Answered before any
+        export runs and again under the lock that writes the catalog and
+        appends the row, so two creates into one folder can't both pass.
+        Caller holds the lock."""
+        if target is not None and (target / CATALOG_FILENAME).exists():
+            raise MarketplaceDuplicate(FOLDER_TAKEN)
+        if location is not None and self._taken(location):
+            raise MarketplaceDuplicate(ALREADY_ADDED)
 
     def _editable(self, source_id: str) -> dict:
         """The row the editor may touch: a path or `null` location, whose
@@ -780,12 +844,31 @@ class MarketplaceStore:
 
     def save_catalog(self, source_id: str, body: dict, export) -> dict:
         """§22.7 save: the content prepared and written over the catalog the
-        editor sees, then the copy brought up to date."""
+        editor sees, then the copy brought up to date. Like a refresh, the slow
+        half runs outside the table lock (§22.2): the lock is taken to resolve
+        the row, released for the exports and the archive writes, then taken
+        again to write the catalog text and stamp the row. A row removed
+        meanwhile raises its ordinary not-found, and one whose location moved
+        meanwhile - the archives went beside the location this save started
+        from - is CATALOG_MOVED; either way the archives this save wrote are
+        removed again."""
         self._require_writable()
         with self.lock:
-            source = self._editable(source_id)
-            catalog, writes = self._prepare_catalog(source, body, export)
-            self._commit_catalog(source, catalog, writes)
+            # A copy of the row: nothing outside the lock may touch the table's
+            # own dict, and only the location feeds the prepare.
+            snapshot = dict(self._editable(source_id))
+        catalog, writes = self._prepare_catalog(snapshot, body, export)
+        written = self._write_archives(writes)
+        with self.lock:
+            try:
+                source = self._editable(source_id)
+                if source["location"] != snapshot["location"]:
+                    raise MarketplaceMoved(CATALOG_MOVED)
+            except BaseException:
+                for path in written:
+                    _unlink(path)
+                raise
+            self._commit_catalog(source, catalog, written)
             self._save()
             return self.serialize(source)
 
@@ -797,8 +880,8 @@ class MarketplaceStore:
         `exportFolder`) and is listed by its absolute path; an `archiveFile` is
         validated and listed where it is. Everything is checked before
         anything is written. Answers the catalog to write plus the archive
-        files it lists, each with the entry naming it. Caller holds the
-        lock."""
+        files it lists, each with the entry naming it. No lock held - the
+        exports and the archive reads are the slow half (§22.2)."""
         location = source["location"]
         raw_entries = body.get("entries") or []
         # §22.7: bounded before any export runs - never after the archives were
@@ -898,20 +981,36 @@ class MarketplaceStore:
         parse_catalog(dump_catalog(name, description, planned), location=location)
         return {"name": name, "description": description, "entries": planned}, writes
 
-    def _commit_catalog(self, source: dict, catalog: dict, writes: list) -> None:
-        """§22.7 steps 5-6: the exports, then the catalog atomically - to the
-        location for a path (and the copy refreshed from it), to the row's copy
-        for `null`. Every archive is created exclusively, so a file that
-        appeared under its planned name since step 3 takes the next free suffix
-        rather than being overwritten, and the entry lists the name actually
-        written. A failure unlinks the archives this save wrote. Caller holds
-        the lock."""
+    def _write_archives(self, writes: list) -> list[Path]:
+        """§22.7 step 5: the exported archives written, outside the table lock.
+        Every archive is created exclusively, so a file that appeared under its
+        planned name since step 3 takes the next free suffix rather than being
+        overwritten, and the entry lists the name actually written. A failure
+        unlinks what this save had written already. Answers the paths written,
+        for the caller to unlink if the rest of the save fails."""
         written: list[Path] = []
         try:
             for target, data, entry in writes:
                 path = _write_new_archive(target, data)
                 written.append(path)
                 entry["path"] = str(path)
+        except BaseException as e:
+            # §22.7 step 5: nothing this save wrote may survive its failure.
+            for path in written:
+                _unlink(path)
+            if isinstance(e, OSError):
+                raise MarketplaceError(
+                    f"couldn't write into the catalog's folder - {e.strerror or e}") from None
+            raise
+        return written
+
+    def _commit_catalog(self, source: dict, catalog: dict, written: list) -> None:
+        """§22.7 steps 5-6: the catalog written atomically - to the location for
+        a path (and the copy refreshed from it), to the row's copy for `null`.
+        `written` is what `_write_archives` put on disk for this save: a failure
+        here unlinks it, so nothing this save wrote survives. Caller holds the
+        lock."""
+        try:
             text = dump_catalog(catalog["name"], catalog["description"],
                                 catalog["entries"])
             parse_catalog(text, location=source["location"])

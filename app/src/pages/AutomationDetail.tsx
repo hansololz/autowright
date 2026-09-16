@@ -68,6 +68,9 @@ export default function AutomationDetail() {
   // none of an old automation's rows, so RECENT EXECUTIONS and the failure
   // notice read a per-automation fetch merged with the window (window wins:
   // events land there). A failed fetch degrades to the window's rows alone.
+  // §19: a reconnect missed every event the socket was down for — this
+  // page-owned fetch is never replayed, so it re-runs on each one.
+  const reconnects = useStore((s) => s.reconnects)
   const [fetchedExecs, setFetchedExecs] = useState<Execution[]>([])
   useEffect(() => {
     let stale = false
@@ -77,7 +80,7 @@ export default function AutomationDetail() {
       (r) => { if (!stale) setFetchedExecs(r.executions) },
       () => {})
     return () => { stale = true }
-  }, [automationId])
+  }, [automationId, reconnects])
   // §4.3: refresh the countdown every 30 s.
   useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 30000)

@@ -66,6 +66,11 @@ interface Model {
   // keyed — drives the §9.1 drafting notes and the §11 re-attach; kept
   // current by the draftjob.changed event.
   draftJobs: DraftJobRow[]
+  // §19 reconnect counter: bumped by every ws.open AFTER the first — a page
+  // holding its own fetch (the §9.2 per-automation execution list) keys on it
+  // and refetches, since the events it missed while the socket was down are
+  // never replayed.
+  reconnects: number
   // §22.3/§22.4: bumped by every marketplace.changed event - the Marketplace
   // page refetches when it moves, so a §20 CLI change shows without a reload.
   // The sources themselves live on the page, not here: nothing else reads them.
@@ -137,6 +142,9 @@ let refreshSeq = 0
 // /state snapshot from before the bump is already stale and must refetch
 // rather than clobber the fresher event-applied rows (§19 event path).
 let eventSeq = 0
+// §19: the process's first ws.open is the boot connection — every later one is
+// a reconnect, which is what `reconnects` counts.
+let wsOpened = false
 
 // §3 one-shot first-run CLI install: with cliEnabled on (default true) and the
 // ad-cli-installed marker (§15) unset, a `missing` shim is installed silently
@@ -241,6 +249,7 @@ export const useStore = create<Model>((set, get) => ({
   updateAvailable: null,
   pendingDraft: null,
   draftJobs: [],
+  reconnects: 0,
   marketplaceVersion: 0,
   reportOpen: false,
   whatsNewOpen: false,
@@ -380,6 +389,10 @@ export const useStore = create<Model>((set, get) => ({
     const ev = msg.event
     const m = get()
     if (ev === 'ws.open') {
+      // §19: the first open is the boot connection — every later one is a
+      // reconnect, which is what page-owned fetches key on.
+      if (wsOpened) set({ reconnects: m.reconnects + 1 })
+      wsOpened = true
       void m.refresh()
       // §2/§9: this open follows the reconnect's backend.json re-read — the
       // backend behind it can be a restarted (or upgraded) one, so refresh the
@@ -579,7 +592,14 @@ export const useStore = create<Model>((set, get) => ({
       // §19: entity present → patch the one row in place (null = deleted);
       // bare → many may have changed, fall back to /state.
       if (msg.automationId !== undefined && msg.automation !== undefined) {
-        patchAutomation(msg.automationId, msg.automation)
+        const id = msg.automationId
+        // §19: when this client holds the FULL record for that id, the merge is
+        // followed by one GET — steps/spec/params/versions/memory never ride the
+        // event, so a change made elsewhere (the CLI, a second window) would
+        // otherwise leave an open detail page showing the old body.
+        const held = msg.automation !== null && get().automations.find((a) => a.id === id)
+        patchAutomation(id, msg.automation)
+        if (held && 'latest' in held) void m.loadAuto(id)
       } else {
         void m.refresh()
       }

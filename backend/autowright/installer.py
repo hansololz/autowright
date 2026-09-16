@@ -24,6 +24,7 @@ import time
 import urllib.request
 
 from . import harness, paths, platform
+from .platform.base import run_bounded
 
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
 # §19 install-location principle: the vendor script's own symlink target —
@@ -188,12 +189,12 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
         # Windows); the layer falls back to the direct child itself.
         platform.current().processes.signal_group(proc, None)
         # An escaped child (a daemonizing grandchild that re-setsid'd) could
-        # still hold the merged pipe open — close our read end so the loop
-        # unblocks regardless, like harness._invoke's timeout kill.
-        try:
-            proc.stdout.close()  # type: ignore[union-attr]
-        except OSError:
-            pass
+        # still hold the merged pipe open — swap our read end for /dev/null so
+        # the loop sees EOF regardless, like harness._invoke's timeout kill.
+        # Never `.close()` from this thread: close() takes the buffer lock the
+        # blocked read holds and would wedge the timer instead of freeing the
+        # loop.
+        harness.defuse_read_end(proc.stdout)
 
     timer = threading.Timer(INSTALL_TIMEOUT_S, _kill)
     timer.daemon = True
@@ -213,6 +214,13 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
         proc.wait()
     finally:
         timer.cancel()
+        # The read end closes on every path — one leaked fd per install would
+        # otherwise accumulate on the long-lived backend.
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except (OSError, ValueError):
+            pass
     if timed_out.is_set() and proc.returncode != 0:
         # returncode guard: a timer firing in the instant after a successful
         # exit must not report a completed install as a timeout.
@@ -251,11 +259,13 @@ def _login_shell_path() -> list[str]:
     shell = os.environ.get("SHELL") or (
         "/bin/zsh" if paths.current_os() == "macos" else "/bin/sh")
     try:
-        out = subprocess.run([shell, "-l", "-c", 'printf %s "$PATH"'],
-                             capture_output=True, text=True, timeout=15)
-        if out.returncode == 0 and out.stdout.strip():
+        # Bounded: a login shell whose profile spawns a lingering background
+        # job holds the probe's stdout, and `subprocess.run`'s own timeout
+        # would then block here forever (§2 shared bounded run).
+        out = run_bounded([shell, "-l", "-c", 'printf %s "$PATH"'], 15)
+        if out is not None and out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip().split(os.pathsep)
-    except (OSError, subprocess.SubprocessError):
+    except Exception:  # noqa: BLE001 — a PATH probe may never fail the install
         pass
     return []
 

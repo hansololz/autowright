@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import type { ParamDef } from '../../types'
-import { MiniBadge } from '../../ui'
+import { MiniBadge, settingsRow, settingsRowDivided, settingsRowSub, settingsRowTitle } from '../../ui'
 import { ParamValueEditor } from '../../steps'
 import { runAction } from './model'
 
@@ -24,14 +24,16 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
   // Resync from the server value when it changes underneath (a restore, a new
   // version's defaults, an edit from another window) — but never while an edit
   // is pending or an input is focused, so typing is never clobbered.
+  // `foc` rides in the deps: a value that changed while the row was focused
+  // would otherwise never land, since nothing re-runs this on blur.
   const serverLines = JSON.stringify(p.lines ?? [])
   useEffect(() => {
     if (!timer.current && !foc) setLines([...(p.lines ?? [])])
-  }, [serverLines])
+  }, [serverLines, foc])
   const serverRows = JSON.stringify(p.rows ?? [])
   useEffect(() => {
     if (!timer.current && !foc) setRows((p.rows ?? []).map((r) => ({ ...r })))
-  }, [serverRows])
+  }, [serverRows, foc])
   useEffect(() => { setTog(null) }, [p.on])
 
   const commit = (value: unknown) => {
@@ -71,24 +73,26 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
   // §9.2 hybrid layout: compact controls (toggle/number) sit on the label's line,
   // wide editors (text/list/kv) stack below the full-width label + help.
   const compact = p.kind === 'toggle' || p.kind === 'number'
+  // The §14 settings-row geometry either way; the stacked form keeps its
+  // padding and divider but not the side-by-side part.
+  const settings = last ? settingsRow : settingsRowDivided
+  const rowStyle: React.CSSProperties = compact
+    ? settings
+    : { ...settings, gap: 8, flexDirection: 'column', alignItems: 'stretch' }
   const labelBlock = (
     <div style={{ flex: 1, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 13.5, fontWeight: 600 }}>{p.label}</span>
+        <span style={settingsRowTitle}>{p.label}</span>
         {p.kind === 'text' && !p.value && (
           <MiniBadge c="var(--amber)" bg="var(--amber-bg)">NOT SET</MiniBadge>
         )}
       </div>
-      <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--text-muted)', marginTop: 3 }}>{p.help}</div>
+      <div style={settingsRowSub}>{p.help}</div>
     </div>
   )
 
   return (
-    <div data-testid={`param-row-${p.name}`} style={{
-      padding: '15px 18px', borderBottom: last ? 'none' : '1px solid var(--hairline-dim)',
-      display: 'flex', gap: compact ? 18 : 8, flexDirection: compact ? 'row' : 'column',
-      alignItems: compact ? 'center' : 'stretch',
-    }}>
+    <div data-testid={`param-row-${p.name}`} style={rowStyle}>
       {labelBlock}
       <div style={{ minWidth: 0, display: 'flex', flex: 'none' }}>
         <ParamValueEditor

@@ -304,7 +304,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   appears. The reply is returned to the script as untrusted text/JSON — never executed or
   evaluated. Per-step timeout plus prompt- and output-size caps (200k chars each) apply; the full
   redacted prompt and response (up to those caps) are written to the step's attempt log
-  file (§5) for audit.
+  file (§5) for audit — as ordinary log lines, so each rides the §7 128 KB per-line clip
+  (a prompt or reply longer than that is audited truncated, ending in "… [line truncated]").
   Worst-case prompt injection from fetched content is therefore a wrong answer in a result, never
   an action.
 - **Drafting calls read the web.** Unlike runtime agent steps, the §8 drafting invocations

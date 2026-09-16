@@ -20,7 +20,12 @@ with any port (the §15 renderer-URL dev server), credentials off. One rule in b
 **Request validation:** every mutating endpoint's request body is validated by a pydantic
 request model (`backend/autowright/models.py`) — a malformed body (missing or mistyped
 fields, wrong shapes: `stepAgents`/`allowedSecrets` must be lists of strings, the settings
-booleans must be booleans with `days` an int) answers 422 before any handler logic runs.
+booleans must be booleans with `days` an int; a §4.4 draft's `spec` must be a list of
+block objects, `notes` a string, `params` and `packages` lists) answers 422 before any
+handler logic runs — and before any file is written, so a mistyped draft can never leave a
+half-written version folder behind. A model-level 422 carries the same shape as a
+handler 422: `detail` is one sentence (pydantic's per-field entries are flattened to
+`<field>: <reason>` joined by `; `), so clients render every 422 the same way.
 The store-state cross-field checks live in the handlers, answering the same 422:
 `paramValues` entries are checked against the automation's param definitions (names **and**
 kinds), `agentId`/`stepAgents` entries must reference configured agents, and
@@ -71,7 +76,19 @@ remain plain dicts (§2).
   and `engine.start` refuses admissions for it — a
   scheduler tick, listener dispatch, or app-start firing landing mid-delete would otherwise
   escape the wait set and re-create the tree after the rmtree (the scheduler's own
-  one-shot consumption carries the same registered-object guard for the same reason).
+  one-shot consumption carries the same registered-object guard for the same reason, and
+  so does **every store write into an automation directory** — patch, new version, restore,
+  draft and chat saves, draft open, memory clear, the §6.3 snapshot operations: a write
+  whose record is no longer the registered one answers 404 instead of re-creating the
+  directory, so a mutation racing the delete can never resurrect the automation at the
+  next boot). Removing a record from disk (this route, the memory clear, and internally
+  the §7 retention sweep and the draft-test settle) moves the directory aside first;
+  "nothing there" (`FileNotFoundError`) is the header-only case and completes normally,
+  while any other OS error (a read-only or vanished volume, an open handle on Windows) is
+  logged and the record stays registered — the routes answer 409 with `couldn't remove it
+  from disk: <reason>`, the sweeps log and move on to the next record — never silently
+  dropped from the index while its directory survives to be re-adopted at the next
+  startup.
   If a thread somehow survives the wait, the directory is
   removed anyway (the step group is already hard-killed by then)
 - `PATCH /automations/{id}` — user-owned fields only: name (a blank or missing name is
@@ -801,7 +818,11 @@ already neutralize. The provider config and
   `executing`, but it announces that through `execution.started`, which this rule leaves alone. `automation.changed` carries `automationId` plus
   `automation` — the changed automation in list shape, or `null` when it was deleted —
   whenever exactly one automation changed; clients patch that one row in place by **merging**
-  it over the stored record, never replacing it; the delete form also stamps
+  it over the stored record, never replacing it — and when the client holds the **full**
+  record for that id (a §9.2 detail page or the editor is open on it), the merge is followed
+  by one `GET /automations/{id}` so the full-record fields (steps, spec, params, versions,
+  memory, latest) catch up with a change made elsewhere (the CLI, a second window); the
+  delete form also stamps
   `automationDeleted` on every execution row the client holds for that id — exactly what a
   fresh `/state` would serialize, so Retry / Execute again never stay offered on orphaned
   rows. The list shape lacks the full-record fields

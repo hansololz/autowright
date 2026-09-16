@@ -425,6 +425,23 @@ describe('executions list finished paging (§7)', () => {
     expect(mockedApi.listExecutions).toHaveBeenCalledTimes(1)
   })
 
+  it('the absorbed set never outgrows the pages in reach (§7)', async () => {
+    // Six windows of finished rows churn past the page. What left the window
+    // is absorbed only as far as the visible page can slice it: the deeper
+    // page is fetched again rather than served from a set that grew all
+    // session long.
+    seed(finishedRows(50, 250), 300)
+    render(<ExecutionsList />)
+    for (const from of [200, 150, 100, 50, 0]) {
+      act(() => { storeMod.useStore.setState({ executions: finishedRows(50, from) }) })
+      await act(async () => {})
+    }
+    expect(mockedApi.listExecutions).not.toHaveBeenCalled()
+
+    fireEvent.click(pagerButton('Next'))
+    await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalledTimes(1))
+  })
+
   it('renders no pager when the total fits one page', () => {
     seed(finishedRows(50))
     render(<ExecutionsList />)

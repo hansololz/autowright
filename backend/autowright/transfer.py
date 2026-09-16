@@ -516,7 +516,14 @@ def _validate(z: zipfile.ZipFile) -> dict:
     seen_files: set[str] = set()
     for i, s in enumerate(steps_meta, 1):
         if (not isinstance(s, dict) or not isinstance(s.get("file"), str)
-                or not s["file"] or not s.get("name")):
+                or not s["file"] or not isinstance(s.get("name"), str)
+                or not s["name"].strip()):
+            raise TransferError(f"invalid step manifest entry: {s!r}")
+        # §5.1: the archive is untrusted, so the text fields are typed, not
+        # just truthy - a mapping/list/bool would land verbatim in the stored
+        # version and white-screen the §9.2 detail page.
+        if any(s.get(key) is not None and not isinstance(s[key], str)
+               for key in ("description", "why")):
             raise TransferError(f"invalid step manifest entry: {s!r}")
         if ("/" in s["file"] or "\\" in s["file"] or s["file"].startswith(".")
                 or s["file"] in ("automation.yaml", "spec.md", "instructions.md", "notes.md")):
@@ -543,8 +550,8 @@ def _validate(z: zipfile.ZipFile) -> dict:
         except SyntaxError as e:
             raise TransferError(f"step {s['file']!r} isn't valid Python "
                                 f"(line {e.lineno}): {e.msg}") from None
-        entry = {"file": s["file"], "name": s["name"], "description": s.get("description", ""),
-                 "code": code}
+        entry = {"file": s["file"], "name": s["name"],
+                 "description": s.get("description") or "", "code": code}
         # A scalar where a list belongs (hand-written YAML `agents: 5`) must
         # answer 422, not iterate into a TypeError 500.
         for key in ("agents", "secrets", "packages"):
@@ -562,7 +569,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
                                 "automation with the current version")
         if s.get("agent"):
             entry["agent"] = True
-            entry["why"] = s.get("why", "")
+            entry["why"] = s.get("why") or ""
             entry["agents"] = [
                 {"ref": r,
                  **({"why": str(g["why"]).strip()} if str(g.get("why") or "").strip() else {})}

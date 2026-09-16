@@ -8,11 +8,10 @@ internals the §15 suites pin), and shared POSIX process control.
 """
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Callable
 
 from . import posixproc
-from .base import Capabilities, Platform
+from .base import Capabilities, Platform, run_bounded
 
 
 class OsascriptNotifier:
@@ -23,10 +22,12 @@ class OsascriptNotifier:
         esc_t = title.replace("\\", "\\\\").replace('"', '\\"')
         esc_b = body.replace("\\", "\\\\").replace('"', '\\"')
         try:
-            subprocess.run(
+            # Bounded: a wedged osascript (it blocks on its own Apple event)
+            # must never hold the caller — run_bounded kills the group and
+            # returns instead of blocking on a grandchild's pipe.
+            run_bounded(
                 ["osascript", "-e",
                  f'display notification "{esc_b}" with title "{esc_t}"'],
-                capture_output=True,
                 timeout=10,
             )
         except Exception:

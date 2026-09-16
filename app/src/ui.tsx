@@ -639,6 +639,16 @@ export function usePopover(): [boolean, (v: boolean) => void, React.RefObject<HT
   return [open, setOpen, ref]
 }
 
+// §14 settings row — the one geometry for every settings-style row: the
+// Settings and About pages, the §9.2 detail cards, the §7 read-only
+// PARAMETERS card. Shared so no surface can drift from it.
+export const settingsRowTitle: React.CSSProperties = { fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }
+export const settingsRowSub: React.CSSProperties = { fontSize: 12, lineHeight: 1.55, color: 'var(--text-muted)', marginTop: 3 }
+export const settingsRow: React.CSSProperties = {
+  padding: '15px 18px', display: 'flex', alignItems: 'center', gap: 20,
+}
+export const settingsRowDivided: React.CSSProperties = { ...settingsRow, borderBottom: '1px solid var(--hairline-dim)' }
+
 export const menuStyle: React.CSSProperties = {
   position: 'absolute', zIndex: 60, background: 'var(--bg-menu)',
   border: '1px solid var(--border-input)', borderRadius: 10,
@@ -1007,7 +1017,9 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
       if (i >= 0) modalStack.splice(i, 1)
       document.removeEventListener('keydown', onKey)
     }
-  }, [])
+    // The stack entry captures `zIndex`: a card that changes it re-registers,
+    // or Escape and the Tab trap would keep ranking it by the z it opened with.
+  }, [zIndex])
   useEffect(() => {
     if (!closing) return
     // Unmount even if animationend never fires (e.g. reduced-motion setups).
@@ -1246,13 +1258,20 @@ export function useOverlayThumb() {
     setThumb((p) => (p && Math.abs(p.top - top) < 0.5 && Math.abs(p.h - h) < 0.5 ? p : { top, h }))
   }
   useEffect(update) // own renders (e.g. controlled-textarea value changes)
-  useEffect(() => () => { obs.current?.ro.disconnect(); obs.current?.mo.disconnect() }, [])
+  // Dropping the pair on cleanup (StrictMode unmounts once before the real
+  // mount) is what lets `attach` re-observe the same element on the way back —
+  // the ref alone would say it is already watched.
+  useEffect(() => () => {
+    obs.current?.ro.disconnect()
+    obs.current?.mo.disconnect()
+    obs.current = null
+  }, [])
   return {
     attach: (el: HTMLElement | null) => {
       elRef.current = el
       // content can grow without this pane re-rendering (async loads under the
       // page scroller, streamed logs) — watch the pane's box and its subtree
-      if (el && el !== obsEl.current) {
+      if (el && (el !== obsEl.current || !obs.current)) {
         obs.current?.ro.disconnect()
         obs.current?.mo.disconnect()
         obsEl.current = el

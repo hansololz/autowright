@@ -3,7 +3,7 @@ import React, { useState } from 'react'
 import { api } from '../../api'
 import { useStore } from '../../store'
 import type { Automation } from '../../types'
-import { ConfirmModal, Eyebrow, Notice } from '../../ui'
+import { ConfirmModal, Eyebrow, Notice, settingsRow, settingsRowDivided, settingsRowSub, settingsRowTitle } from '../../ui'
 import { runAction } from './model'
 
 /** One `number` row per setting, using the same §9.2 compact-row layout as
@@ -108,13 +108,10 @@ function NumberSettingRow(
   const [draft, setDraft] = useState<string | null>(null)
 
   return (
-    <div style={{
-      padding: '15px 18px', borderBottom: last ? 'none' : '1px solid var(--hairline-dim)',
-      display: 'flex', gap: 18, alignItems: 'center',
-    }}>
+    <div style={last ? settingsRow : settingsRowDivided}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{label}</div>
-        <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--text-muted)', marginTop: 3 }}>{help}</div>
+        <div style={settingsRowTitle}>{label}</div>
+        <div style={settingsRowSub}>{help}</div>
       </div>
       <input
         value={draft ?? String(value)}

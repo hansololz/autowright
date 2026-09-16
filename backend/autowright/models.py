@@ -43,20 +43,32 @@ class StepIn(BaseModel):
 
 
 class DraftIn(BaseModel):
-    """A §4.4 draft payload. Only `steps` is typed (each entry must be an
-    object — the camelCase flag boundary above); the rest (name, description,
-    spec, params, packages, triggers, stepAgents, allowedSecrets, …)
-    passes through untouched for the handler's semantic checks. `plain()`
-    preserves key presence — a handler's `"triggers" in d` still works."""
+    """A §4.4 draft payload. Everything the store writes into a version folder
+    is typed here — steps (each entry an object, the camelCase flag boundary
+    above), the spec blocks, the notes doc, the param and package lists — so a
+    wrong shape answers 422 before any file is written (§19); the rest (name,
+    description, triggers, stepAgents, allowedSecrets, …) passes through
+    untouched for the handler's semantic checks. `plain()` preserves key
+    presence — a handler's `"triggers" in d` still works."""
 
     model_config = ConfigDict(extra="allow")
 
     steps: list[StepIn] = None
+    spec: list[dict] = None       # §4.4 spec blocks — {kind, text} objects
+    notes: StrictStr = None       # §4.1 notes.md
+    params: list[dict] = None     # §4.2 definitions (+ draft-only values)
+    packages: list[dict] = None   # §6.2 declarations — {pip, import, why}
+
+    # The typed keys `plain()` re-emits, presence-preserving like `steps`.
+    _CONTENT_KEYS = ("spec", "notes", "params", "packages")
 
     def plain(self) -> dict:
         d = dict(self.model_extra or {})
         if "steps" in self.model_fields_set:
             d["steps"] = [s.plain() for s in (self.steps or [])]
+        for k in self._CONTENT_KEYS:
+            if k in self.model_fields_set:
+                d[k] = getattr(self, k)
         return d
 
 

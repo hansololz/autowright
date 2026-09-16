@@ -133,16 +133,21 @@ def _step_sha(s: dict) -> str:
     return hashlib.sha256((s.get("code") or "").encode()).hexdigest()[:16]
 
 
-def build_redactions(secret_values: dict[str, str]) -> dict[str, str]:
+def build_redactions(values_by_id: dict[str, str],
+                     names_by_id: dict[str, str]) -> dict[str, str]:
     """value → secret name, plus each non-blank line of a multi-line value
     (§4.8: log lines are redacted one at a time, so a partial paste of a
-    multi-line key must match too). Shared by executions and §11 tests."""
-    redactions = {v: k for k, v in secret_values.items()}
-    for name, v in secret_values.items():
+    multi-line key must match too). Shared by executions and §11 tests.
+
+    Both maps are keyed by secret ID, never by name: two stored secrets may
+    carry the SAME name, and a name-keyed input collapses them so one of the
+    values would never be redacted (§1 — redaction must never fail open)."""
+    redactions = {v: names_by_id.get(i, i) for i, v in values_by_id.items()}
+    for i, v in values_by_id.items():
         if "\n" in v:
             for part in v.splitlines():
                 if part.strip():
-                    redactions.setdefault(part, name)
+                    redactions.setdefault(part, names_by_id.get(i, i))
     return redactions
 
 
@@ -190,6 +195,12 @@ def _close_pipe(f) -> None:
         f.close()
     except (OSError, ValueError):
         pass
+
+
+# §4.5 agentPgids: the step read loop adds groups on its own thread while a
+# kill path snapshots them on another — one lock covers both sides, or the
+# snapshot can raise "Set changed size during iteration" and skip the kill.
+_pgids_lock = threading.Lock()
 
 
 def _processes():
@@ -292,7 +303,9 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             # step's in-flight groups.
             if state.get("proc") is proc:
                 procs = _processes()
-                for g in list(state.get("agent_pgids") or ()):
+                with _pgids_lock:
+                    groups = list(state.get("agent_pgids") or ())
+                for g in groups:
                     try:
                         procs.kill_group(g)
                     except Exception:  # noqa: BLE001 — an already-gone group is fine
@@ -392,20 +405,24 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                         # reach it (the step-group signal can't).
                         g = msg.get("pgid")
                         if isinstance(g, int) and not isinstance(g, bool):
-                            groups = state.setdefault("agent_pgids", set())
-                            if op == "agent_group":
-                                # §4.5: persisted only when the set GAINS a
-                                # group — that is the write §3 recovery needs.
-                                # A retraction writes nothing: the step-end
-                                # write clears the list, and recovery re-checks
-                                # each pid before signalling it.
-                                added = g not in groups
-                                groups.add(g)
-                                persist = state.get("on_agent_groups")
-                                if added and persist:
-                                    persist(sorted(groups))
-                            else:
-                                groups.discard(g)
+                            with _pgids_lock:
+                                groups = state.setdefault("agent_pgids", set())
+                                if op == "agent_group":
+                                    # §4.5: persisted only when the set GAINS a
+                                    # group — that is the write §3 recovery
+                                    # needs. A retraction writes nothing: the
+                                    # step-end write clears the list, and
+                                    # recovery re-checks each pid before
+                                    # signalling it.
+                                    added = g not in groups
+                                    groups.add(g)
+                                    snapshot = sorted(groups)
+                                else:
+                                    added = False
+                                    groups.discard(g)
+                            persist = state.get("on_agent_groups")
+                            if added and persist:
+                                persist(snapshot)
                 elif line.strip():
                     log("out", line)
         except ValueError:
@@ -449,7 +466,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         # otherwise have done it. Clearing first would wipe the only record of
         # the group and orphan the CLI. A stale id must not survive the clear
         # either — a later step's kill re-signalling it is a pid-reuse hazard.
-        leftover = state.pop("agent_pgids", None)
+        with _pgids_lock:
+            leftover = state.pop("agent_pgids", None)
         if leftover:
             procs = _processes()
             for g in sorted(leftover):
@@ -621,14 +639,22 @@ class Engine:
         label = h.pop("_pre_snapshot", None)
         if not label:
             return
-        staged = self.store.stage_snapshot(auto, "pre-version")
-        if staged is not None:
-            self.store.commit_snapshot(auto, staged, "pre-version", version=label)
+        # §6.3: on memory_ops, the lock every API memory operation takes —
+        # commit's prune must not delete the snapshot a concurrent restore is
+        # copying from, and its copytree must not race this stage.
+        with self.store.memory_ops:
+            staged = self.store.stage_snapshot(auto, "pre-version")
+            if staged is not None:
+                self.store.commit_snapshot(auto, staged, "pre-version", version=label)
 
     def retry(self, auto: dict, h: dict) -> dict:
         """§7 in-place retry: the same execution record re-executes from the
         failed step as a new attempt; succeeded/skipped steps are untouched."""
         with self.store.lock:
+            # §3 shutdown: past the kill sweep nothing new may start — same
+            # rule as `start`, and a retry launches its own engine thread.
+            if self._stopping:
+                raise RuntimeError("the backend is shutting down")
             # Re-read under the lock: the caller's header may be the stale
             # object a first retry already replaced in store.execs — checking
             # its status would let two concurrent retries both pass and launch
@@ -822,17 +848,24 @@ class Engine:
         writing `memory/` while the successor starts a second copy. The sweep
         also flips the engine stopping: a firing already inside `fire_trigger`
         must not start a group after the pass that would have killed it."""
-        self._stopping = True
-        with self._lock:
-            states = list(self._live.values())
+        # Under store.lock — the same lock `start`/`retry` check the flag
+        # beneath, so an admission already inside that block either lands
+        # before this sweep (and gets killed by it) or sees the flag.
+        with self.store.lock:
+            self._stopping = True
+            with self._lock:
+                states = list(self._live.values())
         for state in states:
             state["cancel"] = True
             proc = state.get("proc")
             hard = state.get("hard_kill")
-            if hard:
-                hard()
-            elif proc is not None and proc.poll() is None:
-                kill_step_group(proc)
+            try:
+                if hard:
+                    hard()
+                elif proc is not None and proc.poll() is None:
+                    kill_step_group(proc)
+            except Exception:  # noqa: BLE001 — one group's kill must not strand the rest
+                log.exception("shutdown kill failed for a live execution")
 
     # ---------- internals ----------
     def _resolve_version(self, auto: dict, kind: str, version: int | None) -> dict | None:
@@ -1024,7 +1057,7 @@ class Engine:
                         secret_values[sid] = v
                         secret_names[sid] = sec["name"]
             # Redaction labels are names (§4.5 redactedSecrets), never ids.
-            redactions = build_redactions({secret_names[i]: v for i, v in secret_values.items()})
+            redactions = build_redactions(secret_values, secret_names)
 
             # §7: ensure the version's declared packages (§6.2) before step 1 —
             # the fast check costs milliseconds when everything is present;

@@ -360,8 +360,9 @@ export default function MarketplacePage() {
     }
   }
 
-  // §22.3: on mount, and again whenever a marketplace.changed event lands -
-  // every write the page makes publishes one, so nothing else asks for a list.
+  // §22.3: on mount, and again whenever a marketplace.changed event lands.
+  // The page's own actions also refetch directly (a reconnecting socket may
+  // miss the event); load()'s sequence guard makes the overlap harmless.
   useEffect(() => {
     alive.current = true
     void load()
@@ -628,6 +629,7 @@ export default function MarketplacePage() {
           onAdded={(source) => {
             setAddOpen(false)
             showToast(`Added ${source.name}.`)
+            void load()
           }}
         />
       )}
@@ -635,7 +637,7 @@ export default function MarketplacePage() {
         <CatalogSettingsModal
           source={settings}
           onClose={() => setSettings(null)}
-          onSaved={() => setSettings(null)}
+          onSaved={() => { setSettings(null); void load() }}
         />
       )}
       {editing && (
@@ -646,6 +648,7 @@ export default function MarketplacePage() {
             const created = editing === 'create'
             setEditing(null)
             showToast(created ? `Created ${source.name}.` : `Saved ${source.name}.`)
+            void load()
           }}
         />
       )}

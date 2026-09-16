@@ -23,7 +23,9 @@ const KIND_META: Array<{ kind: AddableKind; icon: string; label: string }> = [
   { kind: 'discord', icon: 'fa-brands fa-discord', label: 'Discord' },
   { kind: 'imessage', icon: 'fa-solid fa-comment', label: 'iMessage' },
 ]
-export const kindIcon = (k: AddableKind) => KIND_META.find((m) => m.kind === k)!.icon
+// A kind this build has no chip for (a record written by another version)
+// still renders — the generic clock, never a crash.
+export const kindIcon = (k: AddableKind) => KIND_META.find((m) => m.kind === k)?.icon ?? 'fa-solid fa-clock'
 
 // §9.2 iMessage permission checklist — FDA can only be detected and guided
 // (macOS has no prompt API for it); Automation is promptable via the probe.

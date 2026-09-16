@@ -196,6 +196,10 @@ function FileBody({ executionId, file, kind, stamp }: {
   useEffect(() => {
     let dead = false
     let url: string | null = null
+    // Every dep change is a fresh read: a mid-run failure (a half-written file)
+    // must not outlive the `stamp` refetch that settles it.
+    setErr(null)
+    setImgUrl(null)
     void api.resultFile(executionId, file.name)
       .then(async (r) => (kind === 'img' ? URL.createObjectURL(await r.blob()) : r.text()))
       .then((v) => {

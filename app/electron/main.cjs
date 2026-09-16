@@ -1009,28 +1009,31 @@ ipcMain.handle('open-catalog', async () => {
 // §9.3 developer log overlay: tail of each existing log file. Polled by the
 // renderer while the overlay is open — no watchers, nothing runs while closed.
 const LOG_FILES = ['app.log', 'backend.out.log', 'backend.err.log', 'vite.log']
-ipcMain.handle('tail-logs', () => {
+// Async IO: the overlay polls at 1 Hz, and the logs can sit on a slow or
+// network-backed volume — a sync open/stat/read of four files would stall the
+// whole main process on every tick.
+ipcMain.handle('tail-logs', async () => {
   const dir = logsDir()
   const out = []
   for (const name of LOG_FILES) {
-    let fd
-    try { fd = fs.openSync(path.join(dir, name), 'r') } catch { continue }
+    let handle
+    try { handle = await fs.promises.open(path.join(dir, name), 'r') } catch { continue }
     try {
-      const size = fs.fstatSync(fd).size
+      const { size } = await handle.stat()
       const start = Math.max(0, size - 64 * 1024)
       const buf = Buffer.alloc(size - start)
-      // Only what was really read: a file that shrank between the fstat and
+      // Only what was really read: a file that shrank between the stat and
       // the read (a rotation) would otherwise stringify the buffer's unwritten
       // tail as NUL padding into the overlay.
-      const read = fs.readSync(fd, buf, 0, buf.length, start)
-      let text = buf.subarray(0, read).toString('utf-8')
+      const { bytesRead } = await handle.read(buf, 0, buf.length, start)
+      let text = buf.subarray(0, bytesRead).toString('utf-8')
       if (start > 0) {
         const nl = text.indexOf('\n')
         if (nl !== -1) text = text.slice(nl + 1)
       }
       out.push({ name, text })
     } catch { /* unreadable mid-rotation — skip this poll */ } finally {
-      fs.closeSync(fd)
+      await handle.close()
     }
   }
   return out
@@ -1038,15 +1041,19 @@ ipcMain.handle('tail-logs', () => {
 // §9.3 Requests tab: §5 request-log files under <logs>/requests — name list
 // (descending ≙ newest first, the timestamp prefix makes name order
 // chronological) + one-file read. `name` must be a plain basename.
-ipcMain.handle('list-request-logs', () => {
+// Async IO for the same reason as tail-logs: the directory grows with every
+// request (§5) and both sides of the tab are polled while the overlay is open.
+ipcMain.handle('list-request-logs', async () => {
   try {
-    return fs.readdirSync(path.join(logsDir(), 'requests'))
+    return (await fs.promises.readdir(path.join(logsDir(), 'requests')))
       .filter((n) => n.endsWith('.log')).sort().reverse()
   } catch { return [] }
 })
-ipcMain.handle('read-request-log', (_e, name) => {
+ipcMain.handle('read-request-log', async (_e, name) => {
   if (typeof name !== 'string' || name !== path.basename(name)) return null
-  try { return fs.readFileSync(path.join(logsDir(), 'requests', name), 'utf-8') } catch { return null }
+  try {
+    return await fs.promises.readFile(path.join(logsDir(), 'requests', name), 'utf-8')
+  } catch { return null }
 })
 // §9.5 report modal: OS details for the info block — the renderer has no
 // other source (getSystemVersion is the marketing macOS version, not the

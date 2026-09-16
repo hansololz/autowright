@@ -143,6 +143,44 @@ describe('§10 Free local AI card: install queue and not-ready reasons', () => {
     fireEvent.click(screen.getByText('Download Qwen3 8B · 5.2 GB'))
     expect(mockedApi.ollamaPull).toHaveBeenCalledWith('qwen3:8b')
   })
+
+  it('the download poll never stacks: a retry replaces it, and leaving the download stops it', async () => {
+    let statusCalls = 0
+    ;(mockedApi.ollamaStatus as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      statusCalls += 1
+      return statusCalls === 1
+        ? { ready: true, installed: true, models: ['llama3.2:3b'] }
+        : { ready: true, installed: true, models: [] }
+    })
+    ;(mockedApi.checkHarness as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'error' })
+    setup([det({ id: 'opencode', name: 'OpenCode', installed: true })])
+    await toStep2()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+
+    // §10 recovery: the download starts, and its poll asks once per tick
+    fireEvent.click(screen.getByText('Download Qwen3 8B · 5.2 GB'))
+    const started = statusCalls
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    expect(statusCalls).toBe(started + 1)
+
+    // §19 ollama.pull: the download failed, so the card leaves 'pulling' -
+    // the poll goes with it
+    act(() => {
+      storeMod.useStore.setState({
+        ollamaPull: { model: 'qwen3:8b', line: 'no space left', done: true, ok: false },
+      })
+    })
+    expect(screen.getByText('Install failed — no space left')).toBeTruthy()
+    const failed = statusCalls
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
+    expect(statusCalls).toBe(failed)
+
+    // Try again downloads again: one poll, not the retry's on top of the first
+    fireEvent.click(screen.getByText('Try again'))
+    const retried = statusCalls
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    expect(statusCalls).toBe(retried + 1)
+  })
 })
 
 describe('§10 step-2 exits: Skip for now and prior data', () => {

@@ -122,7 +122,9 @@ export default function AgentNewPage() {
   // §12 install gating: real per-harness install state (§19 GET /agents/detect)
   // and the picked harness's download-and-set-up machine.
   const [det, setDet] = useState<Record<string, { installed: boolean; signedIn: boolean | null }> | null>(null)
-  const [hInst, setHInst] = useState<'idle' | 'installing' | 'signin' | 'failed'>('idle')
+  // 'checking' is the beat between a finished install and the sign-in answer —
+  // the card keeps the install notice, but the install branch can't re-enter.
+  const [hInst, setHInst] = useState<'idle' | 'installing' | 'checking' | 'signin' | 'failed'>('idle')
   const [hPct, setHPct] = useState<number | null>(null)
   const [hErr, setHErr] = useState<string | null>(null)
   const [hMethod, setHMethod] = useState<'browser' | 'terminal'>('terminal')
@@ -212,8 +214,12 @@ export default function AgentNewPage() {
     if (!evt.done) {
       if (evt.percent !== undefined) setHPct(evt.percent)
     } else if (evt.ok) {
-      // Installed — sign-in help only when it's needed (§12).
+      // Installed — sign-in help only when it's needed (§12). The phase leaves
+      // 'installing' synchronously: another write to `harnessInstall` while the
+      // check is on the wire would otherwise re-enter this branch and open a
+      // second sign-in window.
       const h = harness
+      setHInst('checking')
       void api.signinStatus(h)
         .then((s) => { if (s.signedIn === false) startHarnessSignin(h); else setupDone(h) })
         .catch(() => setupDone(h))
@@ -559,7 +565,7 @@ export default function AgentNewPage() {
             name={HARNESS_NAME[harness]}
             style={{ marginBottom: 16 }}
           />
-        ) : hInst === 'installing' ? (
+        ) : hInst === 'installing' || hInst === 'checking' ? (
           <div className="ad-anim-item" style={{
             background: 'var(--notice-amber-bg)', border: '1px solid var(--notice-amber-border)',
             borderRadius: 10, padding: '11px 14px', marginBottom: 16,

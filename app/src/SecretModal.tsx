@@ -42,12 +42,16 @@ export function SecretModal({ modal, onClose, onSaved }: {
   // empty textarea, and the textarea only appears once Replace value is pressed.
   const hasStoredValue = modal.mode === 'edit' && modal.set
   const [replacing, setReplacing] = useState(false)
+  // §12: one save per modal — Enter plus a click (or two quick clicks) must not
+  // post the secret twice.
+  const [busy, setBusy] = useState(false)
   const showTextarea = !hasStoredValue || replacing
 
   return (
     <Modal onClose={onClose} width={460}>
       {(close) => {
         const save = async () => {
+          if (busy) return
           if (isAdd) {
             if (!name) { showToast('Give the secret a name.'); return }
             if (!NAME_RE.test(name)) { showToast('Secret names must start with a letter and use only A–Z, 0–9 and _.'); return }
@@ -58,6 +62,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
               return
             }
           }
+          setBusy(true)
           try {
             // §4.8: a blank value on edit keeps the stored one (description-only
             // update); a blank value on add creates a placeholder (set: false).
@@ -69,7 +74,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
               ? (value ? `Saved to your ${copy.secretStore}.` : 'Saved. Add the value before an automation needs it.')
               : 'Secret updated.')
             onSaved?.(saved)
-          } catch (e) { showToast((e as Error).message) }
+          } catch (e) { showToast((e as Error).message) } finally { setBusy(false) }
         }
 
         const onKeyDown = (e: React.KeyboardEvent) => {
@@ -201,7 +206,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
                 Stored in your {copy.machine}’s {copy.secretStore}
               </span>
               <BtnGhost onClick={close}>Cancel</BtnGhost>
-              <BtnPrimary onClick={() => { void save() }}>
+              <BtnPrimary disabled={busy} onClick={() => { void save() }}>
                 {isAdd ? `Save to ${copy.secretStore}` : 'Save changes'}
               </BtnPrimary>
             </div>

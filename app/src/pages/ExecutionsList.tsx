@@ -201,6 +201,8 @@ export default function ExecutionsList() {
   // window's span but isn't in the window can only have been deleted
   // server-side (an automation delete, a retention sweep) — keeping it would
   // show a ghost row.
+  // The set is capped at what the pages in reach can slice: everything deeper
+  // is refetched by Next anyway, so it never grows for the session's lifetime.
   useEffect(() => {
     const finishedRows = executions
       .filter((e) => e.status !== 'queued' && e.status !== 'executing')
@@ -209,8 +211,13 @@ export default function ExecutionsList() {
     setFetched((f) => {
       const ids = new Set(finishedRows.map((e) => e.id))
       const oldest = finishedRows[finishedRows.length - 1]
-      return [...finishedRows,
-              ...f.filter((e) => !ids.has(e.id) && byCanonicalOrder(e, oldest) > 0)]
+      const merged = [...finishedRows,
+                      ...f.filter((e) => !ids.has(e.id) && byCanonicalOrder(e, oldest) > 0)]
+        .slice(0, (page + 1) * PAGE)
+      // The same rows in the same order: keep the identity, or every /state
+      // refresh would re-render the whole list for nothing.
+      const key = (rows: Execution[]) => rows.map((e) => e.id).join(',')
+      return key(merged) === key(f) ? f : merged
     })
   }, [executions])
 

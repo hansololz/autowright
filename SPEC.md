@@ -284,7 +284,7 @@ migrate-on-load migration so data written by released versions keeps loading (§
   under `src/` (`store.ts` central model, `api.ts` client,
   `ui.tsx` shared primitives, `tokens.css` design tokens, `pages/` one file per screen
   (`pages/MarketplacePage.tsx` the §22 page, `pages/CatalogEditor.tsx` its §22.7 catalog
-  editor and add-automation picker; `pages/ImportModal.tsx` the §9.1 import modal,
+  editor and add-automation form; `pages/ImportModal.tsx` the §9.1 import modal,
   shared with §22 Install) —
   except the two biggest screens, each a thin page over its own directory: the §11
   create/edit flow (`pages/CreateFlow.tsx` over `pages/createflow/`: `model.ts` — the pure

@@ -371,6 +371,20 @@ describe('applyEvent', () => {
   })
 })
 
+describe('applyEvent — ws.open reconnect counter (§19)', () => {
+  it('every open after the process\u2019s first counts as a reconnect', () => {
+    const open = () => store.useStore.getState().applyEvent({ event: 'ws.open' } as never)
+    // Whatever this process\u2019s first open was, it has already happened: from
+    // here every open is a reconnect, and each one bumps the counter once.
+    open()
+    const first = store.useStore.getState().reconnects
+    open()
+    expect(store.useStore.getState().reconnects).toBe(first + 1)
+    open()
+    expect(store.useStore.getState().reconnects).toBe(first + 2)
+  })
+})
+
 describe('applyEvent — automation.changed row patching (§19)', () => {
   // Minimal list rows — the store only routes them, never reads deep fields.
   const auto = (id: string, over: Record<string, unknown> = {}) =>
@@ -433,6 +447,31 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     } as never)
     await store.useStore.getState().refresh()
     expect(store.useStore.getState().version).toBe('0.8.0')
+  })
+
+  it('a full record catches up with one GET — the event carries no body (§19)', () => {
+    // The merge is synchronous; steps/spec/params/versions/memory never ride
+    // the event, so a change made elsewhere is fetched right behind it.
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    getAutomation.mockClear()
+    store.useStore.setState({ automations: [auto('a1', { latest: { executionId: 'e1' }, steps: [{ name: 's1' }] })] })
+    store.useStore.getState().applyEvent({
+      event: 'automation.changed', automationId: 'a1', automation: auto('a1', { name: 'Renamed' }),
+    })
+    expect(store.useStore.getState().automations[0].name).toBe('Renamed')
+    expect(getAutomation).toHaveBeenCalledTimes(1)
+    expect(getAutomation).toHaveBeenCalledWith('a1')
+  })
+
+  it('a list-shape-only row fetches nothing — there is no body to catch up (§19)', () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    getAutomation.mockClear()
+    store.useStore.setState({ automations: [auto('a1')] })
+    store.useStore.getState().applyEvent({
+      event: 'automation.changed', automationId: 'a1', automation: auto('a1', { name: 'Renamed' }),
+    })
+    expect(store.useStore.getState().automations[0].name).toBe('Renamed')
+    expect(getAutomation).not.toHaveBeenCalled()
   })
 
   it('automation: null removes the deleted row', () => {

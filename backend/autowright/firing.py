@@ -143,7 +143,9 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
                         finish_never_ran(store, h,
                                          f"version v{a['current_version']} no longer exists",
                                          finished_at=timefmt.now_iso())
-                        skipped = True
+                        # `skipped` stays False: the tail's notice is the §6
+                        # capacity one ("I'm working on something else"), and
+                        # nothing is busy here — the firing failed outright.
                     except Exception:  # noqa: BLE001
                         log.exception("recording a failed firing on %r", a.get("name"))
                 elif not isinstance(e, RuntimeError):

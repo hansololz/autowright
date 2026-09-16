@@ -399,8 +399,8 @@ autowright marketplace catalog add <source> <automation-or-file> [--title T] [--
 autowright marketplace catalog remove <source> <n>            drop entry n; its archive file stays
 ```
 
-`<source>` resolves like every other §20 reference: an id, an unambiguous id prefix, or an
-exact name (case-insensitive); ambiguity and no-match are the standard §20 errors. A file
+`<source>` resolves like every other §20 reference: an id, an unambiguous id prefix, an
+exact name (case-insensitive), or a unique part of its name; ambiguity and no-match are the standard §20 errors. A file
 path given to `add` is made absolute against the current directory before it travels.
 `list` prints one block per catalog - `<name> [<id8>]  <location>` (`(kept by Autowright)`
 for `null`), with ` hidden` and/or ` auto-refresh` appended to that line when set; then
@@ -656,7 +656,16 @@ is written before everything has been checked**:
 
 The request is bounded before any export runs: more than the §22.1 200 entries is the 422
 "the catalog file lists more than 200 automations" up front, never after the archives
-were built.
+were built. The exports, archive reads and archive writes run **outside the table lock**
+(the §22.2 rule: a slow export never blocks `GET /marketplace`); the lock is taken only to
+commit the catalog text and stamp the row; a source removed meanwhile answers 404, and
+one whose location changed meanwhile (its archives were placed beside the old location)
+answers 409 "the catalog moved while saving - try again" — in both cases the archives
+just written are cleaned up. Create checks the folder-taken and already-added
+refusals before any export runs (and again at commit), so a refused create never
+exports. A row whose `marketplaces.yaml` write fails is
+dropped from the in-memory table again alongside its copy — the table never lists a
+catalog whose saved copy was just removed.
 
 Removing an entry never deletes its archive file (the UI row says so: a removed entry's
 file stays where it is). `PUT` on a link location is the 409 above.

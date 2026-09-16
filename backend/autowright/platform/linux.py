@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .. import paths
 from . import fallback, posixproc
-from .base import Capabilities, Platform
+from .base import Capabilities, Platform, run_bounded
 
 LABEL = "ai.autowright.backend"
 UNIT_NAME = f"{LABEL}.service"
@@ -92,12 +92,9 @@ class _TimedOut:
 def _systemctl(*args: str) -> subprocess.CompletedProcess | _TimedOut:
     """Every `systemctl --user` call goes through here: captured, text,
     time-boxed. The §15 suites swap this out for a recorder."""
-    try:
-        return subprocess.run(["systemctl", "--user", *args],
-                              capture_output=True, text=True,
-                              timeout=SYSTEMCTL_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return _TimedOut()
+    done = run_bounded(["systemctl", "--user", *args],
+                       timeout=SYSTEMCTL_TIMEOUT_S)
+    return done if done is not None else _TimedOut()
 
 
 def _run_ok(*args: str) -> str | None:

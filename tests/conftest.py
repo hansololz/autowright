@@ -105,22 +105,22 @@ def use_fake_osascript(monkeypatch, module):
     No-op on POSIX — `PATH` already resolves `tests/bin/osascript`. On Windows
     `CreateProcess` appends only `.exe` to a bare command name (unlike
     `shutil.which`, which honors `PATHEXT`), so `["osascript", …]` can never
-    reach the `.cmd` twin. Only the *name resolution* is substituted here: the
-    real Python port still runs as a real child process, so argv, stdout,
+    reach the `.cmd` twin. The seam is the `run_bounded` name the module binds
+    (§2 shared bounded run). Only the *name resolution* is substituted here:
+    the real Python port still runs as a real child process, so argv, stdout,
     stderr and exit code are the fake's own."""
     if os.name != "nt":
         return
-    import subprocess
+    from autowright.platform.base import run_bounded as real_run_bounded
 
-    real_run = subprocess.run
     fake = str(REPO / "tests" / "bin" / "osascript.py")
 
-    def run(args, *a, **kw):
-        if isinstance(args, (list, tuple)) and args and args[0] == "osascript":
-            args = [sys.executable, fake, *args[1:]]
-        return real_run(args, *a, **kw)
+    def run_bounded(argv, *a, **kw):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "osascript":
+            argv = [sys.executable, fake, *argv[1:]]
+        return real_run_bounded(argv, *a, **kw)
 
-    monkeypatch.setattr(module, "subprocess", _SubprocessProxy(run=run))
+    monkeypatch.setattr(module, "run_bounded", run_bounded)
 
 
 @pytest.fixture(autouse=True)
