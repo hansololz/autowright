@@ -1374,7 +1374,8 @@ editors enter with
   always reads **"Test draft"** — the label never changes once a test outcome exists (a
   live test shows Open test + Cancel in its place) — and the modal's run button reads
   **"Run test"** — never "Execute", which is reserved for real executions (§9.2 "Execute
-  now", §7 "Execute again"). A test uses: in-editor param
+  now", §7 "Execute again"); while its POST is in flight the button disables and swaps to
+  a spinner + "Starting…" (the §9 busy rule), so a double-click can never start two tests. A test uses: in-editor param
   values and grants (never the stored automation's), and **scratch memory** — copied to a
   temp dir from the draft container's `memory/` when it exists (edit mode falls back to
   the automation's memory dir; create mode to empty) and discarded when the test ends, so

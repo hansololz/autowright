@@ -53,24 +53,39 @@ APPLICATIONS = "/Applications"
 
 _lock = threading.Lock()
 _jobs: dict[str, dict] = {}  # provider id → §19 install snapshot
+# §19: every job carries a generation token. An abandoned phase (below) keeps
+# running until the process exits, and without the token its late progress
+# would write into — and stream out of — a LATER install's snapshot.
+_generation = 0
 
 
 def status(provider_id: str) -> dict:
     with _lock:
         snap = _jobs.get(provider_id)
-        return dict(snap) if snap else {"state": "idle"}
+        # The generation token is internal bookkeeping, never part of the §19
+        # `GET /agents/install/{id}` shape.
+        return {k: v for k, v in snap.items() if k != "_gen"} if snap \
+            else {"state": "idle"}
 
 
 def start(provider_id: str, publish) -> bool:
     """Kick off a background install. False if one is already running."""
+    global _generation
     with _lock:
         if _jobs.get(provider_id, {}).get("state") == "running":
             return False
-        _jobs[provider_id] = {"state": "running", "line": "", "percent": None}
+        _generation += 1
+        gen = _generation
+        _jobs[provider_id] = {"state": "running", "line": "", "percent": None,
+                              "_gen": gen}
 
     def emit(line: str | None = None, percent: int | None = None) -> None:
         with _lock:
-            snap = _jobs[provider_id]
+            snap = _jobs.get(provider_id)
+            if snap is None or snap.get("_gen") != gen:
+                # §19: the abandoned phase's late progress is discarded — it
+                # neither writes the snapshot nor publishes an event.
+                return
             if line is not None:
                 snap["line"] = line
             if percent is not None:
@@ -103,11 +118,12 @@ def start(provider_id: str, publish) -> bool:
         if error is not None:
             msg = (str(error).strip().splitlines() or ["install failed"])[0][:300]
             with _lock:
-                _jobs[provider_id] = {"state": "failed", "error": msg}
+                _jobs[provider_id] = {"state": "failed", "error": msg,
+                                      "_gen": gen}
             publish(done=True, ok=False, error=msg)
             return
         with _lock:
-            _jobs[provider_id] = {"state": "done"}
+            _jobs[provider_id] = {"state": "done", "_gen": gen}
         publish(done=True, ok=True)
 
     threading.Thread(target=run, daemon=True).start()
@@ -149,16 +165,21 @@ def login(provider_id: str) -> str:
     cmd = (f"cd {shlex.quote(harness._neutral_cwd(provider_id))} && "
            + " ".join(shlex.quote(p) for p in [binpath, *args]))
     osa = cmd.replace("\\", "\\\\").replace('"', '\\"')
+    # §19: "sign-in help couldn't start" is a 409 with the reason — a wedged
+    # Terminal (osascript blocks on its Apple event) or a missing osascript
+    # would 500 the endpoint instead. Bounded through the shared helper: a
+    # grandchild holding osascript's pipe would wedge subprocess.run's own
+    # timeout in communicate().
     try:
-        subprocess.run(["osascript", "-e", 'tell application "Terminal" to activate',
-                        "-e", f'tell application "Terminal" to do script "{osa}"'],
-                       capture_output=True, timeout=10, check=False)
+        done = run_bounded(["osascript", "-e", 'tell application "Terminal" to activate',
+                            "-e", f'tell application "Terminal" to do script "{osa}"'],
+                           timeout=10)
     except (OSError, subprocess.SubprocessError) as e:
-        # §19: "sign-in help couldn't start" is a 409 with the reason — a
-        # wedged Terminal (osascript blocks on its Apple event) or a missing
-        # osascript would 500 the endpoint instead.
         raise RuntimeError("Terminal didn't respond; run the command in your own "
                            "terminal to sign in.") from e
+    if done is None:
+        raise RuntimeError("Terminal didn't respond; run the command in your own "
+                           "terminal to sign in.")
     return "terminal"
 
 
@@ -202,7 +223,14 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
     tail: list[str] = []
     try:
         try:
-            for raw in proc.stdout:  # type: ignore[union-attr]
+            while True:
+                # Size-capped readline, the same shape the engine and harness
+                # read loops use: iterating the pipe buffers a newline-free
+                # stream (a progress bar drawn with carriage returns) without
+                # bound before it ever yields.
+                raw = proc.stdout.readline(2_000_000)  # type: ignore[union-attr]
+                if raw == "":
+                    break
                 line = raw.strip()
                 if line:
                     tail = (tail + [line])[-5:]
@@ -460,7 +488,9 @@ def _install_ollama(emit) -> None:
         except subprocess.TimeoutExpired as e:
             raise RuntimeError("starting the Ollama app timed out") from e
     for _ in range(30):
-        if harness.ollama_status()["ready"]:
+        # §19: readiness only — the version lookup this loop never reports is
+        # one more bounded HTTP round trip per second.
+        if harness.ollama_status(want_version=False)["ready"]:
             return
         time.sleep(1)
     raise RuntimeError("Ollama installed but its server didn't start")

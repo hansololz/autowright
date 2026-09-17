@@ -17,11 +17,7 @@ def add_secret(store, name, *, set_=True) -> str:
     return secret_id
 
 
-def wait_done(engine, execution_id, timeout=30):
-    t0 = time.time()
-    while engine.is_live(execution_id):
-        assert time.time() - t0 < timeout, "execution didn't finish in time"
-        time.sleep(0.1)
+from conftest import wait_done
 
 
 def test_run_lifecycle_success(store):

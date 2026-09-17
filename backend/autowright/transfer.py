@@ -58,10 +58,10 @@ class TransferError(Exception):
     """Archive rejected — the message is the §19 422 detail."""
 
 
-def safe_filename(name: str) -> str:
-    """§19: the automation name sanitized for a filesystem filename."""
-    cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", name).strip().strip(".")
-    return cleaned or "automation"
+# §19: the filename sanitizer lives in `paths` (the §20 CLI needs it without
+# importing the store, §15 leaf rule) — re-exported here for the callers that
+# have always reached for it through transfer.
+safe_filename = paths.safe_filename
 
 
 # ---------- export ----------
@@ -396,10 +396,18 @@ def _validate(z: zipfile.ZipFile) -> dict:
     """Parse + validate everything up front; returns the parsed archive."""
     _check_sizes(z)
     manifest = _yaml_or_reject(z, "manifest.yaml")
-    if manifest.get("format_version") != FORMAT_VERSION:
+    format_version = manifest.get("format_version")
+    if format_version != FORMAT_VERSION:
+        # §5.1: a higher format was written by an app this one doesn't know —
+        # re-export guidance is advice this machine can't follow, since it has
+        # no version that reads the file in the first place.
+        if (isinstance(format_version, int) and not isinstance(format_version, bool)
+                and format_version > FORMAT_VERSION):
+            raise TransferError("this file was made by a newer Autowright - update this one "
+                                "and import again")
         # §5.1/§21.3: the numeric-reference break carried no migration — any
-        # other format (the retired format 1 included) gets re-export guidance.
-        raise TransferError(f"unsupported archive format {manifest.get('format_version')!r} - "
+        # lower format (the retired format 1 included) gets re-export guidance.
+        raise TransferError(f"unsupported archive format {format_version!r} - "
                             f"this app reads format {FORMAT_VERSION}; re-export the "
                             "automation with the current version and import that file")
     name = manifest.get("name")
@@ -505,8 +513,13 @@ def _validate(z: zipfile.ZipFile) -> dict:
     # strip can carry resolved values inside its definitions; they never land.
     params = strip_param_values(params)
     packages = meta.get("packages") or []
+    # §5.1: the archive is untrusted, so the package fields are typed, not just
+    # truthy - a mapping or a number would land verbatim in the stored version
+    # and reach the §6.2 installer as something it can't name.
     if not isinstance(packages, list) or any(
-            not isinstance(p, dict) or not p.get("pip") or not p.get("import")
+            not isinstance(p, dict)
+            or not isinstance(p.get("pip"), str) or not p["pip"]
+            or not isinstance(p.get("import"), str) or not p["import"]
             for p in packages):
         raise TransferError("invalid packages declaration")
     steps_meta = meta.get("steps") or []

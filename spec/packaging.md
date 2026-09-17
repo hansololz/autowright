@@ -63,7 +63,9 @@ the update bullets below).
   the same single `service install` code path headless setups run by hand; there is no separate
   registration mechanism (`SMAppService` was considered and dropped — it would need a native
   helper for no gain). No sudo required. A healthy backend is never touched, so an app launch
-  never interrupts running executions. Registration output/errors append to `app.log`
+  never interrupts running executions — the health probe retries (three attempts, 2 s each,
+  500 ms apart) before concluding the backend is unreachable, so a backend busy under its
+  store lock at launch is never bootout-ed as absent. Registration output/errors append to `app.log`
   (visible in the §9.3 developer log overlay). Dev launches (`electron .` from the repo) have no
   bundled Python, so the ensure step is a no-op there — `scripts/dev.sh` installs the service
   from the repo venv before launching Electron, through the same `service install` code.

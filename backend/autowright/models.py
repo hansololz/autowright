@@ -202,7 +202,12 @@ class PackageRef(BaseModel):
 class PackagesBody(BaseModel):
     """POST /packages/check|install|outdated|update (§19)."""
 
-    packages: list[PackageRef] = Field(default_factory=list)
+    # §19: every packages body is capped — /outdated runs one PyPI lookup per
+    # entry, and an unbounded list is an unbounded fan-out.
+    packages: list[PackageRef] = Field(default_factory=list, max_length=64)
+    # §19 install/update: wait for a held pip lock instead of answering 409 —
+    # the §20 import's foreground ensure sends it; the §11 buttons never do.
+    wait: bool = False
 
 
 class SnapshotCreate(BaseModel):

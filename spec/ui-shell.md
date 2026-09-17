@@ -179,7 +179,7 @@ works." (the §4.9 "Show in the menu bar" row itself hides on Linux, §4.9) · t
 that is asleep would not trigger the automation." → "Works best on an always-on desktop
 PC. A laptop that is asleep would not trigger the automation." on both · the §9.2 trigger
 editor's sleep-through note tail (`sleepMissNote`) "This is not an issue on Mac mini or
-Mac Studio, but a MacBook that is asleep will not fire on schedule." → "That is not an
+Mac Studio, but a MacBook that is asleep will not fire on schedule." → "This is not an
 issue on an always-on desktop PC, but a laptop that is asleep will not fire on schedule."
 on both · model-facing instruction text naming the OS
 itself (`macOS`) → the §4.1 os display name via a `{{OS}}` placeholder beside `{{MACHINE}}`
@@ -1173,7 +1173,7 @@ also open itself after an update (below) with the About page nowhere in sight.
   in both modes; in brew mode it is the notice that leads here.
 - **Check for updates automatically** — toggle row between Updates and What's new,
   bound to §4.9 `automaticUpdateCheck` (default on). Sub-line "Once a day, ask
-  autowright.ai whether a newer version exists. Downloads still start only when you
+  GitHub whether a newer version exists. Downloads still start only when you
   ask." Writes PATCH `/settings` like the Settings-page toggles (§4.9 one-apply
   path: the renderer pushes apply-settings on every settings change, and the shell's
   reconcile starts or stops the §3 automatic check — turning it on checks
@@ -1525,7 +1525,8 @@ Claude Code, Codex, or OpenCode (§4.7) and carries the note "Pick a model serve
 through Ollama. Best for simple steps"; when the harness is Gemini CLI the local-model row
 renders disabled with the note "Gemini CLI can't drive local models." — a disabled row is
 never selectable, and switching to Gemini CLI while the local-model mode is picked moves the
-selection back to "Default model") — with the model input below (required for specific-model and
+selection back to "Default model"; re-picking the harness that is already selected changes
+nothing — the mode and model stay) — with the model input below (required for specific-model and
 local-model modes — the specific-model mode shows a mono free-text input with a per-harness
 placeholder: Claude Code "e.g. claude-opus-4-8", Gemini CLI "e.g. gemini-2.5-pro", Codex
 "e.g. gpt-5-codex", OpenCode "e.g. anthropic/claude-opus-4-8"; OpenCode expects the

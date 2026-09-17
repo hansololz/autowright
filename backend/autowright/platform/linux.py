@@ -256,9 +256,12 @@ class NotifySendNotifier:
 
     def post(self, title: str, body: str) -> None:
         try:
-            subprocess.run(
+            # Bounded like darwin's notifier: a wedged notify-send (its own
+            # D-Bus call blocks) must never hold the caller — run_bounded
+            # kills the group and returns instead of blocking on a
+            # grandchild's pipe.
+            run_bounded(
                 ["notify-send", "--app-name=Autowright", "--", title, body],
-                capture_output=True,
                 timeout=10,
             )
         except Exception:  # noqa: BLE001

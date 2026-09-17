@@ -681,11 +681,13 @@ export function PopMenu({ show, style, children }: {
 }
 
 /** §14 collapsible body: content stays mounted; height animates via the
- * .ad-collapse grid-rows transition. */
+ * .ad-collapse grid-rows transition. Closed content is `inert` as well as
+ * visibility-hidden, so a collapsed section holds no focusable controls even
+ * where the stylesheet is not loaded. */
 export function Collapse({ open, children }: { open: boolean; children: React.ReactNode }) {
   return (
     <div className={`ad-collapse${open ? ' open' : ''}`}>
-      <div>{children}</div>
+      <div inert={!open || undefined}>{children}</div>
     </div>
   )
 }
@@ -968,6 +970,16 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
   guard.current = guardClose
   const escape = () => { if (!guard.current || guard.current()) setClosing(true) }
   const card = useRef<HTMLDivElement>(null)
+  // §14: focus returns to whatever held it when the card opened. This effect is
+  // declared first so it captures the opener before the effect below moves focus
+  // onto the card, and it has no deps so a zIndex change re-registers the stack
+  // entry without counting as a close.
+  useEffect(() => {
+    const opener = document.activeElement
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true })
+    }
+  }, [])
   useEffect(() => {
     const entry = { id: Symbol('modal'), z: zIndex }
     modalStack.push(entry)

@@ -56,6 +56,11 @@ class ExecDB:
             self.conn = sqlite3.connect(path, check_same_thread=False)
         try:
             self.conn.execute("PRAGMA journal_mode=WAL")
+            # §5: WAL with synchronous=NORMAL — a process crash loses nothing,
+            # and the power-loss window (the newest index rows) is exactly what
+            # the startup yaml scan rebuilds, so the fsync per commit on the
+            # execution hot path buys nothing.
+            self.conn.execute("PRAGMA synchronous=NORMAL")
             if self.conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
                 # The DB is only an index (§5): on any schema change, drop and let
                 # startup's yaml reconcile rebuild the rows from disk.

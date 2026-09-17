@@ -568,7 +568,7 @@ def test_login_codex_runs_detached_and_reports_browser(monkeypatch):
 
     monkeypatch.setattr(installer.subprocess, "Popen", fake_popen)
     runs = []
-    monkeypatch.setattr(installer.subprocess, "run",
+    monkeypatch.setattr(installer, "run_bounded",
                         lambda *a, **k: runs.append(a))
     assert installer.login("codex") == "browser"
     assert popen["cmd"] == ["/fake/codex", "login"]
@@ -591,8 +591,12 @@ def test_login_terminal_providers_open_terminal_in_neutral_cwd(monkeypatch, pid,
     # the provider's empty workspace first so the CLI startup scan never walks ~.
     monkeypatch.setattr(harness, "resolve_bin", lambda b: f"/fake/{b}")
     runs = []
-    monkeypatch.setattr(installer.subprocess, "run",
-                        lambda cmd, **kw: runs.append(cmd))
+
+    def fake_run_bounded(cmd, **kw):
+        runs.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(installer, "run_bounded", fake_run_bounded)
     assert installer.login(pid) == "terminal"
     cmd = runs[-1]
     assert cmd[0] == "osascript"
@@ -632,7 +636,7 @@ def test_login_linux_degrades_tui_providers_to_the_manual_command(monkeypatch, p
     monkeypatch.setattr(installer.paths, "current_os", lambda: "linux")
     monkeypatch.setattr(harness, "resolve_bin", lambda b: f"/fake/{b}")
     runs = []
-    monkeypatch.setattr(installer.subprocess, "run",
+    monkeypatch.setattr(installer, "run_bounded",
                         lambda cmd, **kw: runs.append(cmd))
     with pytest.raises(RuntimeError, match="only on macOS") as e:
         installer.login(pid)
@@ -717,7 +721,7 @@ def test_ollama_recipe_opens_app_and_waits_for_server_ready(monkeypatch):
     monkeypatch.setattr(installer.subprocess, "run",
                         lambda cmd, **kw: runs.append(list(cmd)))
     answers = [{"ready": False}, {"ready": True}]
-    monkeypatch.setattr(harness, "ollama_status", lambda: answers.pop(0))
+    monkeypatch.setattr(harness, "ollama_status", lambda **kw: answers.pop(0))
     installer._install_ollama(lambda **k: None)  # returns once ready flips
     assert answers == []
     # §19: the app is launched hidden — its menu-bar agent owns the server
@@ -730,7 +734,7 @@ def test_ollama_recipe_fails_when_server_never_starts(monkeypatch):
     monkeypatch.setattr(installer, "_require", lambda b: None)
     monkeypatch.setattr(installer.time, "sleep", lambda s: None)
     monkeypatch.setattr(installer.subprocess, "run", lambda cmd, **kw: None)
-    monkeypatch.setattr(harness, "ollama_status", lambda: {"ready": False})
+    monkeypatch.setattr(harness, "ollama_status", lambda **kw: {"ready": False})
     with pytest.raises(RuntimeError, match="server didn't start"):
         installer._install_ollama(lambda **k: None)
 
@@ -749,7 +753,7 @@ def test_ollama_recipe_linux_installs_tarball_and_launches_nothing(monkeypatch):
     monkeypatch.setattr(installer.subprocess, "run",
                         lambda cmd, **kw: runs.append(list(cmd)))
     answers = [{"ready": False}, {"ready": True}]
-    monkeypatch.setattr(harness, "ollama_status", lambda: answers.pop(0))
+    monkeypatch.setattr(harness, "ollama_status", lambda **kw: answers.pop(0))
     installer._install_ollama(lambda **k: None)
     assert installed == [True] and answers == []
     assert runs == []  # no `open`, no direct serve — the self-heal owns it
@@ -794,14 +798,12 @@ def test_login_terminal_timeout_becomes_the_409_reason(monkeypatch):
     monkeypatch.setattr(installer.paths, "current_os", lambda: "macos")
     monkeypatch.setattr(harness, "resolve_bin", lambda b: f"/fake/{b}")
 
-    def timeout(cmd, **kw):
-        raise subprocess.TimeoutExpired(cmd, 10)
-
-    monkeypatch.setattr(installer.subprocess, "run", timeout)
+    # §2 shared bounded run: a timeout is its None answer, not an exception.
+    monkeypatch.setattr(installer, "run_bounded", lambda cmd, **kw: None)
     with pytest.raises(RuntimeError, match="Terminal didn't respond"):
         installer.login("claude")
 
-    monkeypatch.setattr(installer.subprocess, "run",
+    monkeypatch.setattr(installer, "run_bounded",
                         lambda cmd, **kw: (_ for _ in ()).throw(OSError("no osascript")))
     with pytest.raises(RuntimeError, match="Terminal didn't respond"):
         installer.login("claude")

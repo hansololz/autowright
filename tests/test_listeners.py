@@ -300,11 +300,7 @@ def test_set_status_publishes_row(store, monkeypatch):
     assert events == []
 
 
-def _wait_done(engine, execution_id, timeout=30):
-    t0 = time.time()
-    while engine.is_live(execution_id):
-        assert time.time() - t0 < timeout, "execution never finished"
-        time.sleep(0.05)
+from conftest import wait_done as _wait_done
 
 
 def test_engine_reply_and_payload_end_to_end(store, monkeypatch):
@@ -934,3 +930,60 @@ def test_reconcile_recreates_a_dead_connection(store, monkeypatch):
     made[0].alive = False  # the thread died
     li._reconcile()
     assert len(made) == 2 and li._conns["TOKEN"] is made[1]
+
+
+def test_reconcile_starts_nothing_once_stop_has_run(store, monkeypatch):
+    """§6 shutdown: stop() stops every listener it can see, so a reconcile
+    still in flight must not start one nobody is left to stop — the flag is
+    re-read before each creation, since the pass outlives the first check."""
+    from autowright import listeners as li_mod
+
+    made = []
+
+    class FakeConn:
+        def __init__(self, secret, mgr):
+            made.append(secret)
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def stop(self):
+            pass
+
+    class FakeWatcher:
+        def __init__(self, mgr):
+            made.append("imsg")
+
+        def tick(self, senders):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(li_mod, "_Conn", FakeConn)
+    monkeypatch.setattr(li_mod, "_ImsgWatcher", FakeWatcher)
+    _pin_imessage_capability(monkeypatch, True)
+    a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"] = [_trig(), {"id": "t9", "kind": "imessage", "enabled": True,
+                               "from": "dave@example.com"}]
+    li = Listeners(store, None)
+
+    li.stop()
+    li._reconcile()
+    assert made == []
+
+    # a stop landing mid-pass is caught before the next creation
+    li._stop.clear()
+    a["triggers"] = [_trig(), _trig(id="t2", secret="TOKEN2", channel="43")]
+
+    class StoppingConn(FakeConn):
+        def __init__(self, secret, mgr):
+            super().__init__(secret, mgr)
+            li._stop.set()
+
+    monkeypatch.setattr(li_mod, "_Conn", StoppingConn)
+    li._reconcile()
+    assert len(made) == 1

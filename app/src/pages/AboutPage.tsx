@@ -274,6 +274,7 @@ export default function AboutPage() {
             // and the shell's reconcile starts or stops the §3 automatic check.
             on={!!settings?.automaticUpdateCheck}
             onChange={(v) => { api.patchSettings({ automaticUpdateCheck: v }).catch((e: Error) => showToast(e.message)) }}
+            title="Check for updates automatically"
           />
         </div>
         <div style={row}>

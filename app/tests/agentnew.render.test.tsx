@@ -126,6 +126,26 @@ describe('AgentNewPage (§12)', () => {
     })
   })
 
+  it('re-picking the harness already selected keeps the mode and model (§12)', async () => {
+    render(<AgentNewPage />)
+    fireEvent.click(screen.getByText('OpenCode'))
+    fireEvent.click(screen.getByText('A specific model'))
+    fireEvent.change(screen.getByPlaceholderText('e.g. anthropic/claude-opus-4-8'),
+      { target: { value: 'anthropic/claude-opus-4-8' } })
+    // The same card again is not a change — the mode row stays checked and the
+    // typed model survives.
+    fireEvent.click(screen.getByText('OpenCode'))
+    expect(screen.getByText('A specific model').closest('button')!.getAttribute('aria-checked')).toBe('true')
+    expect((screen.getByPlaceholderText('e.g. anthropic/claude-opus-4-8') as HTMLInputElement).value)
+      .toBe('anthropic/claude-opus-4-8')
+    fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'Pinned again' } })
+    fireEvent.click(screen.getByText('Add agent'))
+    await waitFor(() => expect(mockedApi.addAgent).toHaveBeenCalledTimes(1))
+    expect((mockedApi.addAgent as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
+      harness: 'OpenCode', mode: 'custom', model: 'anthropic/claude-opus-4-8',
+    })
+  })
+
   it('local-model mode renders for every harness — disabled for Gemini CLI (§4.7)', async () => {
     render(<AgentNewPage />)
     fireEvent.click(screen.getByText('Claude Code'))

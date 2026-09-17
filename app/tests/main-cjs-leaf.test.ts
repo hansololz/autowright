@@ -138,8 +138,8 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // The probe now reads the body: our app name, and a version that isn't
     // empty. Anything else (non-JSON throws into the catch) answers null, so
     // ensureBackend falls through to the install branch.
-    expect(src).toMatch(/async function backendVersion\(\)[\s\S]{0,400}body\?\.app !== 'Autowright'/)
-    expect(src).toMatch(/backendVersion\(\)[\s\S]{0,500}String\(body\.version \?\? ''\) \|\| null/)
+    expect(src).toMatch(/async function backendVersion\(\)[\s\S]{0,900}body\?\.app !== 'Autowright'/)
+    expect(src).toMatch(/backendVersion\(\)[\s\S]{0,1000}String\(body\.version \?\? ''\) \|\| null/)
     // …and every caller still reads "healthy" off exactly that answer, so the
     // stricter probe can't be routed around.
     expect(src).toContain('return (await backendVersion()) !== null')
@@ -1322,6 +1322,53 @@ describe('main.cjs live-execution gate (§3)', () => {
     // it, so a version-sync install still never lands mid-execution.
     expect(src).toContain("if (live === null || live === 'unknown') {")
     expect(src).toContain("return live === true || live === 'unknown'")
+  })
+})
+
+// ---- §3 /health probe retries ----------------------------------------------
+// A backend busy under its store lock can miss a probe. Concluding
+// "unreachable" from one miss made the launch bootout a live backend, so the
+// probe asks three times before it believes the answer.
+
+describe('main.cjs /health probe retries (§3)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('two missed probes followed by a healthy one never install the service', async () => {
+    vi.useFakeTimers()
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = platMod.bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    let probes = 0
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (!String(input).includes('/health')) return Promise.reject(new Error('offline in tests'))
+      probes += 1
+      if (probes <= 2) return Promise.reject(new Error('busy under the store lock'))
+      // The app's own version (the stub's getVersion), so nothing version-syncs.
+      return Promise.resolve({ ok: true, json: async () => ({ app: 'Autowright', version: '0.0.0' }) } as Response)
+    })
+    const children: string[][] = []
+    try {
+      const m = loadMain({ ready: true, execFile: (_py, args) => { children.push(args) } })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+      // Two 500 ms gaps between the three attempts.
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(500)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(probes).toBe(3)
+      expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
+      expect(children).toEqual([])
+    } finally {
+      fetchSpy.mockRestore()
+      rmSync(resources, { recursive: true, force: true })
+    }
   })
 })
 

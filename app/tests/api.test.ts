@@ -4,7 +4,7 @@
 // stubbed before connectInfo() is called, which fills the module-level
 // base/token used by every request.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, connectInfo } from '../src/api'
+import { api, connectInfo, openWs } from '../src/api'
 
 const setBackendInfo = (info: { port: number; token: string } | null) => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -193,5 +193,71 @@ describe('agent/harness/ollama/draft request shapes', () => {
     await api.deleteSecret(secretId)
     expect(fetchMock.mock.calls[1][0]).toBe(`http://127.0.0.1:4242/secrets/${secretId}`)
     expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe('DELETE')
+  })
+})
+
+// §19 reconnect: a backend that stays down must not be asked once a second for
+// as long as the app is open — the wait doubles to a ceiling and starts over
+// only when a connection actually came back.
+describe('openWs reconnect backoff (§19)', () => {
+  class FakeSocket {
+    static made: FakeSocket[] = []
+    onmessage: ((e: { data: string }) => void) | null = null
+    onerror: (() => void) | null = null
+    onclose: (() => void) | null = null
+    onopen: (() => void) | null = null
+    close = vi.fn()
+    constructor(public url: string) { FakeSocket.made.push(this) }
+  }
+  let infoCalls = 0
+
+  beforeEach(async () => {
+    FakeSocket.made = []
+    infoCalls = 0
+    ;(window as unknown as Record<string, unknown>).autowright = {
+      backendInfo: async () => { infoCalls++; return { port: 4242, token: 'tok' } },
+    }
+    await connectInfo()
+    vi.stubGlobal('WebSocket', FakeSocket)
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  // Each close is followed to the millisecond: nothing reconnects a tick early,
+  // and exactly one socket opens a tick later.
+  const expectRetryAfter = async (index: number, wait: number) => {
+    FakeSocket.made[index].onclose!()
+    await vi.advanceTimersByTimeAsync(wait - 1)
+    expect(FakeSocket.made.length).toBe(index + 1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(FakeSocket.made.length).toBe(index + 2)
+  }
+
+  it('doubles 1.5 s up to the 15 s ceiling, and starts over after a successful open', async () => {
+    const close = openWs(() => {})
+    expect(FakeSocket.made.length).toBe(1)
+
+    // four consecutive failures, then the ceiling holds
+    for (const [i, wait] of [1500, 3000, 6000, 12000, 15000].entries()) {
+      await expectRetryAfter(i, wait)
+    }
+    // every attempt re-reads backend.json first — a restart binds a new port
+    expect(infoCalls).toBeGreaterThanOrEqual(5)
+
+    // the connection came back: the next outage starts at the quick retry again
+    FakeSocket.made[5].onopen!()
+    await expectRetryAfter(5, 1500)
+
+    close()
+  })
+
+  it('the closer cancels the pending retry — a closed socket never reconnects', async () => {
+    const close = openWs(() => {})
+    FakeSocket.made[0].onclose!()
+    close()
+    const before = infoCalls
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(FakeSocket.made.length).toBe(1)
+    expect(infoCalls).toBe(before)
   })
 })

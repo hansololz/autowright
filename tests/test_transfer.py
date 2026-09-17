@@ -468,8 +468,24 @@ def test_import_rejects_format_1_with_reexport_guidance(store):
                        match=r"unsupported archive format 1 - this app reads format 2; "
                              r"re-export the automation with the current version"):
         transfer.import_automation(store, _archive(format_version=1))
-    with pytest.raises(transfer.TransferError, match="unsupported archive format 99"):
-        transfer.import_automation(store, _archive(format_version=99))
+    with pytest.raises(transfer.TransferError, match="unsupported archive format None"):
+        transfer.import_automation(store, _archive(format_version=None))
+    assert len(store.autos) == before
+
+
+def test_import_tells_a_newer_format_to_update_this_app(store):
+    """§5.1: a higher format_version was written by an app this one doesn't
+    know - re-export guidance is advice this machine can't follow, since it has
+    no version that reads the file at all."""
+    before = len(store.autos)
+    for version in (3, 99):
+        with pytest.raises(transfer.TransferError,
+                           match=r"this file was made by a newer Autowright - update this "
+                                 r"one and import again"):
+            transfer.import_automation(store, _archive(format_version=version))
+    # a bool is not a version number - it keeps the re-export wording
+    with pytest.raises(transfer.TransferError, match="unsupported archive format True"):
+        transfer.import_automation(store, _archive(format_version=True))
     assert len(store.autos) == before
 
 
@@ -1488,6 +1504,23 @@ def test_step_manifest_text_fields_must_be_text(store):
     b, _ = transfer.import_automation(store, stripped)
     ver = b["versions"][b["current_version"]]
     assert [s["description"] for s in ver["steps"]] == ["", ""]
+
+
+def test_package_entries_must_be_text(store):
+    """§5.1: the archive is untrusted, so a package's pip and import names are
+    typed, not just truthy - a mapping or a number would land verbatim in the
+    stored declaration and reach the §6.2 installer as something it can't name."""
+    a = _build(store)
+    data = transfer.export_automation(store, a)
+    before = len(store.autos)
+
+    for bad in ([{"pip": 5, "import": {"a": 1}}], [{"pip": "pandas", "import": 7}],
+                [{"pip": ["pandas"], "import": "pandas"}],
+                [{"pip": "pandas", "import": True}]):
+        with pytest.raises(transfer.TransferError, match="invalid packages declaration"):
+            transfer.import_automation(store, _rezip_meta(data, lambda m, b=bad: {
+                **m, "packages": b}))
+    assert len(store.autos) == before
 
 
 def test_import_drops_param_values_naming_no_param(store):

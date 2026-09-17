@@ -483,6 +483,11 @@ class Listeners:
         return secrets, senders
 
     def _reconcile(self) -> None:
+        # §6 shutdown: stop() has already stopped every connection it could see,
+        # so a reconcile running past it must not create new ones — the flag is
+        # re-read before each creation below, since the pass outlives the check.
+        if self._stop.is_set():
+            return
         desired, senders = self._desired_secrets()
         # A connection whose thread is gone is no connection at all - treat it
         # as missing so the loop below recreates it (§6: the listener for an
@@ -492,6 +497,8 @@ class Listeners:
                 log.warning("discord listener for %s died - restarting it", secret[:8])
                 self._conns.pop(secret).stop()
         for secret in desired - self._conns.keys():
+            if self._stop.is_set():
+                return
             conn = _Conn(secret, self)
             self._conns[secret] = conn
             conn.start()
@@ -504,7 +511,8 @@ class Listeners:
         # and the watcher closes when the last trigger goes.
         # §2 platform layer: the whole watcher is capability-gated — on an OS
         # without iMessage nothing ever touches chat.db or osascript.
-        if senders and self._imsg is None and platform.current().capabilities.imessage:
+        if (senders and self._imsg is None and not self._stop.is_set()
+                and platform.current().capabilities.imessage):
             self._imsg = _ImsgWatcher(self)
         elif not senders and self._imsg is not None:
             self._imsg.close()

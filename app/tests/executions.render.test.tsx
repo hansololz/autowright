@@ -442,6 +442,36 @@ describe('executions list finished paging (§7)', () => {
     await waitFor(() => expect(mockedApi.listExecutions).toHaveBeenCalledTimes(1))
   })
 
+  it('keeps a filtered page\'s fetched rows when the window churns (§7 absorption)', async () => {
+    // The §19 window is unfiltered: 50 finished rows of which only 3 failed.
+    // Absorbing all 50 would evict every row the filter paged in, so the very
+    // next store write would leave a 50-row readout over 3 rows — the page
+    // silently empties while the user is standing on it.
+    const windowRows = finishedRows(50).map((e, i) =>
+      (i % 20 === 0 ? { ...e, status: 'failed' as const } : e))
+    const olderFailures = Array.from({ length: 47 }, (_, i) =>
+      ex(`f-${String(i).padStart(4, '0')}`, {
+        status: 'failed', startedMs: NOW - 100_000 - i * 1000, endedMs: NOW - 100_000 - i * 1000,
+      }))
+    mockedApi.listExecutions.mockResolvedValue({
+      executions: [...windowRows.filter((e) => e.status === 'failed'), ...olderFailures],
+      total: 137,
+    })
+    seed(windowRows, 1240)
+    render(<ExecutionsList />)
+
+    applyStatuses('Failed')
+    await waitFor(() => expect(within(pager()).getByText('1–50 of 137')).toBeTruthy())
+
+    // A /state refresh replaces the window wholesale — the fetched page stays
+    act(() => { storeMod.useStore.setState({ executions: [...windowRows] }) })
+    await act(async () => {})
+
+    expect(within(pager()).getByText('1–50 of 137')).toBeTruthy()
+    expect(screen.getAllByTestId('execution-row').length).toBe(50)
+    expect(screen.getByText('f-0046')).toBeTruthy()
+  })
+
   it('renders no pager when the total fits one page', () => {
     seed(finishedRows(50))
     render(<ExecutionsList />)

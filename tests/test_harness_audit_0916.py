@@ -3,22 +3,12 @@
 Each test names the spec rule it pins (§8 agent pipeline in
 `spec/agent-pipeline.md`, §19 provider endpoints in `spec/backend-api.md`)."""
 import json
+import os
 import threading
 import time
 
-from conftest import fake_cli
-
-
-def _reap(pidfile) -> None:
-    """Kill the escaped grandchild the fake CLI left behind — nothing else
-    will, which is the whole point of the scenario."""
-    import os
-    import signal
-
-    try:
-        os.kill(int(pidfile.read_text()), signal.SIGKILL)
-    except (OSError, ValueError):
-        pass
+import pytest
+from conftest import _reap, fake_cli
 
 
 # ---------- §8: the timeout kill defuses BOTH pipes ----------
@@ -163,3 +153,105 @@ def test_claude_bash_tool_is_reported_as_shell():
 
     assert [t["name"] for t in tools] == ["Shell", "WebSearch"]
     assert tools[0]["input"] == {"command": "ls"}
+
+
+# ---------- §8: EOF on stdout disarms the idle window ----------
+
+@pytest.mark.skipif(os.name == "nt",
+                    reason="the .cmd shim holds stdout open past the child's close")
+def test_invoke_keeps_the_reply_of_a_cli_that_lingers_after_eof(monkeypatch, tmp_path,
+                                                                home):
+    """§8: "EOF on stdout disarms the window: the exit is then reaped under its
+    own 30 s bound … so a complete reply from a CLI that lingers after closing
+    stdout is never reported as a timeout". The window used to keep counting
+    across the reap and kill a call whose answer had already arrived."""
+    from autowright import harness
+
+    script = fake_cli(tmp_path,
+                      "import os, sys, time\n"
+                      "sys.stdout.write('the whole answer\\n')\n"
+                      "sys.stdout.flush()\n"
+                      "os.close(1)\n"          # EOF, with the child still alive
+                      "time.sleep(3)\n")
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    monkeypatch.setenv("AUTOWRIGHT_AGENT_TIMEOUT_S", "1")  # §15 idle window
+    t0 = time.monotonic()
+
+    out = harness.invoke({"harness": "Claude Code"}, "question: hi?")
+
+    assert "the whole answer" in out
+    # It really did outlive the window it would have been killed by.
+    assert time.monotonic() - t0 > 1
+
+
+# ---------- §19: overlapping sign-in polls share one probe ----------
+
+def test_overlapping_signin_polls_share_one_probe(monkeypatch):
+    """§19: "The provider's probe result is cached for 2 s behind a
+    per-provider lock, so overlapping polls (a CLI cold start can outlast the
+    poll interval) share one process instead of stacking"."""
+    from autowright import harness
+
+    probed = []
+    running = threading.Event()
+
+    def slow_probe(provider_id):
+        probed.append(provider_id)
+        running.set()
+        time.sleep(0.5)
+        return True
+
+    monkeypatch.setattr(harness, "_signin_probe", slow_probe)
+    answers = []
+
+    def poll():
+        answers.append(harness.signed_in("claude"))
+
+    first = threading.Thread(target=poll, daemon=True)
+    first.start()
+    assert running.wait(5), "the first probe never started"
+    second = threading.Thread(target=poll, daemon=True)
+    second.start()
+    for t in (first, second):
+        t.join(timeout=10)
+
+    assert probed == ["claude"]  # the second poll read the first's answer
+    assert answers == [True, True]
+
+
+# ---------- §8: one raising progress callback never kills the watcher ----------
+
+def test_scratch_watcher_survives_a_raising_progress_callback(monkeypatch, tmp_path):
+    """§8 live progress: the poll calls the caller's `on_file` callback, and a
+    raising one used to take the watcher thread down with it — every document
+    that landed afterwards went unreported for the rest of the call."""
+    from autowright import harness
+
+    monkeypatch.setattr(harness, "_SCRATCH_POLL_S", 0.05)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    seen: list[str] = []
+
+    def on_file(name, content):
+        seen.append(name)
+        if len(seen) == 1:
+            raise RuntimeError("the progress callback blew up")
+
+    watcher = harness._ScratchWatcher(scratch, harness.ProgressSink(on_file=on_file))
+    (scratch / "01-first.py").write_text("one\n", encoding="utf-8")
+    watcher.start()
+    try:
+        deadline = time.monotonic() + 5
+        while "01-first.py" not in seen and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert seen == ["01-first.py"], "the first document never reached the sink"
+        (scratch / "02-second.py").write_text("two\n", encoding="utf-8")
+        deadline = time.monotonic() + 5
+        while "02-second.py" not in seen and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        watcher.stop()
+
+    assert "02-second.py" in seen  # the thread outlived the raising callback
+    assert [name for name, _text in watcher.documents()] == ["01-first.py",
+                                                             "02-second.py"]

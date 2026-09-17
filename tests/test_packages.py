@@ -31,7 +31,7 @@ def _fake_process_control(monkeypatch, fall_back_to_child=False):
     return killed
 
 
-def _fake_dist(home, name="requests", version="2.31.0"):
+def _fake_dist(home, name="requests", version="2.31.0", invalidate=True):
     """Minimal installed distribution in the §6.2 site-packages dir."""
     d = home / "site-packages" / f"{name}-{version}.dist-info"
     d.mkdir(parents=True)
@@ -43,6 +43,14 @@ def _fake_dist(home, name="requests", version="2.31.0"):
     import importlib
 
     importlib.invalidate_caches()
+    # §6.2: only pip writes to that directory in production, and every pip run
+    # drops the cached scan — a fabricated dist-info stands in for one, so it
+    # drops the cache too (the directory key itself is only re-read once a
+    # second). `invalidate=False` is for the cache test, which owns the key.
+    if invalidate:
+        from autowright import packages
+
+        packages.invalidate_scan()
 
 
 def test_norm_pep503():
@@ -390,12 +398,14 @@ def test_ensure_reports_progress_and_pip_failure(home, monkeypatch):
 
 
 def test_upgrade_always_runs_pip_and_reports(home, monkeypatch):
-    """§19 upgrade (the §11 Update button): pip runs unpinned even for an
-    installed distribution; invalid names and pip failures come back failed
-    with no version, successes re-read the real installed version."""
+    """§19 upgrade (the §11 Update button): pip runs unpinned for an installed
+    distribution; invalid names, entries that aren't installed, and pip
+    failures come back failed with no version, successes re-read the real
+    installed version."""
     from autowright import packages
 
     _fake_dist(home, "requests", "2.31.0")
+    _fake_dist(home, "leftpad", "1.0.0")
     calls = []
 
     def fake_pip(name, pin_installed=False, should_stop=None):
@@ -423,22 +433,30 @@ def test_upgrade_always_runs_pip_and_reports(home, monkeypatch):
 
 def test_installed_scan_is_cached_until_the_directory_changes(home, monkeypatch):
     """§6.2/§4.1: the installed-check is served from a cached scan - the §4.1
-    problems audit runs it per automation on every /state, so it must not walk
-    site-packages every time. The cache drops when the directory changes."""
+    problems audit runs it per automation on every /state, so it must neither
+    walk site-packages every time nor re-read the directory key once per
+    automation. The cache drops when the directory changes."""
     from autowright import packages
 
     scans = []
     real = packages._scan_installed
     monkeypatch.setattr(packages, "_scan_installed",
                         lambda: scans.append(1) or real())
+    keys = []
+    real_key = packages._scan_key
+    monkeypatch.setattr(packages, "_scan_key", lambda: keys.append(1) or real_key())
 
     entries = [{"pip": "requests", "import": "requests"}]
     assert packages.check(entries)[0]["status"] == "missing"
     packages.check(entries)
     packages.check(entries)
     assert len(scans) == 1  # repeated checks hit the cache
+    assert len(keys) == 1  # and inside the window don't even re-read the key
 
-    _fake_dist(home, "requests", "2.31.0")  # a new dist-info moves the key
+    # Past the key window the directory is read again, and a new dist-info
+    # moves the key.
+    monkeypatch.setattr(packages, "_SCAN_KEY_TTL_S", 0.0)
+    _fake_dist(home, "requests", "2.31.0", invalidate=False)
     assert packages.check(entries)[0]["version"] == "2.31.0"
     assert len(scans) == 2
     packages.check(entries)
@@ -462,3 +480,104 @@ def test_ensure_invalidates_the_scan_after_installing(home, monkeypatch):
     packages.check([{"pip": "leftpad", "import": "leftpad"}])  # seeds the cache
     out = packages.ensure([{"pip": "leftpad", "import": "leftpad"}])
     assert out[0]["status"] == "installed" and out[0]["version"] == "1.2.3"
+
+
+# ---------- §6.2/§19: a held pip lock is answered, never waited out ----------
+
+def test_ensure_and_upgrade_report_a_busy_pip_lock_instead_of_waiting(home):
+    """§19: "a request that finds the pip lock held by another install answers
+    409 … instead of holding a request worker until it frees" — the module
+    raises `PackagesBusy` and the route turns it into that 409."""
+    import threading
+    import time
+
+    from autowright import packages
+
+    # `home`: the §6.2 site-packages dir is the empty temp one, so leftpad is
+    # missing and ensure has to reach for the lock (the real user dir may hold it).
+    held, release = threading.Event(), threading.Event()
+
+    def hold_the_lock():
+        with packages._pip_lock:
+            held.set()
+            release.wait(20)
+
+    holder = threading.Thread(target=hold_the_lock, daemon=True)
+    holder.start()
+    assert held.wait(5), "the lock holder never started"
+    entries = [{"pip": "leftpad", "import": "leftpad"}]
+    try:
+        started = time.monotonic()
+        with pytest.raises(packages.PackagesBusy):
+            packages.ensure(entries, wait=False)
+        with pytest.raises(packages.PackagesBusy):
+            packages.upgrade(entries, wait=False)
+        assert time.monotonic() - started < 2
+        # The waiting mode (engine / drafting / import) never raises: a stop
+        # that lands during the wait answers cancelled rows at once.
+        started = time.monotonic()
+        rows = packages.ensure(entries, should_stop=lambda: True)
+        assert [(r["status"], r["error"]) for r in rows] == [("failed", "cancelled")]
+        rows = packages.upgrade(entries, should_stop=lambda: True)
+        assert [(r["status"], r["error"]) for r in rows] == [("failed", "cancelled")]
+        assert time.monotonic() - started < 2
+    finally:
+        release.set()
+        holder.join(5)
+
+
+def test_upgrade_never_installs_what_isnt_installed(home, monkeypatch):
+    """§19: "an entry that isn't installed is never installed by update — it
+    answers `status: failed`, `error: "not installed"`"."""
+    from autowright import packages
+
+    _fake_dist(home, "requests", "2.31.0")
+    calls = []
+
+    def fake_pip(name, pin_installed=False, should_stop=None):
+        calls.append(name)
+        return None
+
+    monkeypatch.setattr(packages, "_pip_install", fake_pip)
+    out = packages.upgrade([{"pip": "leftpad", "import": "leftpad"},
+                            {"pip": "requests", "import": "requests"}])
+    assert calls == ["requests"]  # nothing was fetched for the absent one
+    assert out[0] == {"pip": "leftpad", "import": "leftpad",
+                      "status": "failed", "error": "not installed"}
+    assert out[1]["status"] == "installed"
+
+
+def test_upgrade_honors_should_stop_between_packages(home, monkeypatch):
+    """§6.2: the same cancel hook `ensure` carries — a §7 cancel must not wait
+    out the remaining pip runs."""
+    from autowright import packages
+
+    _fake_dist(home, "requests", "2.31.0")
+    _fake_dist(home, "leftpad", "1.0.0")
+    calls = []
+    monkeypatch.setattr(packages, "_pip_install",
+                        lambda name, pin_installed=False, should_stop=None:
+                        calls.append(name) or None)
+
+    out = packages.upgrade([{"pip": "requests", "import": "requests"},
+                            {"pip": "leftpad", "import": "leftpad"}],
+                           should_stop=lambda: len(calls) >= 1)
+    assert calls == ["requests"]
+    assert out[1] == {"pip": "leftpad", "import": "leftpad",
+                      "status": "failed", "error": "cancelled"}
+
+
+# ---------- §6.2: the interpreter's wheel tags are built once per process ----------
+
+def test_the_supported_wheel_tags_are_computed_once(monkeypatch):
+    """§6.2: `sys_tags()` builds the platform's whole tag matrix and can't
+    change within a process — the §19 outdated sweep pays for it once, not
+    once per package."""
+    from autowright import packages
+
+    packages._supported_tags.cache_clear()
+    try:
+        assert packages._supported_tags() is packages._supported_tags()
+        assert packages._supported_tags.cache_info().misses == 1
+    finally:
+        packages._supported_tags.cache_clear()

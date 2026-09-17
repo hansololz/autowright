@@ -39,8 +39,9 @@ def test_executions_page_serializes_outside_the_store_lock(client, monkeypatch):
 # ---------- §4.8 usedBy: one index pass per /secrets ----------
 
 def test_secrets_usedby_scans_each_step_once(client):
-    """One `SECRET_REF_RE` scan per step per call, not one per (secret × step)."""
-    from autowright import api
+    """One `SECRET_REF_RE` scan per step per call, not one per (secret × step):
+    the §4.8 usedBy index reads each record's §4.1 current-version references."""
+    from autowright import storage
     from autowright.storage import store
 
     class _CountingPattern:
@@ -57,12 +58,14 @@ def test_secrets_usedby_scans_each_step_once(client):
     store.create_automation(make_version(), "Other", "mock")        # 2 steps
     assert user["versions"][1]["steps"]
 
-    counting = _CountingPattern(api.SECRET_REF_RE)
-    api.SECRET_REF_RE = counting
+    for a in store.autos.values():
+        a.pop("_ref_cache", None)  # the §4.1 memo may already hold the scan
+    counting = _CountingPattern(storage.SECRET_REF_RE)
+    storage.SECRET_REF_RE = counting
     try:
         listed = client.get("/secrets").json()
     finally:
-        api.SECRET_REF_RE = counting.real
+        storage.SECRET_REF_RE = counting.real
     assert [s["name"] for s in listed] == ["ALPHA", "BETA", "GAMMA"]
     # 2 automations × 2 steps — not 3 secrets × 4 steps
     assert counting.calls == 4

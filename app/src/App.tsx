@@ -1,6 +1,7 @@
 // App shell (§9): hover-expanding floating nav rail + independently scrolling content,
 // state-driven nav.
 import React, { useEffect, useState } from 'react'
+import { MARKETPLACE_HIDDEN } from './config'
 import { useStore } from './store'
 import { CountPill, Logo, ScrollArea, Spinner, Toast } from './ui'
 import DevLogOverlay from './devlog'
@@ -21,13 +22,9 @@ import SecretsPage from './pages/SecretsPage'
 import SettingsPage from './pages/SettingsPage'
 import WhatsNewModal from './pages/WhatsNewModal'
 
-// §22 visibility parking switch: the marketplace is hidden for everyone
-// while true. False now (un-parked 2026-09-14): the §22.3 preview
-// gate applies (the page and its nav row behind the §4.9 developerMode
-// setting). Nothing else is gated by it: the routes, the store, and the CLI
-// group stay live (§2, one code path for every mode). Flip this and the
-// §22.6 e2e skip together.
-export const MARKETPLACE_HIDDEN = false
+// §22 parking switch, defined in config.ts and re-exported here — it has always
+// been read as `App.MARKETPLACE_HIDDEN`.
+export { MARKETPLACE_HIDDEN }
 
 const NAV: { page: string; label: string; icon: string }[] = [
   { page: 'automations', label: 'Automations', icon: 'fa-bolt' },

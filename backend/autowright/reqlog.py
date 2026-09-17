@@ -28,6 +28,13 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _TOKEN = re.compile(r"token=[^&\s\"']+")
 _lock = threading.Lock()
 
+# The kept file names per log directory, in name (≙ chronological) order.
+# Seeded from one `iterdir` the first time a directory is written to and then
+# appended to: a file lands on every request, and listing + sorting a
+# 500-entry directory on each of them is the cost this removes. Guarded by
+# `_lock` with the writes themselves.
+_kept_names: dict[str, list[str]] = {}
+
 # developerMode is read straight from settings.yaml (1 s cache) rather than from the
 # in-memory store: harness.invoke also runs inside the executor subprocess,
 # whose Store is never loaded — the file is the one truth both processes see,
@@ -83,15 +90,23 @@ def _write(d, stem: str, text: str, cap: int) -> None:
     try:
         with _lock:
             d.mkdir(parents=True, exist_ok=True)
+            names = _kept_names.get(str(d))
+            if names is None:
+                names = sorted(p.name for p in d.iterdir() if p.name.endswith(".log"))
+                _kept_names[str(d)] = names
             path = d / f"{stem}.log"
             n = 1
             while path.exists():
                 n += 1
                 path = d / f"{stem}_{n}.log"
             path.write_text(text, encoding="utf-8")
-            names = sorted(p.name for p in d.iterdir() if p.name.endswith(".log"))
-            for name in names[:-cap]:
-                (d / name).unlink(missing_ok=True)
+            names.append(path.name)
+            # Only the writes past the cap touch the directory again — a file
+            # someone removed by hand is simply already gone.
+            if len(names) > cap:
+                for name in names[:-cap]:
+                    (d / name).unlink(missing_ok=True)
+                del names[:-cap]
     except OSError:
         pass
 

@@ -615,7 +615,9 @@ destructive moments recoverable.
   memory (when non-empty and the toggle is on), then replaces `memory/` with the snapshot's
   copy. The replacement never has a window with no surviving copy: the snapshot is staged to
   `.ad-tmp-memory` first, the current `memory/` is renamed aside to `.ad-old-memory` (never
-  rmtree'd in place), the staged copy renamed in, and only then the aside deleted. A restore
+  rmtree'd in place), the staged copy renamed in, and only then the aside deleted — the
+  swap re-checks that the automation is still registered (a delete landing during the copy
+  discards the staged copy and answers 404, never re-creating the directory). A restore
   finding `memory/` missing with `.ad-old-memory` present (crash inside a previous swap)
   renames the aside back before doing anything else; leftover stage/aside dirs are otherwise
   cleaned at the next restore. The restored snapshot itself stays — restore is repeatable

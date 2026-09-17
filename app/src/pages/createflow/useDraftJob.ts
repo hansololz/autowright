@@ -89,6 +89,11 @@ export function useDraftJob(d: DraftJobDeps) {
   // away; a live-started job's inputs lock keeps it still).
   const attachedRef = useRef(false)
   const sentTriggersRef = useRef<unknown[] | null>(null)
+  // §11 poll: one GET in flight at a time. A request slower than the 700 ms
+  // tick would otherwise stack — the backend takes a request per tick for as
+  // long as it is slow, the answers land out of order, and `pollFails` counts
+  // overlapping failures instead of consecutive ones.
+  const pollInFlightRef = useRef(false)
   const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null } }
   const startPoll = (jobId: string, { onDone, onFail, onCancelled, onBlocked, onPlan }: PollHandlers,
     opts?: { preSettled?: string[] }) => {
@@ -177,6 +182,8 @@ export function useDraftJob(d: DraftJobDeps) {
     // running fine server-side, so only three consecutive failures give up.
     let pollFails = 0
     pollRef.current = setInterval(() => {
+      if (pollInFlightRef.current) return
+      pollInFlightRef.current = true
       void (async () => {
         try {
           const j = await api.getDraftJob(jobId)
@@ -281,6 +288,8 @@ export function useDraftJob(d: DraftJobDeps) {
           jobIdRef.current = null
           stopPoll()
           onFail((e as Error).message)
+        } finally {
+          pollInFlightRef.current = false
         }
       })()
     }, 700)

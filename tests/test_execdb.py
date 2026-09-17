@@ -128,3 +128,15 @@ def test_timestamps_store_as_iso_text_and_sort_chronologically(home):
     assert loaded["e-a"]["started_at"] == early
     assert loaded["e-b"]["finished_at"] is None
     db.close()
+
+
+def test_the_index_runs_wal_with_synchronous_normal(home):
+    """§5: WAL with synchronous=NORMAL — a process crash loses nothing, and the
+    power-loss window (the newest index rows) is exactly what the startup yaml
+    scan rebuilds, so the execution hot path never waits on an fsync."""
+    from autowright import execdb
+
+    db = execdb.ExecDB(_db_path(home))
+    assert db.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert db.conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    db.close()

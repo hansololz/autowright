@@ -25,7 +25,7 @@ rule that developer and production mode run the same code, with no dev-only path
 Turning Developer mode off while the page is open navigates to Automations (§22.3). The
 gate is lifted by removing the condition, nothing else; the feature is built as a normal
 surface that happens to be hidden. One renderer constant, `MARKETPLACE_HIDDEN` in
-`App.tsx`, is the **parking switch** on top of the gate: while it is `true` the page and
+`config.ts` (re-exported by `App.tsx`), is the **parking switch** on top of the gate: while it is `true` the page and
 its nav row render for nobody, Developer mode or not, and the §22.6 e2e drive (which
 reaches the page through the nav row) is skipped; the constant and that skip flip
 together. It is `false` now. History: parked 2026-09-12 (unpolished, design not settled),
@@ -84,7 +84,10 @@ entries:                             # required list, may be empty, max 200 entr
   itself is capped by §5.1 (64 MB) at install time. Link fetches use the §5.2 headers
   (`User-Agent: autowright/<version>`), a 30-second per-read timeout, and a 60-second
   whole-download deadline for catalogs and images (they are small; the §5.2 10-minute
-  deadline is for archives), HTTPS only with redirects re-checked to stay on https.
+  deadline is for archives), HTTPS only with redirects re-checked to stay on https. At most
+  4 reference reads (downloads or local files) run at once process-wide — a page of 200
+  images against a slow host must not hold every request worker — and a local reference
+  must be a regular file (a FIFO or device answers the unreadable 502 without being opened).
 
 ### 22.2 Catalog table
 
@@ -334,7 +337,8 @@ still cached).
   `error` carries the reason and the copy is unchanged). Unknown id → 404; a `null`
   location → 409 "this catalog has no location to refresh from", the row untouched.
 - `POST /marketplace/refresh` → `{ sources }` after refreshing every catalog with a
-  location, in order (the others are listed as they were).
+  location, in order (the others are listed as they were). One 120 s deadline bounds the
+  whole request: catalogs not reached by then are left as they were, no error stamped.
 - `DELETE /marketplace/sources/{id}` → `{ ok: true }`; unknown id → 404.
 - `GET /marketplace/sources/{id}/entries/{index}/image` → the entry's image bytes, read
   **on demand by reference**: an https reference is downloaded with the §22.1 caps,

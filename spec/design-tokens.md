@@ -287,7 +287,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     used by every `usePopover` consumer) and `Toast` all enter at `--t-enter` and play a
     `--t-exit` fade-down before unmounting, on every dismissal path.
   - **Collapsibles:** the `Collapse` primitive in `ui.tsx` (`.ad-collapse` grid-rows
-    `0fr`→`1fr`; content stays mounted) animates every expand/collapse section (the §11
+    `0fr`→`1fr`; content stays mounted but a closed section's content is `visibility:
+    hidden` and `inert` — out of the tab order and the accessibility tree, the visibility
+    flip delayed to the end of the exit so the fade still plays) animates every
+    expand/collapse section (the §11
     review cards — body and collapsed hint alike — §9.2 step rows and setup-guide
     disclosures, result view cards). Motion is asymmetric per the duration tokens — rows
     open at `--t-enter`/`--ease-enter` and close at `--t-exit`/`--ease-exit` — and the
@@ -312,7 +315,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     the exit finishes. Keyboard focus is **trapped** in the open card: Tab on the card's last
     focusable element wraps to its first and Shift+Tab wraps back, and a modal that opens
     while focus sits outside its card moves focus onto the card, so no keypress ever
-    reaches the page underneath (the §9.3 overlay still wins, as for every shortcut). The
+    reaches the page underneath (the §9.3 overlay still wins, as for every shortcut). On
+    close, focus returns to the element that held it when the card opened (if it is still in
+    the document), so Tab resumes where the user was instead of at the top of the page. The
     card itself never draws the focus ring, however focus reached it
     (`.ad-modal-card:focus-visible { outline: none }`): it holds focus only as the trap's
     anchor, and a whole-card outline reads as the modal being selected - the ring belongs

@@ -148,14 +148,19 @@ def find_execution(c: Client, ref: str | None) -> dict:
         if newest:
             return newest[0]
         sys.exit("no execution found")
-    # §19/§20: no limit — reference resolution reads the uncapped list, so
-    # every short id the CLI ever printed resolves back (§20 reference rule).
-    execs = c.req("GET", "/executions")["executions"]
+    # §19/§20: the server does the prefix match, so only rows that could
+    # resolve cross the wire — every short id the CLI ever printed resolves
+    # back (§20 reference rule) without reading the whole list.
+    execs = c.req("GET", f"/executions?idPrefix={urllib.parse.quote(ref)}&limit=50")["executions"]
     matches = [e for e in execs if e["id"].startswith(ref)]
     if len(matches) == 1:
         return matches[0]
+    # §20: the candidate list is a readout, not a dump — 20 rows, then a count.
+    shown = [f"{e['id'][:8]} ({e['automationName']}, {e['status']}, {e['started']})"
+             for e in execs[:20]]
+    more = f", … and {len(execs) - 20} more" if len(execs) > 20 else ""
     sys.exit(f"no unique execution matches {ref!r} — "
-             f"have: {', '.join(f'{e['id'][:8]} ({e['automationName']}, {e['status']}, {e['started']})' for e in execs) or '(none)'}")
+             f"have: {', '.join(shown) or '(none)'}{more}")
 
 
 def find_source(c: Client, ref: str) -> dict:
@@ -437,8 +442,10 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     written = ["spec.md", "manifest.yaml"]
     (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
     manifest: dict = {"name": auto["name"], "description": auto.get("description", "")}
-    # §20: pull writes the stored schedules — crons and intervals — so an
-    # untouched manifest round-trips them through push unchanged.
+    # §20: pull writes the stored spec-sourced schedules — crons and intervals
+    # — so an untouched manifest round-trips them through push unchanged.
+    # User-minted schedules (source: user, the trigger verbs' affair) stay out,
+    # so editing a manifest line can never duplicate one.
     schedules = [{**({"cron": t["expression"],
                       **({"timezone": t["timezone"]} if t.get("timezone") else {})}
                      if t["kind"] == "cron" else {"every": t["every"]}),
@@ -446,7 +453,7 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
                   # out (absent = true)
                   **({"run_if_missed": False} if t.get("runIfMissed") is False else {})}
                  for t in auto.get("triggers") or []
-                 if t["kind"] in ("cron", "interval")]
+                 if t["kind"] in ("cron", "interval") and t.get("source") != "user"]
     if schedules:
         manifest["triggers"] = schedules
     params = [{k: v for k, v in p.items() if k not in PARAM_VALUE_KEYS}
@@ -531,7 +538,10 @@ def ensure_packages(c: Client, pkgs: list[dict]) -> None:
     pre-execution ensure retries it before anything runs."""
     if not pkgs:
         return
-    r = c.req("POST", "/packages/install", {"packages": pkgs}, timeout=600)
+    # §20: the foreground ensure waits its turn on the pip lock (the §19 import
+    # already started the same ensure in the background) — `wait` keeps a
+    # contended lock from answering 409.
+    r = c.req("POST", "/packages/install", {"packages": pkgs, "wait": True}, timeout=600)
     for p in r.get("packages", []):
         if p.get("status") == "installed":
             version = f" {p['version']}" if p.get("version") else ""
@@ -566,7 +576,10 @@ def _grants(args, draft: dict, agents: list[dict], secrets: list[dict],
     agent_name_by_id = {a["id"]: (a.get("name") or a["harness"]) for a in agents}
     secret_name_by_id = {s["id"]: s["name"] for s in secrets}
 
-    granted_agent_ids = list(stored_agents)
+    # §20: a stored id that no longer names an agent or secret (deleted since)
+    # is not a grant — it drops silently instead of failing the save, so a
+    # headless workdir never becomes unpushable.
+    granted_agent_ids = [i for i in stored_agents if i in agent_name_by_id]
     for name in args.grant_agent:
         # §4.7 uniqueness makes the case-insensitive match unambiguous.
         match = [a for a in agents
@@ -575,7 +588,7 @@ def _grants(args, draft: dict, agents: list[dict], secrets: list[dict],
             sys.exit(f"no agent named {name!r} — have: {', '.join(known_agents) or '(none)'}")
         if match[0]["id"] not in granted_agent_ids:
             granted_agent_ids.append(match[0]["id"])
-    granted_secret_ids = list(stored_secrets)
+    granted_secret_ids = [i for i in stored_secrets if i in secret_name_by_id]
     for name in args.grant_secret:
         match = [s for s in secrets if s["name"] == name]
         if not match:
@@ -697,11 +710,9 @@ def cmd_automation_show(c: Client, args) -> None:
 
 
 def cmd_automation_pull(c: Client, args) -> None:
-    from .transfer import safe_filename
-
     a = find_automation(c, args.automation)
     full = c.req("GET", f"/automations/{a['id']}")
-    d = Path(args.dir or safe_filename(full["name"]))
+    d = Path(args.dir or paths.safe_filename(full["name"]))
     for name in write_workdir(d, full):
         print(f"wrote {d / name}")
 
@@ -728,7 +739,15 @@ def cmd_automation_push(c: Client, args) -> None:
     r = c.req("POST", f"/automations/{a['id']}/versions", body)
     # Reported before the description PATCH — a failing PATCH exits, and the
     # version has already landed either way.
-    print(f"saved {draft.get('name') or full['name']!r} as v{r['version']}")
+    name = draft.get("name") or full["name"]
+    if r["version"] == full.get("version"):
+        # §19/§20: the operational-only rule minted nothing — say that rather
+        # than announce a version that was already there.
+        print(f"no new version - {name!r} stays v{r['version']} (content unchanged)")
+        if args.note:
+            print("note not stored - a note needs a content change", file=sys.stderr)
+    else:
+        print(f"saved {name!r} as v{r['version']}")
     description = draft.get("description")
     if description and description != (full.get("description") or ""):
         c.req("PATCH", f"/automations/{a['id']}", {"description": description})
@@ -861,12 +880,14 @@ def cmd_automation_execute(c: Client, args) -> None:
 
 
 def cmd_automation_export(c: Client, args) -> None:
-    from .transfer import safe_filename
-
     a = find_automation(c, args.automation)
+    path = args.path or f"{paths.safe_filename(a['name'])}.autowright"
+    if os.path.exists(path) and not args.force:
+        # §20: export never clobbers — the file is named, with the flag that
+        # would replace it. Checked before the archive is even built.
+        sys.exit(f"{path} already exists - pass --force to overwrite")
     q = "?values=0" if args.no_values else ""
     data = c.req_raw("GET", f"/automations/{a['id']}/export{q}")
-    path = args.path or f"{safe_filename(a['name'])}.autowright"
     try:
         with open(path, "wb") as f:
             f.write(data)
@@ -927,7 +948,13 @@ def cmd_automation_import(c: Client, args) -> None:
         r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
                   timeout=600)
     else:
+        from .transfer import MAX_ARCHIVE_BYTES
+
         try:
+            # §5.1: the cap the server enforces, applied here too — an
+            # oversized archive is never read into this process's memory.
+            if os.path.getsize(args.path) > MAX_ARCHIVE_BYTES:
+                sys.exit("the archive is larger than the 64 MB import limit")
             with open(args.path, "rb") as f:
                 data = f.read()
         except OSError as e:
@@ -1061,6 +1088,22 @@ def _trigger_at_index(triggers: list[dict], n: str) -> dict:
     return triggers[i - 1]
 
 
+# §4.3/§20: which modifiers each trigger kind takes, and what each modifier is
+# for — one table, so a flag given with a kind that has no use for it is named
+# rather than silently dropped.
+_KIND_MODIFIERS = {"discord": ("--pattern", "--mention", "--author", "--secret"),
+                   "imessage": ("--pattern",)}
+_KIND_LABELS = {"cron": "a cron schedule", "interval": "--every", "time": "--at",
+                "app_start": "--app-start", "discord": "--discord",
+                "imessage": "--imessage"}
+_MODIFIER_REASONS = {
+    "--pattern": "only a --discord or --imessage trigger matches message text",
+    "--mention": "only a --discord trigger can be mentioned",
+    "--author": "only a --discord trigger has senders to filter",
+    "--secret": "only a --discord trigger needs a bot token",
+}
+
+
 def cmd_trigger_add(c: Client, args) -> None:
     # §4.3: a trigger is exactly one kind — the chain below would keep the
     # first and silently drop the rest, so name the conflict instead.
@@ -1114,6 +1157,11 @@ def cmd_trigger_add(c: Client, args) -> None:
         sys.exit("give a cron expression, --every for a repeating interval, "
                  "--at for a one-shot, --app-start, --discord for a Discord "
                  "message trigger, or --imessage for an iMessage trigger")
+    for flag, given in (("--pattern", args.pattern), ("--mention", args.mention),
+                        ("--author", args.author), ("--secret", args.secret)):
+        if given and flag not in _KIND_MODIFIERS.get(entry["kind"], ()):
+            sys.exit(f"{flag} doesn't apply to {_KIND_LABELS[entry['kind']]}: "
+                     f"{_MODIFIER_REASONS[flag]}")
     if args.timezone:
         if entry["kind"] == "interval":
             # §4.3: an interval is a duration, not a wall-clock moment.
@@ -1458,7 +1506,16 @@ def cmd_agent_check(c: Client, args) -> None:
         sys.exit(f"no agent named {args.agent!r} — have: "
                  f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
     r = c.req("POST", f"/agents/{match[0]['id']}/check")
-    print(json.dumps(r))
+    if args.json:
+        _pjson(r)
+        return
+    # §20: `ready` or `needs setup`, then the §19 detect line for the tool this
+    # agent drives — what the probe found on this machine, in its own words.
+    print("ready" if r.get("status") == "ready" else "needs setup")
+    found = next((d for d in c.req("GET", "/agents/detect")
+                  if d.get("name") == match[0]["harness"]), None)
+    if found and found.get("detail"):
+        print(found["detail"])
 
 
 # ---------------------------------------------------------------- marketplace
@@ -2296,13 +2353,17 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
              epilog="Examples:\n"
                     "  autowright automation export report\n"
                     "  autowright automation export report ~/Desktop/report.autowright\n"
-                    "  autowright automation export report --no-values")
+                    "  autowright automation export report --no-values\n"
+                    "  autowright automation export report --force")
     _ref(p)
     p.add_argument("path", nargs="?",
                    help="file to write (default: <automation name>.autowright, in the "
                         "current directory)")
     p.add_argument("--no-values", action="store_true",
                    help="export the parameter definitions without your values")
+    p.add_argument("--force", action="store_true",
+                   help="replace the file if one is already there (without this, an existing "
+                        "file is left alone and nothing is written)")
     p = _sub(ag, "import", cmd_automation_import, "import an automation from a file or link",
              description="Import an automation someone exported, from a file on disk or "
                          "straight from a link. Typing the command is taken as your go-ahead, "
@@ -2757,13 +2818,14 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                      "Autowright passes no model at all and the tool uses whatever it is set "
                      "up with. These names are what --grant-agent and `agent check` take.")
     p = _sub(agg, "check", cmd_agent_check, "check whether an agent is ready to run",
+             json_flag=True,
              description="Ask an agent whether it can actually run right now: its tool "
                          "installed and reachable, and signed in where that is needed."
                          "\n\n"
                          "This is the first thing to try when an automation fails on a step "
-                         "that uses an agent. It reports what it found as JSON. Fixing what "
-                         "it reports — installing the tool, signing in, choosing another "
-                         "model — is done in the app.")
+                         "that uses an agent. It prints ready or needs setup, then what the "
+                         "probe found on this machine. Fixing what it reports — installing "
+                         "the tool, signing in, choosing another model — is done in the app.")
     p.add_argument("agent", help="which agent, by the name `agent list` prints")
 
     stg = _sub(top, "settings", None, "read and change the app's settings",

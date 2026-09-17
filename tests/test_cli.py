@@ -592,10 +592,11 @@ def test_workdir_run_if_missed_round_trip(tmp_path):
 
 
 def test_workdir_interval_round_trip(tmp_path):
-    """§20/§4.3: pull writes a stored interval as `every` beside the crons, the
-    §8 dialect validates it, and an untouched push merges it back onto the same
-    stored entry - id, enabled state, and source unchanged. `run_if_missed`
-    rides an `every` entry like a cron's."""
+    """§20/§4.3: pull writes a stored spec-sourced interval as `every` beside the
+    crons, the §8 dialect validates it, and an untouched push merges it back onto
+    the same stored entry - id, enabled state, and source unchanged.
+    `run_if_missed` rides an `every` entry like a cron's. A user-minted interval
+    never reaches the manifest and survives the push all the same."""
     import yaml
 
     from autowright import cli
@@ -612,13 +613,12 @@ def test_workdir_interval_round_trip(tmp_path):
     cli.write_workdir(d, auto)
     assert yaml.safe_load((d / "manifest.yaml").read_text())["triggers"] == [
         {"cron": "0 8 * * *", "timezone": "Asia/Tokyo"},
-        {"every": "PT6H", "run_if_missed": False},
-        {"every": "PT90S"}]
+        {"every": "PT6H", "run_if_missed": False}]
 
     draft = _validate_workdir(_WorkdirClient(auto), d)
     assert [(t["kind"], t.get("every"), t.get("runIfMissed", "absent"))
             for t in draft["triggers"] if t["kind"] == "interval"] == [
-        ("interval", "PT6H", False), ("interval", "PT90S", "absent")]
+        ("interval", "PT6H", False)]
     merged = cli.merge_draft_triggers(auto["triggers"], draft["triggers"])
     kept = {t["id"]: t for t in merged if t["kind"] == "interval"}
     assert kept["t3"]["enabled"] is False and kept["t3"]["runIfMissed"] is False
@@ -711,7 +711,8 @@ def test_push_and_create_install_declared_packages(tmp_path, capsys):
     assert "package pandas 2.2.0 installed" in out
     assert "warning: package ghostlib failed to install — no matching distribution" in out
     _, _, body = next(p for p in c.posted if p[1] == "/packages/install")
-    assert body == {"packages": auto["packages"]}
+    # §20: the foreground ensure waits its turn on the pip lock (§19 `wait`)
+    assert body == {"packages": auto["packages"], "wait": True}
     # §20: pip runs behind the install call — 600 s; the save itself stays 30 s
     assert dict((p, t) for _, p, t in c.timeouts) == {
         f"/automations/{auto['id']}/versions": 30, "/packages/install": 600}
@@ -760,7 +761,7 @@ def test_import_installs_declared_packages(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "package pandas 2.2.0 installed" in out
     _, _, body = next(p for p in c.posted if p[1] == "/packages/install")
-    assert body == {"packages": [{"pip": "pandas", "import": "pandas"}]}
+    assert body == {"packages": [{"pip": "pandas", "import": "pandas"}], "wait": True}
 
 
 def test_merge_draft_triggers_drops_unlisted_and_adds_new():
@@ -942,7 +943,7 @@ def test_trigger_add_imessage():
 
     c = _WorkdirClient()
     cli.cmd_trigger_add(c, SimpleNamespace(
-        automation="Daily Report", discord=None, secret=None,
+        automation="Daily Report", discord=None, secret=None, author=None,
         pattern="deploy", mention=False, imessage="+15551234567",
         app_start=False, at=None, every=None, expression=None, timezone=None))
     method, path, body = c.posted[-1]
@@ -989,6 +990,25 @@ def test_trigger_add_no_run_if_missed():
         with pytest.raises(SystemExit, match="--no-run-if-missed applies"):
             cli.cmd_trigger_add(c, args(no_run_if_missed=True, **over))
     assert len(c.posted) == sent_before
+
+
+def test_trigger_add_refuses_a_modifier_its_kind_has_no_use_for():
+    """§20: every modifier is checked against its kind - a message flag given
+    with a schedule or --app-start exits 1 naming the flag, never silently
+    dropped, in the same voice as the --timezone-with---every refusal."""
+    c = _WorkdirClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "trigger", "add", "Daily Report", "0 8 * * *",
+             "--pattern", "go")
+    assert str(ei.value.code) == ("--pattern doesn't apply to a cron schedule: only a "
+                                  "--discord or --imessage trigger matches message text")
+
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "trigger", "add", "Daily Report", "--app-start",
+             "--secret", "API_TOKEN")
+    assert str(ei.value.code) == ("--secret doesn't apply to --app-start: only a "
+                                  "--discord trigger needs a bot token")
+    assert c.posted == []   # nothing sent either time
 
 
 def test_trigger_add_refuses_two_kinds():
@@ -1171,8 +1191,11 @@ class _ExecListClient:
         self.paths = []
 
     def req(self, method, path, body=None):
-        # §20: limit=1 for the bare "newest" form, uncapped for prefix matching
-        assert method == "GET" and path in ("/executions", "/executions?limit=1")
+        # §20: limit=1 for the bare "newest" form, the §19 idPrefix match for a
+        # reference (answered here with every row, like a server that has no
+        # other execution to filter out)
+        assert method == "GET" and (path in ("/executions", "/executions?limit=1")
+                                    or path.startswith("/executions?idPrefix="))
         self.paths.append(path)
         rows = self.execs[:1] if path.endswith("?limit=1") else self.execs
         return {"executions": rows, "total": len(self.execs)}
@@ -1193,8 +1216,9 @@ def test_find_execution_defaults_to_latest():
 
 
 def test_find_execution_bare_form_reads_limit_1():
-    """§20: the bare no-reference form means "the newest", so it reads
-    limit=1 — only prefix matching needs the uncapped list."""
+    """§20: the bare no-reference form means "the newest", so it reads limit=1;
+    a reference rides the §19 idPrefix filter, so the server does the prefix
+    match and only rows that could resolve cross the wire."""
     from autowright.cli import find_execution
 
     c = _ExecListClient(EXECS)
@@ -1203,7 +1227,7 @@ def test_find_execution_bare_form_reads_limit_1():
 
     c = _ExecListClient(EXECS)
     assert find_execution(c, "f3")["id"] == "f3333333-c"
-    assert c.paths == ["/executions"]
+    assert c.paths == ["/executions?idPrefix=f3&limit=50"]
 
 
 def test_find_execution_no_executions_exits():
@@ -1229,6 +1253,20 @@ def test_find_execution_by_unique_prefix_and_ambiguity():
     with pytest.raises(SystemExit) as ei:
         find_execution(_ExecListClient([]), "e")
     assert "(none)" in str(ei.value.code)
+
+
+def test_find_execution_caps_the_candidate_list():
+    """§20: an ambiguous reference reads a candidate list, not a dump — 20 rows,
+    then a count of what it left out."""
+    from autowright.cli import find_execution
+
+    rows = [{"id": f"e{i:07d}-x", "automationName": "Daily Report",
+             "status": "succeeded", "started": "2026-07-29 08:00"} for i in range(30)]
+    with pytest.raises(SystemExit) as ei:
+        find_execution(_ExecListClient(rows), "e")
+    msg = str(ei.value.code)
+    assert msg.count("(Daily Report, succeeded, 2026-07-29 08:00)") == 20
+    assert msg.endswith("… and 10 more")
 
 
 # ---------------------------------------------------------------- command layer
@@ -1271,10 +1309,13 @@ def _auto_gets(auto=None, **extra):
 
 
 def _exec_gets(*execs):
-    """§20: the bare execution reference reads limit=1, a prefix reads the
-    uncapped list — a table answering both serves either form."""
+    """§20: the bare execution reference reads limit=1, a prefix rides the §19
+    idPrefix filter — a table answering both serves either form. The idPrefix
+    rows are unfiltered here, like a server with nothing else to filter out."""
     rows = {"executions": list(execs), "total": len(execs)}
-    return {"/executions": rows, "/executions?limit=1": rows}
+    return {"/executions": rows, "/executions?limit=1": rows,
+            **{f"/executions?idPrefix={e['id'][:n]}&limit=50": rows
+               for e in execs for n in range(1, len(e["id"]) + 1)}}
 
 
 def _run(client, *argv):
@@ -1675,7 +1716,7 @@ def test_cmd_automation_import_prints_summary(tmp_path, capsys):
     _run(c, "automation", "import", str(src))
     assert c.calls == [
         ("POST", "/automations/import", b"ARCHIVE"),
-        ("POST", "/packages/install", {"packages": [{"pip": "requests"}]}),
+        ("POST", "/packages/install", {"packages": [{"pip": "requests"}], "wait": True}),
     ]
     out = capsys.readouterr().out
     assert "imported 'Imported 2' [deadbeef]" in out
@@ -1738,6 +1779,40 @@ def test_cmd_automation_import_reports_os_mismatch(tmp_path, capsys):
                        "summary": {**summary, "osMismatch": False}}).encode()
     _run(_RouteClient(raw=same), "automation", "import", str(src))
     assert "may need rewriting" not in capsys.readouterr().out
+
+
+def test_cmd_automation_export_refuses_an_existing_file_without_force(tmp_path, capsys):
+    """§20: export never clobbers - an existing target exits 1 naming the flag
+    that would replace it, and the archive is never even asked for."""
+    out_file = tmp_path / "out.autowright"
+    out_file.write_bytes(b"MINE")
+
+    c = _RouteClient(_auto_gets(), raw=b"ZIPDATA")
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "export", "Daily Report", str(out_file))
+    assert str(ei.value.code) == f"{out_file} already exists - pass --force to overwrite"
+    assert c.calls == []                       # nothing exported
+    assert out_file.read_bytes() == b"MINE"    # and nothing written
+
+    _run(c, "automation", "export", "Daily Report", str(out_file), "--force")
+    assert out_file.read_bytes() == b"ZIPDATA"
+    assert "exported 'Daily Report'" in capsys.readouterr().out
+
+
+def test_cmd_automation_import_refuses_a_file_over_the_cap(tmp_path, monkeypatch):
+    """§5.1/§20: the 64 MB cap is checked locally before the archive is read, in
+    the server's own 413 wording - an oversized file never reaches memory."""
+    from autowright import cli
+    from autowright.transfer import MAX_ARCHIVE_BYTES
+
+    src = tmp_path / "huge.autowright"
+    src.write_bytes(b"Z")
+    monkeypatch.setattr(cli.os.path, "getsize", lambda p: MAX_ARCHIVE_BYTES + 1)
+    c = _RouteClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "import", str(src))
+    assert str(ei.value.code) == "the archive is larger than the 64 MB import limit"
+    assert c.calls == []    # never read, never sent
 
 
 def test_cmd_automation_export_unwritable_path_exits_1(tmp_path, capsys):
@@ -1832,6 +1907,59 @@ def test_cmd_automation_push_keeps_stored_grants(tmp_path, capsys):
     kinds = {t["kind"] for t in body["draft"]["triggers"]}
     assert kinds == {"cron", "app_start"}
     assert "saved 'Daily Report' as v2" in capsys.readouterr().out
+
+
+def test_cmd_automation_push_drops_a_grant_whose_record_is_gone(tmp_path, capsys):
+    """§20 grant model: a stored id that no longer names an agent or secret (it
+    was deleted since) is not a grant - push drops it silently instead of
+    failing the save, so a headless workdir never becomes unpushable."""
+    from autowright import cli
+
+    auto = {**FULL_AUTO,
+            "allowedSecrets": [API_TOKEN_ID, "dead0000-0000-0000-0000-000000000000"],
+            "stepAgents": ["dead1111-1111-1111-1111-111111111111"]}
+    d = tmp_path / "wd"
+    cli.write_workdir(d, auto)
+    c = _WorkdirClient(auto)
+    _run(c, "automation", "push", "Daily Report", str(d))
+    _, _, body = c.posted[-1]
+    assert body["allowedSecrets"] == [API_TOKEN_ID]   # the deleted secret is gone
+    assert body["stepAgents"] == []                   # and so is the deleted agent
+    assert "saved 'Daily Report' as v2" in capsys.readouterr().out
+
+
+def test_cmd_automation_push_reports_a_version_that_was_never_minted(tmp_path, capsys):
+    """§20: an untouched pull → push mints nothing - the §19 operational-only
+    rule leaves the version where it was, so push says so rather than announcing
+    a version that was already there, and a --note given then is reported as
+    needing a content change."""
+    auto = {**FULL_AUTO, "version": 2}   # the stub answers every save with v2
+    d = tmp_path / "wd"
+    _run(_WorkdirClient(auto), "automation", "pull", "Daily Report", str(d))
+    capsys.readouterr()
+
+    _run(_WorkdirClient(auto), "automation", "push", "Daily Report", str(d))
+    out = capsys.readouterr()
+    assert out.out == "no new version - 'Daily Report' stays v2 (content unchanged)\n"
+    assert out.err == ""
+
+    _run(_WorkdirClient(auto), "automation", "push", "Daily Report", str(d),
+         "--note", "tweak")
+    out = capsys.readouterr()
+    assert "no new version" in out.out
+    assert out.err == "note not stored - a note needs a content change\n"
+
+
+def test_cmd_automation_pull_defaults_the_directory_to_the_name(tmp_path, monkeypatch,
+                                                                capsys):
+    """§20: `pull` with no directory writes into one named after the automation,
+    sanitized for the filesystem the same way an export filename is."""
+    monkeypatch.chdir(tmp_path)
+    c = _WorkdirClient({**FULL_AUTO, "name": "Daily/Report:2"})
+    _run(c, "automation", "pull", "Daily/Report:2")
+    d = tmp_path / "Daily Report 2"
+    assert (d / "spec.md").exists() and (d / "manifest.yaml").exists()
+    assert f"wrote {os.path.join('Daily Report 2', 'spec.md')}" in capsys.readouterr().out
 
 
 def test_cmd_automation_push_never_widens_grants_silently(tmp_path):
@@ -2335,7 +2463,7 @@ def test_cmd_execution_tail_follows_and_exits_by_status(monkeypatch, capsys):
             self.polls = 0
 
         def req(self, method, path, body=None, timeout=30):
-            if path in ("/executions", "/executions?limit=1"):
+            if path.startswith("/executions?") or path == "/executions":
                 return {"executions": [FULL_EXEC], "total": 1}
             if path == f"/executions/{FULL_EXEC['id']}":
                 self.polls += 1
@@ -2567,6 +2695,13 @@ AGENTS = [{"id": "ag1", "name": "Fast local", "harness": "OpenCode", "model": "q
            "default": True},
           {"id": "ag2", "name": None, "harness": "Claude Code", "model": None}]
 
+# §19 /agents/detect: one row per provider, keyed by the harness name an agent
+# record carries.
+DETECTED = [{"id": "claude", "name": "Claude Code", "installed": True,
+             "signedIn": True, "detail": "1.2.3 · signed in"},
+            {"id": "opencode", "name": "OpenCode", "installed": True,
+             "signedIn": False, "detail": "installed · not signed in yet"}]
+
 
 def test_cmd_agent_list_and_check(capsys):
     _run(_RouteClient({"/agents": AGENTS}), "agent", "list")
@@ -2574,14 +2709,35 @@ def test_cmd_agent_list_and_check(capsys):
     assert "* Fast local" in out and "qwen3" in out
     assert "Claude Code" in out and "default model" in out
 
-    c = _RouteClient({"/agents": AGENTS}, reply={"ok": True})
-    _run(c, "agent", "check", "claude code")  # falls back to harness name
+    c = _RouteClient({"/agents": AGENTS, "/agents/detect": DETECTED},
+                     reply={"status": "ready"})
+    _run(c, "agent", "check", "claude code", "--json")  # falls back to harness name
     assert c.calls == [("POST", "/agents/ag2/check", None)]
-    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert json.loads(capsys.readouterr().out) == {"status": "ready"}
 
     with pytest.raises(SystemExit) as ei:
         _run(_RouteClient({"/agents": AGENTS}), "agent", "check", "nope")
     assert "no agent named 'nope'" in str(ei.value.code)
+
+
+def test_cmd_agent_check_human_output_says_ready_then_what_it_found(capsys):
+    """§20: `agent check` prints `ready` or `needs setup`, then the §19 detect
+    line for the tool that agent drives - the machine form is `--json`."""
+    c = _RouteClient({"/agents": AGENTS, "/agents/detect": DETECTED},
+                     reply={"status": "ready"})
+    _run(c, "agent", "check", "claude code")
+    assert capsys.readouterr().out == "ready\n1.2.3 · signed in\n"
+
+    c = _RouteClient({"/agents": AGENTS, "/agents/detect": DETECTED},
+                     reply={"status": "needs-setup"})
+    _run(c, "agent", "check", "Fast local")
+    assert capsys.readouterr().out == "needs setup\ninstalled · not signed in yet\n"
+
+    # nothing found for that tool: the verdict still prints, with no line under it
+    c = _RouteClient({"/agents": AGENTS, "/agents/detect": []},
+                     reply={"status": "needs-setup"})
+    _run(c, "agent", "check", "Fast local")
+    assert capsys.readouterr().out == "needs setup\n"
 
 
 # ---------------------------------------------------------------- marketplace

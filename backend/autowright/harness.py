@@ -4,6 +4,7 @@ Every adapter is one-shot and non-interactive.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -83,6 +84,11 @@ def agent_hard_cap() -> int:
 # backend memory and every log sink. Both are far beyond any valid response.
 STDOUT_CAP_CHARS = 50_000_000
 STDERR_CAP_CHARS = 1_000_000
+
+# §8: how long a call waits for the child to exit once its stdout hit EOF.
+# The idle window is disarmed by then (the reply is complete), so this is the
+# only bound left on a CLI that closes stdout and lingers.
+REAP_TIMEOUT_S = 30.0
 
 
 def kill_group(proc: subprocess.Popen, sig: int | None = None) -> None:
@@ -684,11 +690,21 @@ class _ScratchWatcher:
             # huge or network-backed file) skips it: the worst case is a lost
             # last-interval `file` feed event — documents() re-reads from
             # disk, so the recombined envelope is complete either way.
-            self._poll()
+            self._safe_poll()
 
     def _run(self) -> None:
         while not self._stop_event.wait(_SCRATCH_POLL_S):
+            self._safe_poll()
+
+    def _safe_poll(self) -> None:
+        """One poll, never fatal. The poll calls the §8 progress sink, and a
+        raising callback there would otherwise kill this thread outright — no
+        later file event would ever reach the feed, and stop() would join a
+        corpse. The failure is logged; the next poll re-reads the dir."""
+        try:
             self._poll()
+        except Exception:  # noqa: BLE001 — one bad callback, not the watcher
+            log.exception("scratch watcher poll failed")
 
     def _read(self, name: str) -> str:
         try:
@@ -1028,7 +1044,20 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
                 # The timeout kill closed our read end — anything else is real.
                 if not timed_out.is_set():
                     raise
-            proc.wait()
+            # §8: EOF on stdout disarms the idle window, BEFORE the reap. The
+            # reply is complete at this point, and a CLI that closes stdout
+            # and then lingers (flushing telemetry, waiting on a child) would
+            # otherwise let the watchdog count the whole window down and turn
+            # that finished call into a timeout.
+            done.set()
+            try:
+                proc.wait(timeout=REAP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                # It is not exiting on its own and nothing is watching it any
+                # more — take the group down and reap, rather than hold this
+                # thread on a process whose output already arrived.
+                kill_group(proc)
+                proc.wait()
         except BaseException:
             # A raising callback (or any read error) must not orphan the
             # child — the timer gets cancelled below, so nothing else would
@@ -1328,9 +1357,41 @@ def _status_ok(cmd: list[str], provider_id: str) -> bool:
         return False
 
 
+_SIGNIN_CACHE_S = 2.0
+_signin_cache: dict[str, tuple[float, bool | None]] = {}
+_signin_locks: dict[str, threading.Lock] = {}
+_signin_locks_guard = threading.Lock()
+
+
+def _signin_lock(provider_id: str) -> threading.Lock:
+    """The per-provider probe lock, created on first use — one provider's cold
+    start never holds another's poll."""
+    with _signin_locks_guard:
+        lock = _signin_locks.get(provider_id)
+        if lock is None:
+            lock = _signin_locks[provider_id] = threading.Lock()
+        return lock
+
+
 def signed_in(provider_id: str) -> bool | None:
     """§19 per-harness sign-in rule. None means the provider needs no account
-    (Ollama); False for an account-backed provider that isn't installed."""
+    (Ollama); False for an account-backed provider that isn't installed.
+
+    The answer is cached for 2 seconds behind a per-provider lock: §10 polls
+    `GET /agents/signin/{id}` every 2 s and a CLI cold start can outlast that
+    interval, so overlapping polls would otherwise stack one probe process
+    each. The second caller waits on the lock and reads the first's result."""
+    with _signin_lock(provider_id):
+        cached = _signin_cache.get(provider_id)
+        if cached is not None and time.monotonic() - cached[0] < _SIGNIN_CACHE_S:
+            return cached[1]
+        answer = _signin_probe(provider_id)
+        _signin_cache[provider_id] = (time.monotonic(), answer)
+        return answer
+
+
+def _signin_probe(provider_id: str) -> bool | None:
+    """The §19 rule itself — the real probe behind `signed_in`'s cache."""
     if provider_id == "ollama":
         return None
     if provider_id == "claude":
@@ -1453,18 +1514,22 @@ def detect() -> list[dict]:
         except Exception:  # noqa: BLE001
             return None
 
-    out = []
-    for pid, name in PROVIDERS:
-        if pid == "ollama":
-            continue
+    def entry(provider: tuple[str, str]) -> dict:
+        pid, name = provider
         binpath = resolve_bin(PROVIDER_BIN[pid])
         if not binpath:
-            out.append({"id": pid, "name": name, "installed": False,
-                        "signedIn": False, "detail": ""})
-            continue
+            return {"id": pid, "name": name, "installed": False,
+                    "signedIn": False, "detail": ""}
         s = signed_in(pid) is True
         v = version_of(binpath, pid)
         detail = f"{v or 'installed'} · {'signed in' if s else 'not signed in yet'}"
-        out.append({"id": pid, "name": name, "installed": True,
-                    "signedIn": s, "detail": detail})
-    return out
+        return {"id": pid, "name": name, "installed": True,
+                "signedIn": s, "detail": detail}
+
+    providers = [(pid, name) for pid, name in PROVIDERS if pid != "ollama"]
+    # §19: the four probes run in parallel — each is bounded on its own, and
+    # in series a wedged CLI made the whole call wait for every one before it.
+    # `map` yields in argument order, so the answer is the PROVIDERS order
+    # whatever finishes first, and all four are always present.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        return list(pool.map(entry, providers))

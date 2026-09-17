@@ -83,48 +83,102 @@ class _StreamScanner:
     end (no newline yet) is provisional: it is re-verified on the next feed
     and replaced or dropped as its line grows. Blocked detection is
     line-anchored (BLOCKED_MARK_RE), matching the recombiner — a quoted
-    mid-line marker no longer mislabels the stream."""
+    mid-line marker no longer mislabels the stream.
+
+    Neither the accumulated text nor its line-start alignment is re-walked per
+    chunk: the stream is kept as chunks and joined only when a caller reads
+    `text`, and the scan works on a materialized tail (the overlap window
+    extended back to its line start), so no step of a feed is O(stream)."""
 
     _OVERLAP = 1024  # > any marker line (===FILE: <name>=== + whitespace)
+    # Cap on the retained tail — a stream with no newline at all would
+    # otherwise grow the tail to the whole response. Past the cap the tail
+    # starts mid-line, so a marker line longer than this is not re-found (no
+    # valid marker line is anywhere near it).
+    _MAX_TAIL = 64 * 1024
 
     def __init__(self) -> None:
-        self.text = ""
+        self._parts: list[str] = []
+        self._length = 0
+        self._joined: str | None = ""
+        # The scan window, materialized: text[_tail_start:], where _tail_start
+        # is a line start (_tail_aligned says so — the cap above can cut one
+        # mid-line).
+        self._tail = ""
+        self._tail_start = 0
+        self._tail_aligned = True
         self.marks: list[tuple[str, int, int]] = []  # (name, start, end)
         self.blocked_at = -1
         self._blocked_end = -1
 
+    @property
+    def text(self) -> str:
+        """Everything fed so far — joined on demand and cached until the next
+        feed. `self.text += chunk` per chunk re-copied the whole buffer every
+        time, the same quadratic cost the incremental scan removed."""
+        if self._joined is None:
+            self._joined = "".join(self._parts)
+        return self._joined
+
     def feed(self, chunk: str) -> None:
-        prev = len(self.text)
-        self.text += chunk
+        prev = self._length
+        self._parts.append(chunk)
+        self._length = prev + len(chunk)
+        self._joined = None
+        base = self._tail_start
+        tail = self._tail + chunk
+
+        def reverify(pattern, at: int) -> tuple[re.Match | None, int]:
+            """Re-match `pattern` at absolute offset `at` — (match, the offset
+            its positions are relative to). The tail carries it whenever it
+            reaches back that far; a provisional match whose start ran off the
+            front of the tail (a marker line trailed by more blank lines than
+            the overlap window) falls back to the joined text."""
+            if at >= base:
+                return pattern.match(tail, at - base), base
+            return pattern.match(self.text, at), 0
+
         # Re-verify provisional matches that touched the old end-of-text.
         if self.marks and self.marks[-1][2] >= prev:
             _, s, _ = self.marks[-1]
-            m = FILE_MARK_RE.match(self.text, s)
+            m, origin = reverify(FILE_MARK_RE, s)
             if m:
-                self.marks[-1] = (m.group(1).strip(), s, m.end())
+                self.marks[-1] = (m.group(1).strip(), s, origin + m.end())
             else:
                 self.marks.pop()
         if self.blocked_at >= 0 and self._blocked_end >= prev:
-            m = BLOCKED_MARK_RE.match(self.text, self.blocked_at)
+            m, origin = reverify(BLOCKED_MARK_RE, self.blocked_at)
             if m:
-                self._blocked_end = m.end()
+                self._blocked_end = origin + m.end()
             else:
                 # The provisional blocked line grew into something else. An
                 # even earlier genuine blocked line (fake-then-real) is not
                 # re-found — label-only cosmetics; the settle parser decides
                 # the real outcome.
                 self.blocked_at = self._blocked_end = -1
-        start = max(0, prev - self._OVERLAP)
-        start = self.text.rfind("\n", 0, start) + 1  # align ^ to a line start
-        region = self.text[start:]
+        cut = max(0, prev - self._OVERLAP)
+        # Align ^ to a line start, searching the tail only: the tail itself
+        # begins at a line start, so no newline in it before `cut` means the
+        # whole text has none there either and the tail start IS the alignment.
+        offset = tail.rfind("\n", 0, cut - base) + 1
+        start = base + offset
+        aligned = self._tail_aligned or offset > 0
+        if cut - start > self._MAX_TAIL:
+            start, aligned = cut - self._MAX_TAIL, False
+        region = tail[start - base:]
         for m in FILE_MARK_RE.finditer(region):
+            if m.start() == 0 and not aligned:
+                continue  # region[0] is mid-line: ^ would anchor on nothing
             s = start + m.start()
             if not self.marks or s > self.marks[-1][1]:
                 self.marks.append((m.group(1).strip(), s, start + m.end()))
         for m in BLOCKED_MARK_RE.finditer(region):
+            if m.start() == 0 and not aligned:
+                continue
             s = start + m.start()
             if s > self.blocked_at:
                 self.blocked_at, self._blocked_end = s, start + m.end()
+        self._tail, self._tail_start, self._tail_aligned = region, start, aligned
 
 # §8 file-writing delivery: the OUTPUT section appended to every drafting
 # prompt on a file-writing harness (harness.writes_files) — the ONE
@@ -1160,6 +1214,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         if s.get("agent") and not (s.get("why") or "").strip():
             errors.append(f"step {s.get('name')}: agent: true requires a why")
         ags = s.get("agents")
+        declared_agents: set[str] = set()
         if ags is not None:
             if not s.get("agent"):
                 errors.append(f"step {s.get('name')}: agents is only valid on agent: true steps")
@@ -1187,18 +1242,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                         errors.append(f"step {s.get('name')}: agent "
                                       f"{_label(agent_names, x['id'])!r} needs a why — "
                                       "one line on its role (required when a step lists several agents)")
-                # §8 rule 7: agents["<id>"] in code only resolves against the
-                # step's own declared entries at runtime.
-                for ref in set(AGENT_REF_RE.findall(files.get(s.get("file", ""), ""))):
-                    if ref not in seen_ids:
-                        errors.append(f"step {s.get('name')}: code subscripts agents[{ref!r}], "
-                                      "which isn't among this step's declared agents entries")
-        elif s.get("agent"):
-            # No agents: list — the bare `agent` handle is the only one the
-            # runtime container holds, so any agents["<id>"] subscript dangles.
-            for ref in set(AGENT_REF_RE.findall(files.get(s.get("file", ""), ""))):
-                errors.append(f"step {s.get('name')}: code subscripts agents[{ref!r}] but the "
-                              "step declares no agents entries")
+                declared_agents = seen_ids
         # §8 rule 8: short explicit timeout, or the explicit no-limit marker —
         # never both, never a sentinel value.
         t = s.get("timeout")
@@ -1253,6 +1297,21 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                               + (_imported_no_match("secret", ref, "secrets")
                                  or f"code subscripts secrets[{ref!r}], which isn't among "
                                     f"the allowed secrets — allowed: {_granted(secret_names)}"))
+        # §8 rule 7: agents["<id>"] in code only resolves against the step's OWN
+        # declared entries at runtime — the runtime container holds nothing
+        # else. The scan runs on EVERY step, beside the secrets one: a step
+        # that declares no entries (an agent step with no `agents` list, or a
+        # plain step that is not an agent step at all) dangles the same way,
+        # and only this scan catches it.
+        for ref in set(AGENT_REF_RE.findall(files.get(s.get("file", ""), ""))):
+            if ref in declared_agents:
+                continue
+            errors.append(
+                f"step {s.get('name')}: code subscripts agents[{ref!r}], "
+                "which isn't among this step's declared agents entries"
+                if declared_agents else
+                f"step {s.get('name')}: code subscripts agents[{ref!r}] but the "
+                "step declares no agents entries")
         pkgs = s.get("packages")
         if pkgs is not None:
             if (not isinstance(pkgs, list)

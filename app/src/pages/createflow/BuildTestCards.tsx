@@ -154,10 +154,13 @@ export function TestCard({
   // Per-field selectors (UI-GUIDE): a bare useStore() re-renders the whole
   // card on every store write anywhere — every toast, every log line.
   const executions = useStore((s) => s.executions)
-  const executionFull = useStore((s) => s.executionFull)
   const go = useStore((s) => s.go)
   const showToast = useStore((s) => s.showToast)
   const test = useStore((s) => s.test)
+  // Only the tracked test's full record: subscribing to the whole
+  // `executionFull` map would re-render the card on every other execution's
+  // body landing.
+  const testFull = useStore((s) => (test ? s.executionFull[test.executionId] : undefined))
   const beginTest = useStore((s) => s.beginTest)
   // §9 per-OS copy rule: the machine noun the side-effects line names.
   const copy = usePlatformCopy()
@@ -174,11 +177,15 @@ export function TestCard({
   // §11 stale-outcome rule: the fingerprint of the steps the tracked test ran
   // against (null for a re-attached test — unknown, so never stale).
   const [testedFp, setTestedFp] = useState<string | null>(null)
+  // §11: true from the click until POST /tests answers. `testLive` only turns
+  // true once the record is tracked, so without this a second click during the
+  // POST starts a second test run.
+  const [posting, setPosting] = useState(false)
 
   // §11: the tracked test is an ordinary execution record — steps/status render
   // off it (executionFull carries the body; the header list covers the gap before
   // loadExecution lands).
-  const testExec = test ? executionFull[test.executionId] ?? executions.find((e) => e.id === test.executionId) : undefined
+  const testExec = test ? testFull ?? executions.find((e) => e.id === test.executionId) : undefined
   const testLive = testExec?.status === 'executing'
 
   // §11 test values: seed from the automation's current values (draft default when a param
@@ -230,7 +237,7 @@ export function TestCard({
     : p.kind === 'number' ? (typeof p.value === 'number' ? p.value : (p.min ?? 0))
     : String(p.value ?? ''),
   ]))
-  const testSteps = (test && executionFull[test.executionId]?.steps) ?? []
+  const testSteps = (test && testFull?.steps) ?? []
   const testLiveIdx = testSteps.findIndex((s) => s.status === 'executing')
 
   // A live test survives leaving the editor — re-attach the card on entry.
@@ -245,7 +252,8 @@ export function TestCard({
     // §11: a test always runs steps that match the spec — never stale ones
     // (out of sync) and never mid-build. An old version is never synced or
     // tested (§11), so a version view can't start one either.
-    if (!rev || rev.steps.length === 0 || testLive || busyRewrite || outOfSync || viewingOld) return
+    if (!rev || rev.steps.length === 0 || testLive || posting || busyRewrite || outOfSync || viewingOld) return
+    setPosting(true)
     try {
       // §11: with the modal never opened, drafted §8 test values still apply —
       // the run sends the seeded values (drafted map on top of the
@@ -276,6 +284,8 @@ export function TestCard({
       setTestedFp(fp)
     } catch (e) {
       showToast((e as Error).message)
+    } finally {
+      setPosting(false)
     }
   }
   const cancelTest = () => {
@@ -382,8 +392,9 @@ export function TestCard({
     : showGate ? 'Sync first — a test executes the steps as generated from the spec.'
       : busyRewrite ? 'Wait for the current request to finish.'
         : testLive ? 'A test is already executing.'
-          : viewingOld ? 'An old version is never tested — restore it first.'
-            : null
+          : posting ? 'Starting the test…'
+            : viewingOld ? 'An old version is never tested — restore it first.'
+              : null
 
   return (
     <>
@@ -480,6 +491,7 @@ export function TestCard({
           msgLabels={msgPreviews.map((p) => p?.label)}
           mockSenderSeed={mockSenderSeed}
           runDisabledReason={runDisabledReason}
+          runStarting={posting}
           onRun={() => runTest()}
           onCancel={cancelTest}
           onSkip={skipStep}

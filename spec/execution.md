@@ -59,6 +59,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (`start_new_session`), and timeout/cancel/skip signal the whole group — a step's children
   (Playwright browsers, subprocesses) die with it, are never orphaned, and can never hold the
   engine's log pipe open past the kill (which would strand the automation "executing").
+  The group kill runs whether or not the executor itself has already exited — a grandchild
+  that outlived it is still in the group and still holds the pipe.
   One child deliberately escapes that group: a §6.1 runtime agent call's harness CLI spawns
   in its **own** session (so the call's idle-window watchdog can kill the CLI and its helpers
   without killing the step). The executor therefore reports that child's group id to the
@@ -552,7 +554,11 @@ page fetch surfaces the standard error toast and stays on the current page, page
 An execution finishing mid-view lands at the top of Finished via its §19 event and can push the
 current slice's rows down by one - the canonical order shared by window, keyset, and index
 keeps the pages seamless either way. The accumulated set also **absorbs** the window's
-finished rows on every window change: a `/state` refresh replaces the window wholesale, and
+finished rows on every window change — only the rows that match the active filter (the
+window is unfiltered; under a filter its non-matching rows never enter the set, which is
+capped at the larger of the absorbed window rows and the pages in reach, so a filtered page
+never loses its fetched rows to window rows while an unfiltered page 0 stays the window
+alone): a `/state` refresh replaces the window wholesale, and
 new finishes push old rows out of it - a row that leaves the window mid-session must survive
 in the accumulated set, or the page the user is on silently loses it and every deeper page
 shifts against the readout. The store's own window is re-trimmed after every execution

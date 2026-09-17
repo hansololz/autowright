@@ -195,3 +195,67 @@ def test_pre_version_snapshot_runs_under_memory_ops(store, monkeypatch):
 
     assert held == [True]
     assert len(store.list_snapshots(a)) == 1
+
+
+# ---------- §7: the group kill never checks whether the executor is still alive ----------
+
+def test_hard_kill_signals_the_group_of_an_exited_executor(monkeypatch, tmp_path):
+    """§7: "The group kill runs whether or not the executor itself has already
+    exited — a grandchild that outlived it is still in the group and still
+    holds the pipe". Guarded by `proc.poll() is None`, the kill skipped exactly
+    the case it exists for."""
+    import subprocess
+
+    from autowright import engine as engmod
+
+    real = subprocess.Popen
+    body = ("import sys\n"
+            "sys.stdin.read()\n"
+            "print('go', flush=True)\n")
+    monkeypatch.setattr(engmod.subprocess, "Popen",
+                        lambda argv, **kw: real([sys.executable, "-c", body], **kw))
+    killed = []
+    monkeypatch.setattr(engmod, "kill_step_group",
+                        lambda proc, sig=None: killed.append(proc))
+    script = tmp_path / "01-ask.py"
+    script.write_text("pass\n", encoding="utf-8")
+    state = {"proc": None, "cancel": False}
+
+    def log(kind, text):
+        if text.strip() != "go":
+            return
+        proc = state["proc"]
+        proc.wait()  # the executor is gone; its group may not be
+        assert proc.poll() is not None
+        state["hard_kill"]()
+
+    engmod.run_step_process(script, {}, state, log,
+                            {"status": None, "chip": None}, {}, None)
+
+    assert killed and killed[0].poll() is not None
+
+
+def test_shutdown_kills_the_group_of_an_exited_executor(store, monkeypatch):
+    """§3 shutdown + §7 kill semantics: the same guard sat on `kill_all_live`'s
+    fallback path — a live execution whose executor had exited left its
+    surviving children unsignalled."""
+    from autowright import engine as engmod
+
+    class _Exited:
+        """A step process that has already reaped — its group has not."""
+
+        pid = 4242
+
+        def poll(self):
+            return 0
+
+    killed = []
+    monkeypatch.setattr(engmod, "kill_step_group",
+                        lambda proc, sig=None: killed.append(proc))
+    engine = engmod.Engine(store)
+    proc = _Exited()
+    engine._live["only"] = {"proc": proc}
+
+    engine.kill_all_live()
+
+    assert killed == [proc]

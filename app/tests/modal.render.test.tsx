@@ -145,6 +145,38 @@ describe('Modal focus trap (§14)', () => {
     outside.remove()
   })
 
+  it('on close focus returns to the element that opened the card', () => {
+    const opener = document.createElement('button')
+    opener.textContent = 'open the card'
+    document.body.appendChild(opener)
+    opener.focus()
+
+    const view = render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="Returns focus">
+        {() => <button>inside</button>}
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(card())
+
+    view.unmount()
+    expect(document.activeElement).toBe(opener)
+    opener.remove()
+  })
+
+  it('an opener that left the document is not refocused', () => {
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    opener.focus()
+
+    const view = render(
+      <Modal onClose={vi.fn()} width={400} ariaLabel="Gone opener">
+        {() => <button>inside</button>}
+      </Modal>,
+    )
+    opener.remove()
+    expect(() => view.unmount()).not.toThrow()
+  })
+
   it('a child that autofocuses its own input keeps the focus', () => {
     render(
       <Modal onClose={vi.fn()} width={400} ariaLabel="Autofocused">

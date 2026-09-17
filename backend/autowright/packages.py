@@ -8,6 +8,7 @@ self-heal (§7). `outdated` backs the §11 update badges — read-only PyPI
 lookups, never pip; `upgrade` backs the §11 Update button."""
 from __future__ import annotations
 
+import functools
 import os
 import re
 import subprocess
@@ -28,6 +29,12 @@ INSTALL_TIMEOUT = 600  # seconds per package
 _pip_lock = threading.Lock()
 
 
+class PackagesBusy(RuntimeError):
+    """§6.2: another pip run holds the process-wide lock. The §19 packages
+    routes answer 409 on it rather than hold a request worker for the length
+    of someone else's install."""
+
+
 def site_packages_dir() -> Path:
     return paths.app_support() / "site-packages"
 
@@ -46,6 +53,12 @@ def _norm(name: str) -> str:
 # the same mtime granule can't be missed.
 _scan_lock = threading.Lock()
 _scan_cache: tuple[tuple, dict[str, str]] | None = None
+# When the key was last read. §4.1's audit calls `check` once per automation
+# on every /state publish, and re-reading the directory for each is the cost
+# this window removes; an install landing inside the window is never missed
+# because ensure/upgrade drop the cache outright.
+_SCAN_KEY_TTL_S = 1.0
+_scan_checked_at = 0.0
 
 
 def _scan_key() -> tuple:
@@ -59,9 +72,10 @@ def _scan_key() -> tuple:
 
 def invalidate_scan() -> None:
     """Drop the cached §6.2 installed scan - called after every pip run."""
-    global _scan_cache
+    global _scan_cache, _scan_checked_at
     with _scan_lock:
         _scan_cache = None
+        _scan_checked_at = 0.0
 
 
 def _scan_installed() -> dict[str, str]:
@@ -86,15 +100,22 @@ def _installed_versions() -> dict[str, str]:
     """Normalized distribution name → version, in the §6.2 directory only.
     Served from the cached scan while the directory key is unchanged; the
     returned mapping is shared, so callers must treat it as read-only."""
-    global _scan_cache
+    global _scan_cache, _scan_checked_at
+    now = time.monotonic()
+    with _scan_lock:
+        cached = _scan_cache
+        if cached is not None and now - _scan_checked_at < _SCAN_KEY_TTL_S:
+            return cached[1]
     key = _scan_key()
     with _scan_lock:
         cached = _scan_cache
-    if cached is not None and cached[0] == key:
-        return cached[1]
+        if cached is not None and cached[0] == key:
+            _scan_checked_at = time.monotonic()
+            return cached[1]
     out = _scan_installed()
     with _scan_lock:
         _scan_cache = (key, out)
+        _scan_checked_at = time.monotonic()
     return out
 
 
@@ -123,6 +144,16 @@ def check(entries: list[dict]) -> list[dict]:
 PYPI_TIMEOUT = 8  # seconds per package lookup
 
 
+@functools.lru_cache(maxsize=1)
+def _supported_tags() -> frozenset:
+    """The bundled interpreter's own wheel tags. `sys_tags()` builds the whole
+    platform tag matrix every call, and it can't change within a process, so
+    the §19 outdated sweep pays for it once instead of once per package."""
+    from packaging.tags import sys_tags
+
+    return frozenset(sys_tags())
+
+
 def _latest_compatible(name: str) -> str | None:
     """Newest stable, non-yanked PyPI version of `name` that ships a wheel
     compatible with the bundled interpreter (§6.2 wheels-only applies to the
@@ -132,7 +163,6 @@ def _latest_compatible(name: str) -> str | None:
     import json
     import urllib.request
 
-    from packaging.tags import sys_tags
     from packaging.utils import parse_wheel_filename
     from packaging.version import InvalidVersion, Version
 
@@ -140,7 +170,7 @@ def _latest_compatible(name: str) -> str | None:
     req = urllib.request.Request(url, headers={"User-Agent": "Autowright/1.0"})
     with urllib.request.urlopen(req, timeout=PYPI_TIMEOUT) as resp:
         releases = json.load(resp).get("releases") or {}
-    supported = set(sys_tags())
+    supported = _supported_tags()
     candidates: list[tuple[Version, list]] = []
     for ver_str, files in releases.items():
         try:
@@ -290,7 +320,29 @@ def _pip_install(name: str, pin_installed: bool = False,
                 pass
 
 
-def ensure(entries: list[dict], on_progress=None, should_stop=None) -> list[dict]:
+
+def _acquire_pip_lock(wait: bool, should_stop) -> None:
+    """Take the process-wide pip lock. `wait=False` (§19 routes): one 0.25 s
+    attempt, then `PackagesBusy` — waiting it out would hold a request worker
+    for the whole of someone else's install. `wait=True` (engine, drafting,
+    import): wait in 0.25 s slices, and a `should_stop()` that turns true while
+    waiting raises `StopIteration` for the caller's cancel path — a §7 cancel
+    never waits out another install (spec/execution.md)."""
+    if not wait:
+        if not _pip_lock.acquire(timeout=0.25):
+            raise PackagesBusy()
+        return
+    while not _pip_lock.acquire(timeout=0.25):
+        if should_stop and should_stop():
+            raise _Cancelled()
+
+
+class _Cancelled(Exception):
+    """Raised inside the lock wait when `should_stop()` turned true."""
+
+
+def ensure(entries: list[dict], on_progress=None, should_stop=None,
+           wait: bool = True) -> list[dict]:
     """§6.2 ensure — idempotent: check first, pip only for missing
     distributions (newest compatible wheel at that moment), serialized
     process-wide. An installed distribution is never touched — pins hold
@@ -299,20 +351,24 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None) -> list[dict
     status: installed | failed, version?, error?}. `on_progress(name)` fires
     before each actual pip run; `should_stop()` (checked between pip runs and
     polled during each one) abandons the remaining installs and kills the
-    running pip — a §7 cancel must not wait out pip."""
+    running pip — a §7 cancel must not wait out pip. `wait` (the default —
+    the engine's pre-execution ensure, the §8 post-steps install, the §5.1
+    import ensure) waits its turn on the process-wide lock, honoring
+    `should_stop` while it waits; `wait=False` (the §19 routes) makes one
+    attempt and raises `PackagesBusy` when another pip run holds the lock."""
     results = check(entries)
     if all(r["status"] == "installed" for r in results):
         return results
-    # §7: a cancel arriving while this ensure waits its turn for the
-    # process-wide lock is honored at once — the lock is taken in short slices
-    # instead of blocking out the other install's whole run.
-    while not _pip_lock.acquire(timeout=0.25):
-        if should_stop and should_stop():
-            for r in results:
-                if r["status"] != "installed":
-                    r["status"] = "failed"
-                    r["error"] = "cancelled"
-            return results
+    try:
+        _acquire_pip_lock(wait, should_stop)
+    except _Cancelled:
+        # §7: a cancel arriving while this ensure waits its turn is honored at
+        # once — the remaining installs are reported cancelled, never started.
+        for r in results:
+            if r["status"] != "installed":
+                r["status"] = "failed"
+                r["error"] = "cancelled"
+        return results
     try:
         results = check(entries)  # re-check: another ensure may have run first
         for r in results:
@@ -341,16 +397,36 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None) -> list[dict
     return results
 
 
-def upgrade(entries: list[dict]) -> list[dict]:
+def upgrade(entries: list[dict], should_stop=None, wait: bool = True) -> list[dict]:
     """§19 POST /packages/update — the §11 Update button: always runs pip
     (`install --upgrade name`), the one path that moves an installed
-    distribution forward. Same result shape as `ensure`."""
+    distribution forward. A distribution that isn't installed is never
+    installed by an update: it comes back failed, "not installed". Same result
+    shape as `ensure`, the same `should_stop` between pip runs, and the same
+    `wait` rule (`wait=False` raises `PackagesBusy` when another pip run holds
+    the lock)."""
     results = check(entries)
-    with _pip_lock:
+    try:
+        _acquire_pip_lock(wait, should_stop)
+    except _Cancelled:
+        for r in results:
+            r["status"] = "failed"
+            r["error"] = "cancelled"
+        return results
+    try:
         for r in results:
             if not PIP_NAME_RE.match(r["pip"]):
                 r["status"] = "failed"
                 r["error"] = "not a bare distribution name"
+                r.pop("version", None)
+                continue
+            if r["status"] == "missing":
+                r["status"] = "failed"
+                r["error"] = "not installed"
+                continue
+            if should_stop and should_stop():
+                r["status"] = "failed"
+                r["error"] = "cancelled"
                 r.pop("version", None)
                 continue
             err = _pip_install(r["pip"])
@@ -362,4 +438,6 @@ def upgrade(entries: list[dict]) -> list[dict]:
             else:
                 r["status"] = "installed"
                 r["version"] = _installed_versions().get(_norm(r["pip"]))
+    finally:
+        _pip_lock.release()
     return results

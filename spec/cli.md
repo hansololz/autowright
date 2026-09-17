@@ -47,9 +47,12 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   resolve when passed back. Ambiguity or no match exits with the candidate list.
 - **`--json`** on every read verb (`status`, `instructions`, `automation list|show|diff`,
   `param list`, `trigger list`, `memory show`, `snapshot list`, `execution list|show`,
-  `secret list`, `agent list`, `settings show`) prints the raw API JSON instead of the human
+  `secret list`, `agent list|check`, `settings show`) prints the raw API JSON instead of the human
   columns — the machine mode agents parse. (`marketplace list`, §22.5, has no `--json` yet —
-  deferred until the §22 design settles.)
+  deferred until the §22 design settles.) `execution list --json` prints the §19 envelope
+  `{executions, total}` — the one list verb whose payload is an envelope, because the total
+  sizes the readout; every other list verb prints the bare array. `agent check` prints
+  `ready` or `needs setup` followed by the §19 `detail` line in human mode.
 - **Help text:** `--help` is the CLI's own documentation — the §17 skill's agent discovers the
   surface by reading it, not by reading this spec. Every parser in the tree carries a
   `description` (the prose `<command> --help` prints, distinct from the one-line `help` its
@@ -184,7 +187,10 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
 **Workdir (the authoring format).** `automation pull <ref> [dir]` materializes an automation
 into a directory (dir defaults to the automation's name); `automation push <ref> <dir>
 [--note] [--grant-agent NAME]…
-[--grant-secret NAME]…` validates it and saves vN+1; `automation create <dir> [--name]
+[--grant-secret NAME]…` validates it and saves vN+1 (prints `saved '<name>' as vN`; when the
+§19 operational-only rule minted nothing it prints `no new version - '<name>' stays vN
+(content unchanged)`, and a `--note` given then is reported as needing a content change);
+`automation create <dir> [--name]
 [--agent] [--grant-agent NAME]… [--grant-secret NAME]…` validates and creates v1 — push and
 create take the workdir as a required positional; only pull's is optional. Files:
 
@@ -248,7 +254,9 @@ learns about an install failure at build time, not when a trigger fires.
   engine and UI resolve by id).
 - `automation push` saves the automation's stored lists plus any `--grant-agent`/
   `--grant-secret` flags. Stored grants never shrink on push (they are user-owned state, like
-  param values); the UI edit page remains the place to revoke.
+  param values); the UI edit page remains the place to revoke. A stored id that no longer
+  names an agent or secret (deleted since) is not a grant: push drops it silently instead of
+  failing the save, so a headless workdir never becomes unpushable.
 - After validation, the CLI computes the ids the workdir actually needs — per-step `agents`
   entry ids,
   per-step `secrets` entry ids, plus the code-referenced `secretReferences` (§8 — ids) — and
@@ -270,12 +278,17 @@ learns about an install failure at build time, not when a trigger fires.
   slot)"; `-f` follows through promotion per the follow semantics above). Without the flag
   a busy automation stays a plain refusal (409).
 
+**`automation export [path]`** writes the §5.1 archive (default `<name>.autowright` in the
+current directory) and never clobbers: an existing file at the target exits 1 with
+`<path> already exists - pass --force to overwrite`; `--force` replaces it.
+
 **`automation import`** takes a `.autowright` file path or an HTTPS URL (§5.2 rules — a
 direct `*.autowright` link on any host, or a `github.com` repo/release page resolved to its
 archive asset). A URL goes through §19 `POST /automations/import/url` and confirms
 immediately — the typed command is the user's explicit action, so no interactive preview;
 when GitHub resolution changed the URL, the resolved source is printed. A file path POSTs
-`/automations/import` unchanged. Both paths print the same summary lines, in order: a
+`/automations/import` unchanged, after a local size check: a file over the §5.1 64 MB cap
+exits 1 in the server's 413 wording and is never read into memory. Both paths print the same summary lines, in order: a
 summary carrying `renamedFrom` (§5.1 name dedupe) prints
 `renamed from "<renamedFrom>" - that name already exists`; one carrying `osMismatch`
 (§5.1) prints `built on <OS> - its steps may need rewriting on this machine`; then
@@ -302,15 +315,19 @@ entries arrive enabled with `source: spec`, stored
 **spec-sourced** crons and intervals the manifest no longer lists are dropped (`source: user`
 ones always survive, §4.3); the manifest's `discord`/`imessage`/
 `app_start` entries add only when no stored trigger matches their §4.3 identity fields; and
-stored non-schedule triggers always survive untouched. `pull` writes the stored crons and
+stored non-schedule triggers always survive untouched. `pull` writes the stored **spec-sourced** crons and
 intervals into the
 manifest (`cron`, `timezone` when set, or `every`; `run_if_missed: false` when off), so an untouched
-manifest round-trips the schedule unchanged. Between pushes, `trigger add` (cron by default,
+manifest round-trips the schedule unchanged, while user-minted schedules (`source: user`, the
+trigger verbs' affair) stay out of the manifest, so editing a manifest line can never
+duplicate one. Between pushes, `trigger add` (cron by default,
 `--every <duration>` for a §4.3 interval (the interval dialect; the stored canonical form
 is what `trigger list` labels), `--at` for a §4.3 one-shot — cron and `--at` take `--timezone <zone>`, an IANA zone, stored on the
 entry (`--timezone` with `--every` exits 1 - an interval has no zone), and all three take
 `--no-run-if-missed`, storing §4.3 `runIfMissed: false`; that flag with any other
-trigger kind exits 1 - `--app-start`, `--discord <channel> --secret <name>
+trigger kind exits 1; every modifier is checked against its kind the same way — `--pattern`,
+`--mention`, `--author`, or `--secret` with a cron, `--every`, `--at`, or `--app-start` exits 1
+naming the flag, never silently dropped - `--app-start`, `--discord <channel> --secret <name>
 [--pattern <text>] [--mention] [--author <user-id>[,<user-id>…]]…` for a §4.3 discord
 trigger (`--secret` takes the secret's **name** — the human surface, like the grant
 flags — and the CLI maps it to the stored secret's §4.8 id, which is what the trigger

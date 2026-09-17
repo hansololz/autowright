@@ -32,6 +32,31 @@ const rowBase: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', cursor: 'pointer',
 }
 
+// §7 LOGS pane: one memo'd row per line. A live attempt appends a line at a
+// time into a bucket of up to LOG_TAIL rows, so every append would otherwise
+// re-render two thousand rows; fed primitives, the compare settles them all
+// and only the new row renders. `marked` is the find bar's segments for this
+// line and is null whenever the line has no match — a string never changes
+// identity, so an unmatched row survives every re-search.
+const LogRow = React.memo(function LogRow({ time, kind, text, marked }: {
+  time: string
+  kind: LogLine['kind']
+  text: string
+  marked: React.ReactNode[] | null
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 12 }}>
+      <span style={{ color: 'var(--text-deco)', flex: 'none' }}>{time}</span>
+      <span style={{
+        color: logColor(kind), whiteSpace: 'pre-wrap', minWidth: 0,
+        fontStyle: kind === 'sys' ? 'italic' : 'normal',
+      }}>
+        {marked ?? text}
+      </span>
+    </div>
+  )
+})
+
 // §7 (the §9.2 step-navigator rule): the selected row is a plain, unfocusable,
 // text-selectable block marked by the accent bar and faint fill alone; the
 // other rows are buttons. A clicked row unmounts as it becomes the block, so
@@ -512,15 +537,16 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
               </div>
             )}
             {logs.map((l, k) => (
-              <div key={l.sequence} style={{ display: 'flex', gap: 12 }}>
-                <span style={{ color: 'var(--text-deco)', flex: 'none' }}>{l.time}</span>
-                <span style={{
-                  color: logColor(l.kind), whiteSpace: 'pre-wrap', minWidth: 0,
-                  fontStyle: l.kind === 'sys' ? 'italic' : 'normal',
-                }}>
-                  {find.marked[k]}
-                </span>
-              </div>
+              <LogRow
+                key={l.sequence}
+                time={l.time}
+                kind={l.kind}
+                text={l.text}
+                /* useFind hands back `lines` itself for every unmarked line, so
+                   an identity match is exactly "no segments here" — passing the
+                   fresh one-string array instead would make every row new. */
+                marked={find.marked[k] === lines[k] ? null : find.marked[k]}
+              />
             ))}
             {logs.length === 0 && (
               <EmptyLine style={{ padding: 0 }}>

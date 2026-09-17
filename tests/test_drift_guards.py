@@ -19,6 +19,10 @@ Three guards, all deliberately dumb (read the file, pull the fact out, compare):
    load-bearing for stranded 0.6.0 installs, so a rewrite past 0.6.1 is a bug.
 4. the §4.2 resolved-value parameter keys: the §20 CLI is a pure leaf and
    cannot import the store, so the same tuple is spelled out in both modules.
+5. three §20 CLI facts nothing else pins: that importing the CLI pulls in none
+   of the backend's heavy modules (the leaf rule the §4.2 guard above depends
+   on), that exit code 2 is spelled exactly once, and that a parser holding
+   subcommands carries no epilog.
 """
 import json
 import re
@@ -94,6 +98,55 @@ def test_param_value_keys_agree_between_the_cli_and_the_store():
     assert cli.PARAM_VALUE_KEYS == storage.PARAM_VALUE_KEYS, (
         "the CLI's §4.2 resolved-value keys drifted from the store's — a key "
         "missing on either side leaks a value into a pulled definition")
+
+
+# ---------------------------------------------------------------- §20 CLI
+
+def test_importing_the_cli_pulls_in_no_backend_module():
+    """§20: the CLI is a leaf over the §19 API — importing it must not drag in
+    the store, the app, the drafting pipeline, or the harness. A fresh
+    interpreter is the only honest check: inside the suite those modules are
+    already imported by something else."""
+    probe = (
+        "import sys, autowright.cli; "
+        "print(','.join(m for m in ('autowright.storage', 'autowright.api', "
+        "'autowright.drafting', 'autowright.harness') if m in sys.modules))")
+    r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                       cwd=str(REPO / "backend"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", (
+        f"importing autowright.cli pulled in: {r.stdout.strip()} — the §20 leaf rule is "
+        "broken, and a CLI that loads the backend pays for it on every invocation")
+
+
+def test_the_cli_spells_exit_code_2_exactly_once():
+    """§20 exit codes: "2 is exclusively that follow-failure signal" — a second
+    site would make the code ambiguous for the agents that read it."""
+    source = _read("backend/autowright/cli.py")
+    assert source.count("sys.exit(2)") == 1, (
+        "§20 exit code 2 is the followed-execution signal and nothing else")
+
+
+def test_no_listing_parser_carries_an_epilog():
+    """§20 help text: only commands carry an epilog — the parsers that hold
+    subcommands show their listing and stop, so nothing repeats above a listing
+    the reader hasn't reached yet."""
+    import argparse
+
+    from autowright import cli
+
+    offenders = []
+
+    def walk(p, path):
+        subs = [a for a in p._actions if isinstance(a, argparse._SubParsersAction)]
+        if subs and p.epilog:
+            offenders.append(path)
+        for a in subs:
+            for name, sub in a.choices.items():
+                walk(sub, f"{path} {name}")
+
+    walk(cli.build_parser(full=True), "autowright")
+    assert not offenders, f"parsers holding subcommands must carry no epilog: {offenders}"
 
 
 # ---------------------------------------------------------------- §6.2 curated list

@@ -578,6 +578,27 @@ describe('CreateFlow test-run modal (§11)', () => {
     expect(within(screen.getByTestId('test-card')).getByText('Open test')).toBeTruthy()
   })
 
+  it('two rapid Run test clicks start one test — the POST itself is the guard (§11)', async () => {
+    // `testLive` only turns true once the record is tracked, so until POST
+    // /tests answers, nothing else stops a second click starting a second run.
+    armPendingPoll()
+    let land!: (v: unknown) => void
+    ;(mockedApi.postTest as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((r) => { land = r }))
+    render(<CreateFlow />)
+    fireEvent.click(within(screen.getByTestId('test-card')).getByText('Test draft'))
+    const run = within(screen.getByTestId('test-modal')).getByText('Run test') as HTMLButtonElement
+
+    fireEvent.click(run)
+    fireEvent.click(run)
+    expect(mockedApi.postTest).toHaveBeenCalledTimes(1)
+    expect(run.disabled).toBe(true)
+    expect(run.title).toBe('Starting the test…')
+
+    await act(async () => { land({ executionId: 'e1' }) })
+    expect(mockedApi.postTest).toHaveBeenCalledTimes(1)
+  })
+
   it('a settled failed run: Run again returns to the setup phase, View execution opens the run', async () => {
     // the spy stands in for the store's go before the first render — the card
     // reads it through a selector, so swapping it mid-test would need a flush
@@ -910,6 +931,30 @@ describe('CreateFlow per-stage activity entries (§11)', () => {
     expect(stepsEntry.compareDocumentPosition(feedSteps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     // all settled with a green check, no spinner left
     expect(spinnersIn(t).length).toBe(0)
+  })
+})
+
+describe('CreateFlow draft-job poll (§11)', () => {
+  beforeEach(armPendingPoll)
+
+  it('never stacks ticks — a GET slower than the interval keeps one request in flight', async () => {
+    // Without the in-flight guard a slow backend collects one request per
+    // 700 ms tick for as long as it is slow, the answers land out of order,
+    // and the three-strikes counter counts overlapping failures instead of
+    // consecutive ones.
+    vi.useFakeTimers()
+    try {
+      const getDraftJob = mockedApi.getDraftJob as ReturnType<typeof vi.fn>
+      getDraftJob.mockImplementation(() => new Promise(() => { /* never answers */ }))
+      render(<CreateFlow />)
+      fireEvent.change(screen.getByPlaceholderText('Change something, or ask a question…'),
+        { target: { value: 'Check the docs' } })
+      fireEvent.click(screen.getByText('Send'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(700 * 4) })
+      expect(getDraftJob).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

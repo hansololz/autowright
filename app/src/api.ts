@@ -346,9 +346,17 @@ export const api = {
   },
 }
 
+// §19 reconnect backoff: the first retry is quick (a backend restart is back
+// in about a second), and a backend that stays down is asked for less and less
+// until the ceiling — never a 1.5 s hammer for as long as the app is open.
+const WS_RETRY_MIN_MS = 1500
+const WS_RETRY_MAX_MS = 15000
+
 export function openWs(onEvent: (msg: WsEvent) => void): () => void {
   let sock: WebSocket | null = null
   let closed = false
+  let retryMs = WS_RETRY_MIN_MS
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
   const connect = () => {
     if (closed) return
     sock = new WebSocket(`${base.replace('http', 'ws')}/ws?token=${token}`)
@@ -368,10 +376,21 @@ export function openWs(onEvent: (msg: WsEvent) => void): () => void {
       if (closed) return
       // A backend restart binds a NEW port and token — re-read backend.json
       // before each reconnect attempt or the loop retries a dead address forever.
-      setTimeout(() => { void connectInfo().finally(connect) }, 1500)
+      // A failed re-read is not a reason to stop retrying: connect() anyway and
+      // let the next close schedule the next (longer) wait.
+      const wait = retryMs
+      retryMs = Math.min(retryMs * 2, WS_RETRY_MAX_MS)
+      retryTimer = setTimeout(() => {
+        void connectInfo().catch(() => {}).finally(connect)
+      }, wait)
     }
-    sock.onopen = () => onEvent({ event: 'ws.open' })
+    sock.onopen = () => {
+      // The backoff is per outage, not per session — a connection that came
+      // back starts the next one over at the quick retry.
+      retryMs = WS_RETRY_MIN_MS
+      onEvent({ event: 'ws.open' })
+    }
   }
   connect()
-  return () => { closed = true; sock?.close() }
+  return () => { closed = true; clearTimeout(retryTimer); sock?.close() }
 }

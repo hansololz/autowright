@@ -494,11 +494,14 @@ a.ad-chip-btn, a.ad-chip-btn:hover { text-decoration: none; }
    content stays mounted; the inner wrapper must clip while closed */
 /* §14 collapsible: asymmetric rows (open decelerates, close accelerates) with a content
    crossfade — the wrapper fades out fast on close and fades in slightly after the rows
-   start opening, so text never visibly clips and hint↔body pairs hand off as one swap */
+   start opening, so text never visibly clips and hint↔body pairs hand off as one swap.
+   `visibility` flips to hidden only once the exit finishes (0s transition delayed by
+   --t-exit), so closed content leaves the tab order and the a11y tree without cutting
+   the fade short */
 .ad-collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--t-exit) var(--ease-exit); }
 .ad-collapse.open { grid-template-rows: 1fr; transition: grid-template-rows var(--t-enter) var(--ease-enter); }
-.ad-collapse > * { overflow: hidden; min-height: 0; opacity: 0; transition: opacity var(--t-exit) var(--ease-exit); }
-.ad-collapse.open > * { opacity: 1; transition: opacity var(--t-enter) var(--ease-enter) 40ms; }
+.ad-collapse > * { overflow: hidden; min-height: 0; opacity: 0; visibility: hidden; transition: opacity var(--t-exit) var(--ease-exit), visibility 0s linear var(--t-exit); }
+.ad-collapse.open > * { opacity: 1; visibility: visible; transition: opacity var(--t-enter) var(--ease-enter) 40ms, visibility 0s; }
 
 /* rotating header caret — single glyph, never an icon-class swap */
 .ad-caret { transition: transform var(--t-hover) var(--ease-enter); }

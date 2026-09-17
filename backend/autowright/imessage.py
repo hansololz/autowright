@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .platform.base import run_bounded
 
 log = logging.getLogger("autowright.imessage")
 
@@ -237,12 +238,14 @@ def send_message(chat_guid: str, text: str) -> str | None:
     if not chat_guid:
         return "the triggering message has no chat to reply to"
     try:
-        r = subprocess.run(
+        # Bounded through the shared helper: a grandchild holding osascript's
+        # pipe would wedge subprocess.run's own timeout in communicate().
+        r = run_bounded(
             ["osascript", "-e", _SEND_SCRIPT, chat_guid, str(text)[:REPLY_LIMIT]],
-            capture_output=True, text=True, timeout=30)
+            timeout=30)
     except FileNotFoundError:
         return "osascript not found"
-    except subprocess.TimeoutExpired:
+    if r is None:
         return "Messages didn't answer within 30 s"
     if r.returncode != 0:
         err = (r.stderr or "").strip() or f"osascript exited {r.returncode}"
@@ -285,10 +288,9 @@ def automation_probe() -> str:
     Event at Messages.app — macOS shows the consent prompt if never answered
     (and may launch Messages.app). Blocks until the user answers."""
     try:
-        r = subprocess.run(["osascript", "-e", _PROBE_SCRIPT],
-                           capture_output=True, text=True, timeout=300)
-        state = "granted" if r.returncode == 0 else "denied"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        r = run_bounded(["osascript", "-e", _PROBE_SCRIPT], timeout=300)
+        state = "granted" if r is not None and r.returncode == 0 else "denied"
+    except FileNotFoundError:
         state = "denied"
     _remember_automation(state)
     return state

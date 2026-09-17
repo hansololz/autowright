@@ -15,6 +15,7 @@ import http.client
 import logging
 import os
 import shutil
+import stat
 import threading
 import time
 import urllib.error
@@ -52,6 +53,17 @@ MAX_ENTRY_DESCRIPTION = 1000
 # would let a trickling server pin a threadpool worker for ten minutes.
 FETCH_DEADLINE_S = 60
 _FETCH_CHUNK = 64 * 1024
+
+# §22.1: at most four reference reads run at once process-wide. A §22.4 page of
+# 200 entries asks for 200 images, and a slow host would otherwise hold every
+# request worker the backend has.
+MAX_CONCURRENT_READS = 4
+_read_slots = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
+
+# §22.2: one deadline bounds a whole POST /marketplace/refresh - with a
+# per-catalog 60 s deadline, a table of slow locations would otherwise keep the
+# request open for as long as the table is wide.
+REFRESH_ALL_DEADLINE_S = 120
 
 # §22.2 auto refresh: 30 s after the store loads, then every 6 hours.
 AUTO_REFRESH_DELAY_S = 30
@@ -312,25 +324,34 @@ def _read_reference(reference: str, *, cap: int, what: str) -> bytes:
     from disk for a path, both under `cap`. An over-sized file is refused on
     its size and never read whole (an untrusted reference may name a huge
     file), and the read itself stops one byte past the cap, so a file that
-    grows between the two can't be loaded into memory either."""
-    if kind_of(reference) == "url":
-        return _fetch_url(reference, cap=cap)
-    over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
-    try:
-        if Path(reference).stat().st_size > cap:
+    grows between the two can't be loaded into memory either. Every read - a
+    catalog, an image, an archive - takes one of the §22.1 concurrency slots
+    for its whole length."""
+    with _read_slots:
+        if kind_of(reference) == "url":
+            return _fetch_url(reference, cap=cap)
+        over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
+        try:
+            st = Path(reference).stat()
+            if not stat.S_ISREG(st.st_mode):
+                # §22.1: a FIFO or a device is refused on its kind, before any
+                # open() - opening one blocks until something writes to it,
+                # which an untrusted reference must never be able to arrange.
+                raise MarketplaceError(f"couldn't read the {what} - not a regular file")
+            if st.st_size > cap:
+                raise MarketplaceError(over)
+            with open(reference, "rb") as f:
+                data = f.read(cap + 1)
+        except MarketplaceError:
+            raise  # the refusals above, not a failure to read
+        except (OSError, ValueError) as e:
+            # A path pathlib refuses outright - an embedded NUL byte raises
+            # ValueError, not OSError - is an unreadable reference, never a 500.
+            raise MarketplaceError(
+                f"couldn't read the {what} - {getattr(e, 'strerror', None) or e}") from None
+        if len(data) > cap:
             raise MarketplaceError(over)
-        with open(reference, "rb") as f:
-            data = f.read(cap + 1)
-    except MarketplaceError:
-        raise  # the over-size refusal above, not a failure to read
-    except (OSError, ValueError) as e:
-        # A path pathlib refuses outright - an embedded NUL byte raises
-        # ValueError, not OSError - is an unreadable reference, never a 500.
-        raise MarketplaceError(
-            f"couldn't read the {what} - {getattr(e, 'strerror', None) or e}") from None
-    if len(data) > cap:
-        raise MarketplaceError(over)
-    return data
+        return data
 
 
 def _decode(data: bytes) -> str:
@@ -568,13 +589,20 @@ class MarketplaceStore:
     def refresh_all(self) -> list[dict]:
         """§22.2: every catalog with a location, in table order; the others are
         listed as they were. Every read runs outside the table lock, then one
-        hold writes the results in."""
+        hold writes the results in. One deadline bounds the whole sweep: a
+        catalog whose turn comes after it is left untouched, not failed."""
         self._require_writable()
         with self.lock:
             targets = [(s["id"], s["location"]) for s in self.sources
                        if s["location"] is not None]
-        fetched = [(source_id, *self._fetch_catalog(location))
-                   for source_id, location in targets]
+        deadline = time.monotonic() + REFRESH_ALL_DEADLINE_S
+        fetched = []
+        for source_id, location in targets:
+            if time.monotonic() > deadline:
+                # §22.2: the rows this request never reached are left exactly
+                # as they were - no error stamped - and listed as they stand.
+                break
+            fetched.append((source_id, *self._fetch_catalog(location)))
         with self.lock:
             for source_id, text, error in fetched:
                 self._apply_to_row(source_id, text, error)

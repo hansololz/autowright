@@ -994,8 +994,9 @@ def test_linux_unit_text_escapes_systemd_specials(systemd, monkeypatch):
 
 
 def test_linux_notifier_posts_best_effort(monkeypatch):
+    # §2 shared bounded run — the same seam darwin's notifier uses.
     ran: list[list[str]] = []
-    monkeypatch.setattr(linux.subprocess, "run",
+    monkeypatch.setattr(linux, "run_bounded",
                         lambda cmd, **kw: ran.append(cmd))
     linux.NotifySendNotifier().post("Title", "Body")
     assert ran == [["notify-send", "--app-name=Autowright", "--", "Title", "Body"]]
@@ -1003,7 +1004,7 @@ def test_linux_notifier_posts_best_effort(monkeypatch):
     def boom(cmd, **kw):
         raise OSError("no notify-send")
 
-    monkeypatch.setattr(linux.subprocess, "run", boom)
+    monkeypatch.setattr(linux, "run_bounded", boom)
     linux.NotifySendNotifier().post("t", "b")  # never raises
 
 

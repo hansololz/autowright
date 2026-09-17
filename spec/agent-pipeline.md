@@ -769,7 +769,9 @@ notes rewrite (§11).
    against the automation's enabled
    agents at execution time. Step code is additionally scanned for literal `agents["<id>"]`
    subscripts — every code-referenced id must be among that step's declared entries (the
-   runtime container only holds the step's own agents; a validation error otherwise). An
+   runtime container only holds the step's own agents; a validation error otherwise — and
+   the scan runs on every step, so a subscript in a step that is not an agent step, which
+   declares no entries, is the same error). An
    entry's
    `why` is that agent's role note (appended to its tag tooltip, §9.2/§11 — a single-entry
    or empty list shows the step's own `why` there instead, so both read as the user's plain
@@ -922,7 +924,9 @@ is an **idle window**, 5 minutes without observed progress by default (§15
 `AUTOWRIGHT_AGENT_TIMEOUT_S`): every progress signal resets the window - a stdout line, a
 parsed handler event, or a scratch document appearing or growing (Live progress below) - so
 a call that keeps observably working keeps running, while a harness that reports nothing
-gets no resets and the window degrades to a fixed timeout. On top of the window sits a
+gets no resets and the window degrades to a fixed timeout. EOF on stdout disarms the window:
+the exit is then reaped under its own 30 s bound (group-killed on overrun), so a complete
+reply from a CLI that lingers after closing stdout is never reported as a timeout. On top of the window sits a
 **total wall-clock hard cap**,
 30 minutes by default (§15 `AUTOWRIGHT_AGENT_HARD_CAP_S`), so even a call that never stops
 streaming still ends. Stream size is bounded too: one invocation's stdout is capped at

@@ -25,7 +25,9 @@ block objects, `notes` a string, `params` and `packages` lists) answers 422 befo
 handler logic runs — and before any file is written, so a mistyped draft can never leave a
 half-written version folder behind. A model-level 422 carries the same shape as a
 handler 422: `detail` is one sentence (pydantic's per-field entries are flattened to
-`<field>: <reason>` joined by `; `), so clients render every 422 the same way.
+`<field>: <reason>` joined by `; `, with the location prefix — `body`, `query`, `path`,
+`header` — stripped alike, so a query 422 reads `limit: …` exactly like a body one), so
+clients render every 422 the same way.
 The store-state cross-field checks live in the handlers, answering the same 422:
 `paramValues` entries are checked against the automation's param definitions (names **and**
 kinds), `agentId`/`stepAgents` entries must reference configured agents, and
@@ -60,7 +62,10 @@ remain plain dicts (§2).
 - `GET /instructions` → `{ framework, build }` — the two §8 instruction files verbatim
   (the §8 per-OS placeholder resolved; backs the §11 Framework-instructions and
   Build-instructions cards)
-- `GET /automations` · `GET /automations/{id}` · `DELETE /automations/{id}` — delete cancels
+- `GET /automations` (the **list shape** — the row every `automation.changed` event carries,
+  without the full-record fields; the §20 reference resolution and the §13 tray poll read
+  it, so it never serializes version bodies) · `GET /automations/{id}` (the full record) ·
+  `DELETE /automations/{id}` — delete cancels
   every live execution and queued firing, **and settles the automation's draft work the same
   way a save does** (the §11 draft test is cancelled and its record marked so a landing test
   deletes itself instead of rewriting the removed container; the automation's still-building
@@ -419,14 +424,22 @@ remain plain dicts (§2).
   Packages card's page-load check) · `POST /packages/install` (same body) →
   `{ packages: [{ pip, import, status: installed | failed, version?, error? }] }` — the §6.2
   ensure, blocking; installs only what's missing, one pip run at a time process-wide (backs
-  the §11 Install/Retry button) · `POST /packages/outdated` (same body) → `{ packages:
+  the §11 Install/Retry button; a request that finds the pip lock held by another install
+  answers 409 "a package install is already running" instead of holding a request worker
+  until it frees — unless the body carries `wait: true`, which waits its turn: the §20
+  import's foreground ensure sends it, the §11 buttons never do. The engine's pre-execution
+  ensure, the §8 post-steps install and the §5.1 background import ensure always wait, and
+  a §7 cancel arriving during that wait is still honored at once) · `POST /packages/outdated` (same body) → `{ packages:
   [{ pip, import, latest? }] }` — read-only PyPI query (§6.2: newest stable non-yanked
   version with a compatible wheel); `latest` present only when newer than the **installed**
   version, absent when not installed or on any lookup failure (backs the §11 page-load update
   check) · `POST /packages/update` `{ packages: [{ pip, import }] }` → `{ packages: [{ pip,
   import, status: installed | failed, version?, error? }] }` — `pip install --upgrade` for
-  each named distribution in the shared directory (§6.2: wheels only, serialized); no
-  manifest writes; a malformed name → 422
+  each named distribution that is installed in the shared directory (§6.2: wheels only,
+  serialized; the same 409 as install while another pip run holds the lock); an entry that
+  isn't installed is never installed by update — it answers `status: failed`, `error: "not
+  installed"`; no manifest writes; a malformed name → 422. Every packages body is capped at
+  64 entries (422 above)
 - `POST /drafts` `{ mode: chat|sync, automationId?, text?, spec?, current?, chat?, executionId?,
   agentId?, enabledAgents?, allowedSecrets? }` → `{ jobId }` — `chat` requires a nonempty
   `text` (422 otherwise), takes the in-editor draft as `current` (name + description + spec +
@@ -498,12 +511,15 @@ remain plain dicts (§2).
   rendered from (the §4.3 entries, exactly as sourced for the prompt), so a re-attach
   apply can prove the base list that `triggers` ops index is still the one the agent saw
   (§11 — on any difference the ops are dropped, never applied to a changed list).
-- `GET /executions?automation=&status=&startedFromMs=&startedToMs=&limit=&beforeStartedMs=&beforeId=` →
+- `GET /executions?automation=&status=&startedFromMs=&startedToMs=&idPrefix=&limit=&beforeStartedMs=&beforeId=` →
   `{ executions, total }` (headers only — no steps; rows carry the §4.5 `triggerSender`),
   sorted in the §7 canonical order: `startedMs` desc, id asc on ties, the §5
   §7 canonical order (`startedMs` desc, `id` asc on ties — computed over the in-memory
   headers; the §5 `executions.db` index only seeds that set at startup). `automation`
   filters to automation ids (exact) and **may repeat** - `automation=a&automation=b` matches
+  (`idPrefix` keeps rows whose execution id starts with the given string — the §20
+  execution reference resolution sends it with a `limit`, so resolving a short id never
+  serializes the whole history; an empty value is ignored)
   rows of either (the §7 filter modal's multi-select); a row with no automation id (a
   create-mode test) never matches. `startedFromMs` / `startedToMs` (optional ints ≥ 0,
   either alone or both) bound the row's `startedMs` **inclusively** - the §7 time range;
@@ -525,7 +541,9 @@ remain plain dicts (§2).
   log route's step/attempt pair) ·
   `GET /executions/{id}` (steps
   with attempts + params + error + result + `triggerPayload` + the `workspace` / `logs` dir
-  paths (§4.5) — logs are lazy, never inline) ·
+  paths (§4.5) — logs are lazy, never inline; the header is looked up under the store lock
+  and the body read + serialized outside it — a terminal record is immutable, and the §7
+  page polls this route, so it must never hold the engine's lock across disk) ·
   `GET /executions/{id}/logs?step=&attempt=&tail=` → `{ lines: [{time, kind, sequence, text}] }` — both
   `step` and `attempt`
   select that step attempt's file, neither selects `logs/execution.ndjson`, one without the
@@ -535,11 +553,15 @@ remain plain dicts (§2).
   multi-thousand-line file never has to cross the wire whole. `sinceSequence` (optional int
   ≥ 0; anything lower answers 422) keeps only lines whose `sequence` is greater — the §20
   follow loop sends the last sequence it printed, so a polled live attempt never re-downloads
-  what it already showed; `tail` applies after it. An undecodable byte run in the file (a
+  what it already showed; `tail` applies after it. Sequences are gapless per-file line
+  numbers, so the server slices the file at that line before parsing (after checking that
+  the line there carries that sequence — otherwise it parses the whole file), and a 1 Hz
+  follow never re-parses what it already served. An undecodable byte run in the file (a
   crash mid-append) is replaced, never a 500 ·
   `GET /executions/{id}/result/{name}` (raw result-dir file for the §7 file views; plain
   filenames only — no path traversal) ·
-  `POST /executions/{id}/cancel` (a running execution is killed per §7; a §6 `queued` one leaves
+  `POST /executions/{id}/cancel` (404 for an unknown id, like its siblings; a running
+  execution is killed per §7; a §6 `queued` one leaves
   the queue and finishes `skipped`, with its sender told — the same endpoint covers both, and
   the queue check and the live check share one lock so an entry promoted between the click and
   the call can never be cancelled twice or missed by both) ·
@@ -580,7 +602,9 @@ remain plain dicts (§2).
   `{ id, name, installed, signedIn, detail }` — `signedIn` is `true`/`false` by the rule
   above; `detail` is the real version/sign-in line rendered on §10 cards
   (never a fabricated "signed in" claim). Ollama state is not part of detection — the §10
-  Free local AI card reads it from `GET /ollama/status`.
+  Free local AI card reads it from `GET /ollama/status`. The four probes run in parallel,
+  and concurrent detect calls share one in-flight probe (single-flight) — a wedged CLI costs
+  one bounded probe, never one per caller.
 - **Install** — `POST /agents/install` `{ id }` starts a background install of that provider
   (409 while one is already running for the same id) and streams `harness.install` WS events.
   Install and sign-in help (`POST /agents/login`, below) are both gated on the §2
@@ -599,7 +623,9 @@ remain plain dicts (§2).
   `GET /agents/install/{id}` → `{ state: idle | running | done | failed, percent?, line?, error? }`
   lets a remounted UI reattach. A 15-minute wall-clock cap applies to each install phase
   (installer subprocess run and download): on expiry the job fails with a timeout message —
-  it can never sit `running` forever and block retries. **Install-location principle:**
+  it can never sit `running` forever and block retries; the abandoned phase's late progress
+  is discarded (each job carries a generation token its emitter checks), so it can never
+  write into a later install's snapshot. **Install-location principle:**
   every install lands exactly where the user's own manual install would put the tool — a
   standard user location, never a directory private to Autowright — and leaves it reachable
   from the user's terminal, never isolated inside the app. Every install whose bin lands in
@@ -658,7 +684,10 @@ remain plain dicts (§2).
   dir (§6) first — Terminal shells
   otherwise start in `~`, and the CLI's startup scan must not walk the home folder.
   `GET /agents/signin/{id}` → `{ installed, signedIn }` is the cheap poll (§10 waits on it
-  every 2 s) — it runs only that provider's sign-in rule, never version lookups. For an
+  every 2 s) — it runs only that provider's sign-in rule, never version lookups. The
+  provider's probe result is cached for 2 s behind a per-provider lock, so overlapping
+  polls (a CLI cold start can outlast the poll interval) share one process instead of
+  stacking. For an
   ollama-mode agent `signedIn` is `null` — local models have no sign-in concept.
 - Ollama: `GET /ollama/status` → `{ ready, installed,
   models, version }` (`version` from Ollama's `/api/version` when the server answers, else
@@ -832,6 +861,8 @@ already neutralize. The provider config and
   mid-edit, and collapses the page height so the scroll position jumps to the top. A bare
   `automation.changed` (no `automationId`) means "many may have changed" (data-path switch,
   startup repair): clients fall back to re-`GET /state`, applying its list rows with the
-  same merge. Clients also re-`GET /state` on reconnect, and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
+  same merge. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
+  successful open), re-reading `backend.json` before each attempt, and re-`GET /state` on
+  reconnect, and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
   the client's disconnect, so a dropped client ends the handler immediately — an idle open
   socket never leaves uvicorn's graceful shutdown waiting.

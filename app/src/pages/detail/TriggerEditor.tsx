@@ -7,7 +7,7 @@ import { usePlatformCopy } from '../../platformCopy'
 import { SecretModal } from '../../SecretModal'
 import { useStore } from '../../store'
 import type { SecretMeta, Trigger, TriggerKindFields } from '../../types'
-import { Caret, Collapse, MenuRow, MiniBadge, PopMenu, ScrollArea, usePopover } from '../../ui'
+import { Caret, Collapse, MenuItemRow, MenuRow, MiniBadge, PopMenu, ScrollArea, usePopover } from '../../ui'
 import { useTriggerPreview } from '../../triggers'
 
 const TZ_LIST: string[] = Intl.supportedValuesOf('timeZone')
@@ -333,39 +333,21 @@ function SecretPick({ secrets, selected, onPick }: {
           <div style={{ padding: '9px 14px', font: '400 11.5px/1.45 var(--sans)', color: 'var(--text-muted)' }}>
             No secrets yet — press New secret.
           </div>
-        ) : secrets.map((s) => {
-          const sel = s.id === selected
-          return (
-            <button
-              className="ad-btn-bare ad-hover-row"
-              key={s.id}
-              onClick={() => { setOpen(false); onPick(s.id) }}
-              style={{
-                display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 14px', cursor: 'pointer',
-                borderBottom: '1px solid var(--hairline-dim)',
-                background: sel ? 'var(--accent-hint-bg)' : 'transparent',
-              }}
-            >
-              <span style={{ width: 14, flex: 'none', textAlign: 'center', font: '600 12px var(--mono)', color: 'var(--accent)' }}>
-                {sel ? <i className="fa-solid fa-check" style={{ fontSize: 10 }} /> : ''}
+        ) : secrets.map((s) => (
+          <MenuItemRow
+            key={s.id}
+            mono
+            title={s.set ? s.name : (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {s.name}
+                <MiniBadge c="var(--amber)" bg="var(--amber-bg)">NOT SET</MiniBadge>
               </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ font: `500 12.5px var(--mono)`, color: sel ? 'var(--text)' : 'var(--text-2)' }}>{s.name}</span>
-                  {!s.set && <MiniBadge c="var(--amber)" bg="var(--amber-bg)">NOT SET</MiniBadge>}
-                </div>
-                {s.description && (
-                  <div style={{
-                    font: '400 11.5px/1.45 var(--sans)', color: 'var(--text-muted)', marginTop: 1,
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>
-                    {s.description}
-                  </div>
-                )}
-              </div>
-            </button>
-          )
-        })}
+            )}
+            sub={s.description || undefined}
+            selected={s.id === selected}
+            onPick={() => { setOpen(false); onPick(s.id) }}
+          />
+        ))}
       </PopMenu>
     </div>
   )

@@ -13,7 +13,7 @@ import { useStore } from '../../store'
 import { ParamValueEditor } from '../../steps'
 import { ExecutionView, MODAL_TOOLBAR, PendingStepRow, RAIL_WIDTH, RailHeader } from '../../executionView'
 import type { DraftTrigger, ParamDef, Step } from '../../types'
-import { EmptyLine, Eyebrow, Modal, ProgressBar, PULSE, ScrollArea, StatusLine } from '../../ui'
+import { EmptyLine, Eyebrow, Modal, ProgressBar, PULSE, ScrollArea, StatusLine, Spinner } from '../../ui'
 
 const FOOTER = 36
 export const TEST_MODAL_FRAME = 'clamp(440px, 680px, 82vh)'
@@ -82,6 +82,8 @@ export interface TestRunModalProps {
   mockSenderSeed: (t: DraftTrigger) => string
   /** null when Run test may start; otherwise the tooltip reason */
   runDisabledReason: string | null
+  /** §9 busy feedback: the POST is in flight — spinner + "Starting…" label */
+  runStarting?: boolean
   onRun: () => Promise<void>
   onCancel: () => void
   onSkip: (i: number) => void
@@ -97,7 +99,7 @@ export interface TestRunModalProps {
 
 export function TestRunModal({
   steps, runExecutionId, testParams, setTestParams, testMock, setTestMock, msgTriggers, msgLabels, mockSenderSeed,
-  runDisabledReason, onRun, onCancel, onSkip, onViewExecution, onAnalyze, analyzeDisabled, lockStyle, machine, onClose,
+  runDisabledReason, runStarting = false, onRun, onCancel, onSkip, onViewExecution, onAnalyze, analyzeDisabled, lockStyle, machine, onClose,
 }: TestRunModalProps) {
   const executions = useStore((s) => s.executions)
   const executionFull = useStore((s) => s.executionFull)
@@ -268,8 +270,10 @@ export function TestRunModal({
                       title={runDisabledReason ?? undefined}
                       onClick={() => void onRun()}
                     >
-                      <i className="fa-solid fa-play" style={{ fontSize: 10, marginRight: 5 }} />
-                      Run test
+                      {runStarting
+                        ? <Spinner size={10} style={{ marginRight: 5, verticalAlign: '-1px' }} />
+                        : <i className="fa-solid fa-play" style={{ fontSize: 10, marginRight: 5 }} />}
+                      {runStarting ? 'Starting…' : 'Run test'}
                     </button>
                     {closeBtn(close)}
                   </div>

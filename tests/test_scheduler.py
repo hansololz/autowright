@@ -1454,3 +1454,50 @@ def test_run_if_missed_true_catches_a_slept_through_interval_up_once(store, monk
     sched._tick()
     assert len(fires) == 1
     assert _drop_records(store, a["id"]) == []
+
+
+# ---------- §19: a deleted automation is nobody's to announce ----------
+
+def test_a_change_event_is_never_published_for_a_deleted_automation(store, monkeypatch):
+    """§19: the tick holds the record a snapshot handed it — a DELETE landing
+    under it must not put the row back on every client's list."""
+    from autowright import scheduler as sched_mod
+
+    engine, sched = _mk(store)
+    published = []
+    monkeypatch.setattr(sched_mod.hub, "publish",
+                        lambda kind, **payload: published.append(kind))
+    a = store.create_automation(make_version(), "Going", None)
+
+    sched._publish_changed(a)
+    assert published == ["automation.changed"]
+
+    store.delete_automation(a)
+    sched._publish_changed(a)
+    assert published == ["automation.changed"]  # nothing new
+
+
+def test_the_overdue_sweep_says_nothing_about_an_automation_a_delete_took(store, monkeypatch):
+    """§6: the sweep's second observation would notify — but the automation it
+    observed is gone, so there is nothing left to be overdue."""
+    from datetime import datetime
+
+    from autowright import notify
+    from conftest import make_version
+
+    clock = _Clock(datetime(2026, 7, 10, 9, 0))
+    engine, sched = _mk_clocked(store, clock)
+    posted = []
+    monkeypatch.setattr(notify, "post", lambda title, body: posted.append((title, body)))
+    a = store.create_automation(make_version(), "Dead Job", None, triggers=[
+        {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+         "source": "user"}])
+    a["created_at"] = "2026-07-01T08:00:00"  # never ran; many 8:00s already missed
+    a["triggers"][0]["enabledAt"] = datetime(2026, 7, 1, 8, 0).astimezone().isoformat()
+
+    sched._overdue_sweep([a], datetime(2026, 7, 10, 10, 1))  # sweep 1: streak 1
+    assert posted == []
+    store.delete_automation(a)
+    sched._overdue_sweep([a], datetime(2026, 7, 10, 11, 2))  # would notify
+    assert posted == []
+    assert a["id"] not in sched._overdue_notified

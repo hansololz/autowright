@@ -131,17 +131,31 @@ function bundledPython() {
 async function backendVersion() {
   const info = backendInfo()
   if (!info) return null
-  try {
-    const res = await fetch(`http://127.0.0.1:${info.port}/health`, {
-      signal: AbortSignal.timeout(1500),
-    })
-    if (!res.ok) return null
-    const body = await res.json()
-    if (body?.app !== 'Autowright') return null
-    return String(body.version ?? '') || null
-  } catch {
-    return null
+  // §3: a backend busy under its store lock can miss a single probe, and
+  // concluding "unreachable" there would bootout a live backend mid-execution.
+  // So only the no-answer case retries - three attempts, 2 s each, 500 ms
+  // apart. An answer settles it either way: a foreign app name or an empty
+  // version is null on the first reply, never retried.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 500))
+    let res
+    try {
+      res = await fetch(`http://127.0.0.1:${info.port}/health`, {
+        signal: AbortSignal.timeout(2000),
+      })
+    } catch {
+      continue
+    }
+    try {
+      if (!res.ok) return null
+      const body = await res.json()
+      if (body?.app !== 'Autowright') return null
+      return String(body.version ?? '') || null
+    } catch {
+      return null
+    }
   }
+  return null
 }
 
 // Healthy ≙ our backend answered and named itself — never merely "something

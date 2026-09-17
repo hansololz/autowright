@@ -299,6 +299,9 @@ class Scheduler:
             if is_overdue:
                 self._overdue_streak[aid] = self._overdue_streak.get(aid, 0) + 1
                 if self._overdue_streak[aid] >= 2 and aid not in self._overdue_notified:
+                    with self.store.lock:
+                        if self.store.autos.get(aid) is not a:
+                            continue  # §19: deleted mid-sweep — nobody to notify about
                     self._overdue_notified.add(aid)
                     # §6: attention-class — posts under both §4.9 notifications
                     # values, exactly like a failed execution's end notification.
@@ -318,5 +321,10 @@ class Scheduler:
         # §19: single-automation change events carry the changed row so clients
         # patch in place instead of re-fetching /state.
         with self.store.lock:
+            # §19: a DELETE landing between the tick and here leaves the record
+            # in hand but no longer registered — serializing it would announce
+            # an automation the clients have already dropped.
+            if self.store.autos.get(a["id"]) is not a:
+                return
             payload = self.store.auto_json(a, full=False)
         hub.publish("automation.changed", automationId=a["id"], automation=payload)

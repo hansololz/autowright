@@ -1123,7 +1123,10 @@ cliEnabled: bool (default true) — whether the user wants the `autowright` comm
   standing pre-policy decision recorded in the §21.4 log). The §3 shim
   files on disk stay the truth about what's actually installed — this key only records the
   user's choice (stored backend-side like every setting, §20 CLI parity included)
-dataPath (default ~/Library/Application Support/Autowright/executions), dataSize
+dataPath (default ~/Library/Application Support/Autowright/executions), dataSize (the tree
+  walk runs on a background thread, cached 30 s and keyed by the path — `/state` and
+  `/settings` answer the last value at once, an empty string until the first walk lands,
+  never blocking on the walk)
 imessageAutomation: granted | denied | unknown — hidden stored value, no settings row and no
   default entry (absent reads as unknown): the §19 remembered macOS Automation-permission
   state (Apple Events control of Messages). macOS offers no prompt-free read, so the backend

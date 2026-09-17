@@ -71,9 +71,10 @@ export default function ReportModal() {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 18 }}>
+            <div role="radiogroup" aria-label="Report type" style={{ display: 'flex', gap: 18 }}>
               {([['bug', 'Bug'], ['feature', 'Feature request']] as const).map(([k, l]) => (
-                <button key={k} className="ad-btn-bare ad-hover-row" onClick={() => setKind(k)}
+                <button key={k} className="ad-btn-bare ad-hover-row" role="radio" aria-checked={kind === k}
+                  onClick={() => setKind(k)}
                   style={{ display: 'flex', alignItems: 'center', gap: 7, width: 'auto' }}>
                   <RadioRing selected={kind === k} />
                   {l}

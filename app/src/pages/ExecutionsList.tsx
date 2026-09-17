@@ -4,7 +4,7 @@
 // §7 filter modal — statuses, automations, a started-time range — and the
 // pager bring deeper history in via GET /executions. Every filter is one
 // predicate applied server-side and to the window's rows alike.
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
 import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageLoading, PageTitle, PULSE, waitedLabel } from '../ui'
@@ -113,18 +113,23 @@ export default function ExecutionsList() {
   const [filters, setFilters] = useState<ExecutionFilters>(DEFAULT_FILTERS)
   const [modalOpen, setModalOpen] = useState(false)
   const filtered = filtersActive(filters)
+  const filterKey = JSON.stringify(filters)
   // §7: one predicate, the same on the server and over the window's rows —
   // status ∈ selection (when any), automation id ∈ selection (when any),
-  // startedMs within the inclusive bounds. Presets resolve against the clock
-  // at every use.
-  const range = resolveRange(filters.time, Date.now())
-  const selectedStatuses = new Set<string>(filters.statuses)
-  const selectedIds = new Set(filters.automations)
-  const matches = (e: Execution) =>
-    (selectedStatuses.size === 0 || selectedStatuses.has(e.status)) &&
-    (selectedIds.size === 0 || (e.automationId !== null && selectedIds.has(e.automationId))) &&
-    (range.from === undefined || e.startedMs >= range.from) &&
-    (range.to === undefined || e.startedMs <= range.to)
+  // startedMs within the inclusive bounds. A preset resolves against the clock
+  // once per filter change, never per use: the query and the predicate must
+  // read the same bounds, or a row fetched under one window fails the other
+  // and vanishes from the page a moment after it landed.
+  const range = useMemo(() => resolveRange(filters.time, Date.now()), [filterKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const matches = useMemo(() => {
+    const selectedStatuses = new Set<string>(filters.statuses)
+    const selectedIds = new Set(filters.automations)
+    return (e: Execution) =>
+      (selectedStatuses.size === 0 || selectedStatuses.has(e.status)) &&
+      (selectedIds.size === 0 || (e.automationId !== null && selectedIds.has(e.automationId))) &&
+      (range.from === undefined || e.startedMs >= range.from) &&
+      (range.to === undefined || e.startedMs <= range.to)
+  }, [filterKey, range]) // eslint-disable-line react-hooks/exhaustive-deps
   // §7: the Finished section exists only while the status selection is empty
   // or names a terminal status — live statuses alone render no table and
   // fetch nothing.
@@ -138,7 +143,6 @@ export default function ExecutionsList() {
     ...(range.from !== undefined ? { startedFromMs: range.from } : {}),
     ...(range.to !== undefined ? { startedToMs: range.to } : {}),
   }
-  const filterKey = JSON.stringify(filters)
   // §7 fetched pages and the page number: view state only — reset on unmount
   // and on every filter change. `serverTotal` is the current filter's match
   // count from the last fetch (null until one lands).
@@ -159,8 +163,9 @@ export default function ExecutionsList() {
     .filter((e) => e.status === 'queued' && matches(e))
     .sort((a, b) => (a.queuedMs || a.startedMs) - (b.queuedMs || b.startedMs))
 
-  const matchesFinished = (e: Execution) =>
-    e.status !== 'queued' && e.status !== 'executing' && hasFinished && matches(e)
+  const matchesFinished = useCallback((e: Execution) =>
+    e.status !== 'queued' && e.status !== 'executing' && hasFinished && matches(e),
+  [matches, hasFinished])
   // §7 merge: fetched pages join the live window, window wins on an id both
   // hold (it is fresher — events land there), in the canonical order.
   const windowFinished = executions.filter(matchesFinished)
@@ -201,6 +206,9 @@ export default function ExecutionsList() {
   // window's span but isn't in the window can only have been deleted
   // server-side (an automation delete, a retention sweep) — keeping it would
   // show a ghost row.
+  // The window is unfiltered, so only its matching rows enter the set: under a
+  // filter its other rows are not this page's rows at all, and absorbing them
+  // would evict the fetched page they were merged in front of.
   // The set is capped at what the pages in reach can slice: everything deeper
   // is refetched by Next anyway, so it never grows for the session's lifetime.
   useEffect(() => {
@@ -208,18 +216,28 @@ export default function ExecutionsList() {
       .filter((e) => e.status !== 'queued' && e.status !== 'executing')
       .sort(byCanonicalOrder)
     if (finishedRows.length === 0) return
+    const absorbed = filtered ? finishedRows.filter(matchesFinished) : finishedRows
+    // The prune anchor stays the UNFILTERED window's oldest row — that span is
+    // what proves an accumulated row was deleted server-side, and a filtered
+    // window's own oldest row would condemn every older fetched row with it.
+    const oldest = finishedRows[finishedRows.length - 1]
     setFetched((f) => {
-      const ids = new Set(finishedRows.map((e) => e.id))
-      const oldest = finishedRows[finishedRows.length - 1]
-      const merged = [...finishedRows,
+      const ids = new Set(absorbed.map((e) => e.id))
+      // §7 cap: the larger of the absorbed rows and the pages in reach —
+      // unfiltered the window alone fills page 0 (Next fetches), under a
+      // filter the few matching window rows never evict a fetched page.
+      const merged = [...absorbed,
                       ...f.filter((e) => !ids.has(e.id) && byCanonicalOrder(e, oldest) > 0)]
-        .slice(0, (page + 1) * PAGE)
+        .slice(0, Math.max(absorbed.length, (page + 1) * PAGE))
       // The same rows in the same order: keep the identity, or every /state
       // refresh would re-render the whole list for nothing.
       const key = (rows: Execution[]) => rows.map((e) => e.id).join(',')
       return key(merged) === key(f) ? f : merged
     })
-  }, [executions])
+    // Only a window change absorbs: a filter change resets the set through the
+    // fetch effect above, so `matchesFinished`'s identity is not a reason to
+    // re-run this one.
+  }, [executions]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // §7: the QUEUED FOR column counts up — one timer for the whole section,
   // running only while something is actually queued.

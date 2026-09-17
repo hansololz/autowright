@@ -1,4 +1,6 @@
 """§5 request-log files: one file per HTTP/agent request under <logs>/requests."""
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -137,3 +139,26 @@ def test_build_failure_prune_keeps_newest(home, devmode, monkeypatch):
     names = sorted(p.name for p in (home / "logs" / "build-failures").iterdir())
     assert len(names) == 3
     assert names[0].startswith("20260726-000000-002")
+
+
+def test_the_kept_names_are_held_in_memory(home, devmode, monkeypatch):
+    """§5: a file lands on every request — the kept names are seeded from one
+    `iterdir` and appended to afterwards, so no write re-lists the directory."""
+    from autowright import reqlog
+
+    monkeypatch.setattr(reqlog, "MAX_FILES", 3)
+    reqlog._kept_names.clear()
+    d = home / "logs" / "requests"
+    listings = []
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir",
+                        lambda self: listings.append(self) or real_iterdir(self))
+
+    for i in range(6):
+        reqlog.write(f"20260726-000000-{i:03d}", "GET", "/state", f"body {i}")
+
+    assert listings.count(d) == 1  # only the seeding read
+    monkeypatch.undo()
+    names = sorted(p.name for p in d.iterdir())
+    assert len(names) == 3
+    assert names[0].startswith("20260726-000000-003")  # the oldest three pruned

@@ -954,7 +954,9 @@ export default function CreateFlow() {
         })
         // The detail page guards against unknown ids — make sure the store
         // knows the new automation before navigating (WS refresh may lag).
-        await useStore.getState().loadAuto(created.id)
+        // The one inserting load: every other one is update-only, so a row the
+        // list has never held is added here and nowhere else.
+        await useStore.getState().loadAuto(created.id, { insert: true })
         setSurface('app')
         go('automation', { automationId: created.id })
         showToast('Created — nothing has executed yet. Press Execute now when you’re ready.', 3600)

@@ -135,6 +135,18 @@ def fake_keychain(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_signin_cache():
+    """§19: `harness.signed_in` caches each provider's probe for 2 s. Tests
+    flip sign-in state (a creds file, an env knob, a patched probe) far faster
+    than that in one process, so every test starts and ends cache-free."""
+    from autowright import harness
+
+    harness._signin_cache.clear()
+    yield
+    harness._signin_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_notifications(monkeypatch):
     """Default: notify.post is a no-op. The fixture yields the real function so
     tests/test_notify.py can drive the true osascript path (against the fake
@@ -179,6 +191,10 @@ def reset_module_globals():
     executor._robots.clear()
     executor._site_last.clear()
     packages.invalidate_scan()  # §6.2 installed-scan cache (keyed on the home dir)
+    api._data_size_cache = None  # §4.9 dataSize walk result (keyed on the home dir)
+    api._data_size_walking = False
+    api._detect_cache = None  # §19 /agents/detect result cache and in-flight sweep
+    api._detect_inflight = None
     api._served_launches.clear()  # §19 app-start dedupe memory
     api._shutdown_callbacks.clear()  # §3 main()-registered cleanup from an earlier boot
     api._quiesce_callbacks.clear()
@@ -356,6 +372,41 @@ def store(home):
     s = Store()
     s.load_all()
     return s
+
+
+def wait_done(engine, execution_id, timeout=30):
+    """Test convenience: block until the engine says the execution is no longer
+    live, failing rather than hanging when it never settles."""
+    import time
+
+    t0 = time.time()
+    while engine.is_live(execution_id):
+        assert time.time() - t0 < timeout, "execution didn't finish in time"
+        time.sleep(0.05)
+
+
+def _rename_denied(monkeypatch, name: str):
+    """Make one directory's aside-rename fail the way a locked or read-only
+    volume makes it fail; every other rename runs for real."""
+    real = Path.rename
+
+    def rename(self, target):
+        if self.name == name:
+            raise PermissionError(13, "Permission denied")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+
+
+def _reap(pidfile) -> None:
+    """Kill the escaped grandchild a fake CLI left behind — nothing else will,
+    which is the whole point of the scenarios that use it."""
+    import signal
+
+    try:
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
 
 
 def read_all_logs(store, execution_id):

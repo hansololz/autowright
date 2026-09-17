@@ -137,6 +137,33 @@ describe('applyEvent', () => {
     expect(m.execLogs.e1).toBeUndefined()
   })
 
+  it('exec.deleted drops the tracked §11 test — the card never waits on a gone record', async () => {
+    vi.useFakeTimers()
+    const getExecution = vi.mocked(apiMod.api.getExecution)
+    store.useStore.setState({
+      executions: [ex('eT', 100, { test: true })], executionsTotal: 1, test: { executionId: 'eT' },
+    })
+    store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'eT' })
+    // left tracked, the TEST card would sit on "Loading the test…" forever
+    expect(store.useStore.getState().test).toBeNull()
+
+    // the in-flight body fetch is released with it: a re-created id is never
+    // locked out of its one catch-up GET
+    store.useStore.setState({ executionId: 'eT', executionFull: {} })
+    const ev: WsEvent = {
+      event: 'execution.step', executionId: 'eT', automationId: null, index: 0,
+      step: { name: 's', status: 'succeeded', duration: '1s', attempts: [] },
+    }
+    store.useStore.getState().applyEvent(ev)
+    await vi.advanceTimersByTimeAsync(0)
+    getExecution.mockClear()
+    store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'eT' })
+    store.useStore.setState({ executionId: 'eT' })
+    store.useStore.getState().applyEvent(ev)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getExecution).toHaveBeenCalledWith('eT')
+  })
+
   it('exec.deleted floors the total at zero', () => {
     store.useStore.setState({ executions: [], executionsTotal: 0 })
     store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'gone' })
@@ -495,6 +522,26 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     expect(m.executionFull.e1.automationDeleted).toBe(true)
   })
 
+  it('loadAuto is update-only — a row removed while the GET was in flight stays gone (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [auto('a1')] })
+    let land!: (v: unknown) => void
+    getAutomation.mockImplementationOnce(() => new Promise((r) => { land = r }) as never)
+    const p = store.useStore.getState().loadAuto('a1')
+    store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'a1', automation: null })
+    land(auto('a1'))
+    await p
+    expect(store.useStore.getState().automations).toEqual([])
+  })
+
+  it('loadAuto inserts only when the caller asks — the §11 create path (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [] })
+    getAutomation.mockResolvedValueOnce(auto('a-new'))
+    await store.useStore.getState().loadAuto('a-new', { insert: true })
+    expect(store.useStore.getState().automations.map((a: { id: string }) => a.id)).toEqual(['a-new'])
+  })
+
   it('bare event and unknown-id entity both fall back to a full refresh', () => {
     const state = vi.mocked(apiMod.api.state)
     state.mockClear()
@@ -677,6 +724,63 @@ describe('applyEvent — changed nudges and ws.open recovery (§19)', () => {
     await store.useStore.getState().refresh()
     expect(state).toHaveBeenCalledTimes(2)
     expect(store.useStore.getState().executions.map((e) => e.id)).toEqual(['mid'])
+  })
+
+  it('an execution.deleted mid-/state makes the snapshot stale — the row never comes back (§19)', async () => {
+    const snap = (executions: Execution[]) => ({
+      version: 'v', automations: [], executions, agents: [], secrets: [],
+      settings: null, pendingDraft: null,
+    })
+    const state = vi.mocked(apiMod.api.state)
+    state.mockClear()
+    store.useStore.setState({ executions: [ex('gone', 5)], executionsTotal: 1 })
+    state.mockImplementationOnce(async () => {
+      // serialized before the delete: applying it would resurrect the row
+      store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'gone' })
+      return snap([ex('gone', 5)]) as never
+    })
+    state.mockResolvedValueOnce(snap([]) as never)
+    await store.useStore.getState().refresh()
+    expect(state).toHaveBeenCalledTimes(2)
+    expect(store.useStore.getState().executions).toEqual([])
+  })
+
+  it('an automation delete mid-/state makes the snapshot stale the same way (§19)', async () => {
+    const snap = (executions: Execution[]) => ({
+      version: 'v', automations: [], executions, agents: [], secrets: [],
+      settings: null, pendingDraft: null,
+    })
+    const row = { id: 'a1', name: 'Auto a1', lastStatus: 'none', triggers: [], live: [] } as never
+    const state = vi.mocked(apiMod.api.state)
+    state.mockClear()
+    store.useStore.setState({ automations: [row] })
+    state.mockImplementationOnce(async () => {
+      store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'a1', automation: null })
+      return { ...snap([]), automations: [row] } as never
+    })
+    state.mockResolvedValueOnce(snap([]) as never)
+    await store.useStore.getState().refresh()
+    expect(state).toHaveBeenCalledTimes(2)
+    expect(store.useStore.getState().automations).toEqual([])
+  })
+})
+
+describe('boot — the §2 discovery retry chain', () => {
+  it('arms the retry when the bridge read rejects, not just when it answers false', async () => {
+    vi.useFakeTimers()
+    const connect = vi.mocked(apiMod.connectInfo)
+    connect.mockClear()
+    // A rejection escaping boot() would leave `connected` false with no timer
+    // to fix it — the app never reconnects for the rest of the session.
+    connect.mockRejectedValueOnce(new Error('backend.json is not there yet'))
+    await store.useStore.getState().boot()
+    expect(store.useStore.getState().connected).toBe(false)
+    expect(connect).toHaveBeenCalledTimes(1)
+
+    connect.mockResolvedValue(false)
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(connect).toHaveBeenCalledTimes(2)
+    store.useStore.getState().disconnect()
   })
 })
 

@@ -32,9 +32,7 @@ export function locationLabel(source: MarketplaceSource): string {
 
 export const inputStyle: React.CSSProperties = {
   width: '100%', boxSizing: 'border-box', color: 'var(--text)',
-  font: '400 12.5px var(--sans)', padding: '9px 11px',
 }
-export const monoInput: React.CSSProperties = { ...inputStyle, font: '400 12.5px var(--mono)' }
 export const caption: React.CSSProperties = { fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-faint)', margin: '7px 0 0' }
 
 export const errLine = (msg: string, testId?: string) => (
@@ -91,7 +89,7 @@ function referenceLabel(e: EditorEntry): string {
   return lastSegment(p)
 }
 
-const eyebrowMargin = (first: boolean): React.CSSProperties => ({ margin: first ? '0 0 6px' : '16px 0 6px' })
+const eyebrowMargin = (first: boolean): React.CSSProperties => ({ margin: first ? '0 0 8px' : '16px 0 8px' })
 
 const ARCHIVE_PLACEHOLDER = 'https://…/name.autowright or /path/to/name.autowright'
 const IMAGE_PLACEHOLDER = 'Optional: https://… or /path/to/preview.png'
@@ -128,19 +126,19 @@ function AddAutomationForm({ onAdd, onClose }: {
         return (
           <div data-testid="catalog-picker">
             <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Add automation</h2>
-            <Eyebrow style={{ margin: '18px 0 6px' }}>TITLE</Eyebrow>
+            <Eyebrow style={{ margin: '18px 0 8px' }}>TITLE</Eyebrow>
             <input className="ad-input" value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={onEnter}
               autoFocus spellCheck={false} data-testid="catalog-picker-title" style={inputStyle} />
-            <Eyebrow style={{ margin: '14px 0 6px' }}>DESCRIPTION</Eyebrow>
+            <Eyebrow style={{ margin: '14px 0 8px' }}>DESCRIPTION</Eyebrow>
             <input className="ad-input" value={description} onChange={(e) => setDescription(e.target.value)} onKeyDown={onEnter}
               data-testid="catalog-picker-description" style={inputStyle} />
-            <Eyebrow style={{ margin: '14px 0 6px' }}>AUTOMATION</Eyebrow>
-            <input className="ad-input" value={path} onChange={(e) => setPath(e.target.value)} onKeyDown={onEnter}
-              spellCheck={false} placeholder={ARCHIVE_PLACEHOLDER} data-testid="catalog-picker-path" style={monoInput} />
+            <Eyebrow style={{ margin: '14px 0 8px' }}>AUTOMATION</Eyebrow>
+            <input className="ad-input mono" value={path} onChange={(e) => setPath(e.target.value)} onKeyDown={onEnter}
+              spellCheck={false} placeholder={ARCHIVE_PLACEHOLDER} data-testid="catalog-picker-path" style={inputStyle} />
             <p style={caption}>An https link, or the archive's absolute path on this {copy.machine}.</p>
-            <Eyebrow style={{ margin: '14px 0 6px' }}>IMAGE</Eyebrow>
-            <input className="ad-input" value={image} onChange={(e) => setImage(e.target.value)} onKeyDown={onEnter}
-              spellCheck={false} placeholder={IMAGE_PLACEHOLDER} data-testid="catalog-picker-image" style={monoInput} />
+            <Eyebrow style={{ margin: '14px 0 8px' }}>IMAGE</Eyebrow>
+            <input className="ad-input mono" value={image} onChange={(e) => setImage(e.target.value)} onKeyDown={onEnter}
+              spellCheck={false} placeholder={IMAGE_PLACEHOLDER} data-testid="catalog-picker-image" style={inputStyle} />
             <p style={caption}>{IMAGE_CAPTION}</p>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 18 }}>
               <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.5 }}>
@@ -375,14 +373,14 @@ export default function CatalogEditorModal({ source, onClose, onSaved }: {
                           <input className="ad-input" value={entry.description} onChange={(e) => update(entry.key, { description: e.target.value })}
                             data-testid="catalog-entry-description" style={inputStyle} />
                           <Eyebrow style={eyebrowMargin(false)}>AUTOMATION</Eyebrow>
-                          <input className="ad-input" value={entry.path} onChange={(e) => update(entry.key, { path: e.target.value })}
+                          <input className="ad-input mono" value={entry.path} onChange={(e) => update(entry.key, { path: e.target.value })}
                             spellCheck={false} placeholder={ARCHIVE_PLACEHOLDER}
-                            data-testid="catalog-entry-path" style={monoInput} />
+                            data-testid="catalog-entry-path" style={inputStyle} />
                           <p style={caption}>An https link, or the archive's absolute path on this {copy.machine}.</p>
                           <Eyebrow style={eyebrowMargin(false)}>IMAGE</Eyebrow>
-                          <input className="ad-input" value={entry.image} onChange={(e) => update(entry.key, { image: e.target.value })}
+                          <input className="ad-input mono" value={entry.image} onChange={(e) => update(entry.key, { image: e.target.value })}
                             spellCheck={false} placeholder={IMAGE_PLACEHOLDER}
-                            data-testid="catalog-entry-image" style={monoInput} />
+                            data-testid="catalog-entry-image" style={inputStyle} />
                           <p style={caption}>{IMAGE_CAPTION}</p>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 18 }}>
                             <button className="ad-btn-text danger" data-testid="catalog-entry-remove" aria-label="Remove entry"

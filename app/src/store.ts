@@ -125,7 +125,7 @@ interface Model {
   showToast(msg: string, ms?: number): void
   loadExecution(executionId: string): Promise<void>
   loadExecLogs(executionId: string, step?: number, attempt?: number): Promise<void>
-  loadAuto(automationId: string): Promise<void>
+  loadAuto(automationId: string, opts?: { insert?: boolean }): Promise<void>
   beginTest(executionId: string): void
   clearTest(): void
 }
@@ -300,7 +300,10 @@ export const useStore = create<Model>((set, get) => ({
     // One retry chain only: a re-entrant boot (StrictMode re-mount) must not
     // leave a second timer chain hammering discovery in parallel.
     clearTimeout(bootTimer)
-    const ok = await connectInfo()
+    // A rejected bridge call is just "not connected yet" — swallowing it here
+    // is what arms the retry; an escaping rejection would leave boot() dead
+    // with `connected` false and no timer to fix it.
+    const ok = await connectInfo().catch(() => false)
     if (!ok) { set({ connected: false }); bootTimer = setTimeout(() => get().boot(), 1200); return }
     // §9 gating: the flags must be known before the app shell mounts, so this
     // read is awaited on the same cycle that just re-read backend.json —
@@ -425,6 +428,7 @@ export const useStore = create<Model>((set, get) => ({
     const patchAutomation = (id: string, row: Automation | null) => {
       const cur = get().automations
       if (row === null) {
+        eventSeq++ // an in-flight /state snapshot is stale from here on
         // §19: the delete form also stamps `automationDeleted` on every held
         // execution row for that id — exactly what a fresh /state would
         // serialize, so Retry / Execute again never stay offered on orphans.
@@ -505,12 +509,16 @@ export const useStore = create<Model>((set, get) => ({
       // draft settling — drop the row and every cache keyed on it, and take
       // the pill's total down with it (floored: the window may never have
       // counted this id).
+      eventSeq++ // an in-flight /state snapshot is stale from here on
       const { executionId } = msg
       const executionFull = { ...m.executionFull }
       const execLogs = { ...m.execLogs }
       delete executionFull[executionId]
       delete execLogs[executionId]
       executionRefetched.delete(executionId)
+      // an in-flight body fetch for this id has nothing left to land in —
+      // clearing the entry keeps a re-created id from being locked out
+      executionStepFetching.delete(executionId)
       // the MRU is what eviction keeps — a deleted id left there would hold a
       // slot for a record that can never come back
       executionMru = executionMru.filter((x) => x !== executionId)
@@ -519,6 +527,10 @@ export const useStore = create<Model>((set, get) => ({
         executionsTotal: Math.max(0, m.executionsTotal - 1),
         executionFull,
         execLogs,
+        // §11: the tracked test is exactly this record — leaving it tracked
+        // would strand the TEST card on "Loading the test…" for a record that
+        // can never arrive.
+        ...(m.test?.executionId === executionId ? { test: null } : {}),
       })
       return
     }
@@ -722,12 +734,18 @@ export const useStore = create<Model>((set, get) => ({
     } catch { /* deleted */ }
   },
 
-  async loadAuto(automationId) {
+  async loadAuto(automationId, opts) {
     try {
       const a = await api.getAutomation(automationId)
       const automations = get().automations
+      const held = automations.some((x) => x.id === automationId)
+      // Update-only by default: a refresh that lands after the row was removed
+      // (a delete, a §19 automation.changed with a null row) must not put it
+      // back. Only the creator — which knows the row is new — asks for the
+      // insert, and it is the one caller the list ordering can't come from.
+      if (!held && !opts?.insert) return
       set({
-        automations: automations.some((x) => x.id === automationId)
+        automations: held
           ? automations.map((x) => (x.id === automationId ? a : x))
           : [...automations, a],
       })

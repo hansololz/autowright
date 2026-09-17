@@ -532,8 +532,12 @@ export default function AgentNewPage() {
               role="radio"
               aria-checked={on}
               onClick={() => {
-                if (harness !== h.id) { setHInst('idle'); setHPct(null); setHErr(null) }
-                setHarness(h.id); setMode('default'); setModel(null)
+                // §12: re-picking the harness already selected changes nothing — the
+                // mode and model stay where the user put them.
+                if (harness !== h.id) {
+                  setHInst('idle'); setHPct(null); setHErr(null)
+                  setHarness(h.id); setMode('default'); setModel(null)
+                }
               }}
               style={{
                 // Selected chrome overrides .ad-card-click's base + hover.

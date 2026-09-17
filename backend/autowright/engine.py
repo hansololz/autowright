@@ -294,8 +294,10 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             end is dup2'd over, never `.close()`d cross-thread: close() takes the
             buffer lock a blocked readline holds and would wedge this thread."""
             pipe_closed.set()
-            if proc.poll() is None:
-                kill_step_group(proc)
+            # §7: the group kill runs whether or not the executor itself has
+            # already exited — a grandchild that outlived it is still in the
+            # group and still holds the log pipe open.
+            kill_step_group(proc)
             # §7: any in-flight agent call's own-session group dies with the step —
             # its watchdog lived in the executor this kill just took down. Only
             # while this step still owns the state, though: a cancel/skip grace
@@ -430,7 +432,16 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             # after its kill — the loop is done; anything else is a real error.
             if not timed_out.is_set() and not pipe_closed.is_set():
                 raise
-        proc.wait()
+        # §7: the reap is bounded too. EOF on our read end does not mean the
+        # executor exited — a grandchild that inherited the pipe can close it
+        # while the executor lingers, and an unbounded wait here would hang
+        # the engine thread with the automation stuck "executing" (a
+        # no_timeout step has no watchdog left to rescue it).
+        try:
+            proc.wait(timeout=Engine.KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            kill_step_group(proc)
+            proc.wait()
     finally:
         # Always cancel the timers and drop the proc handle — even if the read
         # loop raises — so neither can later kill an unrelated process. §7: a
@@ -862,7 +873,9 @@ class Engine:
             try:
                 if hard:
                     hard()
-                elif proc is not None and proc.poll() is None:
+                elif proc is not None:
+                    # §7: the group kill runs even when the executor itself
+                    # has already exited — its surviving children have not.
                     kill_step_group(proc)
             except Exception:  # noqa: BLE001 — one group's kill must not strand the rest
                 log.exception("shutdown kill failed for a live execution")

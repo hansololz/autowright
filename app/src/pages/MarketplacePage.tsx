@@ -12,7 +12,7 @@ import {
   Modal, Notice, PageLoading, PageTitle, Spinner, Toggle,
 } from '../ui'
 import CatalogEditorModal, {
-  CATALOG_FILE, KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel, monoInput,
+  CATALOG_FILE, KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel,
 } from './CatalogEditor'
 import ImportModal from './ImportModal'
 import { ImportSummaryModal } from './AutomationsList'
@@ -180,11 +180,10 @@ function AddMarketplaceModal({ onClose, onAdded }: {
             <p style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)', margin: '6px 0 0' }}>
               Browse automations someone published - a marketplace catalog file on this {copy.machine}, or one at a link.
             </p>
-            <div
-              role="button"
-              tabIndex={0}
+            <button
+              type="button"
               data-testid="marketplace-drop-zone"
-              className="ad-card"
+              className="ad-btn-bare ad-card"
               onClick={() => { void chooseFile() }}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void chooseFile() } }}
               onDragOver={(e) => { e.preventDefault(); if (!busy) setOver(true) }}
@@ -201,16 +200,16 @@ function AddMarketplaceModal({ onClose, onAdded }: {
               <span style={{ fontSize: 12.5, color: 'var(--text-muted)', textAlign: 'center', padding: '0 16px' }}>
                 {busy === 'drop' ? 'Reading…' : `Drop a marketplace-catalog.yaml here, or click to choose one on this ${copy.machine}`}
               </span>
-            </div>
+            </button>
             {error?.src === 'drop' && errLine(error.msg, 'marketplace-drop-error')}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0' }}>
               <div style={{ flex: 1, height: 1, background: 'var(--hairline)' }} />
               <Eyebrow>OR</Eyebrow>
               <div style={{ flex: 1, height: 1, background: 'var(--hairline)' }} />
             </div>
-            <Eyebrow style={{ margin: '0 0 6px' }}>FROM A LINK OR FILE PATH</Eyebrow>
+            <Eyebrow style={{ margin: '0 0 8px' }}>FROM A LINK OR FILE PATH</Eyebrow>
             <input
-              className="ad-input"
+              className="ad-input mono"
               value={value}
               onChange={(e) => { setValue(e.target.value); setError(null) }}
               onKeyDown={(e) => { if (e.key === 'Enter') submitField() }}
@@ -218,7 +217,7 @@ function AddMarketplaceModal({ onClose, onAdded }: {
               spellCheck={false}
               placeholder="https://… or /path/to/marketplace-catalog.yaml"
               data-testid="marketplace-add-field"
-              style={monoInput}
+              style={inputStyle}
             />
             {error?.src === 'field' ? errLine(error.msg, 'marketplace-add-error') : (
               <p style={caption}>An https link, or the path of a catalog file on this {copy.machine}.</p>
@@ -273,24 +272,24 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
         return (
           <div data-testid="catalog-settings">
             <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Catalog settings</h2>
-            <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '4px 0 0' }}>{source.name}</p>
-            <Eyebrow style={{ margin: '18px 0 6px' }}>LOCATION</Eyebrow>
+            <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '6px 0 0' }}>{source.name}</p>
+            <Eyebrow style={{ margin: '16px 0 8px' }}>LOCATION</Eyebrow>
             <input
-              className="ad-input"
+              className="ad-input mono"
               value={location}
               onChange={(e) => { setLocation(e.target.value); setError(null) }}
               spellCheck={false}
               placeholder="https://… or /path/to/marketplace-catalog.yaml"
               data-testid="settings-location"
-              style={monoInput}
+              style={inputStyle}
             />
             <p style={caption}>Where Refresh reads this catalog from. Leave it empty to keep only the copy Autowright has.</p>
-            <Eyebrow style={{ margin: '18px 0 8px' }}>SHOWN</Eyebrow>
+            <Eyebrow style={{ margin: '16px 0 8px' }}>SHOWN</Eyebrow>
             <label style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, color: 'var(--text)' }}>
               <Toggle on={shown} onChange={setShown} title="Show this marketplace on the page" />
               Show this marketplace on the page
             </label>
-            <Eyebrow style={{ margin: '18px 0 8px' }}>AUTO REFRESH</Eyebrow>
+            <Eyebrow style={{ margin: '16px 0 8px' }}>AUTO REFRESH</Eyebrow>
             <label style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, color: noLocation ? 'var(--text-muted)' : 'var(--text)' }}>
               <Toggle on={!noLocation && autoRefresh} onChange={setAutoRefresh} disabled={noLocation} title="Refresh on its own" />
               Refresh on its own (at launch and every 6 hours)

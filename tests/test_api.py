@@ -1873,8 +1873,8 @@ def test_packages_outdated_and_update(client, monkeypatch):
 
     # §19 update: pip install --upgrade, no manifest writes.
     monkeypatch.setattr(pkglib, "upgrade",
-                        lambda entries: [{**e, "status": "installed", "version": "2.2.4"}
-                                         for e in entries])
+                        lambda entries, **kw: [{**e, "status": "installed", "version": "2.2.4"}
+                                               for e in entries])
     r = client.post("/packages/update", json={"packages": [
         {"pip": "pandas", "import": "pandas"}]}).json()
     assert r["packages"][0] == {"pip": "pandas", "import": "pandas",
@@ -4268,7 +4268,12 @@ def test_ws_unsubscribes_even_when_the_sender_task_raises(client, monkeypatch):
                 # a payload send_json can't serialize kills the sender task —
                 # its exception surfaces from the `await sender` below
                 api.hub.publish("test.unserializable", value={1, 2})
-                time.sleep(0.3)
+                # the sender task raises on its own loop — poll for the release
+                # rather than sleeping a fixed stretch a slow machine outruns
+                for _ in range(100):
+                    if len(api.hub._subs) == before:
+                        break
+                    time.sleep(0.01)
             assert len(api.hub._subs) == before
     finally:
         api.hub._loop = None

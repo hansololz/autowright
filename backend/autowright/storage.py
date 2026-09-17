@@ -414,6 +414,11 @@ class Store:
         # §5 log line cap: (execution_id, file name) → lines written so far,
         # seeded from disk on first append (see append_log_line).
         self._log_counts: dict[tuple[str, str], int] = {}
+        # §19 /state: file path → (stat key, summary) for the small yamls the
+        # serializers would otherwise open and parse per automation per call
+        # (a draft container's `test.yaml`, the §4.4 pending slot's
+        # `automation.yaml`). The key changes the moment the file does.
+        self._yaml_summaries: dict[Path, tuple[tuple, Any]] = {}
 
     # ---------- paths ----------
     def data_path(self) -> Path:
@@ -564,6 +569,18 @@ class Store:
             return raw
         log.warning("%s doesn't hold a mapping — reading it as absent", path)
         return default
+
+    @staticmethod
+    def _stat_key(path: Path) -> tuple:
+        """§19 memo key for a request-path yaml: the file's (mtime_ns, size),
+        or the absent marker when there is no file — a rewrite, a truncation
+        and a deletion all change it, so the memo needs no explicit
+        invalidation."""
+        try:
+            st = path.stat()
+        except OSError:
+            return ("absent",)
+        return (st.st_mtime_ns, st.st_size)
 
     @staticmethod
     def _toplevel_entries(doc: dict, path: Path, key: str) -> list[dict]:
@@ -1135,6 +1152,22 @@ class Store:
             agent_ids |= set(AGENT_REF_RE.findall(s.get("code", "") or ""))
         return secret_ids, agent_ids
 
+    def current_reference_ids(self, a: dict) -> tuple[set[str], set[str]]:
+        """§4.1 effective references of the CURRENT version, memoized on the
+        record (an in-memory `_` key, never persisted — every writer names its
+        keys explicitly): /state derives `problems` and `unresolvedReferences`
+        for every automation on every call, and the static scan walks every
+        step's code. A version's body never changes, so the version number
+        alone keys the memo. The sets are read-only — callers that combine
+        them build a new one."""
+        memo = a.get("_ref_cache")
+        if memo is not None and memo[0] == a["current_version"]:
+            return memo[1], memo[2]
+        cur = a["versions"].get(a["current_version"]) or {}
+        secret_ids, agent_ids = self.effective_reference_ids(cur)
+        a["_ref_cache"] = (a["current_version"], secret_ids, agent_ids)
+        return secret_ids, agent_ids
+
     def referenced_unresolved(self, a: dict) -> dict:
         """§4.1: the stored unresolved_references filtered to ids the current
         version (or a discord trigger) still references — the serialized form,
@@ -1142,8 +1175,7 @@ class Store:
         unresolved = a.get("unresolved_references") or {}
         if not unresolved:
             return {}
-        cur = a["versions"].get(a["current_version"], {})
-        secret_ids, agent_ids = self.effective_reference_ids(cur)
+        secret_ids, agent_ids = self.current_reference_ids(a)
         trigger_ids = {t["secret"] for t in a["triggers"]
                        if t.get("kind") == "discord" and t.get("secret")}
         live = secret_ids | agent_ids | trigger_ids
@@ -1207,12 +1239,12 @@ class Store:
         automation's `draft/`; everything else about the container is shared."""
         return paths.pending_draft_dir() if a is None else self.auto_dir(a) / "draft"
 
-    @staticmethod
-    def _recover_draft_swap(container: Path) -> None:
+    def _recover_draft_swap(self, container: Path) -> None:
         """§5 crash recovery for the save_draft staged swap: a previous save
         died between the two renames — the aside dir is the sole complete
         copy, put it back. Leftover temps from any other crash point are
-        stale and go."""
+        stale and go — through the §6 reaper, since a recovery runs under
+        store.lock and a stale tree is as big as the copy it holds."""
         dd = container / "automation"
         old = container / ".ad-old-automation"
         new = container / ".ad-new-automation"
@@ -1220,17 +1252,18 @@ class Store:
             old.rename(dd)
         for stale in (old, new):
             if stale.exists():
-                shutil.rmtree(stale, ignore_errors=True)
+                self._remove_tree(stale)
 
-    @staticmethod
-    def _recover_memory_swap(d: Path) -> None:
+    def _recover_memory_swap(self, d: Path) -> None:
         """§6.3 crash recovery for the restore_snapshot staged swap, the exact
         twin of _recover_draft_swap: a restore died between the two renames —
         memory/ was renamed aside and the staged copy never took its place, so
         the aside dir is the sole surviving copy. Without this load-time
         repair, the next execution would recreate memory/ and a later restore
         would then rmtree the aside dir — silently destroying the pre-crash
-        memory. Leftover temps from any other crash point are stale and go."""
+        memory. Leftover temps from any other crash point are stale and go —
+        through the §6 reaper, since a memory-sized tree is never walked where
+        a caller holds store.lock."""
         mem = d / "memory"
         old = d / MEMORY_SWAP_OLD
         tmp = d / MEMORY_SWAP_TMP
@@ -1238,7 +1271,7 @@ class Store:
             old.rename(mem)
         for stale in (old, tmp):
             if stale.exists():
-                shutil.rmtree(stale, ignore_errors=True)
+                self._remove_tree(stale)
 
     def save_draft(self, a: dict | None, ver: dict, *, name: str | None = None,
                    agent_id: str | None = None, triggers: list | None = None) -> None:
@@ -1422,12 +1455,20 @@ class Store:
         the §9.1 Resume draft button; None when the slot holds no draft."""
         with self.lock:
             self._recover_draft_swap(paths.pending_draft_dir())  # §5 swap repair
-            dd = paths.pending_draft_dir() / "automation"
-            if not (dd / "automation.yaml").exists():
-                return None
-            meta = self._load_mapping(dd / "automation.yaml", {}) or {}
-            return {"name": meta.get("name") or "New automation",
-                    "updatedAt": meta.get("updated_at")}
+            f = paths.pending_draft_dir() / "automation" / "automation.yaml"
+            # §19: /state asks for this on every call — the parse is memoized
+            # on the file's stat key (see _stat_key).
+            key = self._stat_key(f)
+            memo = self._yaml_summaries.get(f)
+            if memo is not None and memo[0] == key:
+                return dict(memo[1]) if memo[1] else None
+            out = None
+            if f.exists():
+                meta = self._load_mapping(f, {}) or {}
+                out = {"name": meta.get("name") or "New automation",
+                       "updatedAt": meta.get("updated_at")}
+            self._yaml_summaries[f] = (key, out)
+            return dict(out) if out else None
 
     def draft_container_json(self, a: dict | None) -> dict:
         """§19 GET /draft/{owner} → `{ draft, agentId }` — the same envelope
@@ -1583,6 +1624,13 @@ class Store:
                 "finished_at": None,
                 "duration_ms": None, "note": note, "chip": None, "chip_status": None,
                 "error": None, "redacted_secrets": [],
+                # §5 in-memory-only keys (`_` prefix, never serialized — every
+                # serializer names its keys explicitly): the engine fills them
+                # in off-lock as the execution runs, so they are seeded here
+                # rather than inserted later — a registered header must not
+                # resize while a reader copies it under the lock.
+                "_cur_step": None, "_cur": None, "_log_seq": {}, "_pass_start": None,
+                "_started_ms": 0, "_started_ms_key": None,  # exec_started_ms recomputes on first use (a None key never matches)
                 "steps": [{"name": s["name"], "file": s.get("file"),
                            "agent": bool(s.get("agent")),
                            **({"sha": s["sha"]} if s.get("sha") else {}),
@@ -1771,20 +1819,24 @@ class Store:
         log doesn't hold."""
         p = self.log_file(execution_id, name)
         key = (execution_id, name)
+        # The count lives in memory per file key; the one-time seed counts the
+        # existing file (mirrors the engine's `_log_seq` resume). A restart
+        # mid-execution just re-seeds from disk here. The count itself runs
+        # OUTSIDE the lock — a 10k-line file read under store.lock stalls every
+        # request behind it — and two racing seeders agree because only the
+        # first one's value is kept below.
+        seeded = 0
+        if key not in self._log_counts:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    seeded = sum(1 for _ in f)
+            except OSError:
+                seeded = 0
         # Parallel steps of one execution append concurrently, so the read and
         # the increment have to be one step or two writers take the same slot
         # and the cap counts short. The write itself stays outside the hold.
         with self.lock:
-            count = self._log_counts.get(key)
-            if count is None:
-                # The count lives in memory per file key; the one-time seed counts
-                # the existing file (mirrors the engine's `_log_seq` resume). A
-                # restart mid-execution just re-seeds from disk here.
-                try:
-                    with open(p, encoding="utf-8") as f:
-                        count = sum(1 for _ in f)
-                except OSError:
-                    count = 0
+            count = self._log_counts.get(key, seeded)
             self._log_counts[key] = count + 1 if count <= self.MAX_LOG_LINES else count
         if count > self.MAX_LOG_LINES:
             return False  # already truncated — the marker is the file's last line
@@ -1799,10 +1851,15 @@ class Store:
         return True
 
     def read_log(self, execution_id: str, step_idx: int | None = None,
-                 attempt: int | None = None, tail: int | None = None) -> list[dict]:
+                 attempt: int | None = None, tail: int | None = None,
+                 since: int | None = None) -> list[dict]:
         """§19: one log file's lines. `tail` keeps only the last N of them -
         the whole-log tail the §7 views ask for, so a multi-thousand-line file
-        never has to be serialized whole."""
+        never has to be serialized whole. `since` is the route's
+        `sinceSequence`: sequences are gapless per-file line numbers, so the
+        file is sliced at that line before parsing (the caller's own filter
+        still applies), and a 1 Hz follow never re-parses what it already
+        served."""
         if step_idx is None:
             name = self.EXEC_LOG
         else:
@@ -1823,6 +1880,17 @@ class Store:
             raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             return []
+        if since is not None and since >= 1 and len(raw) >= since:
+            # §19: the line at that 1-based position must really carry that
+            # sequence before the slice is trusted — a hand-edited or
+            # re-seeded file whose numbering doesn't line up is parsed whole
+            # rather than silently losing lines.
+            try:
+                probe = json.loads(raw[since - 1])
+            except ValueError:
+                probe = None
+            if isinstance(probe, dict) and probe.get("sequence") == since:
+                raw = raw[since:]
         if tail is not None:
             raw = raw[-tail:]
         for ln in raw:
@@ -2063,20 +2131,25 @@ class Store:
         a.pop("_memory_stats", None)
 
     def clear_memory(self, a: dict) -> None:
+        # §19: the guard and the writes are one hold — checking registration and
+        # then releasing would let a DELETE land in between and see the mkdir
+        # below re-create the removed directory. Every step here is O(1) (the
+        # removals rename aside), so the hold stays constant-time, and the lock
+        # is an RLock: the api.py caller already holds it.
         with self.lock:
             self._still_registered(a)
-        # §6.3: a crash mid-restore can leave memory/ absent with the aside dir
-        # the sole surviving copy. Put it back first — otherwise the mkdir
-        # below recreates an empty memory/ while the aside dir lives on, and
-        # the next restore's own recovery (seeing memory/ present) rmtrees the
-        # only copy of the pre-crash memory without anyone asking.
-        self._recover_memory_swap(self.auto_dir(a))
-        d = self.auto_dir(a) / "memory"
-        # §6: a memory dir can be gigabytes — renamed aside (O(1)) and reaped
-        # on the background thread, never rmtree'd where a caller holds the lock.
-        self._remove_tree(d)
-        d.mkdir(parents=True, exist_ok=True)
-        self.invalidate_memory_stats(a)
+            # §6.3: a crash mid-restore can leave memory/ absent with the aside
+            # dir the sole surviving copy. Put it back first — otherwise the
+            # mkdir below recreates an empty memory/ while the aside dir lives
+            # on, and the next restore's own recovery (seeing memory/ present)
+            # rmtrees the only copy of the pre-crash memory without anyone asking.
+            self._recover_memory_swap(self.auto_dir(a))
+            d = self.auto_dir(a) / "memory"
+            # §6: a memory dir can be gigabytes — renamed aside (O(1)) and reaped
+            # on the background thread, never rmtree'd where a caller holds the lock.
+            self._remove_tree(d)
+            d.mkdir(parents=True, exist_ok=True)
+            self.invalidate_memory_stats(a)
 
     def memory_files(self, a: dict) -> list[dict]:
         """§19 read-only memory listing: memory-relative posix path, size in
@@ -2326,6 +2399,17 @@ class Store:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
         with self.lock:
+            try:
+                # §6.3: the swap re-checks that the automation is still
+                # registered — a DELETE landing during the copy above would
+                # otherwise see the rename re-create the removed directory,
+                # resurrecting memory/ at the next boot.
+                self._still_registered(a)
+            except AutomationGoneError:
+                if pre is not None:
+                    self.discard_snapshot(pre[0])
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise
             if a.get("_live"):
                 if pre is not None:
                     self.discard_snapshot(pre[0])
@@ -2424,8 +2508,22 @@ class Store:
 
     def draft_test_json(self, container: Path) -> dict | None:
         """§11 last-test summary (`test.yaml` in the draft container, §5) —
-        rides the draft payload as `test`; None when no test has finished."""
-        t = self._load_mapping(container / "test.yaml")
+        rides the draft payload as `test`; None when no test has finished.
+
+        §19: /state serializes a draft per automation, so the parse is
+        memoized on the file's stat key (see _stat_key) — an absent file
+        caches as None just like a present one."""
+        f = container / "test.yaml"
+        key = self._stat_key(f)
+        memo = self._yaml_summaries.get(f)
+        if memo is not None and memo[0] == key:
+            return dict(memo[1]) if memo[1] else None
+        out = self._draft_test_summary(f)
+        self._yaml_summaries[f] = (key, out)
+        return dict(out) if out else None
+
+    def _draft_test_summary(self, f: Path) -> dict | None:
+        t = self._load_mapping(f)
         if not t or not t.get("status"):
             return None
         when = ""
@@ -2510,8 +2608,13 @@ class Store:
                         "label": f"Scheduled executions are being missed — {ran}."})
         secrets_by_id = {s["id"]: s for s in self.secrets}
         agents_by_id = {g["id"]: g for g in self.agents}
-        # §4.1 effective references: manifest entries ∪ code subscripts.
-        step_secret_ids, step_agent_ids = self.effective_reference_ids(cur)
+        # §4.1 effective references: manifest entries ∪ code subscripts — the
+        # current version's come from the memo (the /state path), any other
+        # version (a draft serialization) is scanned as before.
+        if cur is a["versions"].get(a["current_version"]):
+            step_secret_ids, step_agent_ids = self.current_reference_ids(a)
+        else:
+            step_secret_ids, step_agent_ids = self.effective_reference_ids(cur)
         trigger_secret_ids = {t["secret"] for t in a["triggers"]
                               if t.get("kind") == "discord" and t.get("secret")}
         # §4.1/§5.1: a dangling id carried by unresolved_references is an

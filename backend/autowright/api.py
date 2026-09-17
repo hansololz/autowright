@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,9 +26,9 @@ from .engine import Engine, kill_orphan_agent_group, kill_orphan_group
 from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
-from .storage import (SECRET_REF_RE, AutomationGoneError, LiveExecutionError,
-                      StoreUnwritableError, _kind_ok, is_test, exec_started_ms,
-                      iter_file_stats, new_id, size_label, store, strip_param_values)
+from .storage import (AutomationGoneError, LiveExecutionError, StoreUnwritableError,
+                      _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
+                      size_label, store, strip_param_values)
 from . import testexec, versions_diff
 
 log = logging.getLogger("autowright.api")
@@ -233,12 +234,24 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
     parts = []
     for e in exc.errors():
         loc = list(e.get("loc") or ())
-        if loc and loc[0] == "body":
+        if loc and loc[0] in ("body", "query", "path", "header"):
+            # Every source pydantic names is dropped alike — a query
+            # parameter's 422 must read `limit: …`, not `query.limit: …`.
             loc = loc[1:]
         where = ".".join(str(p) for p in loc)
         parts.append(f"{where}: {e.get('msg')}" if where else str(e.get("msg")))
     return JSONResponse(status_code=422,
                         content={"detail": "; ".join(parts) or "invalid request body"})
+
+
+# §19: another pip run already holds the process-wide lock — the request says
+# so at once instead of holding a worker thread until the other run frees it.
+@app.exception_handler(pkglib.PackagesBusy)
+async def _packages_busy_handler(request: Request, exc: pkglib.PackagesBusy):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=409,
+                        content={"detail": "a package install is already running"})
 
 
 # §19 registered-object guard: a store write whose automation record was
@@ -433,23 +446,51 @@ def _validate_draft_steps(d: dict, a: dict | None = None) -> None:
 # label is display-only, so one walk per TTL window is plenty — and it must
 # never run while holding store.lock (it would stall live log streaming).
 _DATA_SIZE_TTL_S = 30
-_data_size_cache: tuple[float, str] | None = None
-# Serializes the walk itself: concurrent /state calls landing on an expired
-# cache would each run the full recursive stat walk, burning a threadpool
-# worker apiece for the same answer.
+# (when the walk landed, the executions dir it walked, the label). The path is
+# part of the key: after a §19 data-path switch a cache entry from the old
+# location would otherwise still look fresh.
+_data_size_cache: tuple[float, str, str] | None = None
+# Guards the cache and the in-flight flag: concurrent /state calls landing on
+# an expired cache would each start the full recursive stat walk, burning a
+# thread apiece for the same answer.
 _data_size_lock = threading.Lock()
+_data_size_walking = False
+
+
+def _data_size_walk(key: str) -> None:
+    """The dataSize tree walk, on its own thread — nothing waits on it."""
+    global _data_size_cache, _data_size_walking
+    label = None
+    try:
+        label = size_label(sum(st.st_size for st in iter_file_stats(Path(key))))
+    except OSError:
+        # An unreadable data root is a §5 degradation, not a server error: the
+        # label just stays at what it was until the next request tries again.
+        pass
+    finally:
+        with _data_size_lock:
+            if label is not None:
+                _data_size_cache = (time.monotonic(), key, label)
+            _data_size_walking = False
 
 
 def _data_size_label() -> str:
-    global _data_size_cache
+    """§4.9 dataSize: the last walk's label, at once. `/state` and `/settings`
+    are polled surfaces — neither may block on a walk of a tree that can hold
+    thousands of directories, so an expired (or missing) entry starts one
+    background walk and answers with what there is: the empty string until the
+    first one lands."""
+    global _data_size_walking
+    key = str(store.executions_dir())
     with _data_size_lock:
-        now = time.monotonic()
-        if _data_size_cache and now - _data_size_cache[0] < _DATA_SIZE_TTL_S:
-            return _data_size_cache[1]
-        p = store.executions_dir()
-        total = sum(st.st_size for st in iter_file_stats(p))
-        _data_size_cache = (now, size_label(total))
-        return _data_size_cache[1]
+        cached = _data_size_cache
+        fresh = (cached is not None and cached[1] == key
+                 and time.monotonic() - cached[0] < _DATA_SIZE_TTL_S)
+        if not fresh and not _data_size_walking:
+            _data_size_walking = True
+            threading.Thread(target=_data_size_walk, args=(key,),
+                             name="datasize", daemon=True).start()
+        return cached[2] if cached is not None and cached[1] == key else ""
 
 
 def _agents_json() -> list[dict]:
@@ -477,17 +518,14 @@ def _settings_json() -> dict:
 
 
 def _secret_usage_index() -> dict[str, list[dict]]:
-    """§4.8 usedBy for every secret at once: one pass over the automations'
-    current-version steps, one `SECRET_REF_RE` scan per step. `secret_used_by`
-    answers the same question for one secret, and running it per secret would
-    re-scan every step once per stored secret. Caller holds store.lock."""
+    """§4.8 usedBy for every secret at once: one pass over the automations,
+    each one's current-version references served from the store's per-record
+    cache. `secret_used_by` answers the same question for one secret, and
+    running it per secret would re-scan every step once per stored secret.
+    Caller holds store.lock."""
     index: dict[str, list[dict]] = {}
     for a in store.autos.values():
-        cur = a["versions"].get(a["current_version"], {})
-        referenced: set[str] = set()
-        for s in cur.get("steps", []):
-            referenced |= {e["id"] for e in s.get("secrets", []) or [] if e.get("id")}
-            referenced |= set(SECRET_REF_RE.findall(s.get("code", "")))
+        referenced, _ = store.current_reference_ids(a)
         for secret_id in referenced:
             index.setdefault(secret_id, []).append({"id": a["id"], "name": a["name"]})
     return index
@@ -587,8 +625,11 @@ def state() -> dict:
 # ---------- automations ----------
 @app.get("/automations", dependencies=[Depends(auth)])
 def list_autos() -> list[dict]:
+    # §19 list shape: no version bodies — the tray poll and the §20 reference
+    # resolution read this route, and serializing every version of every
+    # automation is the cost the two shapes exist to avoid.
     with store.lock:
-        return [store.auto_json(a) for a in store.autos.values()]
+        return [store.auto_json(a, full=False) for a in store.autos.values()]
 
 
 @app.get("/automations/{automation_id}", dependencies=[Depends(auth)])
@@ -1419,7 +1460,9 @@ def packages_check(body: models.PackagesBody) -> dict:
 def packages_install(body: models.PackagesBody) -> dict:
     # Blocking §6.2 ensure — FastAPI runs sync endpoints on a worker thread,
     # and the module lock serializes concurrent pip runs.
-    return {"packages": pkglib.ensure([p.plain() for p in body.packages])}
+    # §19: `wait` (the CLI import's foreground ensure) waits its turn on the
+    # pip lock; without it a contended lock answers 409 at once.
+    return {"packages": pkglib.ensure([p.plain() for p in body.packages], wait=body.wait)}
 
 
 @app.post("/packages/outdated", dependencies=[Depends(auth)])
@@ -1436,7 +1479,7 @@ def packages_update(body: models.PackagesBody) -> dict:
     for e in entries:
         if not pkglib.PIP_NAME_RE.match(e["pip"].strip()):
             raise HTTPException(422, f"not a bare distribution name: {e['pip']!r}")
-    return {"packages": pkglib.upgrade(entries)}
+    return {"packages": pkglib.upgrade(entries, wait=body.wait)}
 
 
 @app.get("/automations/{automation_id}/memory/files", dependencies=[Depends(auth)])
@@ -1711,14 +1754,17 @@ EXECUTIONS_PAGE_LIMIT = 50  # §7: the /state finished window and the page size
 def list_execs(automation: list[str] | None = Query(None), status: list[str] | None = Query(None),
                started_from_ms: int | None = Query(None, ge=0, alias="startedFromMs"),
                started_to_ms: int | None = Query(None, ge=0, alias="startedToMs"),
+               id_prefix: str | None = Query(None, alias="idPrefix"),
                limit: int | None = Query(None, ge=1),
-               before_started_ms: int | None = Query(None, alias="beforeStartedMs"),
+               before_started_ms: int | None = Query(None, ge=0, alias="beforeStartedMs"),
                before_id: str | None = Query(None, alias="beforeId")) -> dict:
     """§19 executions query: headers in the §7 canonical order (startedMs desc,
     id asc on ties), the AND of every filter — `automation` (repeatable: any of
     the ids), `status` (repeatable: any of the §4.6 values, `finished` standing
     for every terminal status), the inclusive
-    `startedFromMs`/`startedToMs` range — and the keyset cursor for paging.
+    `startedFromMs`/`startedToMs` range, `idPrefix` (rows whose id starts
+    with it; the §20 reference resolution sends it with a `limit`, so a short
+    id never serializes the whole history) — and the keyset cursor for paging.
     `total` counts every match, not the page; `limit` omitted means every
     match (§20 reference resolution reads that)."""
     for value in status or []:
@@ -1746,6 +1792,8 @@ def list_execs(automation: list[str] | None = Query(None), status: list[str] | N
             if "finished" in status:
                 wanted_status |= set(EXECUTION_STATUSES) - set(LIVE_STATUSES)
             hs = [h for h in hs if h["status"] in wanted_status]
+        if id_prefix:
+            hs = [h for h in hs if h["id"].startswith(id_prefix)]
         # Sort headers on the shared canonical key and serialize only the page
         # actually returned (exec_json for every match on every keyset fetch
         # is the §7 unbounded-history cost the paging exists to avoid).
@@ -1771,11 +1819,18 @@ def list_execs(automation: list[str] | None = Query(None), status: list[str] | N
 
 @app.get("/executions/{execution_id}", dependencies=[Depends(auth)])
 def get_exec(execution_id: str) -> dict:
+    """§19: the header is looked up under the store lock, the body read and
+    serialized outside it — a terminal record is immutable, and the §7 page
+    polls this route, so it must never hold the engine's lock across disk."""
     with store.lock:
-        h = store.exec_full(execution_id)
-        if not h:
+        h = store.execs.get(execution_id)
+        if h is None:
             raise HTTPException(404, "execution not found")
-        return store.exec_json(h, full=True)
+        h = dict(h)
+    if "steps" not in h:
+        body = store.read_exec_yaml(execution_id)
+        h = {**h, **body} if body else {**h, "steps": [], "redacted_secrets": [], "params": []}
+    return store.exec_json(h, full=True)
 
 
 @app.get("/executions/{execution_id}/logs", dependencies=[Depends(auth)])
@@ -1796,7 +1851,8 @@ def get_exec_logs(execution_id: str, step: int | None = None, attempt: int | Non
     # sequence filter — a tail taken first would hand back fewer new lines than
     # the caller asked for (or none at all).
     lines = store.read_log(execution_id, step, attempt,
-                           tail=None if since_sequence is not None else tail)
+                           tail=None if since_sequence is not None else tail,
+                           since=since_sequence)
     if since_sequence is not None:
         lines = [l for l in lines if l.get("sequence", 0) > since_sequence]
         if tail is not None:
@@ -1821,6 +1877,8 @@ def get_result_file(execution_id: str, name: str):
 
 @app.post("/executions/{execution_id}/cancel", dependencies=[Depends(auth)])
 def cancel_exec(execution_id: str) -> dict:
+    if execution_id not in store.execs:
+        raise HTTPException(404, "execution not found")
     return {"ok": engine.cancel(execution_id)}
 
 
@@ -1980,9 +2038,41 @@ def check_agent(agent_id: str) -> dict:
             else "needs-setup"}
 
 
+# §19 /agents/detect: the sweep probes every supported CLI on the machine, and
+# the §10 pages call it on mount — concurrent callers share one sweep, and its
+# answer is served for a few seconds after it lands rather than re-probed.
+_DETECT_TTL_S = 3
+_detect_lock = threading.Lock()
+_detect_cache: tuple[float, list[dict]] | None = None
+_detect_inflight: Future | None = None
+
+
 @app.get("/agents/detect", dependencies=[Depends(auth)])
 def detect_agents() -> list[dict]:
-    return harness.detect()
+    global _detect_cache, _detect_inflight
+    with _detect_lock:
+        if _detect_cache and time.monotonic() - _detect_cache[0] < _DETECT_TTL_S:
+            return _detect_cache[1]
+        pending = _detect_inflight
+        mine = pending is None
+        if mine:
+            pending = _detect_inflight = Future()
+    if not mine:
+        # Another caller is already sweeping — wait on their answer rather
+        # than probe the same machine a second time.
+        return pending.result()
+    try:
+        found = harness.detect()
+    except BaseException as e:
+        with _detect_lock:
+            _detect_inflight = None
+        pending.set_exception(e)
+        raise
+    with _detect_lock:
+        _detect_cache = (time.monotonic(), found)
+        _detect_inflight = None
+    pending.set_result(found)
+    return found
 
 
 def _provider_or_422(provider_id: str | None) -> str:
@@ -2306,16 +2396,24 @@ def create_secret(body: models.SecretCreate) -> dict:
             # condition, not a server bug: clean 503, nothing stored.
             raise HTTPException(503, _secret_store_rejected(e)) from e
     with store.lock:
-        if any(s["name"] == name for s in store.secrets):
-            # A racing create landed the name while the Keychain IPC ran —
-            # undo the fresh entry (best-effort) and answer the same 422.
-            keychain.delete_secret(secret_id)
-            raise HTTPException(422, f"a secret named {name} already exists")
-        entry = {"id": secret_id, "name": name, "description": body.description or "",
-                 "set": bool(body.value)}
-        store.secrets.append(entry)
-        store.save_secrets()
-        out = _secret_entity(entry)
+        # A racing create may have landed the name while the Keychain IPC ran.
+        lost_race = any(s["name"] == name for s in store.secrets)
+        if not lost_race:
+            entry = {"id": secret_id, "name": name, "description": body.description or "",
+                     "set": bool(body.value)}
+            store.secrets.append(entry)
+            store.save_secrets()
+            out = _secret_entity(entry)
+    if lost_race:
+        # Undo the fresh Keychain entry outside the lock — the delete is the
+        # same blocking IPC the set was, and a failed undo leaves an orphaned
+        # item nothing references, never a failed request.
+        if body.value:
+            try:
+                keychain.delete_secret(secret_id)
+            except Exception:  # noqa: BLE001 — keyring's error zoo is open-ended
+                log.warning("couldn't undo the keychain entry for the lost create race")
+        raise HTTPException(422, f"a secret named {name} already exists")
     hub.publish("secrets.changed")
     return out
 
@@ -2689,7 +2787,11 @@ def set_data_path(body: models.DataPath) -> dict:
     # repair them here too, or the automation would be wedged in 409s. Outside
     # the swap's lock block: the repair's orphan kills read the process table.
     _repair_stale_executing()
-    _data_size_cache = None
+    with _data_size_lock:
+        # The label the old location's walk left behind must not survive the
+        # switch — a walk still in flight for it lands on its own key and is
+        # ignored by the path check in `_data_size_label`.
+        _data_size_cache = None
     hub.publish("settings.changed")
     hub.publish("automation.changed")
     return _settings_json()

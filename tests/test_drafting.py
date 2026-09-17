@@ -938,6 +938,35 @@ def test_stream_scanner_split_marker():
     assert grown.marks == []
 
 
+def test_stream_scanner_joins_the_stream_only_on_demand():
+    # §8 incremental scanner: the accumulated text is kept as chunks and
+    # joined only when a caller reads it. `self.text += chunk` per chunk
+    # re-copied the whole buffer every time — the quadratic cost the scan
+    # itself had already shed.
+    from autowright.drafting import _StreamScanner
+
+    joins = []
+
+    class Counting(_StreamScanner):
+        @property
+        def text(self) -> str:
+            if self._joined is None:
+                joins.append(1)
+            return _StreamScanner.text.fget(self)
+
+    scanner = Counting()
+    for _ in range(20_000):
+        scanner.feed("x")
+    scanner.feed("\n===FILE: manifest.yaml===\n")
+
+    assert joins == []  # 20 001 feeds, not one join
+    assert len(scanner.text) == 20_027
+    assert scanner.text is scanner.text  # cached until the next feed
+    assert joins == [1]
+    # The absolute offsets are the ones the progress labels read.
+    assert scanner.marks == [("manifest.yaml", 20_001, 20_027)]
+
+
 def test_blocked_label_is_line_anchored():
     # §8: blocked detection is line-anchored (it matches the recombiner) — a
     # quoted mid-line marker never mislabels the stream.
@@ -1071,6 +1100,19 @@ def test_code_scanned_ids_validate_against_grants():
     }
     _, errors = validate_steps(files3, grants)
     assert any("declares no agents entries" in e for e in errors)
+
+    # §8 rule 7: "the scan runs on every step, so a subscript in a step that is
+    # not an agent step, which declares no entries, is the same error" — this
+    # one used to validate clean and land as a §4.1 problem instead, raising
+    # only at execution.
+    files4 = {
+        "manifest.yaml": ("description: d\nnote: n\nsteps:\n"
+                          "  - { file: 01-a.py, name: A, description: x }\n"),
+        "01-a.py": f'from autowright import agents\na = agents["{FAST_ID}"].ask("hi")\n',
+    }
+    _, errors = validate_steps(files4, grants)
+    assert any(f"code subscripts agents[{FAST_ID!r}]" in e
+               and "declares no agents entries" in e for e in errors)
 
 
 def test_step_multiple_agents_need_per_entry_why():

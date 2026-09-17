@@ -154,12 +154,13 @@ export default function ExecutionPage() {
   // other execution.
   const executionId = useStore((s) => s.executionId)
   const executions = useStore((s) => s.executions)
-  const executionFull = useStore((s) => s.executionFull)
+  // Only this execution's full record: subscribing to the whole `executionFull`
+  // map would re-render the page whenever any other record's body lands.
+  const full = useStore((s) => (executionId ? s.executionFull[executionId] : undefined))
   const automations = useStore((s) => s.automations)
   const go = useStore((s) => s.go)
   const showToast = useStore((s) => s.showToast)
   const loadExecution = useStore((s) => s.loadExecution)
-  const full = executionId ? executionFull[executionId] : undefined
   const e = full ?? (executionId ? executions.find((x) => x.id === executionId) : undefined)
   const auto = e ? automations.find((a) => a.id === e.automationId) : undefined
 

@@ -457,7 +457,9 @@ Rules:
 
 - Every write goes disk-first (atomic temp-write + rename for files — `execution.yaml`
   included; on POSIX the parent directory is fsynced after the rename, so a committed
-  write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index), then the in-memory state
+  write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index — WAL with `synchronous=NORMAL`: a
+  process crash loses nothing, a power loss can drop the newest index rows, which the startup
+  scan below rebuilds from the yaml), then the in-memory state
   updates. A crash between the two self-heals at the next startup, since startup rebuilds
   everything from disk: after loading the DB index, startup scans `executions/` for
   directories the index doesn't know (crash between the yaml write and the DB upsert, or a
@@ -514,7 +516,9 @@ grants, uuids, and local state never do.** Archive layout:
 ```
 manifest.yaml                # format_version: 2 (import rejects any other with 422; a
                              #   format-1 archive gets re-export guidance - the numeric-
-                             #   reference break carried no migration, §21.3),
+                             #   reference break carried no migration, §21.3; a HIGHER
+                             #   version gets "made by a newer Autowright - update this
+                             #   one", never re-export advice the old machine can't follow),
                              # exported_at, app_version (recorded on every export; import
                              #   does not read it today — diagnostics plus a reserved hook
                              #   for future version gating; format_version stays the only

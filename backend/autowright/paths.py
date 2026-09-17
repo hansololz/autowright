@@ -8,10 +8,19 @@ must never drift (§15 guard)."""
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 APP_NAME = "Autowright"
+
+
+def safe_filename(name: str) -> str:
+    """§19: the automation name sanitized for a filesystem filename. Lives here
+    rather than in `transfer` so the §20 CLI can reach it without importing the
+    store (§15 leaf rule); `transfer.safe_filename` re-exports it."""
+    cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", name).strip().strip(".")
+    return cleaned or "automation"
 
 
 def current_os() -> str:

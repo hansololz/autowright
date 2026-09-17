@@ -2,7 +2,9 @@
 table's locations/refresh/settings, images read on demand, and the §22.4 routes
 with the network stubbed."""
 import io
+import os
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -1991,3 +1993,91 @@ def test_catalog_save_route_lists_an_archive_file_where_it_is(client, tmp_path):
     assert r.status_code == 422
     assert r.json()["detail"] == "entry 1: not a valid .autowright archive"
     assert sorted(p.name for p in folder.iterdir()) == [marketplace.CATALOG_FILENAME]
+
+
+# ---------- §22.1: the caps on concurrent reads and on what may be opened ----------
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_a_local_reference_that_is_not_a_regular_file_is_refused_unopened(tmp_path):
+    """§22.1: "a local reference must be a regular file (a FIFO or device
+    answers the unreadable 502 without being opened)" — opening one would
+    block until something writes to it, which an untrusted catalog must never
+    be able to arrange."""
+    fifo = tmp_path / "preview.png"
+    os.mkfifo(fifo)
+    started = time.monotonic()
+    with pytest.raises(MarketplaceError) as e:
+        marketplace._read_reference(str(fifo), cap=marketplace.MAX_IMAGE_BYTES,
+                                    what="image")
+    assert str(e.value) == "couldn't read the image - not a regular file"
+    assert time.monotonic() - started < 1
+
+
+def test_at_most_four_reference_reads_run_at_once(monkeypatch):
+    """§22.1: "At most 4 reference reads (downloads or local files) run at once
+    process-wide - a page of 200 images against a slow host must not hold every
+    request worker"."""
+    entered, release = threading.Semaphore(0), threading.Event()
+    live, peak = [], []
+    counting = threading.Lock()
+
+    def slow_fetch(url, *, cap, deadline_s=marketplace.FETCH_DEADLINE_S):
+        with counting:
+            live.append(url)
+            peak.append(len(live))
+        entered.release()
+        release.wait(10)
+        with counting:
+            live.remove(url)
+        return PNG
+
+    monkeypatch.setattr(marketplace, "_fetch_url", slow_fetch)
+    readers = [threading.Thread(
+        target=marketplace._read_reference, args=(f"https://x.test/{i}.png",),
+        kwargs={"cap": marketplace.MAX_IMAGE_BYTES, "what": "image"}, daemon=True)
+        for i in range(8)]
+    for t in readers:
+        t.start()
+    try:
+        for _ in range(marketplace.MAX_CONCURRENT_READS):
+            assert entered.acquire(timeout=5), "a slot never opened"
+        # the fifth reader waits for a slot instead of starting a fifth read
+        assert not entered.acquire(timeout=0.5)
+        assert max(peak) == marketplace.MAX_CONCURRENT_READS
+    finally:
+        release.set()
+        for t in readers:
+            t.join(5)
+    assert len(peak) == 8  # every reader got its turn once the slots freed
+
+
+# ---------- §22.2: one deadline bounds POST /marketplace/refresh ----------
+
+def test_refresh_all_leaves_the_rows_past_the_deadline_untouched(market, tmp_path,
+                                                                 monkeypatch):
+    """§22.2: "One 120 s deadline bounds the whole request: catalogs not
+    reached by then are left as they were, no error stamped"."""
+    first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = market.add(path=str(write_catalog(
+        first_dir, [{"title": "First", "path": str(first_dir / "f.autowright")}])))
+    second = market.add(path=str(write_catalog(
+        second_dir, [{"title": "Second", "path": str(second_dir / "s.autowright")}])))
+
+    monkeypatch.setattr(marketplace, "REFRESH_ALL_DEADLINE_S", 0.3)
+    fetched = []
+    real = market._fetch_catalog
+
+    def slow(location):
+        fetched.append(location)
+        time.sleep(0.4)
+        return real(location)
+
+    monkeypatch.setattr(market, "_fetch_catalog", slow)
+    sources = market.refresh_all()
+
+    assert fetched == [first["location"]]  # the second row was never reached
+    assert [s["id"] for s in sources] == [first["id"], second["id"]]
+    assert sources[1]["error"] is None  # left as it was, not failed
+    assert [e["title"] for e in sources[1]["entries"]] == ["Second"]

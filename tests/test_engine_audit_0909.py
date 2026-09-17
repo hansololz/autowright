@@ -13,11 +13,7 @@ from conftest import make_version, read_all_logs
 from autowright.executor import CTRL
 
 
-def wait_done(engine, execution_id, timeout=30):
-    t0 = time.time()
-    while engine.is_live(execution_id):
-        assert time.time() - t0 < timeout, "execution didn't finish in time"
-        time.sleep(0.05)
+from conftest import wait_done
 
 
 # ---------- §7: engine-level failures are not attempts and never retry ----------
