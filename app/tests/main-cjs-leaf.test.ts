@@ -80,8 +80,13 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     const verbs = [...src.matchAll(/runServiceVerb\('([a-z]+)'/g)].map((m) => m[1])
     expect(new Set(verbs)).toEqual(new Set(['stop']))
     expect(verbs).toHaveLength(2)
-    expect(src).toContain("runServiceVerb('stop', 'quit-all')")
+    // §3 quit-entirely: the QUIT card's IPC and the OS quit share one
+    // stop-and-quit, labelled by its caller; reset has its own stop.
+    expect(src).toContain("runServiceVerb('stop', label)")
     expect(src).toContain("runServiceVerb('stop', 'reset')")
+    expect(src).toContain("stopAndQuit(!!opts?.force, 'quit-all')")
+    expect(src).toContain("stopAndQuit(false, 'quit')")
+    expect(src).toContain("stopAndQuit(true, 'quit')")
   })
 
   it('quit-all gates on live executions unless the renderer forces it (§3)', () => {
@@ -89,8 +94,23 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // past the gate — and the gate still runs before the stop for every
     // unforced call.
     expect(src).toContain("ipcMain.handle('quit-all', async (_e, opts) => {")
+    expect(src).toContain("stopAndQuit(!!opts?.force, 'quit-all')")
     expect(src).toMatch(
-      /if \(!opts\?\.force && await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,200}runServiceVerb\('stop', 'quit-all'\)/)
+      /if \(!force && await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,600}runServiceVerb\('stop', label\)/)
+  })
+
+  it('every quit of our own passes through quitUi; only stop-and-quit and quitUi call app.quit (§3)', () => {
+    // §3 quit means quit for good: a bare app.quit() anywhere else would be
+    // intercepted by before-quit as the user's Quit and stop the backend.
+    const bare = [...src.matchAll(/^(?!\s*\/\/).*\bapp\.quit\(\)/gm)].map((m) => m[0].trim())
+    expect(bare).toEqual(['app.quit()'])
+    expect(src).toContain('function quitUi() {\n  uiQuit = true\n  app.quit()\n}')
+    for (const site of ['if (!gotLock) quitUi()', "showStartupError('The app window kept crashing.')\n    quitUi()",
+      'if (!caps.dockIcon && !win) quitUi()', 'if (!tray) quitUi()']) {
+      expect(src).toContain(site)
+    }
+    // The updater quits by itself — flagged before the call, cleared on refusal.
+    expect(src).toMatch(/uiQuit = true\n  let started\n  try \{\n    started = genericUpdater\(\)\.quitAndInstall\(\)/)
   })
 
   it('never executes the CLI — autowright.cli appears only inside the shim file text', () => {
@@ -337,7 +357,7 @@ interface WinRecord {
 interface MainStub {
   invoke: (channel: string, ...args: unknown[]) => unknown
   // Fire an app-level event main.cjs subscribed to (window-all-closed, …).
-  emit: (event: string) => void
+  emit: (event: string) => boolean
   opened: string[]
   // §9.4 external hand-offs (shell.openExternal), in call order.
   externals: string[]
@@ -354,7 +374,8 @@ interface MainStub {
   // §5.1 native dialogs: what main.cjs asked each one for, and the canned
   // answer it gets back (a test arms it before invoking).
   dialogs: [string, Record<string, unknown>][]
-  dialogAnswer: { canceled: boolean, filePaths: string[], filePath: string | null }
+  dialogAnswer: { canceled: boolean, filePaths: string[], filePath: string | null, response: number }
+  powerListeners: Map<string, () => void>
   // §13: fire the tray's own click handler, the only way to the panel.
   clickTray: () => void
   // §9 watchdog / renderer-death reporting: every dialog.showErrorBox the
@@ -406,10 +427,11 @@ function loadMain(options: LoadOptions = {}): MainStub {
   const sent: [string, unknown][] = []
   const errors: [string, string][] = []
   const dialogs: [string, Record<string, unknown>][] = []
-  const dialogAnswer: { canceled: boolean, filePaths: string[], filePath: string | null } = {
-    canceled: true, filePaths: [], filePath: null,
+  const dialogAnswer: { canceled: boolean, filePaths: string[], filePath: string | null, response: number } = {
+    canceled: true, filePaths: [], filePath: null, response: 1,
   }
   const trayEvents = new Map<string, () => void>()
+  const powerListeners = new Map<string, () => void>()
   let quits = 0
   const exits: number[] = []
   const home = mkdtempSync(join(tmpdir(), 'aw-main-'))
@@ -554,8 +576,15 @@ function loadMain(options: LoadOptions = {}): MainStub {
         dialogs.push(['save', opts])
         return { canceled: dialogAnswer.canceled, filePath: dialogAnswer.filePath }
       },
+      // §3 native busy confirm on a windowless OS quit.
+      showMessageBox: async (opts: Record<string, unknown>) => {
+        dialogs.push(['message', opts])
+        return { response: dialogAnswer.response }
+      },
     },
     nativeImage: { createFromPath: () => ({ setTemplateImage() {} }) },
+    // §3 session end: logout/restart/shutdown pass the quit through.
+    powerMonitor: { on: (event: string, fn: () => void) => { powerListeners.set(event, fn) } },
     // §3 reset step 5: the Chromium profile is cleared, never deleted.
     session: {
       defaultSession: {
@@ -611,10 +640,14 @@ function loadMain(options: LoadOptions = {}): MainStub {
       if (!fn) throw new Error(`no handler for ${channel}`)
       return fn({}, ...args)
     },
+    // Answers whether the listener called preventDefault (§3: an intercepted
+    // OS quit does).
     emit: (event) => {
       const fn = appEvents.get(event)
       if (!fn) throw new Error(`no app listener for ${event}`)
-      fn()
+      let prevented = false
+      fn({ preventDefault: () => { prevented = true } })
+      return prevented
     },
     clickTray: () => {
       const fn = trayEvents.get('click')
@@ -622,7 +655,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       fn()
     },
     opened, externals, revealed, windows, wins, trays, loginItem, aumids, sent, updater,
-    home, errors, exits, dialogs, dialogAnswer,
+    home, errors, exits, dialogs, dialogAnswer, powerListeners,
     // AUTOWRIGHT_HOME points app.log at this test's own home (§15).
     log: () => {
       try { return readFileSync(join(home, 'logs', 'app.log'), 'utf-8') } catch { return '' }
@@ -1080,6 +1113,28 @@ describe('main.cjs platform capability wiring (§2/§9)', () => {
     expect(m.quits).toBe(1)
   })
 
+  it('before-quit destroys the panel so a non-closable window cannot veto the quit (§13)', async () => {
+    if (!caps.trayPanel) return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain()
+    m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    expect(m.wins).toHaveLength(1)
+    const panel = m.wins[0]
+    // A quit of our own (here quit-entirely with nothing to stop) passes
+    // through before-quit. The panel is closable: false (Cmd+W must be a
+    // no-op for it) — and app.quit() is cancelled by any window that refuses
+    // to close. Once the panel had been opened, Cmd+Q and quit-all both died
+    // right after before-quit, with the polls stopped and the app resident.
+    expect(await m.invoke('quit-all', { force: true })).toEqual({ ok: true })
+    expect(m.emit('before-quit')).toBe(false)
+    expect(panel.destroys).toBe(1)
+    // Idempotent: a second before-quit (app.quit() called twice) never
+    // touches the dead window.
+    m.emit('before-quit')
+    expect(panel.destroys).toBe(1)
+  })
+
   it('turning the tray off destroys the panel and re-checks the close rule (§9/§13)', () => {
     if (!caps.trayPanel) return
     const m = loadMain()
@@ -1208,7 +1263,7 @@ describe.skipIf(!HAS_UPDATER)('main.cjs electron-updater path (§3)', () => {
     expect(m.updater.installs).toBe(1)
     // The gate itself is one shared code path for every platform: the busy
     // check runs before either updater is asked to quit.
-    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,400}quitAndInstall\(\)/)
+    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,800}quitAndInstall\(\)/)
   })
 })
 
@@ -1319,6 +1374,171 @@ describe('main.cjs bounded service children (§3)', () => {
     expect(options).toEqual([{ windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }])
     // §3: the app stays up on any stop failure.
     expect(m.quits).toBe(0)
+  })
+
+  it('quit-all ends the process outright if the quit is vetoed (§3)', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ execFile: (_py, _args, _o, cb) => { cb(null, 'stopped', '') } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    expect(await m.invoke('quit-all', { force: true })).toEqual({ ok: true })
+    // A normal quit first (before-quit runs: polls stop, the panel goes).
+    expect(m.quits).toBe(1)
+    expect(m.exits).toEqual([])
+    // The backend is already stopped, so a UI that is somehow still here 2 s
+    // later is a UI resident on a dead backend — end it.
+    vi.advanceTimersByTime(1999)
+    expect(m.exits).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(m.exits).toEqual([0])
+    expect(m.log()).toContain('quit-all: quit was vetoed — exiting')
+  })
+
+  it('an OS quit with a loaded window is held and handed to the renderer (§3)', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const stops: string[][] = []
+    const m = loadMain({ execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    m.invoke('open-app', '/app')
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    w.minimize()
+    // Cmd+Q / the dock's Quit: before-quit arrives with nothing of ours having
+    // asked — it is held, the window is brought up, the renderer is asked.
+    expect(m.emit('before-quit')).toBe(true)
+    expect(m.sent).toEqual([['quit-requested', undefined]])
+    expect(w.restores).toBe(1)
+    expect(w.shows).toBe(2)
+    expect(m.quits).toBe(0)
+    expect(stops).toEqual([])
+    // A repeated Cmd+Q while the ask is out changes nothing.
+    expect(m.emit('before-quit')).toBe(true)
+    expect(m.sent).toHaveLength(1)
+    // The renderer takes over through the same quit-all IPC the QUIT card
+    // uses; the native fallback stands down.
+    expect(await m.invoke('quit-all', { force: true })).toEqual({ ok: true })
+    expect(stops).toEqual([['-m', 'autowright.service', 'stop']])
+    expect(m.quits).toBe(1)
+    expect(m.log()).toContain('quit-all: backend stopped, quitting app')
+    // …and that final quit passes straight through before-quit.
+    expect(m.emit('before-quit')).toBe(false)
+    vi.advanceTimersByTime(5000)
+    expect(m.dialogs).toEqual([])
+    expect(stops).toHaveLength(1)
+  })
+
+  it('an OS quit the renderer never answers falls back to the native flow (§3)', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const stops: string[][] = []
+    const m = loadMain({ execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    try {
+      m.invoke('open-app', '/app')
+      m.wins[0].fire('did-start-loading')
+      m.wins[0].fire('did-finish-load')
+      expect(m.emit('before-quit')).toBe(true)
+      expect(m.sent).toEqual([['quit-requested', undefined]])
+      await vi.advanceTimersByTimeAsync(1499)
+      expect(stops).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.advanceTimersByTimeAsync(1000)
+      // Unreachable backend counts as idle: no dialog, straight to the stop.
+      expect(stops).toEqual([['-m', 'autowright.service', 'stop']])
+      expect(m.dialogs).toEqual([])
+      expect(m.quits).toBe(1)
+      expect(m.log()).toContain('quit: the renderer did not take over — quitting natively')
+      expect(m.log()).toContain('quit: backend stopped, quitting app')
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('a windowless OS quit under a live execution asks natively; Cancel keeps everything up (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const stops: string[][] = []
+    const m = loadMain({ execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    // Up but answering 500: the gate reads busy.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, status: 500 } as Response)
+    try {
+      // No window at all (the dock's Quit with the window closed).
+      expect(m.emit('before-quit')).toBe(true)
+      await vi.waitFor(() => expect(m.dialogs).toHaveLength(1))
+      const [kind, opts] = m.dialogs[0]
+      expect(kind).toBe('message')
+      expect(opts).toMatchObject({
+        type: 'warning',
+        message: 'An automation is executing',
+        detail: 'Shut down everything and quit? The running automation will be killed.',
+        buttons: ['Shut down and quit', 'Cancel'],
+        cancelId: 1,
+      })
+      // Cancel (the default answer): nothing stops, nothing quits.
+      await vi.waitFor(() => expect(m.log()).toContain('quit: cancelled at the busy confirm'))
+      expect(stops).toEqual([])
+      expect(m.quits).toBe(0)
+      // Shut down and quit: the forced stop runs and the app quits.
+      m.dialogAnswer.response = 0
+      expect(m.emit('before-quit')).toBe(true)
+      await vi.waitFor(() => expect(m.quits).toBe(1))
+      expect(stops).toEqual([['-m', 'autowright.service', 'stop']])
+      expect(m.dialogs).toHaveLength(2)
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('a native stop failure keeps the app up and says so in an error box (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ execFile: (_py, _args, _o, cb) => {
+      cb(Object.assign(new Error('exit 1'), { code: 1 }), 'stop failed: launchd still reports the job', '')
+    } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    try {
+      expect(m.emit('before-quit')).toBe(true)
+      await vi.waitFor(() => expect(m.errors).toHaveLength(1))
+      expect(m.errors[0][1]).toContain("couldn't stop its backend, so it stays open")
+      expect(m.errors[0][1]).toContain('stop failed: launchd still reports the job')
+      expect(m.quits).toBe(0)
+      // The interlock is released: a later quit-all can run its own stop.
+      expect(await m.invoke('quit-all', { force: true })).toEqual({ error: 'stop failed: launchd still reports the job' })
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('with no backend to stop (dev, no discovery file) quit-all quits the UI instead of refusing (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const stops: string[][] = []
+    const m = loadMain({ execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, '', '') } })
+    // No backend.json and no bundled interpreter: nothing is running here.
+    expect(await m.invoke('quit-all', { force: true })).toEqual({ ok: true })
+    expect(stops).toEqual([])
+    expect(m.quits).toBe(1)
+    expect(m.log()).toContain('quit-all: no backend to stop — quitting app')
+  })
+
+  it('a session end passes the quit through untouched (§3)', () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ ready: true })
+    return vi.waitFor(() => {
+      const on = m.powerListeners.get('shutdown')
+      expect(on).toBeTypeOf('function')
+      on!()
+      // Logout: the UI quits, the backend is left to launchd — no ask, no stop.
+      expect(m.emit('before-quit')).toBe(false)
+      expect(m.sent).toEqual([])
+    })
   })
 
   it('a wedged install child cannot hang the stop that waits for it', async () => {

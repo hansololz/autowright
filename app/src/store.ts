@@ -124,6 +124,11 @@ interface Model {
   go(page: Page, ids?: { automationId?: string | null; executionId?: string | null; agentEditId?: string | null }): void
   setSurface(s: Surface, from?: CreateFrom): void
   showToast(msg: string, ms?: number): void
+  // §4.9 shared quit flow (§3 quit-entirely): null · 'stopping' (overlay up,
+  // quit-all in flight or the app exiting) · 'force' (the busy question).
+  quitStage: null | 'stopping' | 'force'
+  quitAll(force?: boolean): Promise<void>
+  cancelQuit(): void
   // §7: 'gone' is a 404 (the record really is not there), 'error' any other
   // failure — the page must not call a transient failure a deleted execution.
   loadExecution(executionId: string): Promise<'ok' | 'gone' | 'error'>
@@ -701,6 +706,26 @@ export const useStore = create<Model>((set, get) => ({
     set({ surface, createFrom: from })
     syncHistory(get())
   },
+
+  quitStage: null,
+
+  // §4.9 / §3: stop the backend service (with the stray-process sweep), then
+  // the app quits. The blocking overlay is up for the whole call. Busy (only
+  // possible without force) drops it and asks the force question; error drops
+  // it and toasts; on { ok } it stays up until the app exits. A request while
+  // one is in flight is a no-op — a repeated Cmd+Q, or the QUIT card under an
+  // OS quit.
+  async quitAll(force = false) {
+    if (get().quitStage === 'stopping') return
+    set({ quitStage: 'stopping' })
+    const r = await window.autowright?.quitAll(force).catch((e: Error) => ({ error: e.message }))
+    if (r && 'ok' in r) return
+    if (r && 'busy' in r) { set({ quitStage: 'force' }); return }
+    if (r && 'error' in r) get().showToast(r.error)
+    set({ quitStage: null })
+  },
+
+  cancelQuit() { set({ quitStage: null }) },
 
   showToast(msg, ms = 2800) {
     set({ toast: msg })

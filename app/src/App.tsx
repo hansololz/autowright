@@ -17,6 +17,7 @@ import ExecutionsList from './pages/ExecutionsList'
 import MarketplacePage from './pages/MarketplacePage'
 import MenuBarPanel from './pages/MenuBarPanel'
 import Onboarding from './pages/Onboarding'
+import QuitFlow from './pages/QuitFlow'
 import ReportModal from './pages/ReportModal'
 import SecretsPage from './pages/SecretsPage'
 import SettingsPage from './pages/SettingsPage'
@@ -277,7 +278,9 @@ export default function App() {
 
   // §13: the panel renders its own Toast — a failed tray execute is never silent
   if (surface === 'menubar') return <><MenuBarPanel /><Toast msg={toast} /></>
-  if (surface === 'onboard') return <><Onboarding /><Toast msg={toast} /><DevLogOverlay /></>
+  // §4.9/§3: the shared quit flow rides on every main-window surface — an OS
+  // quit during onboarding shows the same overlay as one on the app shell.
+  if (surface === 'onboard') return <><Onboarding /><Toast msg={toast} /><QuitFlow /><DevLogOverlay /></>
 
   // §9 per-OS shell background: only macOS keeps the `--bg-window` two-tone
   // rail gutter — it reads as window chrome around the traffic lights. With
@@ -321,6 +324,9 @@ export default function App() {
       {/* §9.4 What's-new modal — the About row and the post-update auto-open
           share this one shell-mounted instance, never a page */}
       {whatsNewOpen && <WhatsNewModal />}
+      {/* §4.9 shared quit flow (§3 quit-entirely) — the QUIT card and an OS
+          quit both render through this one shell-mounted instance */}
+      <QuitFlow />
       {/* §9.3 developer log overlay — main-window surfaces only */}
       <DevLogOverlay />
     </div>

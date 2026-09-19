@@ -50,6 +50,8 @@ declare global {
       updateAvailable(): Promise<string | null>
       onUpdateAvailable(cb: (version: string | null) => void): (() => void) | void
       onOpenTarget(cb: (hash: string) => void): (() => void) | void
+      // §3 OS quit → the shared §4.9 quit flow (QuitFlow subscribes)
+      onQuitRequested(cb: () => void): (() => void) | void
     }
   }
 }

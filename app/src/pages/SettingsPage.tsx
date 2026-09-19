@@ -52,13 +52,12 @@ export default function SettingsPage() {
   const [cliBusy, setCliBusy] = useState(false)
   // §4.9 disable confirm: turning the toggle off also deletes the command.
   const [cliOffConfirm, setCliOffConfirm] = useState(false)
-  // §4.9 QUIT card (§3 explicit-quit exception). quitOverlay is the blocking
-  // quit overlay's visibility; quitForceConfirm is the busy-answer modal that
-  // retries with force.
+  // §4.9 QUIT card: the card owns only its own confirm; the quit flow itself
+  // (overlay, busy question, quit-all) is the store's, rendered by QuitFlow.
   const [quitConfirm, setQuitConfirm] = useState(false)
-  const [quitBusy, setQuitBusy] = useState(false)
-  const [quitOverlay, setQuitOverlay] = useState(false)
-  const [quitForceConfirm, setQuitForceConfirm] = useState(false)
+  const quitStage = useStore((st) => st.quitStage)
+  const quitAll = useStore((st) => st.quitAll)
+  const quitBusy = quitStage !== null
   // §4.9 RESET card (§3 reset flow). resetStage doubles as the progress
   // overlay's visibility: null = hidden, otherwise the current §3 stage token.
   const [resetConfirm, setResetConfirm] = useState(false)
@@ -138,27 +137,6 @@ export default function SettingsPage() {
       const s = await window.autowright?.cliStatus().catch(() => null)
       if (s) setCli(s)
       setCliBusy(false)
-    })()
-  }
-
-  // §4.9: stop the backend service (with the §3 stray-process sweep), then
-  // the app quits. The blocking quit overlay is up for the whole call. Busy
-  // (only possible without force) drops the overlay and asks the force
-  // question; error drops it and toasts; on { ok } it stays up until the app
-  // exits.
-  const quitAll = (force = false) => {
-    if (quitBusy) return
-    setQuitBusy(true)
-    setQuitOverlay(true)
-    void (async () => {
-      const r = await window.autowright?.quitAll(force).catch((e: Error) => ({ error: e.message }))
-      if (r && 'busy' in r) setQuitForceConfirm(true)
-      else if (r && 'error' in r) showToast(r.error)
-      if (r && 'ok' in r) return
-      // Any non-ok answer (busy, error, or unexpected) drops the overlay —
-      // it has no user dismissal path, so it must never outlive the call.
-      setQuitOverlay(false)
-      setQuitBusy(false)
     })()
   }
 
@@ -464,7 +442,7 @@ export default function SettingsPage() {
               <button
                 className="ad-btn-soft"
                 onClick={() => setQuitConfirm(true)}
-                disabled={quitBusy || quitForceConfirm}
+                disabled={quitBusy}
                 style={{ flex: 'none' }}
               >
                 {quitBusy ? (
@@ -523,21 +501,8 @@ export default function SettingsPage() {
           body="The background service stops too, so schedules and message triggers pause until you next log in or open Autowright."
           confirmLabel="Quit Autowright"
           danger
-          onConfirm={() => { setQuitConfirm(false); quitAll() }}
+          onConfirm={() => { setQuitConfirm(false); void quitAll() }}
           onCancel={() => setQuitConfirm(false)}
-        />
-      )}
-
-      {/* §4.9 force-confirm modal: the quit-all IPC answered busy — a live
-          execution. Confirming retries with force, which skips the gate. */}
-      {quitForceConfirm && (
-        <ConfirmModal
-          title="An automation is executing"
-          body="Shut down everything and quit? The running automation will be killed."
-          confirmLabel="Shut down and quit"
-          danger
-          onConfirm={() => { setQuitForceConfirm(false); quitAll(true) }}
-          onCancel={() => setQuitForceConfirm(false)}
         />
       )}
 
@@ -551,16 +516,6 @@ export default function SettingsPage() {
           onCancel={() => setResetConfirm(false)}
         />
       )}
-
-      {/* §4.9 quit overlay: non-dismissable while §3 quit-all runs — on
-          success it stays up until the app exits. */}
-      <BlockingOverlay open={quitOverlay} ariaLabel="Quitting Autowright">
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, textAlign: 'center' }}>
-          <Spinner size={22} />
-          <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>Quitting Autowright…</div>
-          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Stopping everything…</div>
-        </div>
-      </BlockingOverlay>
 
       {/* §4.9 reset progress overlay: non-dismissable while §3 reset-all runs —
           on success it stays up until the app quits. */}

@@ -657,9 +657,12 @@ Dev workflow:
   each start) plus `/health` and for Vite to answer, then launches Electron in the foreground
   with `AUTOWRIGHT_RENDERER_URL=http://127.0.0.1:<vite port>` (§15) — renderer edits under
   `app/src` hot-reload live; backend edits need a dev.sh restart. Quitting Electron normally
-  (Cmd+Q) leaves the backend running (release semantics — automations keep firing; stop it with
-  `.venv/bin/autowright service stop`, or `service uninstall` for full teardown). Ctrl+C in the dev.sh terminal instead shuts the
-  whole app down: Electron dies with the terminal's SIGINT, the exit trap kills Vite, and an
+  (Cmd+Q) is the §3 quit-entirely flow, exactly as in release: the backend stops with the
+  UI (the plist stays; `.venv/bin/autowright service restart` brings it back headless,
+  `service uninstall` is the full teardown). Ctrl+C in the dev.sh terminal shuts the
+  whole app down: the terminal's SIGINT reaches Electron as an OS quit (§3 — the same
+  quit-entirely flow, which finds the backend already gone or stops it itself, and quits
+  the UI either way), the exit trap kills Vite, and an
   INT/TERM trap stops the backend — `autowright service uninstall` first (launchd KeepAlive
   would otherwise respawn it), then the same SIGTERM → 5 s grace → SIGKILL escalation as the
   startup stale-process sweep (defensive — the §19 ws handler exits on disconnect, so a plain
@@ -674,7 +677,9 @@ Dev workflow:
   the real app data).
 - **`.\windows-scripts\dev.ps1`** — dev.sh on Windows (PowerShell; §17 `windows-scripts/`).
   Same contract — deps only, stale-process sweep, real service, Vite + Electron with HMR,
-  release semantics on normal quit, full teardown on Ctrl+C, the same isolated mode and
+  release semantics on normal quit (the Windows/Linux close rule quits the UI only — the
+  OS-level Quit that runs §3 quit-entirely exists on macOS alone), full teardown on
+  Ctrl+C, the same isolated mode and
   wipe rule (`-Fresh`, the PowerShell flag form) — mapped per-OS:
   - Deps are inlined (build.sh is bash): venv via `py -3.14` when `.venv\Scripts\python.exe`
     is missing, then the same two change-gated steps — `.venv/.backend-stamp`-gated

@@ -5,10 +5,12 @@
 # AUTOWRIGHT_RENDERER_URL (§15). Same real code everywhere: real data dir
 # (~/Library/Application Support/Autowright), macOS Keychain, random free port,
 # backend as the real launchd LaunchAgent (ai.autowright.backend, §3:
-# RunAtLoad/KeepAlive, survives Electron quit), no mocks, no seed data.
+# RunAtLoad/KeepAlive), no mocks, no seed data.
 # Backend edits still need a restart (the backend is not hot-reloaded).
 # Ctrl+C shuts the whole app down (Electron, vite, and the backend);
-# quitting Electron normally leaves the backend up, like release.
+# quitting Electron normally (Cmd+Q) is the §3 quit-entirely flow, like
+# release: the backend stops with the UI (plist stays; `service restart`
+# brings it back headless).
 #
 #   ./scripts/dev.sh    deps, restart the service, vite + Electron with HMR
 #
@@ -83,12 +85,13 @@ else
   "$ROOT/.venv/bin/autowright" service install
 fi
 
-# Ctrl+C shuts the whole app down: Electron dies with the terminal's SIGINT,
-# the EXIT trap below clears vite, and this stops the backend — service
-# uninstall first (launchd KeepAlive would otherwise respawn it), then
-# kill_stale, because a plain SIGTERM leaves uvicorn hanging in graceful
-# shutdown and only its SIGKILL fallback clears that. Quitting Electron
-# normally (Cmd+Q) still leaves the backend up, like release.
+# Ctrl+C shuts the whole app down: the terminal's SIGINT reaches Electron as
+# an OS quit (§3 quit-entirely — it stops the backend itself or finds it
+# already gone, and quits the UI either way), the EXIT trap below clears
+# vite, and this stops the backend — service uninstall first (launchd
+# KeepAlive would otherwise respawn it), then kill_stale, because a plain
+# SIGTERM leaves uvicorn hanging in graceful shutdown and only its SIGKILL
+# fallback clears that.
 shutdown_backend() {
   echo
   echo "· ctrl-c — stopping the backend"
@@ -128,6 +131,6 @@ for _ in $(seq 1 75); do
 done
 [ -n "$VITE_UP" ] || { echo "vite didn't come up — see $LOGS/vite.log"; exit 1; }
 
-# ---- electron (foreground; quitting it leaves the backend up, like release) ----
+# ---- electron (foreground; Cmd+Q stops the backend too, like release) ----
 echo "· launching Electron (HMR via http://127.0.0.1:$VPORT)"
 cd "$ROOT/app" && AUTOWRIGHT_RENDERER_URL="http://127.0.0.1:$VPORT" npx electron . || true

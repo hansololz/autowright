@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('autowright', {
   // replaces the previous listener, like the two above: under §15's renderer
   // dev server a re-evaluated module would otherwise stack subscribers.
   onOpenTarget: (cb) => _push('open-target', cb),
+  // §3 quit means quit for good: main pushes this on an OS quit (Cmd+Q, the
+  // application menu's Quit, the dock's Quit) and the §4.9 QuitFlow runs the
+  // shared quit flow — same overlay, same busy question, same quit-all.
+  onQuitRequested: (cb) => _push('quit-requested', cb),
 })
 
 // One push-channel subscription at a time (replace on re-register), returning

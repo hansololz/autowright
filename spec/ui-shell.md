@@ -94,6 +94,11 @@ the last window always quits the UI; automations keep firing in the §3 systemd 
 regardless. The
 discriminator is the shell capability `dockIcon`, never a platform sniff: a platform with a
 dock stays resident unconditionally; without one, residency requires a **live** tray.
+Quitting is different from closing: Cmd+Q, the application menu's Quit and the dock's Quit
+are the §3 quit-entirely flow — the backend stops with the UI (quit means quit for good),
+through the shared §4.9 `QuitFlow` when the main window is up and natively otherwise. No
+window of ours vetoes a quit — the non-closable §13 panel is destroyed in `before-quit` for
+exactly that reason.
 Turning the tray off is the same rule at another moment: the tray-off transition destroys the
 tray **and its §13 panel window** (a hidden panel is still a window, and would keep
 `window-all-closed` from ever firing) and re-evaluates the rule right then — without a dock,
@@ -1682,7 +1687,16 @@ execute that fails (e.g. the §7 409 no-free-slot) toasts the error message — 
 execute press is never a silent no-op. The panel window is not closable, minimizable, or fullscreenable — the default
 application menu stays active, so Cmd+W/Cmd+M must be no-ops for it (a destroyed or
 minimized panel would otherwise strand the tray toggle on a dead reference). Belt and
-braces: a `closed` handler clears the reference anyway. The panel is visible on all
+braces: a `closed` handler clears the reference anyway. A non-closable window has one
+more consequence: `app.quit()` closes every window and is **cancelled** when one refuses
+(Electron's macOS close path bails on a non-closable window and cancels the quit), so a
+panel that had ever been opened silently vetoed every quit — Cmd+Q, the application
+menu's Quit, the dock's Quit, the §3 quit-all, the §9 renderer-crash quit — after
+`before-quit` had already stopped the shell polls, leaving a resident app that reopened
+from the dock onto whatever the quit had done (a stopped backend, after quit-all). The
+shell therefore destroys the panel in `before-quit`, before Electron walks the windows
+(the same destroy the tray-off transition does, height and anchor reset with it). Rule:
+no window of ours may ever veto a quit. The panel is visible on all
 Spaces including over fullscreen apps (`setVisibleOnAllWorkspaces` with
 `visibleOnFullScreen`) — opening it never switches the user out of a fullscreen Space.
 Panel placement is per-OS (§2 `panelPosition`): macOS anchors under the menu-bar icon;

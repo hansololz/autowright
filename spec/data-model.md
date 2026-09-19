@@ -1203,7 +1203,15 @@ COMMAND LINE; no stored setting). One row titled "Quit Autowright entirely", det
 background service too — schedules and message triggers pause until you next log in or open
 Autowright.", with a "Quit…" button (ellipsis: a confirm follows). The button opens a danger
 ConfirmModal — title "Quit Autowright entirely?", body restating the pause-until-next-launch
-consequence, confirm label "Quit Autowright". Confirming raises the **quit overlay** (the
+consequence, confirm label "Quit Autowright". Confirming runs the shared **quit flow**.
+The quit flow is app-level, not the card's: its state lives in the store (`quitStage`:
+`null` · `'stopping'` · `'force'`, action `quitAll(force?)`) and its surfaces render from
+one `QuitFlow` component mounted on the main-window surfaces (the app shell and
+onboarding), so the §3 OS quit — Cmd+Q, the application menu's Quit, the dock's Quit —
+drives the very same flow through the `quit-requested` push (`QuitFlow` subscribes via
+`onQuitRequested` and calls `quitAll()`; a repeated request while `stopping` is a no-op).
+Only the "Quit Autowright entirely?" confirm above is the card's own — an OS quit asks
+nothing unless an automation is executing. `quitAll` raises the **quit overlay** (the
 same §14 `BlockingOverlay` as RESET below: full-window, portalled above every surface, no
 user dismissal path) holding the §9 busy spinner, the title "Quitting Autowright…", and the
 muted line "Stopping everything…" (static — quit is a single stop step, no stage pushes),
@@ -1213,8 +1221,10 @@ title "An automation is executing", body "Shut down everything and quit? The run
 automation will be killed.", confirm label "Shut down and quit" — whose confirm re-raises
 the overlay and re-fires `quit-all` with `force: true` (skips the gate; §3 quit-entirely).
 Error → the overlay drops and the error text toasts. Success → the overlay stays up until
-the app exits (backend stopped and strays swept first — §3 explicit-quit exception; after
-it, the app bundle can be deleted immediately). The stop typically takes a few seconds and
+the app exits, at most ~2 s later (backend stopped and strays swept first — §3
+quit-entirely, then `app.quit()` with the §3 2 s `app.exit(0)` fallback; after it, the app
+bundle can be deleted immediately). The card's button reads "Stopping…" (spinner) and is
+disabled while the flow is `stopping` or asking the force question, whoever started it. The stop typically takes a few seconds and
 is bounded at ~20 s (deregistration wait plus the stray-process sweep); the overlay blocks
 every interaction for the whole run.
 

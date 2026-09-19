@@ -1,5 +1,5 @@
 // Electron main: one app window + a tray (menu-bar) panel window (§9, §13).
-const { app, autoUpdater, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain, session, shell, screen } = require('electron')
+const { app, autoUpdater, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain, powerMonitor, session, shell, screen } = require('electron')
 const { execFile } = require('child_process')
 const { randomUUID } = require('crypto')
 const fs = require('fs')
@@ -49,6 +49,17 @@ let tray = null
 // True from `before-quit` on — the app is on its way out (§3: the
 // update-install answer tells a real quit from an updater that refused one).
 let quitting = false
+// §3 quit means quit for good: an OS quit (Cmd+Q, the application menu's Quit,
+// the dock's Quit) runs the quit-entirely flow. Every quit of our own goes
+// through quitUi(), which sets the pass-through before-quit reads; a session
+// end (powerMonitor 'shutdown') passes through too. Any other before-quit is
+// the user's Quit and is intercepted below.
+let uiQuit = false
+let sessionEnding = false
+function quitUi() {
+  uiQuit = true
+  app.quit()
+}
 // The 60 s tray-alert + shell-settings poll (§13/§4.9). Held so it can be
 // stopped at quit and at the §3 reset — a poll that outlives either one
 // fetches a backend that is going away and logs into a deleted logs root.
@@ -61,7 +72,7 @@ function stopShellPoll() {
 // One app process only: a second launch (login item racing a manual open,
 // `open -n`) would create a second tray and double-fire §6 app-start triggers.
 const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) app.quit()
+if (!gotLock) quitUi()
 // second-instance can fire before whenReady (the exact login-item race above);
 // creating a BrowserWindow before ready throws. The ready path opens the
 // window itself, so the early signal needs no replay.
@@ -545,7 +556,7 @@ function createWindow(hash) {
     }
     clearWatchdog()
     showStartupError('The app window kept crashing.')
-    app.quit()
+    quitUi()
   })
   load(win, hash || '/app')
   // §9 watchdog: if the window still hasn't shown by now, act rather than sit
@@ -715,7 +726,7 @@ function applyShellSettings(s, { trusted = false } = {}) {
         // tray was the only thing keeping a windowless app reachable. With
         // both gone there is nothing left to click, so quit rather than sit
         // there running and invisible.
-        if (!caps.dockIcon && !win) app.quit()
+        if (!caps.dockIcon && !win) quitUi()
       }
     }
   } catch (err) {
@@ -1335,10 +1346,16 @@ ipcMain.handle('update-install', async () => {
   // the machinery that performs the swap differs (ShipIt vs. the NSIS
   // installer vs. the AppImage swap electron-updater staged).
   lastUpdaterError = null
+  // §3: the updater quits through app.quit() itself — flag it as ours, or the
+  // quit-entirely interception below would treat the install's quit as the
+  // user's Quit and stop the backend under the swap. Cleared again on every
+  // refusal: a later Cmd+Q must still read as the user's.
+  uiQuit = true
   let started
   try {
     started = genericUpdater().quitAndInstall()
   } catch (err) {
+    uiQuit = false
     appLog(`update: install failed: ${String(err?.message || err)}`)
     return { error: String(err?.message || err) }
   }
@@ -1348,6 +1365,7 @@ ipcMain.handle('update-install', async () => {
   // it, and a silent no-op is never an acceptable outcome. MacUpdater returns
   // nothing and quits through Squirrel, so only an explicit false counts.
   if (!quitting && started === false) {
+    uiQuit = false
     const error = lastUpdaterError || 'the updater could not install this update'
     appLog(`update: install refused: ${error}`)
     return { error }
@@ -1394,25 +1412,116 @@ async function runServiceVerb(verb, label) {
   })
 }
 
-// §3 explicit-quit exception (§4.9 QUIT card): stop the backend LaunchAgent
-// (bootout plus the stray-process sweep — plist and shim stay; it returns at
-// next login or app launch), then quit the app. On any stop failure the app
-// stays up — never quit the UI while the backend it promised to stop keeps
-// running. `force` (the §4.9 force-confirm modal's retry) skips the
-// live-execution gate: the backend's graceful shutdown and the stop's sweep
-// end the running execution.
+// §3: how long a successful stop-and-quit waits for app.quit() to end the
+// process before app.exit(0) ends it outright (a vetoed quit must not strand
+// the UI), and how long an OS quit waits for the renderer to take the flow
+// over before the shell runs it natively.
+const QUIT_EXIT_FALLBACK_MS = 2000
+const QUIT_ASK_RENDERER_MS = 1500
+
+// §3 quit-entirely (the §4.9 QUIT card and every OS quit): stop the backend
+// LaunchAgent (bootout plus the stray-process sweep — plist and shim stay; it
+// returns at next login or app launch), then quit the app. On any stop
+// failure the app stays up — never quit the UI while the backend it promised
+// to stop keeps running. `force` (the §4.9 force-confirm modal's retry, the
+// native confirm below) skips the live-execution gate: the backend's graceful
+// shutdown and the stop's sweep end the running execution. One flight at a
+// time: the IPC and the native OS path share it.
+let quitFlight = null
+let quitAskTimer = null
+
+function stopAndQuit(force, label) {
+  if (quitFlight) return quitFlight
+  quitFlight = (async () => {
+    if (!force && await executionsLive()) return { busy: true }
+    // §3 dev-only corner: no bundled interpreter and no backend.json means
+    // no backend to stop — the discovery guard keeps the file present while
+    // one lives. Quit the UI rather than refuse with "no interpreter": a dead
+    // dev backend must never make the app unquittable.
+    if (!bundledPython() && !backendInfo()) {
+      appLog(`${label}: no backend to stop — quitting app`)
+    } else {
+      const err = await runServiceVerb('stop', label)
+      if (err) {
+        // The app stays up (§3), so future ensure/version-sync installs may run.
+        quittingAll = false
+        return { error: err }
+      }
+      appLog(`${label}: backend stopped, quitting app`)
+    }
+    quitUi()
+    // §3 converse invariant: the backend is stopped, so the UI must not stay
+    // resident either — reopened from the dock it would sit on a dead backend
+    // (ensure-backend only runs at launch). Nothing of ours vetoes a quit
+    // (§9/§13: the non-closable panel is destroyed in before-quit), but if
+    // anything ever does, end the process outright: there is nothing to lose.
+    setTimeout(() => {
+      appLog(`${label}: quit was vetoed — exiting`)
+      app.exit(0)
+    }, QUIT_EXIT_FALLBACK_MS)
+    return { ok: true }
+  })().finally(() => { quitFlight = null })
+  return quitFlight
+}
+
 ipcMain.handle('quit-all', async (_e, opts) => {
-  if (!opts?.force && await executionsLive()) return { busy: true }
-  const err = await runServiceVerb('stop', 'quit-all')
-  if (err) {
-    // The app stays up (§3), so future ensure/version-sync installs may run.
-    quittingAll = false
-    return { error: err }
-  }
-  appLog('quit-all: backend stopped, quitting app')
-  app.quit()
-  return { ok: true }
+  // The renderer took an OS quit over (§3): the native fallback stands down.
+  if (quitAskTimer) { clearTimeout(quitAskTimer); quitAskTimer = null }
+  return stopAndQuit(!!opts?.force, 'quit-all')
 })
+
+// §3 OS quit (Cmd+Q, the application menu's Quit, the dock's Quit — and a
+// SIGINT/SIGTERM, which Electron turns into the same before-quit): quit means
+// quit for good. A loaded main window runs the shared §4.9 quit flow (same
+// overlay, same busy question, same quit-all IPC) — it is shown first so the
+// overlay is seen. No loaded window, or a renderer that never answers, and the
+// shell runs the flow natively.
+function quitForGood() {
+  if (quitFlight || quitAskTimer) return // already underway — a repeated Cmd+Q
+  appLog('quit: requested — stopping the backend first')
+  if (win && !win.isDestroyed() && winLoaded) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    win.webContents.send('quit-requested')
+    quitAskTimer = setTimeout(() => {
+      quitAskTimer = null
+      appLog('quit: the renderer did not take over — quitting natively')
+      void quitNatively()
+    }, QUIT_ASK_RENDERER_MS)
+    return
+  }
+  void quitNatively()
+}
+
+async function quitNatively() {
+  let r = await stopAndQuit(false, 'quit')
+  if (r.busy) {
+    let response = 1
+    try {
+      ({ response } = await dialog.showMessageBox({
+        type: 'warning',
+        message: 'An automation is executing',
+        detail: 'Shut down everything and quit? The running automation will be killed.',
+        buttons: ['Shut down and quit', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+      }))
+    } catch { /* no dialog on this host — treat as Cancel */ }
+    if (response !== 0) {
+      appLog('quit: cancelled at the busy confirm')
+      return
+    }
+    r = await stopAndQuit(true, 'quit')
+  }
+  if (r.error) {
+    // §3: the app stays up — and says so, since no renderer is showing it.
+    try {
+      dialog.showErrorBox('Autowright',
+        `Autowright couldn't stop its backend, so it stays open.\n\n${r.error}`)
+    } catch { /* the appLog line runServiceVerb wrote is the whole report */ }
+  }
+}
 
 // §3 reset steps ------------------------------------------------------------
 
@@ -1603,6 +1712,14 @@ app.whenReady().then(() => {
   } catch (err) {
     appLog(`ready: suppressing the application menu failed: ${String(err?.message || err)}`)
   }
+  // §3: logout / restart / shutdown end the LaunchAgent with the session and
+  // RunAtLoad brings it back at login — quitting the UI only, never a stop
+  // that would delay the logout. Guarded like every other ready step.
+  try {
+    powerMonitor?.on?.('shutdown', () => { sessionEnding = true })
+  } catch (err) {
+    appLog(`ready: watching for session end failed: ${String(err?.message || err)}`)
+  }
   void ensureBackend()
   createWindow()
   // §13: a tray that fails to create (a broken package missing its icon asset)
@@ -1635,15 +1752,33 @@ app.whenReady().then(() => {
 //     invisible app with no way to reach it.
 app.on('window-all-closed', () => {
   if (caps.dockIcon) return
-  if (!tray) app.quit()
+  if (!tray) quitUi()
 })
 
 // The app is on its way out: the §3 update-install answer reads this to tell a
 // real quit from an updater that refused to start one, and the 60 s poll and
 // the 24 h update-check timer stop here rather than firing a backend fetch
 // (and an app.log line) mid-quit.
-app.on('before-quit', () => {
+app.on('before-quit', (e) => {
+  // §3 quit means quit for good: a quit that is neither ours (quitUi) nor the
+  // session ending is the user's Quit — hold it and run the quit-entirely
+  // flow, which quits through quitUi() once the backend is stopped.
+  if (!uiQuit && !sessionEnding) {
+    e.preventDefault()
+    quitForGood()
+    return
+  }
   quitting = true
   stopShellPoll()
   stopUpdateTimer()
+  // §13: app.quit() closes every window next and is cancelled when one
+  // refuses — and the panel is deliberately non-closable (Cmd+W must be a
+  // no-op for it). Left alone, a panel that had ever been opened silently
+  // vetoed every quit: Cmd+Q, the dock's Quit and quit-all all stopped right
+  // here, with the polls already gone and the app still resident. Destroy it
+  // (the tray-off transition's move) before Electron walks the windows.
+  if (panel && !panel.isDestroyed()) panel.destroy()
+  panel = null
+  panelHeight = 420
+  panelAnchor = null
 })

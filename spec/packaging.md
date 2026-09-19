@@ -399,12 +399,47 @@ the update bullets below).
   client that dies or navigates away while the backend lives on — is not an orphan at
   all: the job keeps building and its outcome is held for the §11 re-attach (§19
   background continuation), bounded by the §8 idle window and wall-clock hard cap.
-- Quitting the Electron app (window and menu bar) never stops the backend; the scheduler keeps
-  running. The §4.9 `login` setting controls only whether the UI starts at login — the backend
-  service stays registered regardless once onboarding completes.
-  **One explicit exception:** the Settings page's "Quit Autowright entirely" action (§4.9 QUIT
-  card). It runs `python -m autowright.service stop` and then quits the Electron app; the
-  plist and the CLI shim stay on disk. The wait for launchd to finish a bootout is bounded
+- **Closing** the window never stops the backend (§9 close rule): the app stays resident
+  behind the dock / tray and the scheduler keeps running. The §4.9 `login` setting controls
+  only whether the UI starts at login — the backend service stays registered regardless once
+  onboarding completes.
+  **Quitting is different — quit means quit for good (decided 2026-09-19; until then only
+  the QUIT card stopped the backend and an OS quit left it running).** Every user-facing
+  Quit runs the same **quit-entirely** flow: the §4.9 QUIT card, and on macOS the
+  application menu's "Quit Autowright" / Cmd+Q and the dock's Quit. The flow runs
+  `python -m autowright.service stop` and then quits the Electron app; the
+  plist and the CLI shim stay on disk (a headless user brings the backend back with
+  `autowright service restart`). How the shell tells the user's Quit from its own: every
+  internal quit goes through `quitUi()`, which sets a flag `before-quit` lets through —
+  the single-instance loser, the second renderer death (§9), the Windows/Linux close rule
+  and the tray-off no-dock rule (§9), the update install (§3 restart-install; the flag is
+  cleared again when the updater refuses), and quit-entirely's own final quit. An OS
+  session end is UI-only too: `powerMonitor` `shutdown` (logout, restart, shutdown on
+  macOS/Linux) sets the same pass-through — the LaunchAgent dies with the session anyway and
+  `RunAtLoad` brings it back at login, and a stop there would only delay the logout (the
+  pass-through is sticky for the rest of the process — a logout the user cancels at the OS
+  prompt leaves the next Cmd+Q UI-only, a corner accepted over guessing at a cancel). Every
+  other `before-quit` is the user's Quit (or a signal — SIGINT/SIGTERM reach `before-quit`
+  the same way, so dev.sh's Ctrl+C runs this flow too, §18): it is `preventDefault`ed and
+  the flow runs. With a loaded main window the window is restored/shown/focused and told
+  `quit-requested`; the renderer's shared quit flow (§4.9 `QuitFlow`) takes over — the
+  same overlay, the same busy question, the same `quit-all` IPC — so an OS quit looks
+  exactly like the QUIT card minus the card's own "Quit Autowright entirely?" confirm
+  (Cmd+Q asks nothing unless an automation is executing). If no `quit-all` arrives within
+  1.5 s (a wedged renderer) or there is no loaded window at all (the dock's Quit with the
+  window closed, or only the §13 panel up), the shell runs the flow natively: the same
+  live-execution gate, a native warning `showMessageBox` — message "An automation is
+  executing", detail "Shut down everything and quit? The running automation will be
+  killed.", buttons "Shut down and quit" / "Cancel" (Cancel default) — then the stop, and on
+  a stop failure a native error box ("Autowright couldn't stop its backend, so it stays
+  open." + the failure line): the app never quits its UI while the backend it promised to
+  stop keeps running. One stop-and-quit is in flight at a time — the `quit-all` IPC and
+  the native path share it, and a repeated Cmd+Q while it runs is ignored. One dev-only
+  corner: with no bundled interpreter and no `backend.json` there is nothing to stop (the
+  §3 discovery guard makes an absent file mean a stopped backend), so the flow logs
+  `no backend to stop` and quits the UI instead of failing with "No backend interpreter
+  found" — a dead dev backend must never make the app unquittable.
+  The wait for launchd to finish a bootout is bounded
   by a 10 s wall-clock deadline (5 s for the second window after the sweep), never a poll
   count. `stop` is bootout **plus a stray-process sweep**: after
   launchd deregisters the job (or the 10 s deregistration wait expires), the stop TERM-then-KILLs
@@ -429,6 +464,14 @@ the update bullets below).
   which skips the gate; the backend's graceful shutdown (`kill_all_live`) plus the sweep end
   the running execution. If the stop fails, the app does **not** quit — the error is surfaced
   instead; the app must never quit its UI while the backend it promised to stop keeps running.
+  The converse holds too: once the stop succeeded the app must not stay up either — a UI
+  resident against a backend it just stopped reopens from the dock onto a dead backend
+  (ensure-backend only runs at launch, and never in a dev launch), which is exactly the
+  state a vetoed quit left the user in. quit-all quits through `app.quit()` (so
+  `before-quit` runs: the shell polls stop and the §13 panel is destroyed) and arms a 2 s
+  fallback that `app.exit(0)`s if the process is still alive, logging
+  `quit-all: quit was vetoed — exiting` — nothing of ours may veto a quit (§9/§13), and
+  if something does, the backend is already stopped and there is nothing left to lose.
   The shell's service children are time-boxed like `service.py`'s own `launchctl` calls: every
   `python -m autowright.service <verb>` the Electron main process spawns (the ensure-backend
   `install`, quit-all's and reset's `stop`) carries a 120 s `execFile` timeout, and the

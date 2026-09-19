@@ -41,6 +41,12 @@ description: Build, launch, and drive Autowright (Electron + Python backend) to 
   before). The real service can also touch real shims (heal/remove per the real `cliEnabled`),
   which can yank `~/.local/bin/autowright` out from under a verify run.
 
+- **Never end a driven Electron through `electronApp.close()` or `app.quit()`** (§3 quit
+  means quit for good, 2026-09-19): main.cjs intercepts any quit it did not start as the
+  user's Quit and runs `service stop` against the REAL launchd job plus a sweep of every
+  `-m autowright.` process on the machine — it would kill the developer's own backend.
+  End a driven app with `electronApp.evaluate(({ app }) => app.exit(0))` (what
+  `e2e/harness.ts` `closeApp` does), then kill the process if it lingers.
 - **Driving Electron with the stored `login: true` registers REAL login items** pointing at
   the dev `app/node_modules/electron/dist/Electron.app` (the §4.9 apply-settings push runs on
   boot regardless of `AUTOWRIGHT_HOME`). After a verify session, check System Settings login

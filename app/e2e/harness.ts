@@ -290,6 +290,14 @@ export async function launchApp(home: string, onboarded: boolean): Promise<AppHa
 export async function closeApp(h: AppHandle | null): Promise<void> {
   if (!h) return
   try {
+    // §3 quit means quit for good: playwright's close() quits through
+    // app.quit(), which main.cjs now intercepts as the user's Quit and answers
+    // with `service stop` against the REAL launchd job plus a sweep of every
+    // `-m autowright.` process on this machine. End the UI outright instead.
+    await Promise.race([
+      h.app.evaluate(({ app }) => app.exit(0)).catch(() => {}),
+      new Promise((r) => setTimeout(r, 5000)),
+    ])
     await Promise.race([h.app.close(), new Promise((r) => setTimeout(r, 5000))])
   } finally {
     try { h.app.process().kill('SIGKILL') } catch { /* already gone */ }

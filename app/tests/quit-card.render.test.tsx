@@ -1,11 +1,14 @@
-// §4.9 QUIT card: confirm-gated quit-all IPC (§3 explicit-quit exception) —
-// the blocking quit overlay is up for the whole call; busy asks the force
+// §4.9 QUIT card: confirm-gated quit-all IPC (§3 quit-entirely) — the
+// blocking quit overlay is up for the whole call; busy asks the force
 // question, error toasts and leaves everything running, success exits the app.
+// The overlay and the force question are the shared QuitFlow's (store-driven,
+// shell-mounted), so the card is rendered with it, as the app shell does.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Settings } from '../src/types'
 import { useStore } from '../src/store'
 import SettingsPage from '../src/pages/SettingsPage'
+import QuitFlow from '../src/pages/QuitFlow'
 
 const SETTINGS: Settings = {
   login: false, menuBarIcon: false, keepAwake: false, automaticUpdateCheck: false,
@@ -22,7 +25,7 @@ const showToast = vi.fn<(msg: string) => void>()
 beforeEach(() => {
   ;(window as unknown as Record<string, unknown>).autowright = { cliStatus, quitAll }
   cliStatus.mockResolvedValue({ state: 'missing' })
-  useStore.setState({ settings: SETTINGS, showToast })
+  useStore.setState({ settings: SETTINGS, showToast, quitStage: null })
   quitAll.mockReset()
   showToast.mockReset()
 })
@@ -30,7 +33,7 @@ beforeEach(() => {
 afterEach(cleanup)
 
 async function openConfirm() {
-  render(<SettingsPage />)
+  render(<><SettingsPage /><QuitFlow /></>)
   fireEvent.click(await screen.findByRole('button', { name: 'Quit…' }))
   return screen.findByRole('alertdialog', { name: 'Quit Autowright entirely?' })
 }
