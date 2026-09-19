@@ -12,7 +12,7 @@ import {
   Modal, Notice, PageLoading, PageTitle, PopMenu, Spinner, Toggle, usePopover,
 } from '../ui'
 import CatalogEditorModal, {
-  CATALOG_FILE, KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel,
+  CATALOG_FILE, STORED_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel,
 } from './CatalogEditor'
 import ImportModal from './ImportModal'
 import { ImportSummaryModal } from './AutomationsList'
@@ -531,7 +531,7 @@ export default function MarketplacePage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)' }}>{s.name}</span>
-                  <span title={s.location ?? KEPT_LABEL} style={{ display: 'inline-flex', minWidth: 0 }}>
+                  <span title={s.location ?? STORED_LABEL} style={{ display: 'inline-flex', minWidth: 0 }}>
                     <MetaChip>
                       <i className={`fa-solid ${locationIcon(s)}`} style={{ fontSize: 10 }} />
                       {locationLabel(s)}

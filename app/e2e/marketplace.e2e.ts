@@ -176,7 +176,7 @@ describe('marketplace e2e', () => {
     await authoredSection.getByTestId('marketplace-entry').getByText('Watcher', { exact: true })
       .waitFor({ timeout: 10_000 })
     // §22.3: the chip says the app holds the only copy - there is no location.
-    await authoredSection.getByText('Kept by Autowright').waitFor({ timeout: 10_000 })
+    await authoredSection.getByText('Stored by Autowright').waitFor({ timeout: 10_000 })
     // Same for the editor: it closes after the save lands.
     await page.getByTestId('catalog-editor').waitFor({ state: 'detached', timeout: 10_000 })
     await shot(page, 'marketplace-authored.png')

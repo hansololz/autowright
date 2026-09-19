@@ -240,7 +240,7 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
 **Per catalog** - one section each, in table order:
 - Header row: the catalog name (600, 15 px), a §14 `MetaChip` naming the location (link
   icon + hostname for a link, file icon + file name for a path, `fa-box-archive` +
-  "Kept by Autowright" for `null`; the full location in the `title` attribute), and a
+  "Stored by Autowright" for `null`; the full location in the `title` attribute), and a
   muted line "Refreshed <date label>" (the §4.1 shared date-label scheme, e.g. "Refreshed
   Today, 8:00 AM"; omitted while `refreshedAt` is null) for a catalog with a location, or
   "Added <date label>" (from `addedAt`) for one without. A hidden catalog (`shown` false)
@@ -595,7 +595,7 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   CREATE CATALOG / EDIT CATALOG. Then the **details row**: the catalog's name as typed
   (600 when viewed, 500 muted otherwise; the muted "Untitled catalog" while blank) over a
   muted one-line sub naming where it lives - the catalog file's path for a path location,
-  "Kept by Autowright" for `null` and in create mode. Then the eyebrow AUTOMATIONS · <n>
+  "Stored by Autowright" for `null` and in create mode. Then the eyebrow AUTOMATIONS · <n>
   (`padding: 14px 18px 4px`) and one **entry row** per entry in catalog order: the title
   (the muted "Untitled" while blank) over a muted sub naming the reference - the hostname
   for an https link, the file name for a path, "No archive yet" while the reference is
@@ -616,7 +616,7 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
     In edit mode it leads with a LOCATION line: the catalog file's full path (mono,
     muted, 12 px, wrapping - the navigator row only has room for its tail) with the
     caption "The file this editor writes." for a path location; for a `null` location
-    "Kept by Autowright" with the caption "Autowright keeps the catalog. Export its file
+    "Stored by Autowright" with the caption "Autowright keeps the catalog. Export its file
     from the Marketplace page to share it.". In create mode there is no LOCATION line
     (removed 2026-09-19 - there is nothing to locate yet); the form leads with one muted
     note (12.5 px, `--text-muted`, `data-testid` `catalog-create-note`): "Create the

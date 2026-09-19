@@ -337,7 +337,7 @@ describe('§22.3 Marketplace page', () => {
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     // §22.2: a null location is not refreshable - it says when it was added.
-    expect(screen.getByText('Kept by Autowright')).toBeTruthy()
+    expect(screen.getByText('Stored by Autowright')).toBeTruthy()
     await openActions()
     expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
     expect(screen.queryByTestId('marketplace-refresh-all')).toBeNull()
@@ -716,8 +716,8 @@ describe('§22.7 catalog authoring', () => {
 
   it('a catalog kept by Autowright says so where the path would be', async () => {
     await openEditor(keptSource())
-    expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
-    expect(screen.getByTestId('catalog-location').textContent).toBe('Kept by Autowright')
+    expect(screen.getByTestId('catalog-where').textContent).toBe('Stored by Autowright')
+    expect(screen.getByTestId('catalog-location').textContent).toBe('Stored by Autowright')
   })
 
   it('clicking a row views its entry form, editable in place', async () => {
@@ -918,7 +918,7 @@ describe('§22.7 catalog authoring', () => {
     expect(await screen.findByTestId('catalog-editor')).toBeTruthy()
     expect(screen.getByText('CREATE CATALOG')).toBeTruthy()
     expect(marketplaceCatalogRead).not.toHaveBeenCalled()
-    expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
+    expect(screen.getByTestId('catalog-where').textContent).toBe('Stored by Autowright')
     expect(screen.queryByTestId('catalog-location')).toBeNull()
     expect(screen.queryByText('LOCATION')).toBeNull()
     expect(screen.getByTestId('catalog-create-note').textContent).toBe(

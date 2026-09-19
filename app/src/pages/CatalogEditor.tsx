@@ -14,16 +14,16 @@ import {
   BtnGhost, ConfirmModal, EmptyLine, Eyebrow, Modal, PageLoading, ScrollArea, Spinner,
 } from '../ui'
 
-export const KEPT_LABEL = 'Kept by Autowright'
+export const STORED_LABEL = 'Stored by Autowright'
 export const CATALOG_FILE = 'marketplace-catalog.yaml'
 
 export const lastSegment = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p
 
 /** §22.3 location chip text: a link shows its host, a path the catalog's file
- * name, a null location "Kept by Autowright"; the full location rides in the
+ * name, a null location "Stored by Autowright"; the full location rides in the
  * `title` attribute. */
 export function locationLabel(source: MarketplaceSource): string {
-  if (source.location === null) return KEPT_LABEL
+  if (source.location === null) return STORED_LABEL
   if (source.kind === 'url') {
     try { return new URL(source.location).hostname } catch { return source.location }
   }
@@ -216,7 +216,7 @@ export default function CatalogEditorModal({ source, onClose, onSaved }: {
     JSON.stringify({ ...s, rows: s.rows.map(({ key: _key, ...rest }) => rest) })
   // §22.7: a catalog created here is kept by Autowright - there is no
   // location to choose; Export on the page hands the file out.
-  const where = source?.location ?? KEPT_LABEL
+  const where = source?.location ?? STORED_LABEL
 
   useEffect(() => {
     if (creating) { setLoaded(snapshot({ name: '', description: '', rows: [] })); return }
