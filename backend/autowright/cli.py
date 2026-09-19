@@ -69,7 +69,10 @@ class Client:
         # §20 HTTP timeouts: 30 s default; the legitimately long calls
         # (package install, import in all three of its steps, automation
         # delete, and the §22.5 marketplace calls that go over the network)
-        # override to 600 s.
+        # override to 660 s — 60 s of headroom over the backend's own 600 s
+        # download/install deadlines, so a slow server is reported by the
+        # backend's plain-word timeout and never as "backend isn't reachable"
+        # from this socket giving up first.
         r = urllib.request.Request(
             self.base + path,
             data=json.dumps(body).encode() if body is not None else None,
@@ -151,14 +154,24 @@ def find_execution(c: Client, ref: str | None) -> dict:
     # §19/§20: the server does the prefix match, so only rows that could
     # resolve cross the wire — every short id the CLI ever printed resolves
     # back (§20 reference rule) without reading the whole list.
-    execs = c.req("GET", f"/executions?idPrefix={urllib.parse.quote(ref)}&limit=50")["executions"]
+    envelope = c.req("GET", f"/executions?idPrefix={urllib.parse.quote(ref)}&limit=50")
+    execs, total = envelope["executions"], envelope["total"]
     matches = [e for e in execs if e["id"].startswith(ref)]
     if len(matches) == 1:
         return matches[0]
+    if not execs:
+        # §20: a prefix nothing starts with would leave the candidate list
+        # empty — read the newest executions instead, so the miss still names
+        # references the user can actually pass back.
+        envelope = c.req("GET", "/executions?limit=20")
+        execs, total = envelope["executions"], envelope["total"]
     # §20: the candidate list is a readout, not a dump — 20 rows, then a count.
+    # The count comes from the envelope's `total`, never from the capped page:
+    # a `limit` the server honored would otherwise report "and 30 more" for a
+    # history of thousands.
     shown = [f"{e['id'][:8]} ({e['automationName']}, {e['status']}, {e['started']})"
              for e in execs[:20]]
-    more = f", … and {len(execs) - 20} more" if len(execs) > 20 else ""
+    more = f", … and {total - len(shown)} more" if total > len(shown) else ""
     sys.exit(f"no unique execution matches {ref!r} — "
              f"have: {', '.join(shown) or '(none)'}{more}")
 
@@ -541,7 +554,7 @@ def ensure_packages(c: Client, pkgs: list[dict]) -> None:
     # §20: the foreground ensure waits its turn on the pip lock (the §19 import
     # already started the same ensure in the background) — `wait` keeps a
     # contended lock from answering 409.
-    r = c.req("POST", "/packages/install", {"packages": pkgs, "wait": True}, timeout=600)
+    r = c.req("POST", "/packages/install", {"packages": pkgs, "wait": True}, timeout=660)
     for p in r.get("packages", []):
         if p.get("status") == "installed":
             version = f" {p['version']}" if p.get("version") else ""
@@ -783,7 +796,7 @@ def cmd_automation_delete(c: Client, args) -> None:
     if not args.yes:
         sys.exit(f"deleting {a['name']!r} removes every version and its execution "
                  "history — add --yes to confirm")
-    c.req("DELETE", f"/automations/{a['id']}", timeout=600)
+    c.req("DELETE", f"/automations/{a['id']}", timeout=660)
     print(f"deleted {a['name']!r}")
 
 
@@ -939,14 +952,14 @@ def cmd_automation_import(c: Client, args) -> None:
     if args.path.startswith(("http://", "https://")):
         # §5.2: fetch + preview on the backend, confirm immediately - the typed
         # command is the user's explicit action (http:// gets the backend's 422).
-        pr = c.req("POST", "/automations/import/url", {"url": args.path}, timeout=600)
+        pr = c.req("POST", "/automations/import/url", {"url": args.path}, timeout=660)
         resolved = pr.get("preview", {}).get("resolvedUrl")
         if resolved and resolved != args.path.strip():
             print(f"resolved to {resolved}")
         # §20 HTTP timeouts: the confirm lands the archive - a large one on a
         # slow volume must never report "backend isn't reachable" while it works.
         r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
-                  timeout=600)
+                  timeout=660)
     else:
         from .transfer import MAX_ARCHIVE_BYTES
 
@@ -962,7 +975,7 @@ def cmd_automation_import(c: Client, args) -> None:
             # raw OSError.
             sys.exit(f"can't read {args.path}: {e.strerror or e}")
         r = json.loads(c.req_raw("POST", "/automations/import", data,
-                                 timeout=600).decode() or "{}")
+                                 timeout=660).decode() or "{}")
     _print_import_summary(c, r)
 
 
@@ -1563,7 +1576,7 @@ def cmd_marketplace_add(c: Client, args) -> None:
         body = {"path": os.path.abspath(ref)}
     # §20 HTTP timeouts: add fetches the catalog and its images over the
     # network, so it takes the long timeout the import calls take.
-    s = c.req("POST", "/marketplace/sources", body, timeout=600)
+    s = c.req("POST", "/marketplace/sources", body, timeout=660)
     print(f"added {s['name']} [{s['id'][:8]}] - {len(s.get('entries') or [])} automation(s)")
 
 
@@ -1600,9 +1613,9 @@ def cmd_marketplace_refresh(c: Client, args) -> None:
             sys.exit(f"{s['name']!r} has no location to refresh from")
         # §22.4: a single-source refresh answers 200 either way - the failure
         # is in `error`, not in the status code.
-        sources = [c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=600)]
+        sources = [c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=660)]
     else:
-        sources = c.req("POST", "/marketplace/refresh", timeout=600)["sources"]
+        sources = c.req("POST", "/marketplace/refresh", timeout=660)["sources"]
     failed = False
     for s in sources:
         if s.get("error"):
@@ -1640,11 +1653,11 @@ def cmd_marketplace_install(c: Client, args) -> None:
     s = find_source(c, args.source)
     i = _entry_index(args.n, s.get("entries") or [], s.get("name", "?"))
     pr = c.req("POST", f"/marketplace/sources/{s['id']}/entries/{i}/preview",
-               timeout=600)
+               timeout=660)
     # §20 import rule: the typed command is the user's go-ahead - preview and
     # confirm in one, exactly as `automation import` does with a link.
     r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},
-              timeout=600)
+              timeout=660)
     _print_import_summary(c, r)
 
 
@@ -1655,7 +1668,7 @@ def cmd_marketplace_create(c: Client, args) -> None:
     body = {"folder": os.path.abspath(args.folder)} if args.folder else {}
     # §20 HTTP timeouts: create adds the catalog as a source, which reads it
     # and builds its copy - the long timeout the other marketplace calls take.
-    s = c.req("POST", "/marketplace/catalogs", body, timeout=600)
+    s = c.req("POST", "/marketplace/catalogs", body, timeout=660)
     where = f"at {s['location']}" if s.get("location") else "(kept by Autowright)"
     print(f"created {s['name']} [{s['id'][:8]}] {where}")
 
@@ -1695,7 +1708,7 @@ def _save_catalog(c: Client, source: dict, catalog: dict, entries: list[dict],
         # keeps - beside the catalog file there is no folder to use.
         body["exportFolder"] = export_folder
     # §20 HTTP timeouts: a save exports automations and rebuilds the copy.
-    return c.req("PUT", f"/marketplace/sources/{source['id']}/catalog", body, timeout=600)
+    return c.req("PUT", f"/marketplace/sources/{source['id']}/catalog", body, timeout=660)
 
 
 def cmd_marketplace_catalog_set(c: Client, args) -> None:
@@ -1768,6 +1781,9 @@ def _menu_bar_icon_help() -> str:
     return f"show the {surface} icon"
 
 
+# §20: the settings the Electron shell owns — stored by the backend, applied
+# by the app's §3 reconcile poll, so `settings set` says when they land.
+SHELL_OWNED_KEYS = ("login", "menuBarIcon")
 # key → how its value parses: bool (§20 on|off), int, or the tuple of words it
 # accepts. §20 help rule: a stated vocabulary is exactly what the command parses,
 # so `notifications` lists the same two words the `settings set` epilog does.
@@ -1819,6 +1835,12 @@ def cmd_settings_set(c: Client, args) -> None:
     if patch:
         c.req("PATCH", "/settings", patch)
         print(f"set {', '.join(patch)}")
+        if any(k in SHELL_OWNED_KEYS for k in patch):
+            # §20: the OS side of these two is the Electron main process's §3
+            # poll, not the backend's — the setting is stored the moment the
+            # PATCH answers, but nothing outside the app changes until it
+            # syncs (and headless there is no app to apply it at all).
+            print("takes effect when the app next syncs, within a minute")
 
 
 # ---------------------------------------------------------------- service

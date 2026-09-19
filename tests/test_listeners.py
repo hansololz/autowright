@@ -779,19 +779,52 @@ def test_run_healthy_session_resets_backoff(monkeypatch):
 
 
 def test_stop_closes_live_socket(monkeypatch):
+    import threading
+
     from autowright import listeners as li_mod
 
     mgr = _FakeMgr()
     conn = li_mod._Conn("BOT", mgr)
-    closed = []
+    closed = threading.Event()
 
     class _Ws:
         def close(self):
-            closed.append(True)
+            closed.set()
 
     conn._ws = _Ws()
     conn.stop()
-    assert closed == [True] and conn._stop.is_set()
+    # §3: the close is fire-and-forget on its own thread — the flag is set
+    # synchronously, the close lands right after.
+    assert conn._stop.is_set()
+    assert closed.wait(5)
+
+
+def test_stop_never_waits_out_a_blocking_close(monkeypatch):
+    """§3: "a listener's stop is fire-and-forget (the close runs on a
+    short-lived thread nobody joins — the gateway session is disposable at
+    shutdown)", so the backend's 5 s graceful box is never spent on a gateway
+    close that hangs."""
+    import threading
+    import time
+
+    from autowright import listeners as li_mod
+
+    mgr = _FakeMgr()
+    conn = li_mod._Conn("BOT", mgr)
+    release = threading.Event()
+
+    class _WedgedWs:
+        def close(self):
+            release.wait(10)
+
+    conn._ws = _WedgedWs()
+    started = time.monotonic()
+    try:
+        conn.stop()
+        assert time.monotonic() - started < 0.1
+        assert conn._stop.is_set()
+    finally:
+        release.set()
 
 
 # ---------- §6 per-item guards / listener liveness ----------

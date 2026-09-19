@@ -398,8 +398,11 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
   const [channel, setChannel] = useState(init.channel ?? '')
   const [secret, setSecret] = useState(init.secret ?? '')
   const [pattern, setPattern] = useState(init.pattern ?? '')
-  // §9.2: mention-only by default for new triggers — a busy channel shouldn't fire on every message
-  const [mention, setMention] = useState(initial ? !!init.mention : true)
+  // §9.2: mention-only by default for new triggers — a busy channel shouldn't
+  // fire on every message. An existing trigger switched to Discord from
+  // another kind defaults the same way: the stored value seeds the box only
+  // when the stored trigger is a Discord one.
+  const [mention, setMention] = useState(initial && init.kind === 'discord' ? !!init.mention : true)
   const [author, setAuthor] = useState((init.author ?? []).join(', '))
   const [from, setFrom] = useState(init.from ?? '')
   const [guide, setGuide] = useState(false)

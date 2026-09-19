@@ -22,7 +22,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from . import __version__, harness, imessage, installer, keychain, marketplace, models, paths, platform
 from . import drafting, packages as pkglib, reqlog, timefmt, transfer, triggers as triggerlib
 from .drafting import draft_jobs
-from .engine import Engine, kill_orphan_agent_group, kill_orphan_group
+from .engine import CapacityError, Engine, kill_orphan_agent_group, kill_orphan_group
 from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
@@ -93,6 +93,7 @@ async def _lifespan(_: FastAPI):
     hub.bind_loop(asyncio.get_running_loop())
     _clear_import_spool()  # §5.2: spool files a crashed process left behind
     harness.clear_scratch()  # §5/§8: scratch dirs a crashed process left behind
+    testexec.clear_scratch()  # §11: test scratch dirs a crashed process left behind
     _repair_stale_executing()
     for callback in _startup_callbacks:
         callback()
@@ -101,9 +102,14 @@ async def _lifespan(_: FastAPI):
     # §3: quiesce first — the work sources (scheduler, message listeners) stop
     # before anything is killed, so nothing can start an execution the kill
     # sweep below has already passed. Error-tolerant like the shutdown half.
+    # Every piece of this shutdown work runs on a worker thread
+    # (run_in_threadpool), never on the event loop: a message listener's
+    # gateway close can take its library's full close timeout, and the
+    # lifespan has to stay inside uvicorn's 5 s graceful box whatever the
+    # network does.
     for callback in _quiesce_callbacks:
         try:
-            callback()
+            await run_in_threadpool(callback)
         except Exception:  # noqa: BLE001
             pass
     # §3: live step groups die with this backend — the successor's startup
@@ -113,19 +119,19 @@ async def _lifespan(_: FastAPI):
     # raising kill must not skip the sweeps after it — or the shutdown
     # callbacks below, which unlink backend.json.
     try:
-        engine.kill_all_live()
+        await run_in_threadpool(engine.kill_all_live)
     except Exception:  # noqa: BLE001
         log.exception("shutdown: killing live step groups failed")
     # §3: drafting harnesses die with it too — a stopping backend must never
     # leave an agent harness session group running with nobody to collect it.
     try:
-        draft_jobs.kill_all_building()
+        await run_in_threadpool(draft_jobs.kill_all_building)
     except Exception:  # noqa: BLE001
         log.exception("shutdown: killing drafting harnesses failed")
     # §19: and a CLI-mode Ollama pull child — quit-all and reset must never
     # leave a multi-GB download running with nobody watching it.
     try:
-        _kill_pull_procs()
+        await run_in_threadpool(_kill_pull_procs)
     except Exception:  # noqa: BLE001
         log.exception("shutdown: killing model-pull children failed")
     # §3: main()'s registered cleanup (guard thread, backend.json unlink) —
@@ -133,7 +139,7 @@ async def _lifespan(_: FastAPI):
     # running.
     for callback in _shutdown_callbacks:
         try:
-            callback()
+            await run_in_threadpool(callback)
         except Exception:  # noqa: BLE001
             pass
 
@@ -567,7 +573,12 @@ def _secret_grant(secret_id: str) -> dict | None:
 
 # ---------- health / state ----------
 @app.get("/health")
-def health() -> dict:
+async def health() -> dict:
+    # §19: served on the event loop, never on the request worker pool — a pool
+    # saturated by long blocking routes (package installs, imports, probes)
+    # must not make the liveness probe time out, or the §3 ensure-backend step
+    # would read a busy backend as dead and bootout it mid-execution. The
+    # handler touches no I/O, so the loop is never held.
     # §2 platform layer: `os` is the §5.1 platform token; `capabilities` is
     # what this OS can honor — clients gate features here, never by sniffing
     # the platform at a call site.
@@ -577,10 +588,14 @@ def health() -> dict:
 
 
 @app.get("/instructions", dependencies=[Depends(auth)])
-def instructions() -> dict:
+async def instructions() -> dict:
     """§8 instruction files for the create/edit page:
     framework-instructions.md + build-instructions.md, with the
-    §8 {{MACHINE}} placeholder resolved to the per-OS noun."""
+    §8 {{MACHINE}} placeholder resolved to the per-OS noun.
+
+    §19: on the event loop like `/health` — both files are read once at import
+    (`drafting` module constants), so the handler only resolves the
+    placeholders and never touches disk."""
     return {"framework": drafting.contract_preamble(),
             "build": drafting.build_instructions()}
 
@@ -1333,6 +1348,15 @@ def execute_auto(automation_id: str, body: models.ExecuteBody | None = None) -> 
             h, queued = engine.start(a, body.trigger, version_label=body.version), False
     except LookupError as e:  # unknown version label — not a liveness conflict
         raise HTTPException(404, str(e)) from e
+    except CapacityError as e:
+        # §19: the no-free-slot 409 is the only one carrying `reason` — the §7
+        # busy toast keys on it. Every other 409 here (shutting down, being
+        # deleted, a full queue, a Draft queue attempt) answers `detail` alone,
+        # which clients show verbatim.
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=409,
+                            content={"detail": str(e), "reason": "capacity"})
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return {"executionId": h["id"], "queued": queued}
@@ -1827,6 +1851,14 @@ def get_exec(execution_id: str) -> dict:
         if h is None:
             raise HTTPException(404, "execution not found")
         h = dict(h)
+        if "steps" in h:
+            # §7: a live record's steps (and their attempts) are mutated by
+            # the engine thread — the shallow copy above still shares those
+            # lists, so serializing them outside the lock can read a step
+            # half-written. Deep-copy the mutable layers under the lock and
+            # leave the serialization outside it.
+            h["steps"] = [{**s, "attempts": [dict(a) for a in (s.get("attempts") or [])]}
+                          for s in h["steps"]]
     if "steps" not in h:
         body = store.read_exec_yaml(execution_id)
         h = {**h, **body} if body else {**h, "steps": [], "redacted_secrets": [], "params": []}
@@ -2110,7 +2142,9 @@ def agents_install(body: models.ProviderId) -> dict:
                     **{k: v for k, v in kw.items() if v is not None})
 
     if not installer.start(pid, publish):
-        raise HTTPException(409, "an install for this provider is already running")
+        # §19: a live install and an abandoned phase still finishing its
+        # filesystem work are both refusals, in their own words.
+        raise HTTPException(409, installer.busy_detail(pid))
     return {"ok": True}
 
 
@@ -2452,10 +2486,12 @@ def delete_secret(secret_id: str) -> dict:
     with store.lock:
         if not any(s["id"] == secret_id for s in store.secrets):
             raise HTTPException(404, "no such secret")
-    keychain.delete_secret(secret_id)  # Keychain IPC — outside the lock (see create_secret)
-    with store.lock:
+        # §5: the row goes first, the Keychain item second — a crash between
+        # the two leaves a harmless orphan Keychain item, never a row claiming
+        # a value the Keychain no longer holds.
         store.secrets = [s for s in store.secrets if s["id"] != secret_id]
         store.save_secrets()
+    keychain.delete_secret(secret_id)  # Keychain IPC — outside the lock (see create_secret)
     hub.publish("secrets.changed")
     return {"ok": True}
 
@@ -2469,13 +2505,13 @@ def delete_all_secrets() -> dict:
     store.require_writable(paths.secrets_file())  # before the Keychain deletes
     with store.lock:
         swept = [s["id"] for s in store.secrets]
-    for secret_id in swept:  # Keychain IPC — outside the lock (see create_secret)
-        keychain.delete_secret(secret_id)
-    with store.lock:
-        # Filter rather than clear: a create that landed while the Keychain IPC
-        # ran keeps its row — its value was never deleted.
+        # §5: the rows go first, the Keychain items second — every secret-delete
+        # path drops the row before the value, so a crash between the two leaves
+        # orphan Keychain items, never rows claiming values that are gone.
         store.secrets = [s for s in store.secrets if s["id"] not in set(swept)]
         store.save_secrets()
+    for secret_id in swept:  # Keychain IPC — outside the lock (see create_secret)
+        keychain.delete_secret(secret_id)
     hub.publish("secrets.changed")  # one event covers the whole sweep
     return {"deleted": len(swept)}
 

@@ -7,7 +7,7 @@
 // (test-only param values, the trigger-message mock), the §8
 // pendingSync/pendingTest action chaining, and the run-settled thread
 // entries. Quiet when fine, loud only when blocking.
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api'
 import { usePlatformCopy } from '../../platformCopy'
 import { useStore } from '../../store'
@@ -370,7 +370,9 @@ export function TestCard({
   // §11 stale-outcome rule: an outcome belongs to the steps it ran against.
   // Compare the fingerprint of the tested steps with today's; unknown (a
   // re-attached test, an old summary without one) is never stale.
-  const fp = stepsFingerprint(rev.steps)
+  // Memoized: the hash walks every step's code, and this card re-renders on
+  // every store write its selectors see.
+  const fp = useMemo(() => stepsFingerprint(rev.steps), [rev.steps])
   const stale = test
     ? testedFp !== null && testedFp !== fp
     : !!rev.lastTest && !!rev.lastTest.stepsFingerprint && rev.lastTest.stepsFingerprint !== fp

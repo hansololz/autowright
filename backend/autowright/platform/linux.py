@@ -21,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .. import paths
+from ..yamlio import atomic_write_text
 from . import fallback, posixproc
 from .base import Capabilities, Platform, run_bounded
 
@@ -171,7 +172,9 @@ class SystemdService:
         p = unit_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         try:
-            p.write_text(unit_text())
+            # §5: temp-write + rename — a crash mid-write must never leave
+            # systemd a half-written unit file.
+            atomic_write_text(p, unit_text(), mode=0o644)
         except OSError as e:
             return f"install failed: couldn't write {p} ({e})"
         if err := _run_ok("daemon-reload"):

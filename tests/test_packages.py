@@ -31,12 +31,17 @@ def _fake_process_control(monkeypatch, fall_back_to_child=False):
     return killed
 
 
-def _fake_dist(home, name="requests", version="2.31.0", invalidate=True):
-    """Minimal installed distribution in the §6.2 site-packages dir."""
+def _fake_dist(home, name="requests", version="2.31.0", invalidate=True, import_name=None):
+    """Minimal installed distribution in the §6.2 site-packages dir: the
+    dist-info AND the import target beside it, which is what §6.2 counts as
+    installed (a dist-info alone is a killed pip's leftover)."""
     d = home / "site-packages" / f"{name}-{version}.dist-info"
     d.mkdir(parents=True)
     (d / "METADATA").write_text(
         f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
+    module = home / "site-packages" / (import_name or name.replace("-", "_").lower())
+    module.mkdir(parents=True, exist_ok=True)
+    (module / "__init__.py").write_text("", encoding="utf-8")
     # importlib.metadata's FastPath caches directory listings keyed on a
     # coarse mtime — under -n auto load, a dist created within the same tick
     # reads back as absent (version None). Drop the caches every time.
@@ -321,7 +326,7 @@ def test_ensure_fast_path_never_spawns_pip(home, monkeypatch):
 
     monkeypatch.setattr(packages.subprocess, "Popen", no_pip)
     _fake_dist(home, "requests", "2.31.0")
-    _fake_dist(home, "pyyaml", "6.0.2")
+    _fake_dist(home, "pyyaml", "6.0.2", import_name="yaml")
     out = packages.ensure([{"pip": "requests", "import": "requests"},
                            {"pip": "pyyaml", "import": "yaml"}])
     assert out == [

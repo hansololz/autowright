@@ -1260,26 +1260,50 @@ export function useOverlayThumb() {
   const obsEl = useRef<HTMLElement | null>(null)
   const obs = useRef<{ ro: ResizeObserver; mo: MutationObserver } | null>(null)
   const [thumb, setThumb] = useState<{ top: number; h: number } | null>(null)
+  // The last measured geometry: reading scrollTop/scrollHeight/clientHeight
+  // forces layout, and an unchanged triple means the thumb cannot have moved,
+  // so the measurement is the whole update.
+  const measured = useRef<[number, number, number] | null>(null)
+  const frame = useRef<number | null>(null)
   const update = () => {
     const el = elRef.current
     if (!el) return
     const { scrollTop, scrollHeight, clientHeight } = el
+    const last = measured.current
+    if (last && last[0] === scrollTop && last[1] === scrollHeight && last[2] === clientHeight) return
+    measured.current = [scrollTop, scrollHeight, clientHeight]
     if (scrollHeight <= clientHeight + 1) { setThumb(null); return }
     const h = Math.max(24, (clientHeight / scrollHeight) * clientHeight - 6)
     const top = 3 + (scrollTop / (scrollHeight - clientHeight)) * (clientHeight - h - 6)
     setThumb((p) => (p && Math.abs(p.top - top) < 0.5 && Math.abs(p.h - h) < 0.5 ? p : { top, h }))
   }
-  useEffect(update) // own renders (e.g. controlled-textarea value changes)
+  // Every caller (own renders, scroll events, the observers below) schedules
+  // through one animation frame: a burst of scroll or mutation callbacks then
+  // measures once per frame instead of once per call.
+  const schedule = () => {
+    if (frame.current != null) return
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null
+      update()
+    })
+  }
+  useEffect(schedule) // own renders (e.g. controlled-textarea value changes)
   // Dropping the pair on cleanup (StrictMode unmounts once before the real
   // mount) is what lets `attach` re-observe the same element on the way back —
-  // the ref alone would say it is already watched.
+  // the ref alone would say it is already watched. A frame still pending would
+  // measure a pane that is gone, so it is cancelled with them.
   useEffect(() => () => {
     obs.current?.ro.disconnect()
     obs.current?.mo.disconnect()
     obs.current = null
+    if (frame.current != null) { cancelAnimationFrame(frame.current); frame.current = null }
   }, [])
   return {
     attach: (el: HTMLElement | null) => {
+      // a different pane measures from scratch — compared against the observed
+      // element, because the inline ref callback re-attaches the same node on
+      // every render and that must not throw the measurement away
+      if (el && el !== obsEl.current) measured.current = null
       elRef.current = el
       // content can grow without this pane re-rendering (async loads under the
       // page scroller, streamed logs) — watch the pane's box and its subtree
@@ -1287,14 +1311,14 @@ export function useOverlayThumb() {
         obs.current?.ro.disconnect()
         obs.current?.mo.disconnect()
         obsEl.current = el
-        const ro = new ResizeObserver(update)
+        const ro = new ResizeObserver(schedule)
         ro.observe(el)
-        const mo = new MutationObserver(update)
+        const mo = new MutationObserver(schedule)
         mo.observe(el, { childList: true, subtree: true, characterData: true })
         obs.current = { ro, mo }
       }
     },
-    onScroll: update,
+    onScroll: schedule,
     node: thumb && <div className="ad-thumb" style={{ top: thumb.top, height: thumb.h }} />,
   }
 }

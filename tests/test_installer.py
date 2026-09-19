@@ -29,8 +29,10 @@ macos_install_surface = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _fresh_jobs(monkeypatch):
-    """Isolate the module-global job table per test."""
+    """Isolate the module-global job table — and the §19 phase claims — per
+    test: an abandoned phase's claim must not refuse the next test's start."""
     monkeypatch.setattr(installer, "_jobs", {})
+    monkeypatch.setattr(installer, "_phases", {})
     # Keep localhost requests away from any proxy configured in the real env.
     monkeypatch.setenv("no_proxy", "*")
 
@@ -813,7 +815,9 @@ def test_start_caps_an_installer_that_never_returns(monkeypatch):
     # §19: every phase is time-boxed, but a phase that never returns at all
     # would leave the job "running" forever and the running guard would refuse
     # every retry. The job thread joins the installer with the cap and fails
-    # the job past it; the abandoned thread dies with the process.
+    # the job past it; the abandoned thread keeps going until the process
+    # exits — and a retry is refused while it does, in its own words, so the
+    # new install can't race the abandoned one's staged move.
     monkeypatch.setattr(installer, "INSTALL_TIMEOUT_S", 0.2)
     release = threading.Event()
     monkeypatch.setitem(installer._INSTALLERS, "claude",
@@ -824,12 +828,18 @@ def test_start_caps_an_installer_that_never_returns(monkeypatch):
         snap = _wait_state("claude", "failed")
         assert snap["error"].startswith("install timed out after ")
         assert pubs[-1]["ok"] is False and pubs[-1]["done"] is True
-        # the guard released with the job: a retry is allowed straight away
         monkeypatch.setitem(installer._INSTALLERS, "claude", lambda emit: None)
-        assert installer.start("claude", lambda **kw: None) is True
-        _wait_state("claude", "done")
+        assert installer.start("claude", lambda **kw: None) is False
+        assert installer.busy_detail("claude") == installer.BUSY_ABANDONED
     finally:
         release.set()
+    # once the abandoned phase really returns, the next retry is allowed
+    deadline = time.time() + 5
+    while "claude" in installer._phases:
+        assert time.time() < deadline, "the phase never cleared its claim"
+        time.sleep(0.02)
+    assert installer.start("claude", lambda **kw: None) is True
+    _wait_state("claude", "done")
 
 
 @macos_install_surface

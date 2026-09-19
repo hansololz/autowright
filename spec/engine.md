@@ -433,7 +433,10 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   and the one-notification rule). The notification title is the automation name, overridable by a
   param literally named `notification_title`. The body is **redacted like a log line** before it
   reaches the OS: a notification leaves the app's own storage (the `osascript` argv is visible
-  to any local process, and the text persists in Notification Center's database).
+  to any local process, and the text persists in Notification Center's database). The
+  engine posts it on its own thread: the OS notifier can block for its full timeout, and
+  the §6 slot release, the `execution.finished` event and the queue drain must not wait
+  behind it (the §6 overdue sweep already posts the same way).
 - `agent` / `agents` — the §6 query-only runtime calls, only in steps marked `agent: true`.
   `agent` is a ready-made **handle** bound to the step's first `agents:` entry (or, when the
   step lists none, the automation's first enabled agent); `agents["<id>"]` returns the handle
@@ -513,7 +516,9 @@ refuse to load them at import time even though the install succeeded. The execut
 this directory to `sys.path` for every step,
 so deleting it (or an app update) is always recoverable. Installing is one idempotent "ensure"
 operation shared by every call site: a fast installed-check first (distribution present in the
-directory, **any** version — the installed version is never compared against the manifest,
+directory **and** the declared `import` target present beside it — a `.dist-info` whose
+module files a killed pip never finished copying counts as missing, so ensure can repair
+it instead of reporting installed forever; **any** version — the installed version is never compared against the manifest,
 which carries no version), pip runs only for missing distributions (installing the newest
 compatible wheel at that moment), and one process-wide lock serializes pip runs. An installed
 distribution is never touched by ensure — upgrades happen only through the explicit §11 Update

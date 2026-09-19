@@ -101,11 +101,12 @@ export function TestRunModal({
   steps, runExecutionId, testParams, setTestParams, testMock, setTestMock, msgTriggers, msgLabels, mockSenderSeed,
   runDisabledReason, runStarting = false, onRun, onCancel, onSkip, onViewExecution, onAnalyze, analyzeDisabled, lockStyle, machine, onClose,
 }: TestRunModalProps) {
-  const executions = useStore((s) => s.executions)
-  const executionFull = useStore((s) => s.executionFull)
+  // Per-id selectors (UI-GUIDE), like the TEST card's: subscribing to the
+  // whole `executions` list or `executionFull` map would re-render the modal
+  // on every other execution's row or body landing.
   const loadExecution = useStore((s) => s.loadExecution)
-  const full = runExecutionId ? executionFull[runExecutionId] : undefined
-  const summary = runExecutionId ? executions.find((e) => e.id === runExecutionId) : undefined
+  const full = useStore((s) => (runExecutionId ? s.executionFull[runExecutionId] : undefined))
+  const summary = useStore((s) => (runExecutionId ? s.executions.find((e) => e.id === runExecutionId) : undefined))
   const exec = full ?? summary
   // §11 phases: Run again returns to setup with the values intact; a new run
   // (a changed record id) lands in the run phase again.
@@ -114,7 +115,7 @@ export function TestRunModal({
   const phase: 'setup' | 'run' = runExecutionId && !again ? 'run' : 'setup'
   // A resumed last test may not be loaded yet — fetch the body once shown.
   useEffect(() => {
-    if (runExecutionId && !executionFull[runExecutionId]) void loadExecution(runExecutionId)
+    if (runExecutionId && !useStore.getState().executionFull[runExecutionId]) void loadExecution(runExecutionId)
   }, [runExecutionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const runSteps = full?.steps ?? []

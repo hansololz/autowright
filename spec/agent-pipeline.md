@@ -715,12 +715,23 @@ notes rewrite (§11).
    shape-aware, not a raw text search: a `===BLOCKED===` line sitting inside a markdown code
    fence is quoted prose (an answer explaining the format), never a blocker envelope; and a
    `===FILE:` line inside the envelope's yaml body is body text - only a file block *beside*
-   the envelope (the optional notes.md) goes through file parsing.
+   the envelope (the optional notes.md) goes through file parsing. `===FILE:` detection is
+   shape-aware the same way: the envelope starts at the first `===FILE:` line that sits
+   *outside* a markdown code fence, and a reply whose every `===FILE:` line is fenced is
+   prose (a chat answer showing what an actions.yaml looks like must never arm a sync).
+   Once the envelope has started, every later marker counts — a block's *content* may be
+   fenced (the fence-stripping rule above), so fence state is only consulted before the
+   first real marker.
 2. The sync call must return `manifest.yaml` and every file listed in `steps` — a `spec.md` block in
    its response is a validation error (the spec is already settled); an optional `notes.md` block
    (above) is allowed and excluded from the step-file matching.
 3. `manifest.yaml` is schema-valid: kinds from §4.2 only, every param carries a default, steps
    nonempty, `steps[].file` ↔ file blocks match 1:1, filenames follow `NN-name.py` ordering.
+   Field types are checked, not assumed: a step's `name`, `description` and `why`, a
+   param's `name`, and the manifest `note` must be strings (YAML 1.1 turns `name: on` into
+   a boolean and a mis-indented block into a mapping — either would land verbatim in the
+   version and break the §9.2 page and the §5.1 importer, which already rejects them), and
+   param names are unique ("param `url` is declared twice" feeds the repair round).
    `test_values`, when present, must be a mapping whose keys each name a manifest param —
    an unknown name is a validation error feeding the repair round. Values ride the draft
    payload as `testValues` untouched; the editor coerces them per the §4.2 kind with the
@@ -756,7 +767,11 @@ notes rewrite (§11).
    the code would fail at runtime; an id in `unresolvedReferences` gets the same
    imported-file copy as above); the scan drives the Review-screen
    secret warnings (§11). Ids must be literal quoted strings — a variable subscript is
-   invisible to the scan and forbidden by the prompt rules; the mandatory trailing `# NAME`
+   invisible to the scan and forbidden by the prompt rules. The validation scan matches
+   **any** quoted literal subscript, not only uuid-shaped ones: `secrets["API_TOKEN"]` (the
+   name where the id belongs — the likeliest slip) is the validation error "code subscripts
+   secrets['API_TOKEN'], which isn't among the allowed secrets", never a version that fails
+   at runtime with a misleading not-allowed message; the mandatory trailing `# NAME`
    comment at each use is prompt-side convention only, never parsed.
 7. `agent: true` is the query-only marker (§6); `why` is required with it, and the optional
    `agents` list (agent steps only) holds `{ id, why? }` entries whose ids must be
@@ -769,7 +784,8 @@ notes rewrite (§11).
    against the automation's enabled
    agents at execution time. Step code is additionally scanned for literal `agents["<id>"]`
    subscripts — every code-referenced id must be among that step's declared entries (the
-   runtime container only holds the step's own agents; a validation error otherwise — and
+   runtime container only holds the step's own agents; a validation error otherwise, and
+   like the secrets scan it matches any quoted literal, a name included — and
    the scan runs on every step, so a subscript in a step that is not an agent step, which
    declares no entries, is the same error). An
    entry's

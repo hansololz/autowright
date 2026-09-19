@@ -119,17 +119,42 @@ def _installed_versions() -> dict[str, str]:
     return out
 
 
+def _import_present(import_name: str) -> bool:
+    """§6.2: the declared `import` target present beside the distribution. A
+    `.dist-info` whose module files a killed pip never finished copying counts
+    as missing, so ensure can repair it instead of reporting installed
+    forever. The target is a package directory, a module file, or an extension
+    module (`_name.cpython-313-darwin.so`, `name.pyd`)."""
+    top = import_name.split(".", 1)[0].strip()
+    # The name comes from a hand-editable manifest — never joined into a path
+    # unless it is a plain module name (§6.2 declarations are import names).
+    if not top.isidentifier():
+        return True
+    d = site_packages_dir()
+    if (d / top).is_dir() or (d / f"{top}.py").is_file():
+        return True
+    try:
+        return any(p.suffix != ".dist-info" for p in d.glob(f"{top}.*"))
+    except OSError:  # absent (or unreadable) directory — nothing is there
+        return False
+
+
 def check(entries: list[dict]) -> list[dict]:
     """§19 POST /packages/check — the fast installed-check, never runs pip.
     Each entry comes back as {pip, import, status: installed | missing,
     version?} — `version` is the real installed version (§6.2: the installed
-    distribution is the source of truth; any version counts as installed)."""
+    distribution is the source of truth; any version counts as installed).
+    §6.2: installed means the distribution AND the declared `import` target,
+    so a half-copied install reads as missing and ensure repairs it."""
     installed = _installed_versions()
     out = []
     for e in entries or []:
         name = str(e.get("pip") or "").strip()
         version = installed.get(_norm(name)) if PIP_NAME_RE.match(name) else None
-        r = {"pip": name, "import": str(e.get("import") or "").strip(),
+        import_name = str(e.get("import") or "").strip()
+        if version and import_name and not _import_present(import_name):
+            version = None
+        r = {"pip": name, "import": import_name,
              "status": "installed" if version else "missing"}
         # §6.2: the declaration's why rides through check/ensure results so the
         # §8 draft-stage install never strips it from the draft payload.
@@ -327,14 +352,20 @@ def _acquire_pip_lock(wait: bool, should_stop) -> None:
     for the whole of someone else's install. `wait=True` (engine, drafting,
     import): wait in 0.25 s slices, and a `should_stop()` that turns true while
     waiting raises `StopIteration` for the caller's cancel path — a §7 cancel
-    never waits out another install (spec/execution.md)."""
+    never waits out another install (spec/execution.md). §19: the wait is
+    bounded by the per-package install timeout, after which it answers the
+    same `PackagesBusy` — a `wait: true` call never pins a request worker for
+    longer than one install could take."""
     if not wait:
         if not _pip_lock.acquire(timeout=0.25):
             raise PackagesBusy()
         return
+    deadline = time.monotonic() + INSTALL_TIMEOUT
     while not _pip_lock.acquire(timeout=0.25):
         if should_stop and should_stop():
             raise _Cancelled()
+        if time.monotonic() >= deadline:
+            raise PackagesBusy()
 
 
 class _Cancelled(Exception):

@@ -11,7 +11,6 @@ analysis call)."""
 from __future__ import annotations
 
 import shutil
-import tempfile
 import threading
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from . import paths, timefmt
 from .engine import Engine, _step_sha
 from .events import hub
 from .storage import exec_version_label, is_test, safe_step_filename, store
-from .yamlio import save_yaml
+from .yamlio import atomic_write_text, save_yaml
 
 LOG_TAIL = 40      # lines per step handed to the §8 RECENT EXECUTIONS section
 EXECUTIONS_CAP = 5  # §8: newest settled executions included, across all §4.5 kinds
@@ -92,13 +91,19 @@ def start(engine: Engine, draft: dict, auto: dict | None,
         steps_dir = store.exec_dir(h["id"]) / "steps"
         steps_dir.mkdir(parents=True, exist_ok=True)
         for s in steps:
-            (steps_dir / s["file"]).write_text(s.get("code", ""), encoding="utf-8")
+            # §5: written atomically like every other file the app stores — a
+            # crash mid-write must never leave a half-written step script the
+            # engine would then execute.
+            atomic_write_text(steps_dir / s["file"], s.get("code", ""))
 
         # §11 scratch memory: draft container's memory/ when present (edit mode
         # falls back to the automation's), create mode the pending slot's — copied
         # to a temp dir and discarded when the test ends.
         dbase = (store.auto_dir(auto) / "draft") if auto is not None else paths.pending_draft_dir()
-        scratch = Path(tempfile.mkdtemp(prefix="autowright-test-"))
+        # §11: under the app's own storage, never the OS temp dir — the
+        # startup sweep (`clear_scratch`) can then clear what a crash left.
+        scratch = paths.tests_scratch_dir() / h["id"]
+        scratch.mkdir(parents=True, exist_ok=True)
         mem_dir = scratch / "memory"
         src = dbase / "memory"
         if auto is not None and not src.exists():
@@ -194,13 +199,23 @@ def _run(engine: Engine, shadow: dict, ver: dict, h: dict, state: dict,
         store.delete_execution(h["id"])
 
 
+def clear_scratch() -> None:
+    """§11 startup sweep: remove whole scratch trees a crashed backend left
+    behind (a live test's dir is removed by its own `_run` finally instead) —
+    the §8 harness sweep's twin."""
+    for d in paths.tests_scratch_dir().iterdir():
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _log_tail(h: dict, idx: int) -> list[str]:
     # §4.5: attempt numbers are monotonic and old attempts prune — the latest
     # attempt's `n` names the newest log file, never the list length.
     atts = h["steps"][idx].get("attempts") or []
     attempt = atts[-1]["number"] if atts else 1
-    lines = store.read_log(h["id"], idx, attempt)
-    return [l.get("text", "") for l in lines][-LOG_TAIL:]
+    # §5: tailed by the reader — parsing a whole multi-megabyte step log to
+    # keep its last LOG_TAIL lines is the cost this argument exists to avoid.
+    lines = store.read_log(h["id"], idx, attempt, tail=LOG_TAIL)
+    return [l.get("text", "") for l in lines]
 
 
 def executions_context(auto: dict | None, current_steps: list[dict],

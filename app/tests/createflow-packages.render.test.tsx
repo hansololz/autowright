@@ -144,6 +144,21 @@ describe('CreateFlow PACKAGES card (§11/§6.2)', () => {
     expect(screen.getByText('wheel build failed')).toBeTruthy()
   })
 
+  it('the update check runs once per pip list — its own badges never re-fire it', async () => {
+    // §11/§6.2: the answer writes `latest` onto the rows, so a dep key that
+    // carried the badges fired a second POST /packages/outdated per open.
+    ;(mockedApi.checkPackages as ReturnType<typeof vi.fn>).mockResolvedValue({
+      packages: [{ pip: 'httpx', import: 'httpx', status: 'installed', version: '1.0' }],
+    })
+    ;(mockedApi.outdatedPackages as ReturnType<typeof vi.fn>).mockResolvedValue({
+      packages: [{ pip: 'httpx', import: 'httpx', latest: '1.2' }],
+    })
+    render(<CreateFlow />)
+    await waitFor(() => expect(screen.getByText('1 of 1 installed · 1 update')).toBeTruthy())
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(mockedApi.outdatedPackages).toHaveBeenCalledTimes(1)
+  })
+
   it('two outdated packages offer Update all, which upgrades both and toasts', async () => {
     seed([{ pip: 'httpx', import: 'httpx' }, { pip: 'lxml', import: 'lxml' }])
     ;(mockedApi.checkPackages as ReturnType<typeof vi.fn>).mockResolvedValue({

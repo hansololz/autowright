@@ -35,6 +35,10 @@ export default function AutomationDetail() {
   const setSurface = useStore((s) => s.setSurface)
   const showToast = useStore((s) => s.showToast)
   const loadAuto = useStore((s) => s.loadAuto)
+  // §19 reconnect: a page holding a FULL record re-GETs it, and the page-owned
+  // execution fetch below re-runs too — the events missed while the socket was
+  // down are never replayed.
+  const reconnects = useStore((s) => s.reconnects)
   const auto: Automation | undefined = automations.find((a) => a.id === automationId)
 
   const [verOpen, setVerOpen, verRef] = usePopover()
@@ -50,10 +54,13 @@ export default function AutomationDetail() {
   const [specOpen, setSpecOpen] = useState(true)
   const [, setTick] = useState(0)
 
-  // Full record (params/steps/latest) only comes from the full fetch.
+  // Full record (params/steps/latest) only comes from the full fetch, and §19
+  // says a reconnect re-GETs it: the list rows a reconnect's snapshot carries
+  // hold none of those fields, so without this the page would sit on the old
+  // bodies under a new version number until it was navigated away from.
   useEffect(() => {
     if (automationId) void loadAuto(automationId)
-  }, [automationId])
+  }, [automationId, reconnects])
   // Detail → detail keeps this page mounted, so every popover, confirm and
   // modal that names the automation has to let go of the one it was opened for.
   useEffect(() => {
@@ -70,7 +77,6 @@ export default function AutomationDetail() {
   // events land there). A failed fetch degrades to the window's rows alone.
   // §19: a reconnect missed every event the socket was down for — this
   // page-owned fetch is never replayed, so it re-runs on each one.
-  const reconnects = useStore((s) => s.reconnects)
   const [fetchedExecs, setFetchedExecs] = useState<Execution[]>([])
   useEffect(() => {
     let stale = false
@@ -166,8 +172,11 @@ export default function AutomationDetail() {
       } catch (err) {
         // §9.2: a raced 409 (capacity changed between popup and click) falls
         // back to the §7 busy toast.
-        const er = err as Error & { status?: number }
-        showToast(er.status === 409 ? busyToast : er.message)
+        // §19: only the no-free-slot 409 carries `reason: "capacity"` — every
+        // other 409 (shutting down, being deleted, a full queue) gets its own
+        // detail verbatim, since the busy copy would promise the wrong thing.
+        const er = err as Error & { status?: number; reason?: string }
+        showToast(er.status === 409 && er.reason === 'capacity' ? busyToast : er.message)
       }
     })()
   }

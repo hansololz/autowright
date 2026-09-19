@@ -1377,8 +1377,11 @@ editors enter with
   now", §7 "Execute again"); while its POST is in flight the button disables and swaps to
   a spinner + "Starting…" (the §9 busy rule), so a double-click can never start two tests. A test uses: in-editor param
   values and grants (never the stored automation's), and **scratch memory** — copied to a
-  temp dir from the draft container's `memory/` when it exists (edit mode falls back to
-  the automation's memory dir; create mode to empty) and discarded when the test ends, so
+  scratch dir under the app's own storage (`<app-support>/tests/<execution id>/`, never
+  the OS temp dir) from the draft container's `memory/` when it exists (edit mode falls back to
+  the automation's memory dir; create mode to empty) and discarded when the test ends —
+  and swept at backend startup like the §8 harness scratch, so a crash mid-test never
+  leaves a gigabyte memory copy behind — so
   a test can never poison the memory the deployed version reads (§4.1). What distinguishes
   a test record from a real execution: it never touches the automation's derived display
   state or the one-execution-at-a-time gate (§5), it lists in the Executions list like any

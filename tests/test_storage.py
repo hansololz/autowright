@@ -2188,7 +2188,7 @@ def test_load_skips_malformed_automation_dirs(store, caplog):
     """§5 hand-edited disk: a directory with no manifest, one whose manifest
     has no id, one whose name doesn't match its id, one with no version
     folders, and one whose load raises are each skipped. The good automation
-    beside them still loads, and the three diagnosable cases warn."""
+    beside them still loads, and every diagnosable case warns."""
     import logging
     import shutil
 
@@ -2199,7 +2199,7 @@ def test_load_skips_malformed_automation_dirs(store, caplog):
     root = paths.automations_dir()
     src = store.auto_dir(good)
 
-    (root / "no-manifest").mkdir()  # nothing to load: skipped without a word
+    (root / "no-manifest").mkdir()  # nothing to load: logged, and kept (not uuid-named)
     (root / "no-id").mkdir()
     save_yaml(root / "no-id" / "automation.yaml", {"name": "Nameless"})
     shutil.copytree(src, root / "mismatched-dir")  # manifest still holds the real id
@@ -2219,7 +2219,8 @@ def test_load_skips_malformed_automation_dirs(store, caplog):
     assert "doesn't match its id" in logged
     assert "has no version folders" in logged
     assert "failed to load automation at" in logged
-    assert "no-manifest" not in logged and "no-id" not in logged
+    assert "no-manifest has no automation.yaml" in logged and "no-id" not in logged
+    assert (root / "no-manifest").is_dir()  # §5: only a uuid-named orphan is removed
 
 
 def test_version_writer_clears_what_the_new_version_no_longer_carries(store):

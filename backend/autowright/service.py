@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import paths, platform
+from .yamlio import atomic_write_text
 
 LABEL = "ai.autowright.backend"
 SHIM_MARKER = "# autowright CLI shim"
@@ -180,8 +181,9 @@ def install() -> str:
     paths.logs_dir().mkdir(parents=True, exist_ok=True)  # launchd won't create it for the log paths
     p = plist_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "wb") as f:
-        plistlib.dump(plist, f)
+    # §5: every write is temp-write + rename — a crash mid-write must never
+    # leave launchd a half-written plist it will refuse at the next logon.
+    atomic_write_text(p, plistlib.dumps(plist).decode("utf-8"), mode=0o644)
     _unload(p)
     if err := _load(p):
         return f"install failed: {err}"

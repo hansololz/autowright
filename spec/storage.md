@@ -6,7 +6,14 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 
 **File-first everywhere: YAML/markdown files are the persistence. Each execution's full record
 lives in `execution.yaml` inside its execution directory — the directory is fully
-self-contained (record + logs + workspace + result). A SQLite database
+self-contained (record + logs + workspace + result). An execution directory with **no**
+`execution.yaml` when the store loads (startup, and the §4.9 data-location reload — both
+run with nothing live) is a crash leftover (the dirs are made before the record is
+written) and is removed by that scan; one whose `execution.yaml` exists but can't
+be read stays on disk, out of the index, like any other damaged file. Likewise a
+uuid-named automation directory with no `automation.yaml` (a create that failed after its
+version folder landed) is logged and removed at startup — only at startup, never on the
+§4.9 data-location reload, where a create may be in flight. A SQLite database
 (`<dataPath>/executions/executions.db`) exists only as a list/filter index over the execution
 headers; the yaml is authoritative. All derived state lives in memory and is rebuilt from disk
 at every startup.**
@@ -448,6 +455,11 @@ degraded, never destroyed — a corrupt `secrets.yaml` must never be overwritten
 default, which would orphan every Keychain value it referenced. An unreadable `settings.yaml` also pauses the
 §6 retention sweep for the session: with the retention policy unknown, nothing is deleted —
 the default 90-day window must never purge executions a damaged file said to keep forever.
+Retention that deletes a §11 test execution also drops the draft container's `test.yaml`
+when it names that execution (the TEST card must not link to a record that is gone).
+Every secret-delete path (one secret, and the §3 reset's delete-all) removes the `secrets.yaml` row first and the Keychain item second: the
+harmless leftover after a crash between the two is an orphan Keychain item, never a row
+that claims a value the Keychain no longer holds.
 The flags reset whenever the
 store reloads (startup, and the §4.9 data-location change). Per-automation files need no such
 guard: a corrupt `automation.yaml` skips the whole automation at load, so no save path can
@@ -459,7 +471,9 @@ Rules:
   included; on POSIX the parent directory is fsynced after the rename, so a committed
   write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index — WAL with `synchronous=NORMAL`: a
   process crash loses nothing, a power loss can drop the newest index rows, which the startup
-  scan below rebuilds from the yaml), then the in-memory state
+  scan below rebuilds from the yaml; and a top-level `automation.yaml` write that fails
+  (disk full, read-only volume) rolls the in-memory record back to its pre-write fields
+  before the error propagates — memory never runs ahead of disk), then the in-memory state
   updates. A crash between the two self-heals at the next startup, since startup rebuilds
   everything from disk: after loading the DB index, startup scans `executions/` for
   directories the index doesn't know (crash between the yaml write and the DB upsert, or a

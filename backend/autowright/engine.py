@@ -34,6 +34,13 @@ class VersionNotFound(LookupError):
     "no longer exists" record for this one, and logs a bug inside `start`."""
 
 
+class CapacityError(RuntimeError):
+    """§6: every `maxParallel` slot is taken. A RuntimeError subclass, so every
+    caller's 409 mapping still catches it — but a class of its own, because the
+    §19 execute route answers this one (and only this one) with
+    `reason: "capacity"` beside the detail, which the §7 busy toast keys on."""
+
+
 STEP_TIMEOUT = 15 * 60  # per-step hard cap (seconds); override via AUTOWRIGHT_STEP_TIMEOUT
 
 
@@ -178,8 +185,14 @@ def ensure_declared_packages(declared: list, log, should_stop=None) -> str | Non
     if not missing:
         return None
     log("sys", "installing packages: " + ", ".join(p["pip"] for p in missing))
-    bad = [p for p in pkglib.ensure(declared, should_stop=should_stop)
-           if p["status"] != "installed"]
+    try:
+        results = pkglib.ensure(declared, should_stop=should_stop)
+    except pkglib.PackagesBusy:
+        # §19: the bounded wait on the process-wide pip lock expired — another
+        # install held it for a whole install timeout. A package-category
+        # failure like any other, never an engine error.
+        return "another package install has been running for too long — try again later"
+    bad = [p for p in results if p["status"] != "installed"]
     if bad:
         return "; ".join(f"{p['pip']}: {p.get('error') or 'install failed'}" for p in bad)
     return None
@@ -556,7 +569,7 @@ class Engine:
             if ver is None:
                 raise VersionNotFound(f"version {version_label or f'v{version}'} not found")
             if self.at_capacity(auto):
-                raise RuntimeError("already executing")
+                raise CapacityError("already executing")
             pre_snapshot = self._needs_pre_version(auto, kind, version)
             # `sha` snapshots each step's script (§4.5) so a Draft retry can
             # detect a re-saved draft whose code changed under the same names.
@@ -674,7 +687,7 @@ class Engine:
             if self.is_live(h["id"]):
                 raise RuntimeError("already executing")
             if self.at_capacity(auto):
-                raise RuntimeError("already executing")
+                raise CapacityError("already executing")
             if h["status"] != "failed":
                 raise RuntimeError("only failed executions can be retried")
             ver = self._resolve_version(auto, h["kind"], h.get("version"))
@@ -1017,8 +1030,12 @@ class Engine:
             # with no mechanism holds nothing.
             release_power = platform.current().power.hold_execution()
             # §6.3: the pre-version snapshot `start` decided on stands before
-            # anything else this execution does.
-            self._take_pre_version(auto, h)
+            # anything else this execution does — unless the cancel already
+            # landed (§7): a multi-gigabyte copy must never run for an
+            # execution nobody wants. The step loop below then marks every
+            # step cancelled exactly as it does today.
+            if not state["cancel"]:
+                self._take_pre_version(auto, h)
             # §6: a missing secret stops the execution before any step —
             # declared (`secrets` entry ids in the manifest) and the
             # code-referenced secrets["<id>"] literals alike. Ids are the
@@ -1094,7 +1111,9 @@ class Engine:
             for w in warns:
                 self._log(h, "wrn", w, redactions)
 
-            if h["kind"] == "draft" and not failed:
+            # §7: skipped too when the cancel flag is already set — the seed
+            # is the same gigabyte-scale copy the snapshot above is.
+            if h["kind"] == "draft" and not failed and not state["cancel"]:
                 if self._seed_draft_memory(auto):
                     self._log(h, "sys", "draft memory created — copied from the automation's memory", redactions)
 
@@ -1270,7 +1289,16 @@ class Engine:
                 # Center) — redact it like a log line.
                 if notify_text:
                     notify_text = self._redact(h, notify_text, redactions)
-                self._notify_end(auto, ver, h, result if result_touched else None, notify_text)
+                # §6.1: posted on its own thread — the OS notifier can block
+                # for its full timeout, and the §6 slot release, the
+                # `execution.finished` event and the queue drain must not wait
+                # behind it. The record keeps being written after this point,
+                # so the notification's inputs are snapshotted here.
+                threading.Thread(
+                    target=self._notify_end, daemon=True,
+                    name=f"ad-notify-{h['id'][:8]}",
+                    args=(auto, ver, dict(h), result if result_touched else None,
+                          notify_text)).start()
         except Exception as e:  # noqa: BLE001
             # This path must always complete — if the original failure was a
             # disk error, logging/persisting can raise again; swallow those so

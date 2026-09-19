@@ -97,6 +97,9 @@ function ParametersCard({ params }: { params: ParamDef[] }) {
 function WorkspaceCard({ path }: { path: string }) {
   // §9 per-OS copy rule: the reveal button's label.
   const copy = usePlatformCopy()
+  // The bridge call can reject (a scratch dir the OS refuses to reveal) — a
+  // user action never fails silently.
+  const showToast = useStore((s) => s.showToast)
   return (
     <ViewCard title="WORKSPACE" defaultOpen={false} testId="workspace-card">
       <div style={{ padding: '0 18px 14px' }}>
@@ -109,7 +112,10 @@ function WorkspaceCard({ path }: { path: string }) {
           </span>
           <button
             className="ad-btn-ghost"
-            onClick={() => { void window.autowright?.revealPath(path) }}
+            onClick={() => {
+              window.autowright?.revealPath(path)
+                .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+            }}
             title="Opens the scratch directory the steps ran in"
             style={{ flex: 'none' }}
           >
@@ -168,6 +174,11 @@ export default function ExecutionPage() {
   // an absent record is an absent record — a retention-purged deep link, or one
   // the §19 execution.deleted event dropped out from under the open page.
   const [loadedOnce, setLoadedOnce] = useState(false)
+  // §7: a GET that failed for any other reason than a 404 — the record may
+  // well still be there, so the page says it couldn't load and offers a retry.
+  const [loadFailed, setLoadFailed] = useState(false)
+  // bumped by that retry, which re-runs the fetch effect
+  const [reloadKey, setReloadKey] = useState(0)
   // §7 in-place retry keeps the execution id — bumping this remounts the view
   // so its selection and live auto-follow start over with the new attempt.
   const [retryKey, setRetryKey] = useState(0)
@@ -191,12 +202,18 @@ export default function ExecutionPage() {
     if (!executionId) { go('executions'); return }
     let stale = false
     setLoadedOnce(false)
-    // loadExecution swallows the 404 — once it settles, an execution the store
-    // does not hold is gone, and stays gone if it disappears later. A late
+    setLoadFailed(false)
+    // loadExecution answers 'gone' for the 404 — once it settles, an execution
+    // the store does not hold is gone, and stays gone if it disappears later.
+    // 'error' is any other failure and must never read as deleted. A late
     // resolution must not unlock the execution the page moved on to.
-    void loadExecution(executionId).then(() => { if (!stale) setLoadedOnce(true) })
+    void loadExecution(executionId).then((r) => {
+      if (stale) return
+      if (r === 'error') setLoadFailed(true)
+      else setLoadedOnce(true)
+    })
     return () => { stale = true }
-  }, [executionId])
+  }, [executionId, reloadKey])
 
   if (!executionId) return null
 
@@ -209,7 +226,20 @@ export default function ExecutionPage() {
 
   if (!e) {
     return shell(
-      loadedOnce ? (
+      loadFailed ? (
+        <EmptyNotice
+          title="Couldn’t load this execution"
+          body={(
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+              <span>The backend didn’t answer. It may just be restarting.</span>
+              <button className="ad-btn-ghost" onClick={() => setReloadKey((n) => n + 1)}>
+                Try again
+              </button>
+            </div>
+          )}
+          style={{ marginTop: 20 }}
+        />
+      ) : loadedOnce ? (
         <EmptyNotice
           title="This execution no longer exists"
           body="It was removed — most likely by retention cleanup."

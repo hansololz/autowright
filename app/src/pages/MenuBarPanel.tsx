@@ -26,14 +26,18 @@ export default function MenuBarPanel() {
     if (!el) return
     // Border-box measure (scrollHeight excludes the 1px border), re-sent whenever
     // the panel grows — late font loads and row changes both land after mount.
-    const send = () => void window.autowright?.resizePanel(Math.ceil(el.getBoundingClientRect().height))
+    // The main process may answer late or not at all — never an unhandled rejection.
+    const send = () => void window.autowright?.resizePanel(Math.ceil(el.getBoundingClientRect().height))?.catch(() => {})
     send()
     const ro = new ResizeObserver(send)
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
-  const openAutomation = (id: string) => { void window.autowright?.openApp(`/app?automation=${id}`) }
+  const openAutomation = (id: string) => {
+    window.autowright?.openApp(`/app?automation=${id}`)
+      .catch(() => showToast('Couldn’t open Autowright.'))
+  }
 
   return (
     <div
@@ -99,8 +103,12 @@ export default function MenuBarPanel() {
                   e.stopPropagation()
                   // §7: the no-free-slot 409 gets the same toast as every other
                   // execute surface — what happens next depends on the §6 slots.
-                  if (!live) void api.executeNow(a.id, undefined, 'menubar').catch((err: Error & { status?: number }) => {
-                    showToast(err.status === 409 ? executingToast(a.maxParallel, a.maxQueued) : err.message)
+                  // §19: only that 409 carries `reason: "capacity"`; every other
+                  // one shows the backend's own detail.
+                  if (!live) void api.executeNow(a.id, undefined, 'menubar').catch((err: Error & { status?: number; reason?: string }) => {
+                    showToast(err.status === 409 && err.reason === 'capacity'
+                      ? executingToast(a.maxParallel, a.maxQueued)
+                      : err.message)
                   })
                 }}
                 disabled={live}
@@ -127,7 +135,10 @@ export default function MenuBarPanel() {
       }}>
         <button
           className="ad-btn-link"
-          onClick={() => void window.autowright?.openApp('/app')}
+          onClick={() => {
+            window.autowright?.openApp('/app')
+              .catch(() => showToast('Couldn’t open Autowright.'))
+          }}
         >
           Open Autowright
         </button>

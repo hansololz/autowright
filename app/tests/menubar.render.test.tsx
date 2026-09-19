@@ -85,13 +85,15 @@ describe('§13 menu-bar attention count', () => {
 // surface — what happens next depends on the automation's §6 slots.
 describe('§13 menu-bar execute now', () => {
   const execute = () => fireEvent.click(screen.getByRole('button', { name: 'Execute now' }))
-  const reject = (status: number, message = 'already executing') => {
-    mockedApi.executeNow.mockRejectedValue(Object.assign(new Error(message), { status }))
+  // §19: the busy toast keys on `reason: "capacity"` — the only 409 body that
+  // carries one.
+  const reject = (status: number, message = 'already executing', reason?: string) => {
+    mockedApi.executeNow.mockRejectedValue(Object.assign(new Error(message), { status, reason }))
   }
 
   it('a 409 with the default slots toasts the one-at-a-time line', async () => {
     storeMod.useStore.setState({ automations: [auto({ maxParallel: 1, maxQueued: 0 })] })
-    reject(409)
+    reject(409, 'already executing', 'capacity')
     render(<MenuBarPanel />)
     execute()
     await waitFor(() => expect(storeMod.useStore.getState().toast).toBe(
@@ -100,11 +102,22 @@ describe('§13 menu-bar execute now', () => {
 
   it('a 409 with a queue says the firing would be queued', async () => {
     storeMod.useStore.setState({ automations: [auto({ maxParallel: 2, maxQueued: 5 })] })
-    reject(409)
+    reject(409, 'already executing', 'capacity')
     render(<MenuBarPanel />)
     execute()
     await waitFor(() => expect(storeMod.useStore.getState().toast).toBe(
       'All 2 slots are busy. A trigger firing now would be queued.'))
+  })
+
+  // §19: every other 409 (shutting down, being deleted, a full queue) carries
+  // `detail` alone, and the surface shows that verbatim — the busy copy would
+  // promise the wrong thing.
+  it('a 409 with no capacity reason shows the backend detail verbatim', async () => {
+    storeMod.useStore.setState({ automations: [auto({ maxParallel: 1, maxQueued: 3 })] })
+    reject(409, 'the queue is full (3 waiting)')
+    render(<MenuBarPanel />)
+    execute()
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('the queue is full (3 waiting)'))
   })
 
   it('any other failure still toasts its own message', async () => {

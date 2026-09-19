@@ -199,11 +199,28 @@ def _text(raw: dict, key: str, where: str, limit: int | None = None) -> str:
     return value
 
 
+def is_link(value: str) -> bool:
+    """§22.1: the https half of a reference - also what makes a catalog's
+    location remote."""
+    return value.lower().startswith("https://")
+
+
 def is_reference(value: str) -> bool:
     """§22.1: a reference is an https URL or an absolute local path - nothing
     relative, no other scheme, no `~`."""
-    return value.lower().startswith("https://") or (
-        "://" not in value and Path(value).is_absolute())
+    return is_link(value) or ("://" not in value and Path(value).is_absolute())
+
+
+def _check_reference(value: str, key: str, where: str, remote: bool) -> None:
+    """§22.1 reference form, origin-aware: a catalog read from an https
+    location may carry only https references, so a shared catalog can never
+    point the app at files on the user's disk. Local-path references stay
+    legal for a catalog whose location is a path or `null`."""
+    if not is_reference(value):
+        raise MarketplaceError(
+            f"{where}`{key}` must be an https link or an absolute path")
+    if remote and not is_link(value):
+        raise MarketplaceError(f"{where}a remote catalog can't reference a local path")
 
 
 def parse_catalog(text: str, *, location: str | None = None) -> dict:
@@ -211,7 +228,8 @@ def parse_catalog(text: str, *, location: str | None = None) -> dict:
     level are ignored so the format can grow inside one version (the `url` key
     an older draft carried is one of them). References are checked for form
     here and used as written everywhere else. Errors name the entry index.
-    `location` only feeds the default name."""
+    `location` only feeds the default name, and whether it is an https link -
+    a remote catalog may carry only https references (§22.1)."""
     try:
         raw = yaml.safe_load(text)
     except Exception as e:  # noqa: BLE001 - untrusted text: a deeply nested
@@ -225,6 +243,7 @@ def parse_catalog(text: str, *, location: str | None = None) -> dict:
         raise MarketplaceError(
             f"this marketplace catalog is format {raw.get('format_version')!r}; "
             f"this version of Autowright reads format {FORMAT_VERSION}")
+    remote = isinstance(location, str) and is_link(location)
     name = _text(raw, "name", "", MAX_NAME) or default_name(location)
     description = _text(raw, "description", "", MAX_DESCRIPTION)
     listed = raw.get("entries")
@@ -248,16 +267,13 @@ def parse_catalog(text: str, *, location: str | None = None) -> dict:
             raise MarketplaceError(f"{where}it has no `path`")
         if _extension(archive) != ARCHIVE_EXTENSION:
             raise MarketplaceError(f"{where}`path` must name an {ARCHIVE_EXTENSION} file")
-        if not is_reference(archive):
-            raise MarketplaceError(
-                f"{where}`path` must be an https link or an absolute path")
+        _check_reference(archive, "path", where, remote)
         image = _text(item, "image", where)
         if image and _extension(image) not in IMAGE_EXTENSIONS:
             raise MarketplaceError(
                 f"{where}`image` must name a {', '.join(IMAGE_EXTENSIONS)} file")
-        if image and not is_reference(image):
-            raise MarketplaceError(
-                f"{where}`image` must be an https link or an absolute path")
+        if image:
+            _check_reference(image, "image", where, remote)
         entries.append({"index": index, "title": title,
                         "description": _text(item, "description", where,
                                              MAX_ENTRY_DESCRIPTION),
@@ -453,24 +469,31 @@ class MarketplaceStore:
             listed, unreadable = [], True
         sources = []
         for entry in listed:
+            # §22.2: every skip below flips the table read-only for the
+            # session, exactly like a corrupt file - the next save must not
+            # rewrite marketplaces.yaml without the row the user hand-edited.
             if not isinstance(entry, dict):
                 log.warning("skipping a marketplaces.yaml row that isn't a mapping")
+                unreadable = True
                 continue
             if not entry.get("id"):
                 log.warning("skipping a marketplaces.yaml row with no id (%r)",
                             entry.get("location"))
+                unreadable = True
                 continue
             try:
                 uuid.UUID(str(entry["id"]))
             except ValueError:
                 log.warning("skipping marketplaces.yaml row %r - its id isn't a uuid",
                             entry["id"])
+                unreadable = True
                 continue
             location = entry.get("location")
             if location is not None:
                 if not isinstance(location, str) or not is_reference(location):
                     log.warning("skipping marketplaces.yaml row %r - %r isn't a location",
                                 entry["id"], location)
+                    unreadable = True
                     continue
             sources.append({"id": str(entry["id"]), "location": location,
                             "shown": entry.get("shown", True) is not False,
@@ -482,6 +505,35 @@ class MarketplaceStore:
         with self.lock:
             self.sources = sources
             self._unreadable = unreadable
+        self._sweep_orphan_dirs()
+
+    def _sweep_orphan_dirs(self) -> None:
+        """§22.2: nothing but a row's copy lives under `marketplaces/` - a
+        `<id>/` directory no row names (a crash between a remove's table save
+        and its directory delete) goes when the table loads. Uuid-shaped names
+        only: the table's own file lives here too, and a hand-made folder is
+        not the app's to delete. Off the lock (§6: no rmtree under a store
+        lock)."""
+        with self.lock:
+            if self._unreadable:
+                # §5 read-only degradation: with the table unreadable there is
+                # no row list to compare against - every copy would look
+                # orphaned. A damaged file is degraded, never destroyed.
+                return
+            known = {source["id"] for source in self.sources}
+        try:
+            entries = list(paths.marketplace_dir().iterdir())
+        except OSError:
+            return  # no directory yet, or unreadable - nothing to sweep
+        for d in entries:
+            if not d.is_dir() or d.name in known:
+                continue
+            try:
+                uuid.UUID(d.name)
+            except ValueError:
+                continue
+            log.info("sweeping %s - no marketplace row names it", d)
+            shutil.rmtree(d, ignore_errors=True)
 
     def _save(self) -> None:
         """§22.2: the whole file, rewritten on every change - the §22.2 columns

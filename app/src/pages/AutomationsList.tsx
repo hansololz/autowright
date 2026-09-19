@@ -133,8 +133,12 @@ function AutoCard({ a }: { a: Automation }) {
       try {
         await api.executeNow(a.id)
       } catch (err) {
-        const er = err as Error & { status?: number }
-        showToast(er.status === 409 ? executingToast(a.maxParallel, a.maxQueued) : er.message)
+        // §19: only the no-free-slot 409 carries `reason: "capacity"` — every
+        // other 409 shows the backend's own detail (§7).
+        const er = err as Error & { status?: number; reason?: string }
+        showToast(er.status === 409 && er.reason === 'capacity'
+          ? executingToast(a.maxParallel, a.maxQueued)
+          : er.message)
       }
     })()
   }

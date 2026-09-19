@@ -1583,6 +1583,18 @@ def test_failure_reason_classification_direct():
     assert failure_reason(1, None) is None
 
 
+def _wait_notifiers(timeout=5):
+    """§6.1: the end-of-execution notification posts on its own thread — let
+    every one of them land before asserting on what was (or wasn't) posted."""
+    import threading
+    import time
+
+    deadline = time.time() + timeout
+    while any(t.name.startswith("ad-notify-") for t in threading.enumerate()):
+        assert time.time() < deadline, "a notification thread never finished"
+        time.sleep(0.01)
+
+
 def _notify_recorder(monkeypatch):
     """Replace notify.post (already no-op'd by conftest) with a recorder —
     the engine calls it through the module attribute."""
@@ -1604,6 +1616,7 @@ def test_notification_gating_attention_setting(store, monkeypatch):
     a = store.create_automation(make_version(), "Quiet Auto", None)
     h = engine.start(a, "manual")
     wait_done(engine, h["id"])
+    _wait_notifiers()
     assert h["status"] == "succeeded"
     assert calls == []  # result.status("ok") isn't interesting
     ver = make_version()
@@ -1611,6 +1624,7 @@ def test_notification_gating_attention_setting(store, monkeypatch):
     b = store.create_automation(ver, "Loud Fail", None)
     h2 = engine.start(b, "manual")
     wait_done(engine, h2["id"])
+    _wait_notifiers()
     assert h2["status"] == "failed"
     assert calls == [("Loud Fail", "Execution failed")]
 
@@ -1626,6 +1640,7 @@ def test_notification_all_setting_and_body_precedence(store, monkeypatch):
     a = store.create_automation(make_version(), "Chatty", None)
     h = engine.start(a, "manual")
     wait_done(engine, h["id"])
+    _wait_notifiers()
     assert h["status"] == "succeeded"
     assert calls == [("Chatty", "All good")]  # chip becomes the body
     ver = make_version()
@@ -1634,6 +1649,7 @@ def test_notification_all_setting_and_body_precedence(store, monkeypatch):
     b = store.create_automation(ver, "Override", None)
     h2 = engine.start(b, "manual")
     wait_done(engine, h2["id"])
+    _wait_notifiers()
     assert h2["status"] == "succeeded"
     assert calls[-1] == ("Override", "Custom notify text")  # notify() beats the chip
 
@@ -1650,6 +1666,7 @@ def test_notification_title_param_overrides_automation_name(store, monkeypatch):
     a = store.create_automation(ver, "Titled", None)
     h = engine.start(a, "manual")
     wait_done(engine, h["id"])
+    _wait_notifiers()
     assert h["status"] == "failed"
     assert calls == [("My Title", "Execution failed")]
 
@@ -1767,6 +1784,7 @@ def test_chip_and_notification_are_redacted(store, monkeypatch):
     assert "•••" in h["chip"]
     assert "API_KEY" in h["redacted_secrets"]
     # and the same value never reaches the OS notification
+    _wait_notifiers()
     assert posted, "expected a notification"
     assert not any("super-secret-value-123" in body for _, body in posted)
 

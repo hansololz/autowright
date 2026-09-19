@@ -77,12 +77,17 @@ function shimText(python) {
   return `#!/bin/sh\n${SHIM_MARKER}\nexec "${python}" -m autowright.cli "$@"\n`
 }
 
+// §2 spawn policy: never show a console window for a shell child, and cap
+// what it can print — a chatty rc file must not buffer an unbounded stream
+// into the main process.
+const SHELL_PATH_CHILD_OPTIONS = { windowsHide: true, timeout: 2000, maxBuffer: 1024 * 1024 }
+
 // §3: GUI apps inherit a stripped PATH, so ask the login shell for the real
 // one. Resolves to the PATH string, or null on any failure (= not on PATH).
 function readLoginShellPath() {
   return new Promise((resolve) => {
     const shell = process.env.SHELL || '/bin/zsh'
-    execFile(shell, ['-l', '-c', 'printf %s "$PATH"'], { timeout: 2000 }, (err, stdout) => {
+    execFile(shell, ['-l', '-c', 'printf %s "$PATH"'], SHELL_PATH_CHILD_OPTIONS, (err, stdout) => {
       resolve(err ? null : String(stdout))
     })
   })

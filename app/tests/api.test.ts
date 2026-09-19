@@ -251,6 +251,31 @@ describe('openWs reconnect backoff (§19)', () => {
     close()
   })
 
+  // A throw out of connect() — the constructor refusing a malformed address
+  // after a failed backend.json read — used to take the whole retry chain with
+  // it, leaving the app permanently disconnected.
+  it('a throwing WebSocket constructor still schedules the next backoff tick', async () => {
+    let first = true
+    class ThrowsOnce extends FakeSocket {
+      constructor(url: string) {
+        super(url)
+        if (first) { first = false; throw new Error('bad address') }
+      }
+    }
+    vi.stubGlobal('WebSocket', ThrowsOnce)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const close = openWs(() => {})
+    expect(FakeSocket.made.length).toBe(1)
+    await vi.advanceTimersByTimeAsync(1499)
+    expect(FakeSocket.made.length).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(FakeSocket.made.length).toBe(2)
+
+    warn.mockRestore()
+    close()
+  })
+
   it('the closer cancels the pending retry — a closed socket never reconnects', async () => {
     const close = openWs(() => {})
     FakeSocket.made[0].onclose!()

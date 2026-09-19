@@ -55,10 +55,11 @@ export function answerHeader(withWork: boolean, kind?: string): { icon: string; 
     : kind === 'question' ? { icon: 'fa-circle-question', title: 'Question for you' }
       : { icon: 'fa-message', title: 'From your AI' }
 }
-// §4.4: error entries persist too, so a later chat's CONVERSATION context
-// still names a harness failure the user saw in the thread; activity entries
-// (a settled job's event feed) persist for the user but are skipped by the
-// backend's CONVERSATION assembly (§8).
+// §4.4: every entry kind the thread holds persists — error entries too, so a
+// later chat's CONVERSATION context still names a harness failure the user saw
+// in the thread, and activity entries (a settled job's event feed) for the
+// user, though the backend's CONVERSATION assembly skips them (§8). The filter
+// is a safety net for kinds added later: today it drops nothing.
 const PERSIST_KINDS = new Set(['user', 'answer', 'activity', 'rewrite', 'blockers', 'system', 'error'])
 export function persistChat(chat: ChatEntry[]): ChatEntry[] {
   return chat.filter((e) => PERSIST_KINDS.has(e.kind))
@@ -210,8 +211,9 @@ export interface Rev {
   // values. Both are editor state only — never serialized.
   pendingSync: boolean
   pendingTest: { values: Record<string, unknown> | null } | null
-  // §11 chat thread — the editor's one conversational surface. Persisted with
-  // the draft (persistChat strips transient error entries).
+  // §11 chat thread — the editor's one conversational surface. §4.4 thread
+  // lifetime: it persists on its own (§19 /chat/{owner}), never with the
+  // draft — a pure Q&A keeps no draft but still keeps its thread.
   chat: ChatEntry[]
   syncBusy: boolean
   // §8 chat job in flight (the thread's progress entry carries the Cancel)

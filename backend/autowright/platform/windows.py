@@ -609,6 +609,11 @@ class WindowsService:
     def install(self) -> str:
         program, program_note = _backend_program()
         _stop_task()  # unload-then-load: never leave the old instance running
+        # §3: the stop is asynchronous — registering over an instance Task
+        # Scheduler is still winding down would leave two backends racing for
+        # the port, so the unload half has to complete first.
+        if err := _await_running(False):
+            return f"install failed: {err}"
         if err := _register(program):
             return f"install failed: {err}"
         if err := _start_task():

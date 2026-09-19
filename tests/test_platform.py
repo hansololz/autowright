@@ -503,11 +503,12 @@ def test_windows_install_registers_starts_and_verifies(win_service):
                    f"{_no_shim_note()}")
     assert service.result_code(out) == 0
     assert win_service.task["state"] == "Running"
-    # Stop-then-register-then-start (the launchd unload/load shape), then the
-    # state read that verifies it actually started.
+    # Stop-then-register-then-start (the launchd unload/load shape), with a
+    # state read after each half: the stop has to have landed before the
+    # registration, and the start before success is claimed.
     assert _cmdlets(win_service.scripts) == [
-        "Stop-ScheduledTask", "Register-ScheduledTask", "Start-ScheduledTask",
-        "Get-ScheduledTask"]
+        "Stop-ScheduledTask", "Get-ScheduledTask", "Register-ScheduledTask",
+        "Start-ScheduledTask", "Get-ScheduledTask"]
 
 
 def test_windows_registration_pins_the_launchd_equivalents(win_service):

@@ -74,6 +74,11 @@ entries:                             # required list, may be empty, max 200 entr
     or on a shared volume.
   - Anything else - a relative reference, `http://`, `file://`, `~/…` - is the validation
     error "entry <i>: `path` must be an https link or an absolute path" (or `image`).
+  - The reference rule is origin-aware: a catalog whose `location` is an https link may
+    carry **only https** references — an absolute path in a remote catalog is the
+    validation error "entry <i>: a remote catalog can't reference a local path" (or
+    `image`), so a shared catalog can never point the app at files on the user's disk.
+    Local-path references stay legal for a catalog whose `location` is a path or `null`.
 - Validation covers the shape and the *form* of every reference at add and refresh time.
   Whether an archive actually exists is checked when the user installs it (§22.4 preview:
   a missing or invalid archive answers the ordinary §5.2 422); whether an image exists is
@@ -102,7 +107,9 @@ marketplaces/
                                 # or the only copy when the location is null
 ```
 
-Nothing else ever lives here. A marketplace **references** automations, it never stores
+Nothing else ever lives here — a `<id>/` directory no table row names (a crash between a
+remove's table save and its directory delete) is swept when the table loads. A marketplace
+**references** automations, it never stores
 them: every archive an entry names stays where it is (a link, or a file the user owns
 somewhere on the machine), and an automation exported for a catalog (through the §9.2
 Export…, or the §22.5 CLI) lands in a folder the user chose, never under the data root.
@@ -123,7 +130,9 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   couldn't be read - refresh to fetch it again" when it has a location, "… - remove this
   marketplace and add it again" when it has none) rather than vanishing. §5 lenient load
   applies to the table itself: a row missing `id` skips with a warning; a `location` that
-  is neither `null`, an absolute path, nor an `https://` link skips with a warning; a
+  is neither `null`, an absolute path, nor an `https://` link skips with a warning (any
+  skipped row flips the table read-only for the session, exactly like a corrupt file — the
+  next save must not rewrite `marketplaces.yaml` without the row the user hand-edited); a
   missing `shown` reads `true`, a missing `auto_refresh` reads `false`; an `id` that isn't
   uuid-shaped skips with a warning (the id names the row's directory, so it is never joined
   into a path unchecked). A table file that exists but can't be parsed (or whose root isn't a

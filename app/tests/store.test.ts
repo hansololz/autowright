@@ -542,7 +542,9 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     expect(store.useStore.getState().automations.map((a: { id: string }) => a.id)).toEqual(['a-new'])
   })
 
-  it('bare event and unknown-id entity both fall back to a full refresh', () => {
+  // §19: both fall back to /state, and a burst coalesces behind one in-flight
+  // refresh — five events for unknown rows cost one snapshot, not five.
+  it('bare event and unknown-id entity both fall back to one coalesced refresh', () => {
     const state = vi.mocked(apiMod.api.state)
     state.mockClear()
     store.useStore.setState({ automations: [auto('a1')] })
@@ -552,7 +554,7 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     store.useStore.getState().applyEvent({
       event: 'automation.changed', automationId: 'aNew', automation: auto('aNew'),
     })
-    expect(state).toHaveBeenCalledTimes(2)
+    expect(state).toHaveBeenCalledTimes(1)
     expect(store.useStore.getState().automations.map((a) => a.id)).toEqual(['a1'])
   })
 

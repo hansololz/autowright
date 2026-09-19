@@ -93,8 +93,11 @@ export default function SettingsPage() {
   // §4.9: fires §3 cli-install — a silent write into ~/.local/bin, no dialog;
   // a failed install just returns to the previous state — never an error
   // banner.
-  const cliInstall = (): Promise<boolean> => {
-    if (cliBusy) return Promise.resolve(false)
+  // §4.9: the busy short-circuit is its own answer — a click that started no
+  // install is never a failure, so the toggle-on flow below can't read it as
+  // one and patch the setting off under a shim that then lands.
+  const cliInstall = (): Promise<'ok' | 'failed' | 'busy'> => {
+    if (cliBusy) return Promise.resolve('busy')
     setCliBusy(true)
     return (async () => {
       const r = await window.autowright?.cliInstall().catch(() => null)
@@ -104,7 +107,7 @@ export default function SettingsPage() {
       const s = await window.autowright?.cliStatus().catch(() => null)
       if (s) setCli(s)
       setCliBusy(false)
-      return Boolean(r?.ok)
+      return r?.ok ? 'ok' : 'failed'
     })()
   }
 
@@ -119,7 +122,7 @@ export default function SettingsPage() {
       return
     }
     patch({ cliEnabled: true })
-    void cliInstall().then((ok) => { if (!ok) patch({ cliEnabled: false }) })
+    void cliInstall().then((r) => { if (r === 'failed') patch({ cliEnabled: false }) })
   }
 
   // §4.9 disable confirm accepted: patch off, then §3 cli-uninstall removes
@@ -393,8 +396,10 @@ export default function SettingsPage() {
                         {cli.state === 'foreign' && `A different autowright is already at ${cli.path}. Autowright won’t touch it.`}
                       </div>
                     </div>
+                    {/* §4.9: the toggle is disabled while an install is in flight —
+                        a second click must not patch the setting off under it */}
                     {cli.state !== 'foreign' && (
-                      <Toggle on={settings.cliEnabled} onChange={setCliEnabled} title="The autowright command" />
+                      <Toggle on={settings.cliEnabled} onChange={setCliEnabled} disabled={cliBusy} title="The autowright command" />
                     )}
                   </div>
                   {pathRow && (

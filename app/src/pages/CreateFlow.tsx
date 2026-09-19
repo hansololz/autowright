@@ -25,7 +25,7 @@ import {
 } from './createflow/model'
 import { VersionDiffModal } from '../versiondiff'
 import { useDraftJob } from './createflow/useDraftJob'
-import { ChatPanel } from './createflow/ChatPanel'
+import { ChatPanel, useComposerText } from './createflow/ChatPanel'
 import { BuildCard, TestCard } from './createflow/BuildTestCards'
 import { LeftColumn, RightCards } from './createflow/SectionCards'
 
@@ -52,7 +52,6 @@ export default function CreateFlow() {
   const secrets = useStore((s) => s.secrets)
   const automations = useStore((s) => s.automations)
   const executions = useStore((s) => s.executions)
-  const executionFull = useStore((s) => s.executionFull)
   const createFrom = useStore((s) => s.createFrom)
   const automationId = useStore((s) => s.automationId)
   const go = useStore((s) => s.go)
@@ -60,6 +59,10 @@ export default function CreateFlow() {
   const showToast = useStore((s) => s.showToast)
   const loadAuto = useStore((s) => s.loadAuto)
   const test = useStore((s) => s.test)
+  // Only the tracked test's full record: subscribing to the whole
+  // `executionFull` map would re-render the editor on every other execution's
+  // body landing (the TEST card's own selector does the same).
+  const testFull = useStore((s) => (s.test ? s.executionFull[s.test.executionId] : undefined))
   const isEdit = createFrom === 'edit'
   const auto = isEdit ? automations.find((a) => a.id === automationId) ?? null : null
   // §19: the live-execution banner's "next execution" label reads from
@@ -74,13 +77,15 @@ export default function CreateFlow() {
   // §4.1/§11: the colliding name behind the title input's inline error
   const [nameErr, setNameErr] = useState<string | null>(null)
   const [descEdit, setDescEdit] = useState<string | null>(null)
-  const [chatText, setChatText] = useState('')
   // §11: sending a chat message or starting a sync while a manual edit holds
   // unsaved changes first asks through the editing card's discard confirm -
   // confirming discards and proceeds, cancelling aborts the send with the
   // composer text kept. An open editor holding no changes never asks.
   const [confirmEditDiscard, setConfirmEditDiscard] =
     useState<{ doc: 'spec' | 'notes'; proceed: () => void } | null>(null)
+  // §11 composer text: owned by the chat pane (ChatPanel's useComposerText) —
+  // the page holds only the handle, so a keystroke never re-renders the editor.
+  const composer = useComposerText()
   const draftSnap = useRef<Rev | null>(null)
   const seededRef = useRef(false)
 
@@ -388,7 +393,7 @@ export default function CreateFlow() {
   // §11: the tracked test is an ordinary execution record — steps/status render
   // off it (executionFull carries the body; the header list covers the gap before
   // loadExecution lands).
-  const testExec = test ? executionFull[test.executionId] ?? executions.find((e) => e.id === test.executionId) : undefined
+  const testExec = test ? testFull ?? executions.find((e) => e.id === test.executionId) : undefined
   const testLive = testExec?.status === 'executing'
   // BUILD card: the sync button disables (never hides) while any §8 job runs,
   // while viewing an old version, while a draft test is executing
@@ -408,7 +413,7 @@ export default function CreateFlow() {
   const jobs = useDraftJob({
     rev, setRev, up,
     isEdit, auto, agentId, showToast,
-    chatText, setChatText,
+    composer,
     anyJobBusy, testLive, viewingOld,
   })
 
@@ -459,9 +464,14 @@ export default function CreateFlow() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // §19 reconnect: a reconnect's snapshot rows carry no bodies, and this page
+  // reads full fields off the stored record (the version history, the saved
+  // steps and spec the version menu loads) — so it re-GETs the record on every
+  // reconnect, like the §9.2 detail page.
+  const reconnects = useStore((s) => s.reconnects)
   useEffect(() => {
     if (isEdit && automationId) void loadAuto(automationId)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reconnects]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- instruction files (§8) — fetched once per app session ----
   const [fw, setFw] = useState<string>(instructionCache.framework ?? '')
@@ -520,6 +530,11 @@ export default function CreateFlow() {
 
   const resetCreate = async () => {
     jobs.cancelJob()
+    // §4.4: settle BEFORE the awaits, exactly like the edit branch's Discard
+    // draft — the 1 s debounce timers check the flag at fire time, and a PUT
+    // landing after the DELETE would resurrect the discarded draft or clobber
+    // the boundary marker the DELETE appends to the kept thread.
+    draftSettled.current = true
     // §11 hold-and-flush: Start over discards the session's staging, so its
     // held workflow chips drop with it - they must never flush into (or leak
     // through a later sync onto) the next session's thread.
@@ -538,7 +553,10 @@ export default function CreateFlow() {
     setNameEdit(null)
     setDescEdit(null)
     setRev({ ...seedEmpty(agents, secrets.map((s) => s.id)), chat })
-    setChatText((cur) => cur || jobs.firstRequestRef.current)
+    // §4.4: the fresh empty draft is a live session again — the writers re-arm
+    // over the settled one they were muted for.
+    draftSettled.current = false
+    composer.set((cur) => cur || jobs.firstRequestRef.current)
   }
 
   // §11 title rename — hidden while any job runs and, in edit mode, while
@@ -635,7 +653,13 @@ export default function CreateFlow() {
   // statuses/badges without changing the pip list, and must re-trigger the
   // fetch — a pip-only key would leave every row on "checking…" forever.
   const pkgKey = rev ? rev.packages.map((p) => `${p.pip}\t${p.status ? 1 : 0}`).join('\n') : ''
-  const pkgOutdatedKey = rev ? rev.packages.map((p) => `${p.pip}\t${p.latest ? 1 : 0}`).join('\n') : ''
+  // The pip list alone keys the update check: the answer writes `latest` onto
+  // the rows, so a key carrying the badges would re-fire the effect with its
+  // own result (a second POST per editor open). Which list was already checked
+  // lives in a ref instead — it also decides whether a late answer still
+  // belongs to the list on screen.
+  const pkgPipKey = rev ? rev.packages.map((p) => p.pip).join('\n') : ''
+  const pkgOutdatedChecked = useRef<string | null>(null)
   useEffect(() => {
     if (!rev || rev.packages.length === 0 || !rev.packages.some((p) => !p.status)) return
     let stale = false
@@ -658,10 +682,13 @@ export default function CreateFlow() {
   // /packages/outdated) — advisory, a failure just leaves the badges off.
   useEffect(() => {
     if (!rev || rev.packages.length === 0) return
-    let stale = false
+    if (pkgOutdatedChecked.current === pkgPipKey) return
+    pkgOutdatedChecked.current = pkgPipKey
     void api.outdatedPackages(rev.packages.map(({ pip, import: imp }) => ({ pip, import: imp })))
       .then(({ packages }) => {
-        if (stale) return
+        // the list moved on while the check ran (a sync, a version switch) —
+        // the badges belong to a list that is no longer on screen
+        if (pkgOutdatedChecked.current !== pkgPipKey) return
         setRev((r) => r && ({
           ...r,
           packages: r.packages.map((p) => {
@@ -671,8 +698,7 @@ export default function CreateFlow() {
         }))
       })
       .catch(() => { /* badges stay off */ })
-    return () => { stale = true }
-  }, [pkgOutdatedKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pkgPipKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // §11/§6.2 Update / Update all — pip install --upgrade in the shared
   // directory; no manifest writes, the installed version is the truth. The
@@ -764,7 +790,7 @@ export default function CreateFlow() {
     if (!fx) return
     fixConsumed.current = true
     useStore.setState({ fixExec: null })
-    const ex = executionFull[fx] ?? executions.find((e) => e.id === fx)
+    const ex = useStore.getState().executionFull[fx] ?? executions.find((e) => e.id === fx)
     const failure = ex?.error
       ? `Execution failed at step ${ex.error.step ?? '?'} — ${ex.error.message}`
       : 'The execution failed.'
@@ -779,8 +805,10 @@ export default function CreateFlow() {
     if (!rev || !chatReady || !fixSend) return
     setFixSend(null)
     // While another §8 job is already in flight only the seed lands (§11);
-    // the user asks when it settles.
-    if (anyJobBusy || testLive) return
+    // the user asks when it settles. §11 one job at a time: the re-attach
+    // effect above fires in this same commit, so `anyJobBusy` is still a
+    // render behind it — jobs.busyNow() reads the job refs it just armed.
+    if (anyJobBusy || jobs.busyNow() || testLive) return
     // The seed entry above already names the failing step — don't repeat it here.
     void jobs.sendChat(`This execution failed — figure out why. If the automation is at fault, change it so it won’t happen again; if the fix is something I need to do on this ${copy.machine} (install or start an app, sign in), tell me what to do and how instead.`, fixSend)
   }, [rev != null, chatReady, fixSend]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1001,8 +1029,7 @@ export default function CreateFlow() {
             outOfSync={outOfSync}
             syncDisabled={syncDisabled}
             lastRewriteId={lastRewriteId}
-            chatText={chatText}
-            setChatText={setChatText}
+            composer={composer}
             sendMessage={sendMessage}
             undoDraft={undoDraft}
             runSync={() => guardManualEdit(() => void jobs.runSync())}

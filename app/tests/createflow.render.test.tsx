@@ -2453,6 +2453,30 @@ describe('CreateFlow background continuation & re-attach (§11/§19)', () => {
     expect(screen.queryByText(/Trigger changes dropped/)).toBeNull()
   })
 
+  it('a re-attached job blocks the Fix-with-AI send — the seed lands, no second job', async () => {
+    // §11 one job at a time: the re-attach and the §7 Fix-with-AI send fire in
+    // the same commit, so the send's gate has to read the job refs the
+    // re-attach just armed, not the render-behind busy flag.
+    const failed = {
+      id: 'e7', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
+      status: 'failed', trigger: 'Manual', triggerSender: null, test: false, steps: [],
+      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
+      error: { step: 'Fetch pages', message: 'boom', reason: null },
+    }
+    storeMod.useStore.setState({
+      draftJobs: jobRow('building'), fixExec: 'e7',
+      executions: [failed] as never, executionFull: { e7: failed } as never,
+    })
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [USER_ENTRY] })
+    render(<CreateFlow />)
+    // the re-attached job's poll runs…
+    await waitFor(() => expect(mockedApi.getDraftJob).toHaveBeenCalledWith('jx'))
+    // …and the failure seed still lands in the thread (§11)
+    await screen.findByText(/Execution failed at step Fetch pages/)
+    expect(mockedApi.postDraftJob).not.toHaveBeenCalled()
+    expect(mockedApi.cancelDraftJob).not.toHaveBeenCalled()
+  })
+
   it('a slot that owns a building job keeps its thread and re-attaches (fresh-entry clear skipped)', async () => {
     storeMod.useStore.setState({
       createFrom: 'new' as never, automationId: null,
@@ -2714,6 +2738,25 @@ describe('CreateFlow settle paths: vanished automation + live test (§11)', () =
     expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending')
   })
 
+  it('Start over settles the draft — a timer armed before it writes nothing after (§4.4)', async () => {
+    // §4.4 settling: Start over stops the debounced writer before the DELETE,
+    // or the 1 s timer armed with the resumed draft resurrects it right after.
+    storeMod.useStore.setState({ createFrom: 'app', automationId: null })
+    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
+      draft: { spec: [{ kind: 'h1', text: 'Kept' }, { kind: 'p', text: 'Body.' }], steps: [] },
+      agentId: null,
+    })
+    render(<CreateFlow />)
+    // the resumed draft is what arms the writer
+    await screen.findAllByText('Kept')
+    ;(mockedApi.putDraft as ReturnType<typeof vi.fn>).mockClear()
+    fireEvent.click(screen.getByText('Start over'))
+    await waitFor(() => expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending'))
+    // past the 1 s debounce window: nothing wrote the discarded draft back
+    await new Promise((resolve) => setTimeout(resolve, 1400))
+    expect(mockedApi.putDraft).not.toHaveBeenCalled()
+  })
+
   it('Discard draft cancels the edited automation’s live test the same way', async () => {
     storeMod.useStore.setState({
       executions: [liveTest({ id: 't2', automationId: 'a1' })] as never,
@@ -2903,13 +2946,16 @@ describe('CreateFlow BUILD INSTRUCTIONS card (§11)', () => {
 describe('§11 chat thread auto-scroll', () => {
   const entry = (id: string, kind: ChatEntry['kind'], text: string): ChatEntry => ({ id, kind, text })
   const noop = () => {}
+  // §11 composer text: the pane owns the input's value behind this handle —
+  // an inert one here, since these tests drive the thread, not the composer.
+  const composer = { get: () => '', set: noop, subscribe: () => noop }
   const panel = (chat: ChatEntry[]) => (
     <ChatPanel
       rev={{ ...seedEmpty(AGENTS, [MAIL_ID]), chat }}
       agents={AGENTS} selAgent={AGENTS[0]} isEdit isCreateEmpty={false}
       anyJobBusy={false} busyRewrite={false} testLive={false} viewingOld={false}
       inputDisabled={false} outOfSync={false} syncDisabled={false}
-      lastRewriteId={undefined} chatText="" setChatText={noop} sendMessage={noop}
+      lastRewriteId={undefined} composer={composer} sendMessage={noop}
       undoDraft={noop} runSync={noop} runDraftTest={noop} analyzeFailure={null}
       patchEntry={noop} applyBlockersEntry={noop} clearChat={noop} cancelChat={noop}
       cancelSync={noop} setAgentId={noop} up={noop} showToast={noop}

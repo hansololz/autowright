@@ -40,8 +40,10 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
   const revealMemory = () => {
     const p = auto.memory?.path
     if (!p) return
-    void window.autowright?.revealPath(p)
-    showToast(`Shown in ${copy.fileManager} — Autowright › Memory › ${auto.name}`)
+    window.autowright?.revealPath(p)
+      .then(() => showToast(`Shown in ${copy.fileManager} — Autowright › Memory › ${auto.name}`))
+      // a user action never fails silently
+      .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
   }
 
   const doClearMemory = () => {

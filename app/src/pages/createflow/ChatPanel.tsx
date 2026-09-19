@@ -4,7 +4,7 @@
 // rows, plus the transient in-thread progress entry — the page's only live job
 // surface), the create empty state, and the pinned composer with the
 // drafting-agent picker and Clear chat.
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { usePlatformCopy } from '../../platformCopy'
 import { useStore } from '../../store'
 import type { Agent, ChatEntry } from '../../types'
@@ -119,6 +119,124 @@ function AgentPick({ agents, selected, onPick, disabled }: {
   )
 }
 
+/** §11 thread progress entry — the page's only live job surface:
+    transient (derived from the job, never persisted), rendered as a
+    left-aligned agent block at the bottom of the thread. Its own
+    component because of the tick: the §11 live durations advance once a
+    second, and the thread list above must not re-reconcile with them.
+    §11 thread spacing: an operation block — flush beneath a just-settled
+    op entry (the same job's trail chains), the uniform 12px group gap
+    otherwise. */
+function LiveProgress({ rev }: { rev: Rev }) {
+  // §11 live durations: the elapsed stamps tick client-side once per second
+  // from the §8 stage-timing stamps — the 700 ms poll is never the tick
+  // source. The block only exists while a job runs, so mounting starts the
+  // tick and settling clears it.
+  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000)
+  useEffect(() => {
+    const tick = setInterval(() => setNowSeconds(Date.now() / 1000), 1000)
+    return () => clearInterval(tick)
+  }, [])
+  return (
+    <div data-testid="chat-progress" style={{ marginTop: rev.chat.length === 0 ? 0 : familyGap(rev.chat[rev.chat.length - 1], { kind: 'activity' } as ChatEntry) }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 3 }}>
+        <Spinner size={13} style={{ flex: 'none' }} />
+        <div style={{ flex: 1, minWidth: 0, font: "500 12.5px var(--sans)", color: 'var(--text-muted)' }}>
+          {jobStageTitle(rev)}
+        </div>
+      </div>
+      {(() => {
+        // §11 activity feed: the full dim event history over the live
+        // detail line (the backend caps events per job), as flush-left
+        // operation-block bullets; the newest event hides when detail
+        // extends it (same message, growing line count) so it never
+        // shows twice. The backend's `Thinking…` detail never renders —
+        // the canned waiting line below subsumes it, so the waiting
+        // line is never relabeled mid-tick.
+        const evs = rev.genEvents
+        const detail = rev.genDetail === 'Thinking…' ? null : rev.genDetail
+        const last = evs.length ? evs[evs.length - 1] : null
+        // detail extends the last event (same message, growing count):
+        // the detail bullet replaces it and inherits its ticking stamp.
+        // A detail that is a DIFFERENT activity (a tool event landed
+        // after the document stream's throttled line) renders unstamped
+        // instead — the last event keeps the tick, so the block shows
+        // exactly one ticking stamp (§11).
+        const extendsLast = !!(detail && last && detail.startsWith(last.text))
+        const hist = extendsLast ? evs.slice(0, -1) : evs
+        // §11 live durations: a line with a successor carries its settled
+        // span; the newest line ticks its own elapsed instead (whole seconds)
+        const bulletDuration = (i: number): string | undefined => {
+          const t = hist[i].time
+          if (t == null) return undefined
+          const next = i + 1 < evs.length ? evs[i + 1].time : null
+          if (next != null) return durationLabel(Math.max(0, (next - t) * 1000))
+          return waitedLabel(Math.max(0, (nowSeconds - t) * 1000))
+        }
+        const liveSince = last?.time ?? rev.genStageStartedAt
+        // §11 waiting line, one identity: the stage's canned description
+        // bullet ticks from the stage's start until the first milestone,
+        // then freezes in place as the feed's first bullet when the gap
+        // was material (≥ 1 s) — a sub-second gap drops it, matching the
+        // settled shape. A live block never renders as a bare title.
+        const start = rev.genStageStartedAt
+        const firstTime = evs[0]?.time
+        const gapMs = start != null && firstTime != null
+          ? Math.max(0, Math.round((firstTime - start) * 1000)) : null
+        const waiting = evs.length === 0 && !detail
+        const showLead = waiting || (gapMs != null && gapMs >= 1000)
+        return (
+          <>
+            {showLead && (
+              <OpBullet text={stageDoingBullet(jobStageTitle(rev))} ellipsis
+                color={waiting ? 'var(--text-muted)' : undefined}
+                duration={waiting
+                  ? (start != null ? waitedLabel(Math.max(0, (nowSeconds - start) * 1000)) : undefined)
+                  : durationLabel(gapMs!)} />
+            )}
+            {hist.map((e, i) => (
+              <OpBullet key={`${i}-${e.text}`} text={e.text} ellipsis duration={bulletDuration(i)} />
+            ))}
+            {detail && (
+              <OpBullet text={detail} color="var(--text-muted)"
+                duration={extendsLast && liveSince != null ? waitedLabel(Math.max(0, (nowSeconds - liveSince) * 1000)) : undefined} />
+            )}
+          </>
+        )
+      })()}
+    </div>
+  )
+}
+/** §11 composer text — the pinned input's value. It lives in a ref with its
+    own subscriber list instead of the editor page's state: a keystroke then
+    re-renders this pane alone, never the review grid, the step lists and the
+    derived gating block beside it. The page still reads and writes it through
+    this handle — Start over returns the first request to the input, a send
+    clears it, a composer cancel returns the request text. */
+export interface ComposerText {
+  get: () => string
+  set: (next: string | ((cur: string) => string)) => void
+  subscribe: (onChange: () => void) => () => void
+}
+export function useComposerText(): ComposerText {
+  const text = useRef('')
+  const subscribers = useRef<Set<() => void> | null>(null)
+  return useMemo<ComposerText>(() => ({
+    get: () => text.current,
+    set: (next) => {
+      const value = typeof next === 'function' ? next(text.current) : next
+      if (value === text.current) return
+      text.current = value
+      subscribers.current?.forEach((fn) => fn())
+    },
+    subscribe: (onChange) => {
+      const subs = subscribers.current ?? (subscribers.current = new Set())
+      subs.add(onChange)
+      return () => { subs.delete(onChange) }
+    },
+  }), [])
+}
+
 export interface ChatPanelProps {
   rev: Rev
   agents: Agent[]
@@ -133,8 +251,7 @@ export interface ChatPanelProps {
   outOfSync: boolean
   syncDisabled: boolean
   lastRewriteId: string | undefined
-  chatText: string
-  setChatText: (v: string) => void
+  composer: ComposerText
   sendMessage: () => void
   undoDraft: () => void
   runSync: () => void
@@ -157,12 +274,16 @@ export interface ChatPanelProps {
 export function ChatPanel({
   rev, agents, selAgent, isEdit, isCreateEmpty, anyJobBusy, busyRewrite,
   testLive, viewingOld, inputDisabled, outOfSync, syncDisabled,
-  lastRewriteId, chatText, setChatText, sendMessage,
+  lastRewriteId, composer, sendMessage,
   undoDraft, runSync, runDraftTest, analyzeFailure, patchEntry,
   applyBlockersEntry, clearChat, cancelChat, cancelSync, setAgentId, up, showToast,
 }: ChatPanelProps) {
   // §9 per-OS copy rule: the machine noun the create empty state names.
   const copy = usePlatformCopy()
+  // §11 composer text: owned here (the handle keeps it out of the page's
+  // render), so typing re-renders this pane and nothing else.
+  const chatText = useSyncExternalStore(composer.subscribe, composer.get)
+  const setChatText = composer.set
   // §11 per-OS top offset, matching the §9 rail: 53 below the Windows title
   // bar (41px extent + 12px gap, mirroring the bottom gap), 46 elsewhere.
   const platformOs = useStore((s) => s.platformOs)
@@ -187,17 +308,6 @@ export function ChatPanel({
     if (!el || !anyJobBusy) return
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight
   }, [anyJobBusy, rev.genDetail, rev.genEvents])
-  // §11 live durations: the progress entry's elapsed stamps tick client-side
-  // once per second from the §8 stage-timing stamps — the 700 ms poll is
-  // never the tick source.
-  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000)
-  useEffect(() => {
-    if (!anyJobBusy) return
-    setNowSeconds(Date.now() / 1000)
-    const tick = setInterval(() => setNowSeconds(Date.now() / 1000), 1000)
-    return () => clearInterval(tick)
-  }, [anyJobBusy])
-
   // §11 Clear chat: confirm step before the thread is emptied.
   const [confirmClear, setConfirmClear] = useState(false)
 
@@ -599,78 +709,7 @@ export function ChatPanel({
         {/* §11 thread progress entry — the page's only live job surface:
             transient (derived from the job, never persisted), rendered as a
             left-aligned agent block at the bottom of the thread */}
-        {anyJobBusy && (
-          // §11 thread spacing: an operation block — flush beneath a
-          // just-settled op entry (the same job's trail chains), the uniform
-          // 12px group gap otherwise
-          <div data-testid="chat-progress" style={{ marginTop: rev.chat.length === 0 ? 0 : familyGap(rev.chat[rev.chat.length - 1], { kind: 'activity' } as ChatEntry) }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 3 }}>
-              <Spinner size={13} style={{ flex: 'none' }} />
-              <div style={{ flex: 1, minWidth: 0, font: "500 12.5px var(--sans)", color: 'var(--text-muted)' }}>
-                {jobStageTitle(rev)}
-              </div>
-            </div>
-            {(() => {
-              // §11 activity feed: the full dim event history over the live
-              // detail line (the backend caps events per job), as flush-left
-              // operation-block bullets; the newest event hides when detail
-              // extends it (same message, growing line count) so it never
-              // shows twice. The backend's `Thinking…` detail never renders —
-              // the canned waiting line below subsumes it, so the waiting
-              // line is never relabeled mid-tick.
-              const evs = rev.genEvents
-              const detail = rev.genDetail === 'Thinking…' ? null : rev.genDetail
-              const last = evs.length ? evs[evs.length - 1] : null
-              // detail extends the last event (same message, growing count):
-              // the detail bullet replaces it and inherits its ticking stamp.
-              // A detail that is a DIFFERENT activity (a tool event landed
-              // after the document stream's throttled line) renders unstamped
-              // instead — the last event keeps the tick, so the block shows
-              // exactly one ticking stamp (§11).
-              const extendsLast = !!(detail && last && detail.startsWith(last.text))
-              const hist = extendsLast ? evs.slice(0, -1) : evs
-              // §11 live durations: a line with a successor carries its settled
-              // span; the newest line ticks its own elapsed instead (whole seconds)
-              const bulletDuration = (i: number): string | undefined => {
-                const t = hist[i].time
-                if (t == null) return undefined
-                const next = i + 1 < evs.length ? evs[i + 1].time : null
-                if (next != null) return durationLabel(Math.max(0, (next - t) * 1000))
-                return waitedLabel(Math.max(0, (nowSeconds - t) * 1000))
-              }
-              const liveSince = last?.time ?? rev.genStageStartedAt
-              // §11 waiting line, one identity: the stage's canned description
-              // bullet ticks from the stage's start until the first milestone,
-              // then freezes in place as the feed's first bullet when the gap
-              // was material (≥ 1 s) — a sub-second gap drops it, matching the
-              // settled shape. A live block never renders as a bare title.
-              const start = rev.genStageStartedAt
-              const firstTime = evs[0]?.time
-              const gapMs = start != null && firstTime != null
-                ? Math.max(0, Math.round((firstTime - start) * 1000)) : null
-              const waiting = evs.length === 0 && !detail
-              const showLead = waiting || (gapMs != null && gapMs >= 1000)
-              return (
-                <>
-                  {showLead && (
-                    <OpBullet text={stageDoingBullet(jobStageTitle(rev))} ellipsis
-                      color={waiting ? 'var(--text-muted)' : undefined}
-                      duration={waiting
-                        ? (start != null ? waitedLabel(Math.max(0, (nowSeconds - start) * 1000)) : undefined)
-                        : durationLabel(gapMs!)} />
-                  )}
-                  {hist.map((e, i) => (
-                    <OpBullet key={`${i}-${e.text}`} text={e.text} ellipsis duration={bulletDuration(i)} />
-                  ))}
-                  {detail && (
-                    <OpBullet text={detail} color="var(--text-muted)"
-                      duration={extendsLast && liveSince != null ? waitedLabel(Math.max(0, (nowSeconds - liveSince) * 1000)) : undefined} />
-                  )}
-                </>
-              )
-            })()}
-          </div>
-        )}
+        {anyJobBusy && <LiveProgress rev={rev} />}
       </ScrollArea>
       {/* footer composer — while a §8 job runs it keeps its shape (the live
           surface is the thread progress entry above, §11); Send becomes Cancel */}

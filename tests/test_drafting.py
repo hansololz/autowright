@@ -1,10 +1,9 @@
 import pytest
 from conftest import fake_cli
 
-from autowright.drafting import (build_chat_prompt, build_steps_prompt,
+from autowright.drafting import (DraftJobs, build_chat_prompt, build_steps_prompt,
                                parse_blockers, parse_envelope, spec_as_md, validate_actions,
-                               validate_chat, validate_chat_files, validate_spec,
-                               validate_steps)
+                               validate_chat_files, validate_spec, validate_steps)
 
 GOOD_SPEC = """prose the parser must ignore
 ===FILE: spec.md===
@@ -683,8 +682,8 @@ def test_fake_cli_chat_then_sync_validates():
 
     chat_raw = harness.invoke({"harness": "Claude Code"},
                               build_chat_prompt("Track my packages", None, GRANTS))
-    payload, errors = validate_chat(chat_raw, parse_envelope(chat_raw))
-    assert errors == []
+    outcome, payload, _, _, _ = DraftJobs._chat_classify(chat_raw)
+    assert outcome == "done", payload
     assert payload["spec"][0]["kind"] == "h1"
     assert payload["actions"]["sync"] is True
     assert payload["actions"]["name"] == "Track my packages"
@@ -1417,7 +1416,7 @@ def test_validate_actions_shapes():
 
 def test_validate_actions_undo_exclusive():
     # §8: undo is literal-true and always alone — no other action keys, and
-    # (validate_chat) no rewrite blocks in the same response.
+    # (validate_chat_files) no rewrite blocks in the same response.
     ok, errs = validate_actions("undo: true\n")
     assert errs == [] and ok == {"undo": True}
     _, errs = validate_actions("undo: false\n")
@@ -1430,17 +1429,19 @@ def test_validate_actions_undo_exclusive():
 
 def test_validate_chat_undo_rejects_rewrites():
     # §8: undoing and rewriting in one response is contradictory.
-    files = {"actions.yaml": "undo: true\n",
-             "spec.md": "# T\n\nbody"}
-    _, errs = validate_chat("===FILE: ...", files)
-    assert any("cannot be combined" in e for e in errs)
-    files = {"actions.yaml": "undo: true\n", "notes.md": "- n"}
-    _, errs = validate_chat("===FILE: ...", files)
-    assert any("cannot be combined" in e for e in errs)
+    raw = ("===FILE: actions.yaml===\nundo: true\n"
+           "===FILE: spec.md===\n# T\n\nbody\n===END===")
+    outcome, errs, _, _, _ = DraftJobs._chat_classify(raw)
+    assert outcome == "invalid" and any("cannot be combined" in e for e in errs)
+    raw = ("===FILE: actions.yaml===\nundo: true\n"
+           "===FILE: notes.md===\n- n\n===END===")
+    outcome, errs, _, _, _ = DraftJobs._chat_classify(raw)
+    assert outcome == "invalid" and any("cannot be combined" in e for e in errs)
     # alone (answer prose aside) it validates
     raw = "Rolling back.\n===FILE: actions.yaml===\nundo: true\n===END==="
-    ok, errs = validate_chat(raw, {"actions.yaml": "undo: true\n"})
-    assert errs == [] and ok["actions"] == {"undo": True} and ok["answer"] == "Rolling back."
+    outcome, ok, _, _, _ = DraftJobs._chat_classify(raw)
+    assert outcome == "done"
+    assert ok["actions"] == {"undo": True} and ok["answer"] == "Rolling back."
 
 
 def test_validate_actions_checks_test_value_names():
@@ -1558,18 +1559,18 @@ def test_validate_chat_skips_test_value_check_on_spec_rewrite():
     # §8: a spec rewrite re-derives the params — today's names aren't authoritative.
     raw = ("===FILE: spec.md===\n# T\n\nBody.\n"
            "===FILE: actions.yaml===\nsync: true\ntest: true\ntest_values: { new_p: 1 }\n===END===\n")
-    payload, errs = validate_chat(raw, parse_envelope(raw), ["old_p"])
-    assert errs == []
+    outcome, payload, _, _, _ = DraftJobs._chat_classify(raw, ["old_p"])
+    assert outcome == "done", payload
     # without a rebuild, the same unknown key fails
     raw2 = "===FILE: actions.yaml===\ntest: true\ntest_values: { new_p: 1 }\n===END===\n"
-    _, errs = validate_chat(raw2, parse_envelope(raw2), ["old_p"])
-    assert any("unknown params" in e for e in errs)
+    outcome, errs, _, _, _ = DraftJobs._chat_classify(raw2, ["old_p"])
+    assert outcome == "invalid" and any("unknown params" in e for e in errs)
 
 
 def test_validate_chat_prose_and_blocks():
     raw = "Here you go.\n===FILE: notes.md===\n- learned a thing\n===END===\n"
-    payload, errs = validate_chat(raw, parse_envelope(raw))
-    assert errs == []
+    outcome, payload, _, _, _ = DraftJobs._chat_classify(raw)
+    assert outcome == "done"
     assert payload == {"notes": "- learned a thing", "answer": "Here you go."}
 
 

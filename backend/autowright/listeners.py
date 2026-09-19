@@ -227,13 +227,24 @@ class _Conn(threading.Thread):
         self._ws = None
 
     def stop(self) -> None:
+        # §3 shutdown: fire-and-forget — the gateway close can take the
+        # library's full close timeout, and the backend's 5 s graceful box
+        # must not spend it here. The close runs on a short-lived thread
+        # nobody joins (the gateway session is disposable at shutdown); the
+        # stop flag is already set, so the read loop exits either way.
         self._stop.set()
         ws = self._ws
-        if ws is not None:
+        if ws is None:
+            return
+
+        def _close() -> None:
             try:
                 ws.close()
             except Exception:  # noqa: BLE001
                 pass
+
+        threading.Thread(target=_close, daemon=True,
+                         name=f"ad-discord-close-{self.secret[:8]}").start()
 
     def run(self) -> None:
         # The thread body is guarded whole: anything escaping the reconnect loop

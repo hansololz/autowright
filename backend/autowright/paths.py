@@ -209,6 +209,16 @@ def harness_scratch(provider_id: str) -> Path:
     return app_support() / "harness" / provider_id / "scratch"
 
 
+def tests_scratch_dir() -> Path:
+    """§11: parent of the per-test scratch dirs a draft test's memory copy
+    lives in (`<app-support>/tests/<execution id>/`) — the app's own storage,
+    never the OS temp dir. Swept at backend startup like the §8 harness
+    scratch, so a crash mid-test leaves no gigabyte copy behind."""
+    d = app_support() / "tests"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def logs_dir() -> Path:
     env = os.environ.get("AUTOWRIGHT_HOME")
     if env:

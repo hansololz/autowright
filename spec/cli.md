@@ -73,7 +73,10 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   wire parameter names — while reference resolution still reads the uncapped list (§19;
   the bare no-reference form of `execution show|tail|cancel|retry|skip|result` means "the
   newest" and reads `limit=1`), `settings set` lists its keys with
-  each one's value form, and `param set` lists the per-kind value forms. Every `<automation>`
+  each one's value form (and, after setting one of the shell-owned keys `login` or
+  `menuBarIcon`, prints one extra line "takes effect when the app next syncs, within a
+  minute" — the OS side of those two is the Electron main process's §3 poll, not the
+  backend's, and headless there is no app to apply it at all), and `param set` lists the per-kind value forms. Every `<automation>`
   positional carries the compact reference forms from one shared helper (name · part of a name ·
   id · id prefix), and the full rule — case-insensitivity, and that every `[abcd1234]` the CLI
   prints resolves back — is stated once, in the description of each group whose verbs take one,
@@ -176,7 +179,10 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   that legitimately take long — package install (the §6.2 ensure runs pip), import (the
   URL fetch, the file upload, *and* the confirm that lands the archive — a large archive
   landing on a slow volume must never report "backend isn't reachable" while it succeeds),
-  and automation delete (§19 waits for cancelled engine threads) — which get 600 s.
+  and automation delete (§19 waits for cancelled engine threads) — which get 660 s: 60 s
+  of headroom over the backend's own 600 s download/install deadlines, so a slow server is
+  reported by the backend's plain-word timeout ("the download timed out after 10 minutes")
+  and never as "backend isn't reachable" from the client's socket giving up first.
 - **Follow semantics** (`execution tail`, `automation execute -f`): a `queued` record (§6
   firing queue) is not terminal — the follow loop keeps polling while the execution is
   `executing` **or** `queued`, so a followed queued firing is watched through promotion to

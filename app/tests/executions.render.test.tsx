@@ -62,6 +62,10 @@ beforeEach(() => {
   vi.spyOn(Date, 'now').mockReturnValue(NOW)
   mockedApi.listExecutions.mockReset()
   mockedApi.listExecutions.mockResolvedValue({ executions: [], total: 0 })
+  // The render tier runs under StrictMode, so every page effect fires twice —
+  // a per-test body has to be the standing answer, never a `…Once`.
+  mockedApi.getExecution.mockReset()
+  mockedApi.getExecution.mockRejectedValue(new Error('offline'))
   storeMod.useStore.setState({
     page: 'executions', executions: [], executionsTotal: 0, automations: [], toast: null,
   })
@@ -390,6 +394,20 @@ describe('executions list finished paging (§7)', () => {
     expect(screen.getByText('e-0048')).toBeTruthy()
     expect(screen.getByText('e-0049')).toBeTruthy()
     expect(screen.getAllByTestId('execution-row').length).toBe(50)
+  })
+
+  // §7: under a filter the readout has only the fetches to go by, and the
+  // window's own matching rows can outnumber what the server counted — a total
+  // under the rows in hand would strand them behind a finished pager.
+  it('a filter total below the rows in hand reads as the rows in hand', async () => {
+    const failed = finishedRows(60).map((e) => ({ ...e, status: 'failed' as const }))
+    mockedApi.listExecutions.mockResolvedValue({ executions: [], total: 55 })
+    seed(failed, 60)
+    render(<ExecutionsList />)
+
+    applyStatuses('Failed')
+    await waitFor(() => expect(within(pager()).getByText('1–50 of 60')).toBeTruthy())
+    expect(pagerButton('Next').disabled).toBe(false)
   })
 
   it('re-slices on Prev with no request', async () => {
@@ -1291,10 +1309,13 @@ describe('execution page queued body (§7)', () => {
   })
 })
 
-// §7 retention-purged deep link: loadExecution swallows the 404, so the page
-// itself has to decide that nothing landed.
+// §7 retention-purged deep link: loadExecution answers 'gone' for the 404, so
+// the page itself has to decide that nothing landed. Any OTHER failure is not
+// a deleted record — it gets the retryable couldn't-load notice instead.
 describe('execution page retention-purged deep link (§7)', () => {
   it('settles on the gone-execution notice instead of spinning forever', async () => {
+    mockedApi.getExecution.mockRejectedValue(
+      Object.assign(new Error('not found'), { status: 404 }))
     storeMod.useStore.setState({
       page: 'execution', executionId: 'e-gone', executions: [], executionFull: {}, execLogs: {},
     })
@@ -1309,18 +1330,43 @@ describe('execution page retention-purged deep link (§7)', () => {
 
   it('a record dropped out from under the open page gets the notice, not a spinner', async () => {
     const full: Execution = { ...ex('e1'), steps: [], result: null }
+    mockedApi.getExecution.mockResolvedValue(full)
     storeMod.useStore.setState({
       page: 'execution', executionId: 'e1', executions: [ex('e1')], executionsTotal: 1,
       executionFull: { e1: full }, execLogs: {},
     })
     const { container } = render(<ExecutionPage />)
     expect(screen.getByText('e1')).toBeTruthy()
+    // let the mount fetch land first — a GET still on the wire would write the
+    // body back after the delete and resurrect the page
+    await act(async () => {})
     // §19 execution.deleted drops the body and the window row under the page
     await act(async () => {
       storeMod.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'e1' } as never)
     })
     expect(await screen.findByText('This execution no longer exists')).toBeTruthy()
     expect(container.querySelector('[style*="adSpin"]')).toBeNull()
+  })
+
+  // §19: a 500, a dropped socket, a restarting backend — the record may well
+  // still be there, so the page must not claim it was removed.
+  it('a non-404 failure reads as couldn’t-load with a retry, never as deleted', async () => {
+    mockedApi.getExecution.mockRejectedValue(
+      Object.assign(new Error('backend restarting'), { status: 503 }))
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e-flaky', executions: [], executionFull: {}, execLogs: {},
+    })
+    render(<ExecutionPage />)
+
+    expect(await screen.findByText('Couldn’t load this execution')).toBeTruthy()
+    expect(screen.queryByText('This execution no longer exists')).toBeNull()
+
+    // the retry re-runs the fetch, and the record that lands renders the page
+    const full: Execution = { ...ex('e-flaky'), steps: [], result: null }
+    mockedApi.getExecution.mockResolvedValue(full)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })) })
+    expect(screen.queryByText('Couldn’t load this execution')).toBeNull()
+    expect(screen.getByText('e-flaky')).toBeTruthy()
   })
 })
 
@@ -1497,6 +1543,44 @@ describe('execution view log subscription (§7)', () => {
     })
     expect(commits).toBeGreaterThan(settled)
     expect(screen.getByText('mine again')).toBeTruthy()
+  })
+
+  // §7: the pane caches one rendered-line array per §5 sequence so a streamed
+  // append leaves every settled row's identity alone. Sequences restart at 1
+  // in every log, so a flip to another step must never show the cached text.
+  it('a flip to another step shows that step\'s own lines, not the cached ones', async () => {
+    const twoSteps: Execution = {
+      ...ex('e1'),
+      steps: [
+        { name: 'Fetch page', status: 'succeeded', duration: '1s', attempts: [attempt] },
+        { name: 'Write file', status: 'succeeded', duration: '1s', attempts: [attempt] },
+      ],
+      result: null,
+    }
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [ex('e1')],
+      executionFull: { e1: twoSteps },
+      execLogs: {
+        e1: {
+          [storeMod.logKey(0, 1)]: [line(1, 'alpha'), line(2, 'alpha two')],
+          [storeMod.logKey(1, 1)]: [line(1, 'beta')],
+        },
+      },
+    })
+    const { ExecutionView } = await import('../src/executionView')
+    render(<ExecutionView executionId="e1" full={twoSteps} summary={ex('e1')} layout="page" />)
+    await act(async () => {})
+    // the last step with attempts is the resting selection (§7)
+    expect(screen.getByText('beta')).toBeTruthy()
+
+    await act(async () => { fireEvent.click(screen.getByText('Fetch page')) })
+    expect(screen.getByText('alpha')).toBeTruthy()
+    expect(screen.getByText('alpha two')).toBeTruthy()
+    expect(screen.queryByText('beta')).toBeNull()
+
+    await act(async () => { fireEvent.click(screen.getByText('Write file')) })
+    expect(screen.getByText('beta')).toBeTruthy()
+    expect(screen.queryByText('alpha')).toBeNull()
   })
 })
 

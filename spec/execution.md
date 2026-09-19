@@ -13,7 +13,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   **capacity popup** (§9.2) instead of firing blind whenever another execution is live — the
   popup is where Run now / Queue / capacity-full are offered. Every other surface (the §9.1
   inline execute button, the §13 menu bar, the execution page's Execute again, and any raced
-  409 behind the popup) keeps the busy **toast**: "Already executing — one execution at a
+  409 behind the popup) keeps the busy **toast** — shown only for the §19 `reason:
+  "capacity"` 409; any other 409 (shutting down, being deleted, queue full) shows the
+  backend's `detail` as the toast instead, since the busy copy would promise the wrong
+  thing: "Already executing — one execution at a
   time. A trigger firing now would be skipped." at the default (`maxParallel` 1, no queue);
   when `maxParallel > 1` or `maxQueued > 0` the toast says what actually happens next: "The
   slot is busy" (`maxParallel` 1) or "All N slots are busy" (`maxParallel` > 1), followed by
@@ -27,7 +30,13 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   a sys log line ("installing packages: `pandas`…"). An install failure fails the
   execution before any step with the package category below. A cancel that arrives while the
   execution is waiting its turn for the process-wide pip lock (another install in progress)
-  is honored at once — it never waits out the other install.
+  is honored at once — it never waits out the other install; and when that wait outlasts
+  one whole install timeout (§19 bounded pip-lock wait) the execution fails with the same
+  package category ("another package install has been running for too long"), never with
+  an engine error. A cancel that lands before
+  the first step is honored the same way by the pre-execution memory work: the §6.3
+  pre-version snapshot and the draft-memory seed are skipped when the cancel flag is
+  already set, so a multi-gigabyte copy never runs for an execution nobody wants.
 - Streaming: each step queued → executing → terminal status with duration. Executing a step
   appends an **attempt** (its `number` = the last attempt's `number` + 1 — monotonic per step,
   never re-derived from list length, since the §4.5 prune drops old entries) to that step; the
@@ -387,7 +396,9 @@ same stack down), collapse state per-session only (never persisted). The section
 by its chip status (changes = accent, ok = green, attention = orange); an execution that set no chip
 gets no chip here — plus metadata chips; the execution's
 own status badge stays in the page title row, never here. View order: one **file view** per renderable
-file in alphabetical order (`.md` markdown, `.html` sandboxed iframe, images inline; titled
+file in alphabetical order, capped at the first **12** renderable files (each view fetches its
+body on mount — a step that writes hundreds of images must not fire hundreds of requests;
+the rest stay reachable as FILES-footer rows) (`.md` markdown, `.html` sandboxed iframe, images inline; titled
 by filename), then a collapsible **FILES footer** ("FILES · N" header, **collapsed** by default, like the
 PARAMETERS and WORKSPACE cards):
 the result-dir path in mono, every file as a row, and a "Show in Finder" button opening the dir

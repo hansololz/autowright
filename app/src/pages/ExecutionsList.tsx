@@ -6,7 +6,7 @@
 // predicate applied server-side and to the window's rows alike.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import { useStore } from '../store'
+import { byCanonicalOrder, useStore } from '../store'
 import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageLoading, PageTitle, PULSE, waitedLabel } from '../ui'
 import type { Execution } from '../types'
 import FilterModal, {
@@ -97,11 +97,6 @@ const sectionLabel: React.CSSProperties = { marginBottom: 10 }
 // cleanup off entirely, so history is unbounded — it moves in pages of 50,
 // the same size as the §19 /state finished window.
 const PAGE = 50
-
-// §7 canonical order: startedMs desc, id asc on ties — the §19 keyset order,
-// which is what lets fetched pages line up with the live window.
-const byCanonicalOrder = (a: Execution, b: Execution) =>
-  b.startedMs - a.startedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
 export default function ExecutionsList() {
   const executions = useStore((s) => s.executions)
@@ -260,7 +255,11 @@ export default function ExecutionsList() {
   // a disabled Next). A filter has only its fetches to go by.
   const total = !filtered
     ? Math.max(0, executionsTotal - executing.length - queued.length)
-    : (serverTotal ?? finished.length)
+    // A filter's serverTotal counts the server's matches, which can be fewer
+    // than the rows in hand: the window's own matching rows are shown too, and
+    // some of them are newer than the page the fetch answered with. A total
+    // under the rows would strand them behind a disabled Next.
+    : Math.max(serverTotal ?? 0, finished.length)
   // Clamp the page when the total shrinks beneath it (a retention sweep, a
   // filter's true count landing) — never an empty slice with rows in hand.
   const maxPage = Math.max(0, Math.ceil(total / PAGE) - 1)

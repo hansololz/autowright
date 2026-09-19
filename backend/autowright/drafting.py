@@ -36,7 +36,7 @@ from . import harness, packages as pkglib, paths, reqlog, triggers as triggerlib
 from .events import hub
 from .imports_check import ALLOWED_IMPORTS, disallowed_imports
 from .specmd import blocks_to_md, md_to_blocks
-from .storage import AGENT_REF_RE, SECRET_REF_RE, step_json
+from .storage import SECRET_REF_RE, step_json
 
 log = logging.getLogger("autowright.drafting")
 
@@ -64,7 +64,9 @@ def split_answer_kind(prose: str) -> tuple[str, str | None]:
         return prose[m.end():].strip(), "question"
     return prose, None
 BLOCKED_MARK_RE = harness.BLOCKED_MARK_RE
-END_MARK_RE = re.compile(r"^===END===[ \t]*$", re.M)
+# §8: trailing \r tolerated — a harness on a CRLF stream (or an agent
+# echoing one) must not read as a truncated response.
+END_MARK_RE = re.compile(r"^===END===[ \t\r]*$", re.M)
 
 
 # One process-wide lock for job event appends: appends touch one small list
@@ -672,15 +674,27 @@ def _strip_fence(content: str) -> str:
     return content
 
 
+# §8 shape-aware envelope start — canonical in harness (see
+# file_mark_outside_fences there); aliased so the parse below and the
+# recombiner can never disagree about where an envelope begins.
+_file_mark_outside_fences = harness.file_mark_outside_fences
+
+
 def parse_envelope(text: str) -> dict[str, str]:
     """Blocks by filename. Prose before the first marker is ignored. A block runs to
     the next ===FILE: marker or a line-anchored ===END===, whichever comes first —
     the canonical envelope closes once at the very end, but per-block ===END===
     terminators (and prose between blocks) parse identically (§8). No ===END=== at
-    or after the last block → truncated."""
+    or after the last block → truncated.
+
+    §8: the envelope starts at the first ===FILE: line OUTSIDE a markdown
+    code fence — a reply whose every marker is fenced holds no blocks at all.
+    Past that start every marker counts: a block's own content may be fenced
+    (`_strip_fence`), so fence state is consulted only for the start."""
     if not END_MARK_RE.search(text):
         raise ValueError("response is truncated — no ===END=== marker")
-    marks = list(FILE_MARK_RE.finditer(text))
+    first = _file_mark_outside_fences(text)
+    marks = list(FILE_MARK_RE.finditer(text, first.start())) if first else []
     if not marks:
         raise ValueError("no ===FILE: blocks in the response")
     if not END_MARK_RE.search(text, marks[-1].end()):
@@ -718,9 +732,11 @@ def parse_blockers(text: str) -> tuple[list[dict] | None, str | None]:
         raise ValueError("blocker response is truncated — no ===END=== marker")
     notes = None
     # §8: only a file block *beside* the envelope counts - a ===FILE: line
-    # quoted inside the yaml body is body text, not a block.
+    # quoted inside the yaml body is body text, not a block, and (rule 1) a
+    # marker the prose fences is quoted prose, so a blocker that SHOWS an
+    # envelope carries no notes rather than failing the response.
     remainder = text[:m.start()] + text[endm.end():]
-    if FILE_MARK_RE.search(remainder):
+    if _file_mark_outside_fences(remainder):
         # The envelope's own span is cut out, so the remainder must parse as a
         # plain file envelope holding exactly the optional notes.md.
         try:
@@ -873,7 +889,7 @@ def validate_actions(text: str, param_names: list[str] | None = None,
                      "concurrency", "name", "description", "undo"):
             errors.append(f"actions.yaml: unknown key {k!r}")
     # §8: undo is exclusive — undoing and acting/rewriting in one response is
-    # contradictory (the rewrite-block half is enforced in validate_chat)
+    # contradictory (the rewrite-block half is enforced in validate_chat_files)
     if "undo" in data and len(data) > 1:
         errors.append("actions.yaml: undo must be the only key — it cannot be "
                       "combined with other actions")
@@ -1062,21 +1078,14 @@ def validate_chat_files(files: dict[str, str],
     return payload, [], set()
 
 
-def validate_chat(raw: str, files: dict[str, str],
-                  param_names: list[str] | None = None,
-                  triggers_count: int | None = None) -> tuple[dict, list[str]]:
-    """§8 chat-call response with file blocks → terminal payload
-    { answer?, spec?, notes?, actions? }. Prose before the first
-    marker is the accompanying chat message; only the three CHAT_FILES names
-    are allowed."""
-    payload, errors, _ = validate_chat_files(files, param_names, triggers_count)
-    if errors:
-        return {}, errors
-    m = FILE_MARK_RE.search(raw)
-    answer = raw[:m.start()].strip() if m else ""
-    if answer:
-        payload["answer"] = answer
-    return payload, []
+# §8 rules 6/7: the validation scan for code subscripts matches ANY quoted
+# literal, not only uuid-shaped ones — `secrets["API_TOKEN"]` (the name where
+# the id belongs, the likeliest slip) must read as the not-allowed validation
+# error here, never sail through to a version that fails at runtime. Local to
+# drafting: storage's SECRET_REF_RE / AGENT_REF_RE stay uuid-only, because the
+# engine and §20 transfer resolve real references through them.
+SECRET_SUBSCRIPT_RE = re.compile(r"\bsecrets\[\s*[\"']([^\"']+)[\"']\s*\]")
+AGENT_SUBSCRIPT_RE = re.compile(r"\bagents\[\s*[\"']([^\"']+)[\"']\s*\]")
 
 
 def validate_steps(files: dict[str, str], grants: dict | None = None,
@@ -1106,12 +1115,33 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
     if not isinstance(manifest, dict):
         return {}, ["manifest.yaml must be a mapping"]
 
+    # §8 rule 3: the manifest's text fields are checked, not assumed — YAML
+    # 1.1 turns `note: on` into a boolean and a mis-indented block into a
+    # mapping, and either would land verbatim in the version and break the
+    # §9.2 page and the §5.1 importer, which already rejects them.
+    if not isinstance(manifest.get("note", ""), str):
+        errors.append("manifest `note` must be a string")
+
     params = manifest.get("params") or []
     norm_params: list[dict] = []
+    seen_params: set[str] = set()
+    reported_params: set[str] = set()
     for p in params:
         if not isinstance(p, dict) or "name" not in p or "kind" not in p:
             errors.append(f"param entry malformed: {p!r}")
             continue
+        # §8 rule 3: a param name is a nonempty string — nothing else names a
+        # §4.2 param, and the checks below read it as text.
+        if not isinstance(p["name"], str) or not p["name"].strip():
+            errors.append(f"param entry malformed: {p!r} — `name` must be a "
+                          "nonempty string")
+            continue
+        # §8 rule 3: two entries of one name would silently collapse in the
+        # editor — one error per repeated name feeds the repair round.
+        if p["name"] in seen_params and p["name"] not in reported_params:
+            reported_params.add(p["name"])
+            errors.append(f"param `{p['name']}` is declared twice")
+        seen_params.add(p["name"])
         if p["kind"] not in PARAM_KINDS:
             errors.append(f"param {p['name']}: unknown kind {p['kind']}")
         if "default" not in p:
@@ -1208,8 +1238,19 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                     f"Pick one of your {pick} or remove the reference.")
         return None
 
-    for s in steps:
+    for i, s in enumerate(steps, 1):
         if not isinstance(s, dict):
+            continue
+        # §8 rule 3: a step's text fields are checked, not assumed — YAML 1.1
+        # turns `name: on` into a boolean and a mis-indented block into a
+        # mapping. Positional, because a bad `name` can't label its own error.
+        bad_fields = [f for f in ("name", "description", "why")
+                      if f in s and not isinstance(s[f], str)]
+        for field in bad_fields:
+            errors.append(f"step {i}: `{field}` must be a string")
+        if bad_fields:
+            # Everything below reads these as text — the repair round fixes
+            # the shape first.
             continue
         if s.get("agent") and not (s.get("why") or "").strip():
             errors.append(f"step {s.get('name')}: agent: true requires a why")
@@ -1291,7 +1332,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                                       "one line on why the step uses it")
         # §8 rule 6: every secrets["<id>"] literal in code must be an allowed
         # secret's id — at runtime it would raise, so it fails validation here.
-        for ref in set(SECRET_REF_RE.findall(files.get(s.get("file", ""), ""))):
+        for ref in sorted(set(SECRET_SUBSCRIPT_RE.findall(files.get(s.get("file", ""), "")))):
             if ref not in secret_names:
                 errors.append(f"step {s.get('name')}: "
                               + (_imported_no_match("secret", ref, "secrets")
@@ -1303,7 +1344,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         # that declares no entries (an agent step with no `agents` list, or a
         # plain step that is not an agent step at all) dangles the same way,
         # and only this scan catches it.
-        for ref in set(AGENT_REF_RE.findall(files.get(s.get("file", ""), ""))):
+        for ref in sorted(set(AGENT_SUBSCRIPT_RE.findall(files.get(s.get("file", ""), "")))):
             if ref in declared_agents:
                 continue
             errors.append(
@@ -1475,10 +1516,21 @@ class DraftJobs:
             # CURRENT-triggers section renders from, so a §11 re-attach apply
             # can prove the base list `triggers` ops index is still this one.
             job["sentTriggers"] = list((current or {}).get("triggers") or [])
+        # §19: one BUILDING job per owner is a backend invariant, not a
+        # client courtesy — a new job for an owner whose previous one is
+        # still building cancels it first (its harness is killed, its record
+        # settles cancelled), so two agent runs can never write the same
+        # draft. Outside the registration lock below: cancel() takes it.
+        with self._lock:
+            live = [k for k, v in self.jobs.items()
+                    if v["status"] == "building" and v.get("_owner") == owner_id]
+        for k in live:
+            self.cancel(k)
         superseded: list[dict] = []
         with self._lock:
             # §19: one held outcome per owner — a new job for the same owner
-            # supersedes (consumes) the previous terminal record.
+            # supersedes (consumes) the previous terminal record, and the
+            # job just cancelled above is consumed the same way.
             for k, v in list(self.jobs.items()):
                 if v["status"] != "building" and v.get("_owner") == owner_id:
                     superseded.append(self.jobs.pop(k))
@@ -1683,10 +1735,16 @@ class DraftJobs:
             # §8: installs are not a stage — the `Installing …` events land
             # under "Syncing the workflow", where the packages belong.
             self._check_cancel(job)  # a cancel must never start the installs
-            draft["packages"] = pkglib.ensure(
-                draft["packages"],
-                on_progress=lambda spec: self._event(job, f"Installing {spec}…"),
-                should_stop=lambda: bool(job.get("_cancel")))
+            try:
+                draft["packages"] = pkglib.ensure(
+                    draft["packages"],
+                    on_progress=lambda spec: self._event(job, f"Installing {spec}…"),
+                    should_stop=lambda: bool(job.get("_cancel")))
+            except pkglib.PackagesBusy:
+                # §19: the bounded pip-lock wait expired — the packages stay
+                # as declared (status unknown) and the §11 Packages card's own
+                # check reports them; the sync itself still settles.
+                self._event(job, "Package install skipped — another install is still running")
 
         # §19: the job payload is an API payload — its steps leave the
         # manifest's snake_case (`no_timeout` / `infinite_retries`) here, in the
@@ -1780,7 +1838,9 @@ class DraftJobs:
                 return "blocked", {"blockers": blockers, "notes": bnotes}, kept, answer, []
         except ValueError as e:
             return "invalid", [str(e)], kept, answer, []
-        if not FILE_MARK_RE.search(raw):
+        if not _file_mark_outside_fences(raw):
+            # §8: every marker fenced (or none) means prose — a chat answer
+            # that *shows* an actions.yaml must never arm a sync.
             text = raw.strip()
             if not kept:
                 # §8 question type: a leading ===QUESTION=== is stripped and
@@ -1799,7 +1859,7 @@ class DraftJobs:
             except ValueError as e:
                 return "invalid", [str(e)], kept, answer, []
             merged = {**kept, **files}
-            m = FILE_MARK_RE.search(raw)
+            m = _file_mark_outside_fences(raw)
             prose = raw[:m.start()].strip()
         payload, errors, bad = validate_chat_files(merged, param_names, triggers_count)
         answer = prose or answer
@@ -2161,7 +2221,7 @@ class DraftJobs:
                     or job["stage"] != "Working on the request"):
                 return
             text = state["scanner"].text
-            first = FILE_MARK_RE.search(text)
+            first = _file_mark_outside_fences(text)
             plan, _ = split_answer_kind((text[: first.start()] if first
                                          else text).strip())
             if plan:

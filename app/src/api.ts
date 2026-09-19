@@ -65,6 +65,25 @@ export async function connectInfo(): Promise<boolean> {
   return true
 }
 
+// §19 error convention, shared by every fetch below: the API's `detail` is
+// what the surfaces show, falling back to the status line and then the bare
+// code so a toast is never empty. `reason` rides along where the route defines
+// one — the §7 capacity 409 is the only body that carries it, and the busy
+// toast keys on exactly that.
+async function apiError(r: Response): Promise<Error & { status: number; reason?: string }> {
+  let detail = ''
+  let reason: string | undefined
+  try {
+    const body = await r.json() as { detail?: string; reason?: string }
+    detail = body.detail ?? ''
+    if (typeof body.reason === 'string') reason = body.reason
+  } catch { /* a non-JSON body — the status line is all there is */ }
+  return Object.assign(
+    new Error(detail || r.statusText || `request failed (${r.status})`),
+    { status: r.status, reason },
+  )
+}
+
 // §5.1/§5.2 archives ride as raw zip bytes (§19: no multipart)
 async function rawPost<T>(path: string, data: Uint8Array): Promise<T> {
   const r = await fetch(base + path, {
@@ -72,11 +91,7 @@ async function rawPost<T>(path: string, data: Uint8Array): Promise<T> {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
     body: data as unknown as BodyInit,
   })
-  if (!r.ok) {
-    let detail = ''
-    try { detail = (await r.json()).detail } catch { /* ignore */ }
-    throw Object.assign(new Error(detail || r.statusText), { status: r.status })
-  }
+  if (!r.ok) throw await apiError(r)
   return r.json()
 }
 
@@ -89,11 +104,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (!r.ok) {
-    let detail = ''
-    try { detail = (await r.json()).detail } catch { /* ignore */ }
-    throw Object.assign(new Error(detail || r.statusText), { status: r.status })
-  }
+  if (!r.ok) throw await apiError(r)
   return r.json()
 }
 
@@ -260,14 +271,10 @@ export const api = {
     const r = await fetch(`${base}/automations/${automationId}/export?values=${values ? 1 : 0}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-    if (!r.ok) {
-      // §19 error convention (same as req/rawPost): surface the API's `detail`,
-      // so the §9.2 export toast says WHY — e.g. the §5.1 422 naming the step
-      // whose secret or agent reference has no record to travel with.
-      let detail = ''
-      try { detail = (await r.json()).detail } catch { /* ignore */ }
-      throw Object.assign(new Error(detail || r.statusText), { status: r.status })
-    }
+    // §19 error convention (same as req/rawPost): surface the API's `detail`,
+    // so the §9.2 export toast says WHY — e.g. the §5.1 422 naming the step
+    // whose secret or agent reference has no record to travel with.
+    if (!r.ok) throw await apiError(r)
     return r.arrayBuffer()
   },
   importAutomation: (data: Uint8Array) =>
@@ -322,11 +329,7 @@ export const api = {
     const r = await fetch(`${base}/marketplace/sources/${id}/file`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-    if (!r.ok) {
-      let detail = ''
-      try { detail = (await r.json()).detail } catch { /* ignore */ }
-      throw Object.assign(new Error(detail || r.statusText), { status: r.status })
-    }
+    if (!r.ok) throw await apiError(r)
     return r.arrayBuffer()
   },
   marketplaceImage: async (id: string, index: number): Promise<Blob> => {
@@ -357,38 +360,50 @@ export function openWs(onEvent: (msg: WsEvent) => void): () => void {
   let closed = false
   let retryMs = WS_RETRY_MIN_MS
   let retryTimer: ReturnType<typeof setTimeout> | undefined
+  // The backoff tick both the close handler and a failed connect schedule.
+  // A backend restart binds a NEW port and token — re-read backend.json before
+  // each attempt or the loop retries a dead address forever. A failed re-read
+  // is not a reason to stop retrying: connect() anyway and let the next
+  // failure schedule the next (longer) wait.
+  const scheduleRetry = () => {
+    const wait = retryMs
+    retryMs = Math.min(retryMs * 2, WS_RETRY_MAX_MS)
+    retryTimer = setTimeout(() => {
+      void connectInfo().catch(() => {}).finally(connect)
+    }, wait)
+  }
   const connect = () => {
     if (closed) return
-    sock = new WebSocket(`${base.replace('http', 'ws')}/ws?token=${token}`)
-    sock.onmessage = (e) => {
-      // A malformed frame (or a handler that throws on one) must never kill the
-      // socket's message loop — log it and drop that frame alone.
-      try {
-        onEvent(JSON.parse(e.data))
-      } catch (err) {
-        console.warn('Dropped a WebSocket frame:', err)
+    try {
+      sock = new WebSocket(`${base.replace('http', 'ws')}/ws?token=${token}`)
+      sock.onmessage = (e) => {
+        // A malformed frame (or a handler that throws on one) must never kill the
+        // socket's message loop — log it and drop that frame alone.
+        try {
+          onEvent(JSON.parse(e.data))
+        } catch (err) {
+          console.warn('Dropped a WebSocket frame:', err)
+        }
       }
-    }
-    // Errors always arrive with (or just before) a close — let onclose own the
-    // reconnect; this handler only keeps the failure from surfacing unhandled.
-    sock.onerror = () => { console.warn('WebSocket error — reconnecting.') }
-    sock.onclose = () => {
-      if (closed) return
-      // A backend restart binds a NEW port and token — re-read backend.json
-      // before each reconnect attempt or the loop retries a dead address forever.
-      // A failed re-read is not a reason to stop retrying: connect() anyway and
-      // let the next close schedule the next (longer) wait.
-      const wait = retryMs
-      retryMs = Math.min(retryMs * 2, WS_RETRY_MAX_MS)
-      retryTimer = setTimeout(() => {
-        void connectInfo().catch(() => {}).finally(connect)
-      }, wait)
-    }
-    sock.onopen = () => {
-      // The backoff is per outage, not per session — a connection that came
-      // back starts the next one over at the quick retry.
-      retryMs = WS_RETRY_MIN_MS
-      onEvent({ event: 'ws.open' })
+      // Errors always arrive with (or just before) a close — let onclose own the
+      // reconnect; this handler only keeps the failure from surfacing unhandled.
+      sock.onerror = () => { console.warn('WebSocket error — reconnecting.') }
+      sock.onclose = () => {
+        if (closed) return
+        scheduleRetry()
+      }
+      sock.onopen = () => {
+        // The backoff is per outage, not per session — a connection that came
+        // back starts the next one over at the quick retry.
+        retryMs = WS_RETRY_MIN_MS
+        onEvent({ event: 'ws.open' })
+      }
+    } catch (err) {
+      // The constructor itself can throw (a malformed address from a failed
+      // backend.json read) — without this the whole retry chain dies with it
+      // and the app never reconnects.
+      console.warn('WebSocket connect failed — retrying.', err)
+      scheduleRetry()
     }
   }
   connect()

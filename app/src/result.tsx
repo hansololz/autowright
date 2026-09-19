@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from './api'
 import { usePlatformCopy } from './platformCopy'
+import { useStore } from './store'
 import { Caret, Collapse, EmptyLine, EmptyNotice, Eyebrow, LoadingRow, MetaChip, resultChipColors, Tag } from './ui'
 import type { ResultFile, ExecutionResult, SpecBlock } from './types'
 
@@ -22,6 +23,11 @@ const TEXT_MAX_LINES = 2000
 // The name §6.1 tells steps to write, and the only file the §9.2 compact card
 // promotes into its single top view slot.
 const PRIMARY_FILE = 'result.md'
+
+// §7 view cap: only the first this many renderable files get a top-level view —
+// a step that writes hundreds of images must not fire hundreds of requests.
+// Every file stays reachable through the FILES footer, which lists them all.
+export const MAX_FILE_VIEWS = 12
 
 export function ext(name: string): string {
   return name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
@@ -200,6 +206,7 @@ function FileBody({ executionId, file, kind, stamp }: {
     // must not outlive the `stamp` refetch that settles it.
     setErr(null)
     setImgUrl(null)
+    setText(null)
     void api.resultFile(executionId, file.name)
       .then(async (r) => (kind === 'img' ? URL.createObjectURL(await r.blob()) : r.text()))
       .then((v) => {
@@ -290,6 +297,9 @@ function FilesFooter({ files, path, executionId, stamp, defaultOpen = true }: {
 }) {
   // §9 per-OS copy rule: the reveal button's label.
   const copy = usePlatformCopy()
+  // The bridge call can reject (a path the OS refuses to reveal) — a user
+  // action never fails silently.
+  const showToast = useStore((s) => s.showToast)
   return (
     <ViewCard title={`FILES · ${files.length}`} mono defaultOpen={defaultOpen}>
       <div style={{ paddingBottom: 12 }}>
@@ -306,7 +316,10 @@ function FilesFooter({ files, path, executionId, stamp, defaultOpen = true }: {
           {path && (
             <button
               className="ad-btn-ghost"
-              onClick={() => { void window.autowright?.revealPath(path) }}
+              onClick={() => {
+                window.autowright?.revealPath(path)
+                  .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+              }}
               style={{ flex: 'none' }}
             >
               <i className="fa-solid fa-folder-open" style={{ fontSize: 10 }} /> {copy.reveal}
@@ -336,7 +349,9 @@ export function ResultSection({ label, result, executionId, stamp, compact }: {
   const chip = result.chip
   const files = result.files ?? []
   const primary = files.find((f) => f.name === PRIMARY_FILE)
-  const views = compact ? (primary ? [primary] : []) : files.filter((f) => fileKind(f.name) !== null)
+  const views = compact
+    ? (primary ? [primary] : [])
+    : files.filter((f) => fileKind(f.name) !== null).slice(0, MAX_FILE_VIEWS)
   const empty = files.length === 0
   return (
     <div>

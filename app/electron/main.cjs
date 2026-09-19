@@ -129,8 +129,6 @@ function bundledPython() {
 // non-JSON, a foreign app name and an empty version all read as unreachable,
 // so ensure-backend installs (or version-syncs) instead of hanging.
 async function backendVersion() {
-  const info = backendInfo()
-  if (!info) return null
   // §3: a backend busy under its store lock can miss a single probe, and
   // concluding "unreachable" there would bootout a live backend mid-execution.
   // So only the no-answer case retries - three attempts, 2 s each, 500 ms
@@ -138,6 +136,12 @@ async function backendVersion() {
   // version is null on the first reply, never retried.
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await new Promise((r) => setTimeout(r, 500))
+    // backend.json is re-read on every attempt: a backend coming up (or back
+    // up) between attempts writes a fresh port there, and a port pinned
+    // before the first probe would keep asking the old one for the whole
+    // retry window.
+    const info = backendInfo()
+    if (!info) continue
     let res
     try {
       res = await fetch(`http://127.0.0.1:${info.port}/health`, {
@@ -173,7 +177,10 @@ async function executionsLiveProbe() {
   const info = backendInfo()
   if (!info) return null
   try {
-    const res = await fetch(`http://127.0.0.1:${info.port}/executions?status=executing`, {
+    // §3: queued counts as live too — the route repeats `status`. Stopping
+    // the backend under a queued firing strands its sender until the next
+    // start finishes it `skipped`, so the gate must see it.
+    const res = await fetch(`http://127.0.0.1:${info.port}/executions?status=executing&status=queued`, {
       headers: { Authorization: `Bearer ${info.token}` },
       signal: AbortSignal.timeout(5000),
     })
@@ -258,8 +265,14 @@ function runServiceInstall(py, cb) {
   }))
 }
 
+// §3: the verification window is wall-clock, a deadline and not an iteration
+// count — each /health probe carries its own three retries, so a fixed count
+// of 2 s iterations ran for minutes while the log line still said 30 s.
+const VERIFY_DEADLINE_MS = 30_000
+
 async function verifyBackendUp() {
-  for (let i = 0; i < 15; i++) {
+  const deadline = Date.now() + VERIFY_DEADLINE_MS
+  while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 2000))
     if (await backendHealthy()) {
       ensureStatus = { state: 'ok', detail: '' }
@@ -271,7 +284,7 @@ async function verifyBackendUp() {
   // names Gatekeeper; Windows says plainly that the service failed to start),
   // composed with the §2 serviceDiagnostics capture below.
   ensureStatus = { state: 'failed', detail: plat.SERVICE_START_FAILED_DETAIL }
-  appLog('ensure-backend: backend did not come up within 30 s of install')
+  appLog(`ensure-backend: backend did not come up within ${VERIFY_DEADLINE_MS / 1000} s of install`)
   plat.serviceDiagnostics(appLog)
 }
 
@@ -646,6 +659,14 @@ async function refreshTrayAlert() {
 // settings change.
 let automaticUpdateTimer = null
 
+// §3: the 24 h check timer is stopped the same way the 60 s shell poll is —
+// at quit and at the reset. A timer that outlives either one fires an update
+// check against a backend that is going away and logs into a deleted logs
+// root. The §4.9 toggle-off path clears it through here too.
+function stopUpdateTimer() {
+  if (automaticUpdateTimer) { clearInterval(automaticUpdateTimer); automaticUpdateTimer = null }
+}
+
 // §5 executions data dir. Relocatable, so its location is only known from the
 // backend's settings — the periodic sync above carries it (the renderer's
 // apply-settings push never does). Feeds the reveal-path root check below.
@@ -709,9 +730,8 @@ function applyShellSettings(s, { trusted = false } = {}) {
       if (s.automaticUpdateCheck && !automaticUpdateTimer) {
         void fetchUpdateState()
         automaticUpdateTimer = setInterval(() => { void fetchUpdateState() }, 24 * 60 * 60_000)
-      } else if (!s.automaticUpdateCheck && automaticUpdateTimer) {
-        clearInterval(automaticUpdateTimer)
-        automaticUpdateTimer = null
+      } else if (!s.automaticUpdateCheck) {
+        stopUpdateTimer()
       }
     }
   } catch (err) {
@@ -957,10 +977,19 @@ ipcMain.handle('reveal-path', async (_e, p) => {
   if (plat.revealPrefersOpen(abs, isDir)) void shell.openPath(abs)
   else shell.showItemInFolder(abs)
 })
+// §9: every native dialog below is sheet-attached to the main window when
+// there is one. `win` is null whenever the window was closed (tray-only) or
+// destroyed mid-flow, and Electron wants `undefined` — not null — for a
+// parentless dialog, so the intent is spelled out here once instead of
+// passing a maybe-null window four times.
+function dialogParent() {
+  return win ?? undefined
+}
+
 ipcMain.handle('pick-folder', async (_e, defaultPath) => {
   const opts = { properties: ['openDirectory', 'createDirectory'] }
   if (typeof defaultPath === 'string' && defaultPath) opts.defaultPath = defaultPath
-  const r = await dialog.showOpenDialog(win, opts)
+  const r = await dialog.showOpenDialog(dialogParent(), opts)
   return r.canceled ? null : r.filePaths[0]
 })
 // §5.1 transfer archives: native save/open dialogs live in main; the renderer
@@ -974,7 +1003,7 @@ ipcMain.handle('save-file', async (_e, defaultName, data) => {
   if (typeof defaultName !== 'string' || !defaultName) return null
   if (!(Buffer.isBuffer(data) || data instanceof Uint8Array || data instanceof ArrayBuffer)) return null
   const base = path.basename(defaultName)
-  const r = await dialog.showSaveDialog(win, {
+  const r = await dialog.showSaveDialog(dialogParent(), {
     defaultPath: path.join(app.getPath('downloads'), base),
     // §5.1/§22.7: an archive save names its own type, so the picked path keeps
     // the .autowright extension the catalog and the importer both require.
@@ -989,7 +1018,7 @@ ipcMain.handle('save-file', async (_e, defaultName, data) => {
   return r.filePath
 })
 ipcMain.handle('open-archive', async () => {
-  const r = await dialog.showOpenDialog(win, {
+  const r = await dialog.showOpenDialog(dialogParent(), {
     properties: ['openFile'],
     filters: [{ name: 'Autowright automation', extensions: ['autowright'] }],
   })
@@ -1013,7 +1042,7 @@ ipcMain.handle('open-archive', async () => {
 // open-archive nothing is read here - the backend reads the file itself (§22.4),
 // so only the path crosses back.
 ipcMain.handle('open-catalog', async () => {
-  const r = await dialog.showOpenDialog(win, {
+  const r = await dialog.showOpenDialog(dialogParent(), {
     properties: ['openFile'],
     filters: [{ name: 'Marketplace catalog', extensions: ['yaml', 'yml'] }],
   })
@@ -1521,6 +1550,7 @@ ipcMain.handle('reset-all', async () => {
   // that would otherwise re-create the logs root behind the deletion stops.
   resetting = true
   stopShellPoll()
+  stopUpdateTimer()
   await deleteAllData(dataPath, 'reset')
   // §3 step 6: the app quits and stays quit. The next launch finds no
   // backend.json and an empty data root: ensure-backend re-registers and §10
@@ -1609,9 +1639,11 @@ app.on('window-all-closed', () => {
 })
 
 // The app is on its way out: the §3 update-install answer reads this to tell a
-// real quit from an updater that refused to start one, and the 60 s poll stops
-// here rather than firing a backend fetch (and an app.log line) mid-quit.
+// real quit from an updater that refused to start one, and the 60 s poll and
+// the 24 h update-check timer stop here rather than firing a backend fetch
+// (and an app.log line) mid-quit.
 app.on('before-quit', () => {
   quitting = true
   stopShellPoll()
+  stopUpdateTimer()
 })

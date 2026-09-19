@@ -341,6 +341,22 @@ STEP_FILE_RE = re.compile(r"^(\d{2})-[a-z0-9][a-z0-9-]*\.py$")
 FENCE_OPEN_RE = re.compile(r"^```[\w+.-]*$")
 
 
+def _mark_outside_fences(text: str, pattern: re.Pattern) -> re.Match | None:
+    """The first line-anchored `pattern` match that does NOT sit inside a
+    markdown code fence — the shared walk behind the two §8 shape-aware
+    detections below."""
+    fenced = False
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        if FENCE_OPEN_RE.match(bare):
+            fenced = not fenced
+        elif not fenced and pattern.match(bare):
+            return pattern.match(text, pos)
+        pos += len(line)
+    return None
+
+
 def blocked_mark_outside_fences(text: str) -> re.Match | None:
     """§8 shape-aware blocker detection: the first line-anchored ===BLOCKED===
     that does NOT sit inside a markdown code fence - a fenced marker is quoted
@@ -348,16 +364,17 @@ def blocked_mark_outside_fences(text: str) -> re.Match | None:
     so `_recombine` and drafting's parse agree — a naive search here would
     treat a chat reply that *quotes* the marker as blocked and silently drop
     the scratch documents from the recombined envelope."""
-    fenced = False
-    pos = 0
-    for line in text.splitlines(keepends=True):
-        bare = line.rstrip("\r\n")
-        if FENCE_OPEN_RE.match(bare):
-            fenced = not fenced
-        elif not fenced and BLOCKED_MARK_RE.match(bare):
-            return BLOCKED_MARK_RE.match(text, pos)
-        pos += len(line)
-    return None
+    return _mark_outside_fences(text, BLOCKED_MARK_RE)
+
+
+def file_mark_outside_fences(text: str) -> re.Match | None:
+    """§8 shape-aware envelope start: the first line-anchored ===FILE: that
+    does NOT sit inside a markdown code fence — a reply whose every marker is
+    fenced is prose (a chat answer showing what an actions.yaml looks like
+    must never arm a sync). None when every marker is fenced or there is
+    none. Only the envelope's START is decided here: once it has begun every
+    later marker counts, because a block's own content may be fenced."""
+    return _mark_outside_fences(text, FILE_MARK_RE)
 
 # §8 file-writing delivery: the response-document names the scratch watcher
 # accepts — exactly the envelope's file names, flat regular files only, so
@@ -671,6 +688,10 @@ class _ScratchWatcher:
         # (size, mtime_ns) — size alone would miss a same-length rewrite.
         self._stamps: dict[str, tuple[int, int]] = {}
         self._stop_event = threading.Event()
+        # §8: set before the join, so a poll the join times out on emits no
+        # further `file` events — a watcher whose sink call outlives the call
+        # would otherwise bleed documents into the NEXT round's progress feed.
+        self._dead = False
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -678,6 +699,7 @@ class _ScratchWatcher:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._dead = True
         if self._thread.ident is None:
             # Never started (the caller failed between construction and
             # start()): join() would raise RuntimeError and mask the real
@@ -685,6 +707,9 @@ class _ScratchWatcher:
             return
         self._thread.join(timeout=5)
         if not self._thread.is_alive():
+            # The poll thread is gone, so the sweep below is the only caller
+            # left and the flag has nothing to guard — re-arm the sink for it.
+            self._dead = False
             # Final sweep — only after a successful join, so never concurrent
             # with the poll thread. A timed-out join (a _read stalled on a
             # huge or network-backed file) skips it: the worst case is a lost
@@ -733,6 +758,12 @@ class _ScratchWatcher:
             self._stamps[entry.name] = stamp
             if entry.name not in self._order:
                 self._order.append(entry.name)
+            if self._dead:
+                # stop() has run: the call is over, so a `file` event now
+                # would land in the NEXT round's progress feed. The document
+                # is recorded above either way, so documents() still re-reads
+                # it for the recombined envelope.
+                return
             self._sink.file(entry.name, self._read(entry.name))
 
     def documents(self) -> list[tuple[str, str]]:
@@ -756,7 +787,7 @@ def _recombine(stdout_text: str, documents: list[tuple[str, str]]) -> str:
         return stdout_text
     if not documents:
         return stdout_text
-    marker = FILE_MARK_RE.search(stdout_text)
+    marker = file_mark_outside_fences(stdout_text)
     prose = (stdout_text[:marker.start()] if marker else stdout_text).strip()
     parts = [prose] if prose else []
     for name, content in documents:

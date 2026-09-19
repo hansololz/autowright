@@ -254,7 +254,10 @@ only mechanism, identical in the app shell and the create/edit shell. The panel 
 two drag strips in z-order but both are pointer-transparent, and it starts below their rects
 (y 46 > 40), so it needs no `no-drag` handling (on Linux both strips are absent, so the
 12 px top needs none either). Navigation is state-driven (`surface` → `page` → detail ids); browser/OS back works,
-but once past onboarding back never re-enters it. Page navigation (`go()`) always lands in the app
+but once past onboarding back never re-enters it, and while any modal is open back/forward
+are inert (the history entry is pushed back): a modal's `guardClose` (§14) covers Escape and
+the backdrop, and an unmount-by-navigation would bypass it and drop the doc editor's typed
+text without its discard confirm. Page navigation (`go()`) always lands in the app
 shell: if the create/edit surface is active, it exits back to `surface: app` — so sidebar tabs work
 while editing an automation. Popovers close on outside mousedown. Modals render through a React portal on
 `document.body`: page containers animate `transform` (`.ad-anim-page`, fill
@@ -654,7 +657,7 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   234567890123456789 — right-click their name → Copy User ID (needs Developer Mode, enabled
   in step 8)."), and an
   "Only when the bot
-  is mentioned" checkbox (the §14 checkbox, a native input in a `<label>`; §4.3 `mention`) — checked by default, so a fresh trigger fires only
+  is mentioned" checkbox (the §14 checkbox, a native input in a `<label>`; §4.3 `mention`) — checked by default (also when an existing trigger of another kind is switched to Discord in the editor: the stored value seeds it only when the stored trigger *is* a Discord one), so a fresh trigger fires only
   on @-mentions unless the user unticks it; the label hugs its content (`width: fit-content`
   — not `align-self`, which is inert outside a flex parent) so the click target doesn't span
   the editor's full width; preview line "On Discord message in `<channel>`";

@@ -38,7 +38,11 @@ never see). Pydantic shapes **requests only** — response bodies
 remain plain dicts (§2).
 
 - `GET /health` → `{ version, app, os, capabilities }` (unauthenticated; used for
-  discovery/liveness). `os` is the §5.1 platform token; `capabilities` is the §2 platform
+  discovery/liveness). It is served on the event loop (an `async` handler that touches
+  no I/O), never on the request worker pool: a pool saturated by long blocking routes
+  (package installs, imports, probes) must not make the liveness probe time out, or the §3
+  ensure-backend step would read a busy backend as dead and bootout it mid-execution.
+  `GET /instructions` is served the same way. `os` is the §5.1 platform token; `capabilities` is the §2 platform
   layer's flag set — `{ imessage, notifications, keepAwake, service, agentInstall }`, all
   true on macOS —
   and is the one surface clients gate platform features on (never by sniffing the platform
@@ -144,7 +148,11 @@ remain plain dicts (§2).
   trigger?: "manual" | "menubar" (§4.5 kind, default "manual"; anything else answers 422),
   queue?: bool (default false) }` →
   `{ executionId, queued: bool }`. `queue` absent/false: 409 when every §6 `maxParallel`
-  slot is taken — a plain manual start is refused, never silently queued. `queue: true`
+  slot is taken — a plain manual start is refused, never silently queued. That
+  no-free-slot 409 is the only one whose body carries `reason: "capacity"` beside
+  `detail` — the §7 busy toast keys on it; every other 409 this route answers (the backend
+  shutting down, the automation being deleted, a full queue, a Draft queue attempt) carries
+  `detail` alone and clients show that detail verbatim. `queue: true`
   (the §9.2 popup's Queue action): with a free slot it starts (`queued: false`); at
   capacity it is admitted to the §6 queue per the manual-admission rules (`queued: true`,
   the record publishes `execution.queued`); a full queue answers 409 "the queue is full
@@ -429,7 +437,9 @@ remain plain dicts (§2).
   until it frees — unless the body carries `wait: true`, which waits its turn: the §20
   import's foreground ensure sends it, the §11 buttons never do. The engine's pre-execution
   ensure, the §8 post-steps install and the §5.1 background import ensure always wait, and
-  a §7 cancel arriving during that wait is still honored at once) · `POST /packages/outdated` (same body) → `{ packages:
+  a §7 cancel arriving during that wait is still honored at once; the wait is bounded by
+  the per-package install timeout, after which the request answers the same 409 — a
+  `wait: true` call never pins a worker for longer than one install could take) · `POST /packages/outdated` (same body) → `{ packages:
   [{ pip, import, latest? }] }` — read-only PyPI query (§6.2: newest stable non-yanked
   version with a compatible wheel); `latest` present only when newer than the **installed**
   version, absent when not installed or on any lookup failure (backs the §11 page-load update
@@ -499,7 +509,10 @@ remain plain dicts (§2).
   still-building job answers 409 — only terminal jobs are consumable). A held record is also dropped when the
   owner's draft settles (the draft-settle endpoints' owner cancel above) and when a new
   `POST /drafts` job starts for the same owner (one held outcome per owner — superseding
-  is consuming). Job records live in memory only: a backend restart loses them, and the
+  is consuming). One **building** job per owner is a backend invariant, not a client
+  courtesy: a `POST /drafts` for an owner whose previous job is still building cancels that
+  job first (its harness is killed, its record settles `cancelled` and is consumed at once),
+  so two agent runs can never write the same draft. Job records live in memory only: a backend restart loses them, and the
   §11 re-attach reconciliation marks the orphaned turn cancelled rather than leaving it
   looking unanswered. Backend shutdown still cancels every still-building job (§3), so a
   stopping backend never leaves an agent harness running. For re-attach, the
@@ -606,7 +619,10 @@ remain plain dicts (§2).
   and concurrent detect calls share one in-flight probe (single-flight) — a wedged CLI costs
   one bounded probe, never one per caller.
 - **Install** — `POST /agents/install` `{ id }` starts a background install of that provider
-  (409 while one is already running for the same id) and streams `harness.install` WS events.
+  (409 while one is already running for the same id — including while an *abandoned*
+  phase's worker thread is still finishing its filesystem work after the 15-minute give-up,
+  detail "the previous install is still finishing — try again in a minute"; a retry must
+  never race the abandoned run's staged move of the same bundle) and streams `harness.install` WS events.
   Install and sign-in help (`POST /agents/login`, below) are both gated on the §2
   `agentInstall` capability: the channels below and the Terminal sign-in flow are
   macOS-shaped, so where the flag is false (every other OS today) each endpoint answers 409
@@ -863,6 +879,9 @@ already neutralize. The provider config and
   startup repair): clients fall back to re-`GET /state`, applying its list rows with the
   same merge. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
   successful open), re-reading `backend.json` before each attempt, and re-`GET /state` on
-  reconnect, and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
+  reconnect (a client page holding a *full* automation record — the §9.2 detail page, the
+  §11 editor — also re-`GET`s that record on reconnect: the snapshot's list rows carry no
+  steps/spec/versions, and an `automation.changed` missed while the socket was down would
+  otherwise leave the page showing a new version number over old bodies until navigation), and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
   the client's disconnect, so a dropped client ends the handler immediately — an idle open
   socket never leaves uvicorn's graceful shutdown waiting.

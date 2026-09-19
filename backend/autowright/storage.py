@@ -9,6 +9,7 @@ rows the list surfaces need.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import queue
@@ -468,7 +469,11 @@ class Store:
         self._reap_later(aside)
 
     # ---------- startup walk (§5 load model) ----------
-    def load_all(self) -> None:
+    def load_all(self, startup: bool = False) -> None:
+        """`startup` is the backend's own boot load. It is the only load that
+        removes an orphaned automation directory (§5): on the §4.9
+        data-location reload a create may be in flight, and its version folder
+        can be on disk before `automation.yaml` is."""
         with self.lock:
             paths.ensure_dirs()
             # §6: the twin of the executions/automations sweeps below — a crash
@@ -526,7 +531,22 @@ class Store:
                     # delete_automation's aside-rename and its rmtree.
                     shutil.rmtree(d, ignore_errors=True)
                     continue
-                if not d.is_dir() or not (d / "automation.yaml").exists():
+                if not d.is_dir():
+                    continue
+                if d.name.startswith(".ad-"):
+                    continue  # a staging dir — the sweeps above own those
+                if not (d / "automation.yaml").exists():
+                    # §5: a create that failed after its version folder landed.
+                    log.warning("automation directory %s has no automation.yaml", d)
+                    if startup and re.fullmatch(_UUID, d.name):
+                        # Only at startup, and only a directory the app itself
+                        # could have made — a hand-made folder stays put.
+                        try:
+                            self._remove_tree(d)
+                        except OSError:
+                            # _remove_tree logged the path and the reason — an
+                            # orphan that can't go never bricks startup.
+                            pass
                     continue
                 try:
                     a = self._load_automation(d)
@@ -636,7 +656,8 @@ class Store:
         d = self.executions_dir()
         if not d.exists():
             return
-        for ed in d.iterdir():
+        # list(): the sweeps below rename directories aside inside the loop.
+        for ed in list(d.iterdir()):
             if ed.name.startswith(self.DELETED_PREFIX):
                 # A crash between delete_execution's aside-rename and its
                 # rmtree — the record is already gone from the index, so
@@ -644,6 +665,19 @@ class Store:
                 shutil.rmtree(ed, ignore_errors=True)
                 continue
             if not ed.is_dir() or ed.name in self.execs:
+                continue
+            if not (ed / "execution.yaml").exists():
+                # §5: the directory is made before the record is written, so
+                # one without an execution.yaml is a crash leftover — nothing
+                # can ever adopt it, and it would sit there forever.
+                log.warning("execution directory %s has no execution.yaml — "
+                            "removing the crash leftover", ed)
+                try:
+                    self._remove_tree(ed)
+                except OSError:
+                    # _remove_tree logged the path and the reason — a leftover
+                    # that can't go never bricks startup.
+                    pass
                 continue
             try:
                 y = self.read_exec_yaml(ed.name)
@@ -1001,6 +1035,34 @@ class Store:
         return q
 
     # ---------- automation writes ----------
+    # §5: exactly the fields `_write_toplevel` serializes — what a failed write
+    # has to restore, and the reason the list lives beside the writer.
+    TOPLEVEL_FIELDS = ("id", "name", "description", "current_version", "triggers",
+                       "agent_id", "enabled_agents", "allowed_secrets",
+                       "memory_snapshots", "param_values", "max_parallel",
+                       "max_queued", "origin_os", "unresolved_references",
+                       "created_at", "updated_at")
+
+    def _commit_toplevel(self, a: dict, mutate):
+        """§5 disk-first: run `mutate`, write `automation.yaml`, and roll the
+        in-memory record back to its pre-write fields when the write fails
+        (disk full, read-only volume) before the error propagates — memory
+        never runs ahead of disk. The snapshot is deep (every stored container
+        here is small), so a mutation that edits a list or mapping in place is
+        undone too. Answers whatever `mutate` answered."""
+        before = {k: copy.deepcopy(a[k]) for k in self.TOPLEVEL_FIELDS if k in a}
+        try:
+            out = mutate()
+            self._write_toplevel(a)
+            return out
+        except Exception:
+            for k in self.TOPLEVEL_FIELDS:
+                if k in before:
+                    a[k] = before[k]
+                else:
+                    a.pop(k, None)
+            raise
+
     def _write_toplevel(self, a: dict) -> None:
         save_yaml(self.auto_dir(a) / "automation.yaml", {
             "id": a["id"],
@@ -1073,7 +1135,8 @@ class Store:
             "steps": manifest_steps,
             **(extra or {}),
         })
-        for f in vd.iterdir():
+        # list(): the prune unlinks inside the directory it is listing.
+        for f in list(vd.iterdir()):
             if f.is_file() and f.name not in keep and not f.name.startswith(".ad-tmp-"):
                 f.unlink()
 
@@ -1201,17 +1264,27 @@ class Store:
             ver = {**ver, "when": timefmt.now_iso()}
             vd = self.auto_dir(a) / "versions" / f"v{n}"
             self._write_version_folder(vd, ver)
-            a["versions"][n] = self._reload_version(vd, ver)
-            a["current_version"] = n
-            a["updated_at"] = timefmt.now_iso()
-            # §4.1: an edit save clears originOs — a local rework supersedes
-            # "built elsewhere" (a restore keeps it: not a rework).
-            a.pop("origin_os", None)
-            # §4.1: the same save prunes unresolved references the new version
-            # no longer carries — a fixed reference stops carrying its label.
-            self._prune_unresolved(a)
-            self._write_toplevel(a)
-            return n
+
+            def mutate() -> int:
+                a["versions"][n] = self._reload_version(vd, ver)
+                a["current_version"] = n
+                a["updated_at"] = timefmt.now_iso()
+                # §4.1: an edit save clears originOs — a local rework supersedes
+                # "built elsewhere" (a restore keeps it: not a rework).
+                a.pop("origin_os", None)
+                # §4.1: the same save prunes unresolved references the new version
+                # no longer carries — a fixed reference stops carrying its label.
+                self._prune_unresolved(a)
+                return n
+
+            try:
+                return self._commit_toplevel(a, mutate)
+            except Exception:
+                # §5: the pointer rolled back, so the new version must leave
+                # memory with it. Its folder is tolerated on disk — the next
+                # save skips numbers that are taken.
+                a["versions"].pop(n, None)
+                raise
 
     def restore_version(self, a: dict, v: int) -> int:
         with self.lock:
@@ -1227,11 +1300,21 @@ class Store:
             restored = {**a["versions"][v], "when": timefmt.now_iso(),
                         "note": f"Restored from v{v}"}
             self._write_version_folder(dst, restored)
-            a["versions"][n] = self._reload_version(dst, restored)
-            a["current_version"] = n
-            a["updated_at"] = timefmt.now_iso()
-            self._write_toplevel(a)
-            return n
+
+            def mutate() -> int:
+                a["versions"][n] = self._reload_version(dst, restored)
+                a["current_version"] = n
+                a["updated_at"] = timefmt.now_iso()
+                return n
+
+            try:
+                return self._commit_toplevel(a, mutate)
+            except Exception:
+                # §5, as in save_new_version: the pointer rolled back, so the
+                # restored version leaves memory with it. Its folder is
+                # tolerated on disk — the next save skips numbers that are taken.
+                a["versions"].pop(n, None)
+                raise
 
     def draft_dir(self, a: dict | None) -> Path:
         """§5/§19: the one draft-container location rule — the pending
@@ -1486,43 +1569,48 @@ class Store:
         """User-owned fields only (§19 PATCH)."""
         with self.lock:
             self._still_registered(a)
-            if "name" in patch and (n := (patch["name"] or "").strip()) and n != a["name"]:
-                # §5: directories are named by id — a rename touches only the
-                # name field. §4.1 uniqueness is the API's check; names store
-                # trimmed at every write path.
-                a["name"] = n
-            if "description" in patch:
-                # §4.1: desc is optional — blank clears it.
-                a["description"] = patch["description"] or ""
-            for k_api, k_int in [("agentId", "agent_id"),
-                                 ("stepAgents", "enabled_agents"), ("allowedSecrets", "allowed_secrets")]:
-                if k_api in patch:
-                    a[k_int] = patch[k_api]
-            if "triggers" in patch:
-                # Whole-list replace (§19) — the API validated + normalized it.
-                # §4.3: the enable stamps reconcile here, against the stored
-                # list, so every write path gets them (and none can be faked).
-                a["triggers"] = triggerlib.stamp_enabled(patch["triggers"], a["triggers"])
-                # §4.1: a trigger replace prunes unresolved references a
-                # dropped discord trigger was the last holder of.
-                self._prune_unresolved(a)
-            if "paramValues" in patch:
-                a["param_values"].update(patch["paramValues"])
-            for k_api, k_int, clamp in [("maxParallel", "max_parallel", clamp_max_parallel),
-                                        ("maxQueued", "max_queued", clamp_max_queued)]:
-                if k_api in patch:
-                    # §19 validated the range already; clamp is the last line of
-                    # defense for any other caller.
-                    a[k_int] = clamp(patch[k_api])
-            if "snapshotSettings" in patch:
-                # §6.3 toggles — partial object, sent keys merged over the stored ones.
-                sent = patch["snapshotSettings"] or {}
-                for k_api, k_int in [("preVersion", "pre_version"), ("preClear", "pre_clear"),
-                                     ("preRestore", "pre_restore")]:
-                    if k_api in sent:
-                        a["memory_snapshots"][k_int] = bool(sent[k_api])
-            a["updated_at"] = timefmt.now_iso()
-            self._write_toplevel(a)
+            self._commit_toplevel(a, lambda: self._apply_patch(a, patch))
+
+    def _apply_patch(self, a: dict, patch: dict) -> None:
+        """The field edits of a §19 PATCH — run by `_commit_toplevel`, which
+        writes the file and rolls these back when the write fails. Caller holds
+        the lock."""
+        if "name" in patch and (n := (patch["name"] or "").strip()) and n != a["name"]:
+            # §5: directories are named by id — a rename touches only the
+            # name field. §4.1 uniqueness is the API's check; names store
+            # trimmed at every write path.
+            a["name"] = n
+        if "description" in patch:
+            # §4.1: desc is optional — blank clears it.
+            a["description"] = patch["description"] or ""
+        for k_api, k_int in [("agentId", "agent_id"),
+                             ("stepAgents", "enabled_agents"), ("allowedSecrets", "allowed_secrets")]:
+            if k_api in patch:
+                a[k_int] = patch[k_api]
+        if "triggers" in patch:
+            # Whole-list replace (§19) — the API validated + normalized it.
+            # §4.3: the enable stamps reconcile here, against the stored
+            # list, so every write path gets them (and none can be faked).
+            a["triggers"] = triggerlib.stamp_enabled(patch["triggers"], a["triggers"])
+            # §4.1: a trigger replace prunes unresolved references a
+            # dropped discord trigger was the last holder of.
+            self._prune_unresolved(a)
+        if "paramValues" in patch:
+            a["param_values"].update(patch["paramValues"])
+        for k_api, k_int, clamp in [("maxParallel", "max_parallel", clamp_max_parallel),
+                                    ("maxQueued", "max_queued", clamp_max_queued)]:
+            if k_api in patch:
+                # §19 validated the range already; clamp is the last line of
+                # defense for any other caller.
+                a[k_int] = clamp(patch[k_api])
+        if "snapshotSettings" in patch:
+            # §6.3 toggles — partial object, sent keys merged over the stored ones.
+            sent = patch["snapshotSettings"] or {}
+            for k_api, k_int in [("preVersion", "pre_version"), ("preClear", "pre_clear"),
+                                 ("preRestore", "pre_restore")]:
+                if k_api in sent:
+                    a["memory_snapshots"][k_int] = bool(sent[k_api])
+        a["updated_at"] = timefmt.now_iso()
 
     def _still_registered(self, a: dict | None) -> None:
         """§19: called under self.lock by every write into an automation
@@ -1543,8 +1631,11 @@ class Store:
                 # consumed list would re-create automation.yaml as a ghost
                 # directory the UI can never see (same guard as _fire).
                 return
-            a["triggers"] = [t for t in a["triggers"] if t["id"] != trigger_id]
-            self._write_toplevel(a)
+
+            def mutate() -> None:
+                a["triggers"] = [t for t in a["triggers"] if t["id"] != trigger_id]
+
+            self._commit_toplevel(a, mutate)
 
     def trigger_json(self, t: dict) -> dict:
         label, short = triggerlib.trigger_display(t)
@@ -1977,8 +2068,23 @@ class Store:
                     a["_latest"] = latest
                     a["_last_status"] = latest["status"] if latest else "none"
                     a["_last_exec_at"] = latest["started_at"] if latest else None
+                if is_test(h):
+                    # §5 retention: every test-record deletion passes through
+                    # here, and the §11 TEST card must not link to a record
+                    # that is gone.
+                    self._drop_draft_test(self.draft_dir(a), execution_id)
         if aside is not None:
             self._reap_later(aside)
+
+    def _drop_draft_test(self, container: Path, execution_id: str) -> None:
+        """§5: the draft container's `test.yaml` goes with the §11 test
+        execution it names — a retention sweep (or any other delete) must not
+        leave the TEST card pointing at a record that no longer exists. A
+        summary naming another execution stays. Caller holds the lock."""
+        f = container / "test.yaml"
+        summary = self._load_mapping(f) or {}
+        if summary.get("execution_id") == execution_id:
+            f.unlink(missing_ok=True)
 
     def delete_test_execs(self, automation_id: str | None) -> list[str]:
         """§11: test executions live only as long as their draft container —

@@ -1155,7 +1155,9 @@ path, onPath}`, re-read on every Settings visit — the shim files are the truth
 installed; the setting only records the user's choice). Turning the toggle **on** patches
 `cliEnabled: true` and fires §3 `cli-install` (silent ~/.local/bin write, no dialog); a
 failed install patches the setting back to false — the toggle just returns, never an error
-banner. Any successful card install (toggle-on or the Reinstall button) also sets the §3
+banner. The toggle is disabled while an install is in flight: a second click during the
+install must not read the busy short-circuit as a failure and patch the setting off under
+a shim that then lands. Any successful card install (toggle-on or the Reinstall button) also sets the §3
 `ad-cli-installed` first-run marker, so a later hand-deletion is never undone by the
 launch-time one-shot. Turning it **off** deletes the command too: when an ours-marker shim is
 on disk (`installed`) the flip first opens a danger ConfirmModal — title "Turn off

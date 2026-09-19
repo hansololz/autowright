@@ -324,6 +324,20 @@ describe('§9.2 reconnect resync', () => {
     act(() => { storeMod.useStore.setState({ reconnects: storeMod.useStore.getState().reconnects + 1 }) })
     await waitFor(() => expect(mockedApi.listExecutions.mock.calls.length).toBeGreaterThan(onMount))
   })
+
+  // §19 reconnect rule: a page holding a FULL record re-GETs it — the
+  // snapshot's list rows carry no params/steps/spec/versions/memory, so
+  // without this the page would show a new version number over old bodies.
+  it('a reconnect re-GETs the full automation record', async () => {
+    seed(auto())
+    mockedApi.getAutomation.mockClear()
+    render(<AutomationDetail />)
+    await waitFor(() => expect(mockedApi.getAutomation).toHaveBeenCalledWith('a1'))
+    const onMount = mockedApi.getAutomation.mock.calls.length
+
+    act(() => { storeMod.useStore.setState({ reconnects: storeMod.useStore.getState().reconnects + 1 }) })
+    await waitFor(() => expect(mockedApi.getAutomation.mock.calls.length).toBeGreaterThan(onMount))
+  })
 })
 
 describe('§9.2 trigger status text', () => {

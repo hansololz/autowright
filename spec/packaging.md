@@ -72,7 +72,8 @@ the update bullets below).
   **Install verification:** `launchctl` can report success while the job never spawns (observed:
   Gatekeeper silently refuses to exec an unsigned, quarantined bundled Python as a LaunchAgent —
   the GUI app's user approval does not extend to launchd). So after a `service install`, the main
-  process polls `/health` every 2 s for up to 30 s. Success and failure both append to `app.log`;
+  process polls `/health` every 2 s for up to 30 s of wall-clock time (a deadline, not an
+  iteration count — each probe's own retries count against it). Success and failure both append to `app.log`;
   on failure the main process also captures `launchctl print gui/<uid>/ai.autowright.backend`
   into `app.log` and records a failed ensure-backend status. The renderer reads that status over
   the preload bridge (`backend-status` IPC: `{ state: 'idle'|'installing'|'ok'|'failed', detail }`)
@@ -371,7 +372,11 @@ the update bullets below).
   a message firing landing during uvicorn's graceful drain must never start a step group
   after the sweep that nothing will kill — and `api.register_shutdown` (stopping the
   discovery-guard thread, then unlinking its own `backend.json`) runs after them; every
-  callback runs once and error-tolerant. The kill pass also flips the engine into a stopping
+  callback runs once and error-tolerant. Both halves and the kill sweeps run on a worker
+  thread (`run_in_threadpool`), never on the event loop: a message listener's gateway close
+  can take its library's full close timeout, and a listener's stop is fire-and-forget (the
+  close runs on a short-lived thread nobody joins — the gateway session is disposable at
+  shutdown), so the lifespan's shutdown stays inside the 5 s box whatever the network does. The kill pass also flips the engine into a stopping
   state in which every later `start` is refused ("the backend is shutting down"), closing the
   window a tick already inside `fire_trigger` could otherwise slip through. Uvicorn owns
   SIGTERM/SIGINT only once `run()` installs its handlers, though — and `backend.json` is
@@ -415,7 +420,10 @@ the update bullets below).
   immediately after a successful quit-all, no process holds the app bundle open, so the user
   can move Autowright.app to the Trash with no "in use" alert. A sweep that ended processes
   appends an informational `· ended N lingering process(es)` note to the success line (after
-  `·`, so `service.result_code` is unchanged). The live-execution gate is a confirmation, not
+  `·`, so `service.result_code` is unchanged). The live-execution gate counts **queued**
+  executions as live too (`GET /executions?status=executing&status=queued`): stopping the
+  backend under a queued firing strands its sender until the next start finishes it
+  `skipped`, so the user is asked. The live-execution gate is a confirmation, not
   a hard block: a busy answer makes the renderer ask whether to shut everything down anyway
   (§4.9 force-confirm modal) and, on confirm, retry the `quit-all` IPC with `force: true`,
   which skips the gate; the backend's graceful shutdown (`kill_all_live`) plus the sweep end
@@ -656,7 +664,7 @@ the update bullets below).
     `~/Library/Caches/autowright-updater`, the §3 cask's `zap` list covers it), and the
     checked-in `app/dev-app-update.yml` serves the same role for unpackaged dev launches.
     `update-install` asks the backend for live executions
-    (`GET /executions?status=executing`) and answers `{ busy: true }` while any is running —
+    (`GET /executions?status=executing&status=queued`) and answers `{ busy: true }` while any is running or queued —
     swapping the bundle mid-execution risks a step lazily importing mixed versions; an
     unreachable backend counts as idle. Otherwise it calls electron-updater's
     `quitAndInstall()` — Squirrel already staged during download, so this quits straight
@@ -690,7 +698,7 @@ the update bullets below).
   finds a healthy backend, the main process compares `/health`'s `version` with its own
   `app.getVersion()` (one §17 version source, so app and bundled backend versions agree by
   construction). On mismatch it waits for live executions to drain
-  (`GET /executions?status=executing`, polled every 30 s — the service is never restarted
+  (`GET /executions?status=executing&status=queued`, polled every 30 s — the service is never restarted
   mid-execution), then runs the same `service install` path, which rewrites the plist and
   restarts the service on the current bundle's interpreter. Outcome lines append to `app.log`.
 - Sleep: the service manager does not prevent sleep. Two idle-sleep assertions exist, both

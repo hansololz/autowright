@@ -74,9 +74,9 @@ def test_client_req_timeout_default_and_override(home, monkeypatch):
     monkeypatch.setattr(cli._opener, "open",
                         lambda r, timeout: timeouts.append(timeout) or _Resp())
     c.req("GET", "/health")
-    c.req("DELETE", "/automations/x", timeout=600)
+    c.req("DELETE", "/automations/x", timeout=660)
     c.req_raw("GET", "/automations/x/export")
-    assert timeouts == [30, 600, 30]
+    assert timeouts == [30, 660, 30]
 
 
 # ---------------------------------------------------------------- find_automation
@@ -713,9 +713,9 @@ def test_push_and_create_install_declared_packages(tmp_path, capsys):
     _, _, body = next(p for p in c.posted if p[1] == "/packages/install")
     # §20: the foreground ensure waits its turn on the pip lock (§19 `wait`)
     assert body == {"packages": auto["packages"], "wait": True}
-    # §20: pip runs behind the install call — 600 s; the save itself stays 30 s
+    # §20: pip runs behind the install call — 660 s; the save itself stays 30 s
     assert dict((p, t) for _, p, t in c.timeouts) == {
-        f"/automations/{auto['id']}/versions": 30, "/packages/install": 600}
+        f"/automations/{auto['id']}/versions": 30, "/packages/install": 660}
 
     c = _WorkdirClient(auto, install_result=result)
     cli.cmd_automation_create(c, SimpleNamespace(
@@ -1193,8 +1193,10 @@ class _ExecListClient:
     def req(self, method, path, body=None):
         # §20: limit=1 for the bare "newest" form, the §19 idPrefix match for a
         # reference (answered here with every row, like a server that has no
-        # other execution to filter out)
-        assert method == "GET" and (path in ("/executions", "/executions?limit=1")
+        # other execution to filter out), and limit=20 for the candidate
+        # readout a prefix that matched nothing falls back to.
+        assert method == "GET" and (path in ("/executions", "/executions?limit=1",
+                                             "/executions?limit=20")
                                     or path.startswith("/executions?idPrefix="))
         self.paths.append(path)
         rows = self.execs[:1] if path.endswith("?limit=1") else self.execs
@@ -1250,9 +1252,13 @@ def test_find_execution_by_unique_prefix_and_ambiguity():
     # status, started time for every execution
     assert "e1111111 (Daily Report, succeeded, 2026-07-29 08:00)" in msg
     assert "e2222222 (Weekly Report, failed, 2026-07-28 09:00)" in msg
+    # §20: with no execution at all there is no candidate to name — the
+    # readout falls back to the newest rows and finds none either.
+    empty = _ExecListClient([])
     with pytest.raises(SystemExit) as ei:
-        find_execution(_ExecListClient([]), "e")
+        find_execution(empty, "e")
     assert "(none)" in str(ei.value.code)
+    assert empty.paths == ["/executions?idPrefix=e&limit=50", "/executions?limit=20"]
 
 
 def test_find_execution_caps_the_candidate_list():
@@ -1620,8 +1626,8 @@ def test_cmd_automation_delete_needs_yes(capsys):
 
     _run(c, "automation", "delete", "Daily Report", "--yes")
     assert c.calls == [("DELETE", f"/automations/{AUTO_ID}", None)]
-    # §20: delete waits for cancelled engine threads — long 600 s timeout
-    assert c.timeouts == [("DELETE", f"/automations/{AUTO_ID}", 600)]
+    # §20: delete waits for cancelled engine threads — long 660 s timeout
+    assert c.timeouts == [("DELETE", f"/automations/{AUTO_ID}", 660)]
     assert "deleted 'Daily Report'" in capsys.readouterr().out
 
 
@@ -1842,8 +1848,8 @@ def test_cmd_automation_import_url_confirms_immediately(capsys):
         ("POST", "/automations/import/confirm", {"token": "tok1"}),
     ]
     # §20: the remote download and the confirm that lands the archive both
-    # take the long timeout — 600 s
-    assert [t for _, _, t in c.timeouts] == [600, 600]
+    # take the long timeout — 660 s
+    assert [t for _, _, t in c.timeouts] == [660, 660]
     out = capsys.readouterr().out
     assert "resolved to https://gh/dl/watcher.autowright" in out
     assert "imported 'Web' [cafebabe]" in out
@@ -1852,7 +1858,7 @@ def test_cmd_automation_import_url_confirms_immediately(capsys):
 def test_cmd_automation_import_file_upload_gets_the_long_timeout(tmp_path, capsys):
     """§20 HTTP timeouts: a large archive landing on a slow volume must never
     report "backend isn't reachable" while it succeeds — the file upload runs
-    at 600 s like the URL fetch and the confirm."""
+    at 660 s like the URL fetch and the confirm."""
     src = tmp_path / "watcher.autowright"
     src.write_bytes(b"ZIPDATA")
     raw = json.dumps({"automation": {"name": "Web", "id": "cafebabe-2"},
@@ -1860,7 +1866,7 @@ def test_cmd_automation_import_file_upload_gets_the_long_timeout(tmp_path, capsy
                                   "unresolved": [], "packages": []}}).encode()
     c = _RouteClient(raw=raw)
     _run(c, "automation", "import", str(src))
-    assert c.timeouts == [("POST", "/automations/import", 600)]
+    assert c.timeouts == [("POST", "/automations/import", 660)]
     assert "imported 'Web' [cafebabe]" in capsys.readouterr().out
 
 
@@ -2867,7 +2873,7 @@ def test_cmd_marketplace_add_sends_a_link_as_a_url(capsys):
     assert c.calls == [("POST", "/marketplace/sources",
                         {"url": "https://example.com/marketplace.yaml"})]
     # §20 HTTP timeouts: add fetches over the network - the long timeout
-    assert c.timeouts == [("POST", "/marketplace/sources", 600)]
+    assert c.timeouts == [("POST", "/marketplace/sources", 660)]
     assert ("added Community automations [m3333333] - 2 automation(s)"
             in capsys.readouterr().out)
 
@@ -2942,7 +2948,7 @@ def test_cmd_marketplace_refresh_one_resolves_the_source(capsys):
         "entries": [{"index": 0}, {"index": 1}, {"index": 2}]}})
     _run(c, "marketplace", "refresh", "community")  # name substring resolves
     assert c.calls == [("POST", "/marketplace/sources/m1111111-a/refresh", None)]
-    assert c.timeouts == [("POST", "/marketplace/sources/m1111111-a/refresh", 600)]
+    assert c.timeouts == [("POST", "/marketplace/sources/m1111111-a/refresh", 660)]
     assert ("refreshed Community automations - 3 automation(s)"
             in capsys.readouterr().out)
 
@@ -3026,7 +3032,7 @@ def test_cmd_marketplace_install_previews_by_index_then_confirms(capsys):
     ]
     # §20 HTTP timeouts: the archive fetch and the confirm that lands it both
     # take the long timeout
-    assert [t for _, _, t in c.timeouts] == [600, 600]
+    assert [t for _, _, t in c.timeouts] == [660, 660]
     out = capsys.readouterr().out
     assert "imported 'Inbox sweeper' [deadbeef]" in out
     assert "  secrets matched: API_KEY" in out
@@ -3103,7 +3109,7 @@ def test_cmd_marketplace_create_makes_the_folder_absolute(tmp_path, monkeypatch,
     assert c.calls == [("POST", "/marketplace/catalogs",
                         {"folder": os.path.join(os.getcwd(), "my-marketplace")})]
     # §20 HTTP timeouts: create reads the catalog back and builds its copy
-    assert c.timeouts == [("POST", "/marketplace/catalogs", 600)]
+    assert c.timeouts == [("POST", "/marketplace/catalogs", 660)]
     assert ("created my-marketplace [m5555555] at "
             "/x/my-marketplace/marketplace-catalog.yaml" in capsys.readouterr().out)
 
@@ -3142,7 +3148,7 @@ def test_cmd_marketplace_catalog_set_clears_a_key_and_keeps_the_entries(capsys):
          "name=My automations", "description=")
     assert c.calls == [("PUT", CATALOG_PATH, {
         "name": "My automations", "description": "", "entries": CATALOG_SENT})]
-    assert c.timeouts == [("PUT", CATALOG_PATH, 600)]
+    assert c.timeouts == [("PUT", CATALOG_PATH, 660)]
     assert "saved My automations" in capsys.readouterr().out
 
 

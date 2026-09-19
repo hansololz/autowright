@@ -392,7 +392,8 @@ describe('§9.1 execute from the card', () => {
 
   it('a 409 reads as the §6 capacity toast for this automation', async () => {
     mockedApi.executeNow.mockRejectedValueOnce(
-      Object.assign(new Error('busy'), { status: 409 }))
+      // §19: only the no-free-slot 409 carries `reason: "capacity"`
+      Object.assign(new Error('busy'), { status: 409, reason: 'capacity' }))
     seed([auto({ maxParallel: 2, maxQueued: 3 })])
     storeMod.useStore.setState({ toast: null })
     render(<AutomationsList />)

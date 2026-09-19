@@ -1,6 +1,7 @@
 // One central model drives everything (§4 top-level, §9 navigation).
 import { create } from 'zustand'
 import { api, connectInfo, openWs } from './api'
+import { anyModalOpen } from './ui'
 import type { Agent, Automation, DraftJobRow, Execution, LogLine, PlatformCapabilities, SecretMeta, Settings, StateSnapshot, WsEvent } from './types'
 
 type Surface = 'onboard' | 'app' | 'create' | 'menubar'
@@ -123,7 +124,9 @@ interface Model {
   go(page: Page, ids?: { automationId?: string | null; executionId?: string | null; agentEditId?: string | null }): void
   setSurface(s: Surface, from?: CreateFrom): void
   showToast(msg: string, ms?: number): void
-  loadExecution(executionId: string): Promise<void>
+  // §7: 'gone' is a 404 (the record really is not there), 'error' any other
+  // failure — the page must not call a transient failure a deleted execution.
+  loadExecution(executionId: string): Promise<'ok' | 'gone' | 'error'>
   loadExecLogs(executionId: string, step?: number, attempt?: number): Promise<void>
   loadAuto(automationId: string, opts?: { insert?: boolean }): Promise<void>
   beginTest(executionId: string): void
@@ -207,10 +210,28 @@ export const LOG_TAIL = 2000
 // this is what makes it one and not a loop.
 const executionRefetched = new Set<string>()
 
+// §19 log gaps: `<executionId>/<bucket key>` for buckets whose one gap refetch
+// has already been asked for. Log sequences are gapless from 1 (§5), so a
+// streamed line past `last + 1` means the socket dropped what sits between —
+// exactly one refetch fills it in, and the flag is what keeps it one.
+const logGapRefetched = new Set<string>()
+
 // §19: ids whose missing body is being fetched because a step event arrived
 // with nothing to apply it to. In-flight only — the entry is dropped when the
 // fetch settles, so a later eviction re-arms one fetch and never a loop.
 const executionStepFetching = new Set<string>()
+
+// §19 unknown-id fallback: only the server knows list ordering for a row this
+// client has never seen, so the event path falls back to /state — but a burst
+// (a second window adding several automations) must cost one snapshot, not one
+// per event. The flag clears when the refresh settles, so the next burst gets
+// its own.
+let refreshPending = false
+function coalescedRefresh(refresh: () => Promise<void>) {
+  if (refreshPending) return
+  refreshPending = true
+  void refresh().finally(() => { refreshPending = false })
+}
 
 function touchExecutionMru(id: string) {
   executionMru = [id, ...executionMru.filter((x) => x !== id)].slice(0, EXECUTION_CACHE_KEEP)
@@ -363,6 +384,10 @@ export const useStore = create<Model>((set, get) => ({
     clearTimeout(bootTimer)
     closeWs?.()
     closeWs = null
+    // §19: the next socket this process opens is a boot connection again, not
+    // a reconnect — leaving the flag set would have it count one and send
+    // every page-owned fetch off on a connection nothing was missed on.
+    wsOpened = false
   },
 
   async refresh() {
@@ -448,7 +473,7 @@ export const useStore = create<Model>((set, get) => ({
         })
       }
       else if (cur.some((a) => a.id === id)) set({ automations: cur.map((a) => (a.id === id ? { ...a, ...row } : a)) })
-      else { void m.refresh(); return }
+      else coalescedRefresh(m.refresh)
       updateTrayAlert(get().automations)
     }
     // §6 exec.queued (a firing admitted to the queue) carries the same header
@@ -466,7 +491,7 @@ export const useStore = create<Model>((set, get) => ({
       // ones only while they are among the newest FINISHED_WINDOW (the
       // Executions page fetches deeper pages itself).
       let finished = 0
-      const merged = [ej, ...rest].sort((a, b) => b.startedMs - a.startedMs)
+      const merged = [ej, ...rest].sort(byCanonicalOrder)
         .filter((e) => isLive(e.status) || ++finished <= FINISHED_WINDOW)
       set({
         executions: merged,
@@ -580,6 +605,17 @@ export const useStore = create<Model>((set, get) => ({
               [executionId]: { ...buckets, [key]: next.length > LOG_TAIL ? next.slice(-LOG_TAIL) : next },
             },
           })
+          // §5 sequences are gapless from 1, so anything past `last + 1` means
+          // the socket dropped lines — refetch the bucket once to fill them in
+          // (an empty bucket is the in-flight first fetch, which brings them).
+          const gapKey = `${executionId}/${key}`
+          if (last > 0 && line.sequence > last + 1 && !logGapRefetched.has(gapKey)) {
+            // Bounded, like the body refetch set: clearing merely re-arms one
+            // benign refetch per bucket.
+            if (logGapRefetched.size > 1000) logGapRefetched.clear()
+            logGapRefetched.add(gapKey)
+            void get().loadExecLogs(executionId, msg.stepIndex ?? undefined, msg.attempt ?? undefined)
+          }
         }
       }
       return
@@ -613,7 +649,7 @@ export const useStore = create<Model>((set, get) => ({
         patchAutomation(id, msg.automation)
         if (held && 'latest' in held) void m.loadAuto(id)
       } else {
-        void m.refresh()
+        coalescedRefresh(m.refresh)
       }
       return
     }
@@ -697,11 +733,20 @@ export const useStore = create<Model>((set, get) => ({
           executionRefetched.add(executionId)
           setTimeout(() => { void get().loadExecution(executionId) }, 0)
         }
-        return
+        // A record IS in hand (the header the drop kept, or the full body) —
+        // the caller must not read this as "no longer exists" while the
+        // scheduled refetch is still on the wire.
+        return 'ok'
       }
       executionRefetched.delete(executionId)
       set({ executionFull: { ...get().executionFull, [executionId]: e } })
-    } catch { /* deleted */ }
+      return 'ok'
+    } catch (err) {
+      // §19: only a 404 means the record is gone. Anything else (the backend
+      // restarting, a dropped socket, a 500) is a failure to load — the §7
+      // page says so and offers a retry instead of the deleted notice.
+      return (err as { status?: number }).status === 404 ? 'gone' : 'error'
+    }
   },
 
   async loadExecLogs(executionId, step, attempt) {
@@ -761,6 +806,12 @@ export const useStore = create<Model>((set, get) => ({
   clearTest() { set({ test: null }) },
 }))
 
+// §7 canonical execution order: newest first, ties broken by id so the list
+// and the §19 event merge path agree on a stable order (two executions started
+// in the same millisecond would otherwise swap places between the two).
+export const byCanonicalOrder = (a: Execution, b: Execution) =>
+  b.startedMs - a.startedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+
 // §19 log buckets: step+attempt select an attempt file, null/null the execution log.
 export function logKey(step: number | null, attempt: number | null) {
   return step === null ? 'x.0' : `${step}.${attempt ?? 1}`
@@ -785,7 +836,8 @@ export function trayAlertOn(automations: Automation[]) {
 }
 
 function updateTrayAlert(automations: Automation[]) {
-  void window.autowright?.trayAlert(trayAlertOn(automations))
+  // the main process may answer late or not at all — never an unhandled rejection
+  void window.autowright?.trayAlert(trayAlertOn(automations))?.catch(() => {})
 }
 
 // ---------- history (§9: back works, never re-enters onboarding) ----------
@@ -816,6 +868,13 @@ function syncHistory(m: Model) {
 }
 
 window.addEventListener('popstate', (e) => {
+  // §9: while any modal is open back/forward are inert — the entry is pushed
+  // straight back. An unmount-by-navigation would bypass the modal's
+  // `guardClose` (§14) and drop the doc editor's typed text with no confirm.
+  if (anyModalOpen()) {
+    try { history.pushState({ adNav: lastNav }, '') } catch { /* ignore */ }
+    return
+  }
   const s = (e.state && (e.state as { adNav?: NavSnap }).adNav) || null
   if (!s) return
   if (s.surface === 'onboard' && passedOnboard) {

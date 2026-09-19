@@ -21,6 +21,52 @@ const platFiles = readdirSync(PLATFORM_DIR).filter((n) => n.endsWith('.cjs'))
 const platSrc = platFiles.map((n) => readFileSync(join(PLATFORM_DIR, n), 'utf-8')).join('\n')
 const union = `${src}\n${platSrc}`
 
+// The arguments of the call whose opening parenthesis sits at `open`, each one
+// verbatim. Parentheses, brackets, braces and string literals nest, so the
+// split walks the source rather than cutting on every comma — a multi-line
+// options object and a template literal carrying `${…}` both stay one
+// argument.
+function callArguments(source: string, open: number): string[] {
+  const args: string[] = []
+  let depth = 0
+  let start = open + 1
+  for (let i = open; i < source.length; i++) {
+    const c = source[i]
+    if (c === "'" || c === '"' || c === '`') {
+      for (i++; i < source.length; i++) {
+        if (source[i] === '\\') i++
+        else if (source[i] === c) break
+      }
+      continue
+    }
+    if (c === '(' || c === '[' || c === '{') depth++
+    else if (c === ')' || c === ']' || c === '}') {
+      depth--
+      if (depth === 0) { args.push(source.slice(start, i).trim()); return args }
+    } else if (c === ',' && depth === 1) {
+      args.push(source.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  return args
+}
+
+// Every child-process call site in the scanned source, with its options
+// argument resolved: the third argument verbatim when it is an object
+// literal, otherwise the body of the `const NAME = { … }` it names. `exec` is
+// in the list because win32's login-item sweep takes its runner as a
+// parameter — the guard follows the call, not the callee's name.
+function childProcessCalls(source: string) {
+  return [...source.matchAll(/(?<![.\w])(execFile|spawn|exec)\(/g)].map((m) => {
+    const open = m.index + m[0].length - 1
+    const options = callArguments(source, open)[2] ?? ''
+    const named = options.startsWith('{')
+      ? options
+      : source.match(new RegExp(`const ${options} = (\\{[^}]*\\})`))?.[1] ?? ''
+    return { callee: m[1], site: source.slice(m.index, open + 60).split('\n')[0], options: named }
+  })
+}
+
 describe('main.cjs CLI-leaf invariant (§2)', () => {
   it('registers the backend via -m autowright.service', () => {
     expect(src).toContain("'-m', 'autowright.service', 'install'")
@@ -89,6 +135,18 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     }
   })
 
+  it('every child-process call site hides the console window (§2 spawn policy)', () => {
+    // Scanned, not listed by callee name: a spawn added anywhere in main.cjs
+    // or a platform module has to pass options carrying `windowsHide` — a
+    // console program started without it flashes a window on Windows — so a
+    // call that puts its callback where the options belong fails here too.
+    const calls = childProcessCalls(union)
+    expect(calls.length).toBeGreaterThanOrEqual(8)
+    for (const { callee, site, options } of calls) {
+      expect(options, `${callee} at \`${site}\``).toContain('windowsHide: true')
+    }
+  })
+
   it('shim writes are user-local only — no admin prompt, no /usr/local/bin write (§3)', () => {
     // No osascript admin flow exists at all.
     expect(union).not.toContain('with administrator privileges')
@@ -138,8 +196,8 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // The probe now reads the body: our app name, and a version that isn't
     // empty. Anything else (non-JSON throws into the catch) answers null, so
     // ensureBackend falls through to the install branch.
-    expect(src).toMatch(/async function backendVersion\(\)[\s\S]{0,900}body\?\.app !== 'Autowright'/)
-    expect(src).toMatch(/backendVersion\(\)[\s\S]{0,1000}String\(body\.version \?\? ''\) \|\| null/)
+    expect(src).toMatch(/async function backendVersion\(\)[\s\S]{0,1200}body\?\.app !== 'Autowright'/)
+    expect(src).toMatch(/backendVersion\(\)[\s\S]{0,1300}String\(body\.version \?\? ''\) \|\| null/)
     // …and every caller still reads "healthy" off exactly that answer, so the
     // stricter probe can't be routed around.
     expect(src).toContain('return (await backendVersion()) !== null')
@@ -1275,7 +1333,9 @@ describe('main.cjs bounded service children (§3)', () => {
       // — and that child never calls back. quit-all used to sit on
       // `await serviceInstallDone` for the life of the app.
       const m = loadMain({ ready: true, execFile: () => {} })
-      await vi.advanceTimersByTimeAsync(0)
+      // Two 500 ms gaps: with no backend.json the probe still runs its three
+      // attempts (§3 re-reads the file each one) before concluding absent.
+      await vi.advanceTimersByTimeAsync(1000)
       const result = m.invoke('quit-all', { force: true }) as Promise<unknown>
       await vi.advanceTimersByTimeAsync(120_000)
       expect(await result).toEqual({ error: 'service stop timed out' })

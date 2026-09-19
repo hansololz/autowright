@@ -58,7 +58,7 @@ export default function SecretsPage() {
         </div>
         {secrets.map((s, i) => (
           <div
-            key={s.name}
+            key={s.id}
             style={{
               display: 'grid', gridTemplateColumns: '1.2fr 1fr 1.7fr 64px', gap: 10,
               padding: '12px 18px', alignItems: 'center',

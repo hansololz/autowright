@@ -8,6 +8,7 @@ import { useEffect, useRef } from 'react'
 import { api } from '../../api'
 import { useStore } from '../../store'
 import type { Automation, Blocker, ChatEntry, DraftPayload, SpecBlock } from '../../types'
+import type { ComposerText } from './ChatPanel'
 import {
   type Rev, TRIGGER_SETUP_TEXT, answerHeader, applyTriggerOps, chatSinceBoundary, coerceParamValue, jobStageTitle,
   mergeDraftTriggers,
@@ -33,8 +34,9 @@ export interface DraftJobDeps {
   auto: Automation | null
   agentId: string | null
   showToast: (msg: string, ms?: number) => void
-  chatText: string
-  setChatText: React.Dispatch<React.SetStateAction<string>>
+  // §11 composer text: read at send time and cleared on send, through the
+  // pane's handle (the page no longer re-renders per keystroke).
+  composer: ComposerText
   // §11 gating, derived by the page: one agent job at a time, rewrites lock
   // while a test executes, old versions are read-only.
   anyJobBusy: boolean
@@ -45,10 +47,18 @@ export interface DraftJobDeps {
 export function useDraftJob(d: DraftJobDeps) {
   const {
     rev, setRev, up, isEdit, auto, agentId, showToast,
-    chatText, setChatText, anyJobBusy, testLive, viewingOld,
+    composer, anyJobBusy, testLive, viewingOld,
   } = d
 
   const jobIdRef = useRef<string | null>(null)
+  // §11 one job at a time, live: the page's `anyJobBusy` is derived from `rev`,
+  // so it is a render behind — two effects firing in the same commit (the
+  // re-attach and the §7 Fix-with-AI send) would both read "idle" and the
+  // second would start a second job over the first. These two refs move with
+  // the job itself: `jobIdRef` the moment a poll arms, `startingRef` for the
+  // window where the POST is in flight and no job id exists yet.
+  const startingRef = useRef(false)
+  const busyNow = () => !!jobIdRef.current || startingRef.current
   // Cancel generation: bumped by every cancel path (and unmount). A POST-then-
   // poll flow captures it before the await; if it moved while the POST was in
   // flight, the flow cancels the freshly created job instead of arming the
@@ -309,12 +319,17 @@ export function useDraftJob(d: DraftJobDeps) {
   // freshly created job is cancelled instead.
   const startJob = async (body: Parameters<typeof api.postDraftJob>[0], handlers: PollHandlers) => {
     const gen = cancelGenRef.current
-    const { jobId } = await api.postDraftJob(body)
-    // §19: the editor left while the POST was in flight — the job keeps
-    // building and the re-attach picks it up; nothing to poll or cancel here.
-    if (deadRef.current) return
-    if (cancelGenRef.current !== gen) { void api.cancelDraftJob(jobId).catch(() => { /* already gone */ }); return }
-    startPoll(jobId, handlers)
+    startingRef.current = true
+    try {
+      const { jobId } = await api.postDraftJob(body)
+      // §19: the editor left while the POST was in flight — the job keeps
+      // building and the re-attach picks it up; nothing to poll or cancel here.
+      if (deadRef.current) return
+      if (cancelGenRef.current !== gen) { void api.cancelDraftJob(jobId).catch(() => { /* already gone */ }); return }
+      startPoll(jobId, handlers)
+    } finally {
+      startingRef.current = false
+    }
   }
 
   // The {cancel} half of the core: stop polling, invalidate any in-flight
@@ -570,10 +585,10 @@ export function useDraftJob(d: DraftJobDeps) {
   // rename) — applied in that order (§11), with the sync/test chain armed as
   // pending flags a watcher effect fires.
   const sendChat = async (textArg?: string, executionId?: string) => {
-    if (!rev || anyJobBusy || testLive || viewingOld) return
-    const request = (textArg ?? chatText).trim()
+    if (!rev || anyJobBusy || busyNow() || testLive || viewingOld) return
+    const request = (textArg ?? composer.get()).trim()
     if (!request) return
-    if (textArg === undefined) setChatText('')
+    if (textArg === undefined) composer.set('')
     // §11: a fresh draft's first message is the automation's description —
     // Start over returns it to the input (the §8 new-automation rule; the
     // job itself is an ordinary chat job).
@@ -708,7 +723,7 @@ export function useDraftJob(d: DraftJobDeps) {
   // applying amends the in-editor spec (specOverride) and repeats the sync with it.
   const runSync = async (specOverride?: SpecBlock[]) => {
     // §11 rewrites-lock: nothing rewrites the workflow under a running test
-    if (!rev || anyJobBusy || testLive) return
+    if (!rev || anyJobBusy || busyNow() || testLive) return
     // A cancel must return the panel to the state it was in (§11) — a sync
     // started from a clean draft must not leave it marked out-of-sync. A
     // blocker amend (specOverride) is a spec rewrite: it dirties the draft,
@@ -783,7 +798,7 @@ export function useDraftJob(d: DraftJobDeps) {
       ...r, chatBusy: false,
       chat: req ? r.chat.filter((e) => e.id !== req.entryId) : r.chat,
     }))
-    if (req) setChatText((cur) => cur || req.text)
+    if (req) composer.set((cur) => cur || req.text)
     showToast('Edit stopped — the spec is unchanged.', 4200)
   }
 
@@ -809,6 +824,6 @@ export function useDraftJob(d: DraftJobDeps) {
   return {
     sendChat, runSync, attachJob, flushHeldChips, takeHeldChips,
     cancelChat, cancelSync, cancelJob,
-    stopPoll, jobIdRef, firstRequestRef,
+    stopPoll, jobIdRef, firstRequestRef, busyNow,
   }
 }

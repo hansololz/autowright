@@ -8,12 +8,15 @@ import { useStore } from './store'
 import { EmptyNotice } from './ui'
 
 interface Props { children: React.ReactNode }
-interface State { error: Error | null }
+// `attempt` keys the children: clearing the error alone re-renders the same
+// element tree, and the page that threw would be handed straight back its own
+// state — the button reads as inert. A new key is a genuine remount.
+interface State { error: Error | null; attempt: number }
 
 export class ErrorBoundary extends React.Component<Props, State> {
-  state: State = { error: null }
+  state: State = { error: null, attempt: 0 }
 
-  static getDerivedStateFromError(error: Error): State {
+  static getDerivedStateFromError(error: Error): Pick<State, 'error'> {
     return { error }
   }
 
@@ -26,12 +29,12 @@ export class ErrorBoundary extends React.Component<Props, State> {
   // re-mount on the Automations list rather than on the page that just threw.
   private back = () => {
     useStore.getState().go('automations', { automationId: null, executionId: null })
-    this.setState({ error: null })
+    this.setState((s) => ({ error: null, attempt: s.attempt + 1 }))
   }
 
   render() {
-    const { error } = this.state
-    if (!error) return this.props.children
+    const { error, attempt } = this.state
+    if (!error) return <React.Fragment key={attempt}>{this.props.children}</React.Fragment>
     return (
       <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '26px 30px 70px' }}>
         <EmptyNotice

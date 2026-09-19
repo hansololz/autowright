@@ -53,6 +53,13 @@ APPLICATIONS = "/Applications"
 
 _lock = threading.Lock()
 _jobs: dict[str, dict] = {}  # provider id → §19 install snapshot
+# §19: provider id → generation of the phase thread still running for it. An
+# abandoned phase (below) keeps doing filesystem work after the give-up, and a
+# retry landing on top of it would race its staged move of the same bundle —
+# so `start` refuses while an entry stands. Cleared by the phase itself.
+_phases: dict[str, int] = {}
+BUSY_RUNNING = "an install for this provider is already running"
+BUSY_ABANDONED = "the previous install is still finishing — try again in a minute"
 # §19: every job carries a generation token. An abandoned phase (below) keeps
 # running until the process exits, and without the token its late progress
 # would write into — and stream out of — a LATER install's snapshot.
@@ -68,16 +75,31 @@ def status(provider_id: str) -> dict:
             else {"state": "idle"}
 
 
+def busy_detail(provider_id: str) -> str:
+    """§19: why a `start` refusal happened, in the words the 409 carries — an
+    abandoned phase still finishing reads differently from a live install."""
+    with _lock:
+        running = _jobs.get(provider_id, {}).get("state") == "running"
+        return BUSY_RUNNING if running else BUSY_ABANDONED
+
+
 def start(provider_id: str, publish) -> bool:
-    """Kick off a background install. False if one is already running."""
+    """Kick off a background install. False if one is already running — or
+    while an abandoned phase's worker thread is still finishing its filesystem
+    work (§19); `busy_detail` says which."""
     global _generation
     with _lock:
         if _jobs.get(provider_id, {}).get("state") == "running":
+            return False
+        if provider_id in _phases:
+            # §19: the give-up marked the job failed, but the phase thread is
+            # still moving files — a retry now would race its staged move.
             return False
         _generation += 1
         gen = _generation
         _jobs[provider_id] = {"state": "running", "line": "", "percent": None,
                               "_gen": gen}
+        _phases[provider_id] = gen
 
     def emit(line: str | None = None, percent: int | None = None) -> None:
         with _lock:
@@ -108,6 +130,14 @@ def start(provider_id: str, publish) -> bool:
                 _INSTALLERS[provider_id](emit)
             except Exception as e:  # noqa: BLE001 — becomes the §10 failure card
                 raised.append(e)
+            finally:
+                # §19: the phase is only over when the installer call actually
+                # returns — until then `start` refuses. Generation-checked: a
+                # later install owns the entry, and this thread's late finish
+                # must not clear its claim.
+                with _lock:
+                    if _phases.get(provider_id) == gen:
+                        del _phases[provider_id]
 
         worker = threading.Thread(target=phase, daemon=True)
         worker.start()

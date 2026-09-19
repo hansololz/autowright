@@ -379,6 +379,18 @@ def test_manifest_param_keeps_only_the_definition_fields():
 
 # ---------- §6: the notification follows the stored chipStatus ----------
 
+def _wait_notifiers(timeout=5):
+    """§6.1: the end-of-execution notification posts on its own thread — let
+    every one of them land before asserting on what was (or wasn't) posted."""
+    import threading
+    import time
+
+    deadline = time.time() + timeout
+    while any(t.name.startswith("ad-notify-") for t in threading.enumerate()):
+        assert time.time() < deadline, "a notification thread never finished"
+        time.sleep(0.01)
+
+
 def _notify_recorder(monkeypatch):
     from autowright import notify
 
@@ -400,6 +412,7 @@ def test_attention_without_a_chip_notifies_nothing(store, monkeypatch):
     a = store.create_automation(ver, "Chipless attention", None)
     h = engine.start(a, "manual")
     wait_done(engine, h["id"])
+    _wait_notifiers()
 
     assert h["status"] == "succeeded"
     assert h["chip"] is None and h["chip_status"] is None
@@ -412,6 +425,7 @@ def test_attention_without_a_chip_notifies_nothing(store, monkeypatch):
     b = store.create_automation(ver2, "Chipped attention", None)
     h2 = engine.start(b, "manual")
     wait_done(engine, h2["id"])
+    _wait_notifiers()
 
     assert h2["chip_status"] == "attention"
     assert calls == [("Chipped attention", "Look at this")]

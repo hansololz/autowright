@@ -235,6 +235,8 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   // store write anywhere — including each execution.log event of every other
   // execution.
   const loadExecLogs = useStore((s) => s.loadExecLogs)
+  // The reveal bridge call can reject — a user action never fails silently.
+  const showToast = useStore((s) => s.showToast)
   const copy = usePlatformCopy()
   const e = full ?? summary
   const steps = full?.steps ?? []
@@ -272,7 +274,10 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   }, [full, executing, liveIdx]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch the selected log lazily (§19); live lines append via exec.log events.
+  // A new selection is a new log: the auto-follow starts stuck to the tail
+  // again, whatever the scroll position of the one just left behind said.
   useEffect(() => {
+    stickRef.current = true
     if (sel === null) return
     void loadExecLogs(executionId, sel.step ?? undefined, sel.attempt ?? undefined)
   }, [executionId, sel]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -291,7 +296,29 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
   // §7 find in log (find.tsx): the §9.2 bar over the lines' text — times are
   // not searched. The bar and query survive log flips; the current match resets
   // on a new query or a new selection.
-  const lines = useMemo(() => logs.map((l): React.ReactNode[] => [l.text]), [logs])
+  // One `[text]` array per line, cached by §5 sequence: this memo re-runs on
+  // every streamed append, and rebuilding every row's array would hand each
+  // LogRow a fresh `marked` identity — the whole pane would re-render per line.
+  // A line's text never changes, so an entry is reused until its sequence
+  // leaves the bucket (the §7 cap trims the head, a flip swaps the bucket
+  // whole — both shrink the map back down here).
+  const lineCache = useRef(new Map<number, React.ReactNode[]>())
+  const lines = useMemo(() => {
+    const cache = lineCache.current
+    if (cache.size > logs.length) {
+      const kept = new Set(logs.map((l) => l.sequence))
+      for (const sequence of cache.keys()) if (!kept.has(sequence)) cache.delete(sequence)
+    }
+    return logs.map((l): React.ReactNode[] => {
+      const held = cache.get(l.sequence)
+      // the text guard is what makes a bucket flip safe: sequences restart at
+      // 1 in every log, so a same-numbered line from another bucket is new.
+      if (held && held[0] === l.text) return held
+      const fresh: React.ReactNode[] = [l.text]
+      cache.set(l.sequence, fresh)
+      return fresh
+    })
+  }, [logs])
   const find = useFind(lines, logRef, `${executionId}/${sel?.step ?? 'x'}/${sel?.attempt ?? 0}`)
   const showFind = useRef(find.show)
   showFind.current = find.show
@@ -488,7 +515,11 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
                 aria-label={`Show logs in ${copy.fileManager}`}
                 title={`Show logs in ${copy.fileManager}`}
                 disabled={!full.logs}
-                onClick={() => { if (full.logs) void window.autowright?.revealPath(full.logs) }}
+                onClick={() => {
+                  if (!full.logs) return
+                  window.autowright?.revealPath(full.logs)
+                    .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+                }}
               >
                 <i className="fa-regular fa-folder-open" />
               </button>
