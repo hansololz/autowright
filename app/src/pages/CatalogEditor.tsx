@@ -43,18 +43,21 @@ export const errLine = (msg: string, testId?: string) => (
 
 // §22.1 reference forms, checked by the editor before a save travels: an
 // https link or an absolute path (macOS/Linux, a drive letter, a UNC share),
-// ending in the right extension once any query string is dropped.
+// ending in the right extension once any query string is dropped. A GitHub
+// file page (`…/blob/main/x.autowright?raw=true`) is an https link whose own
+// path carries the extension, so it passes as written; the backend reads it
+// through the §5.2 GitHub file rule.
 const isHttps = (s: string) => /^https:\/\//i.test(s)
 const isAbsolute = (s: string) => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(s)
 const extensionOf = (s: string) => s.replace(/[?#].*$/, '').toLowerCase()
 export const archiveRefOk = (s: string) =>
   (isHttps(s) || isAbsolute(s)) && extensionOf(s).endsWith('.autowright')
 export const imageRefOk = (s: string) =>
-  (isHttps(s) || isAbsolute(s)) && /\.(png|jpe?g|webp|gif)$/.test(extensionOf(s))
+  (isHttps(s) || isAbsolute(s)) && /\.(png|jpe?g|webp|gif|svg)$/.test(extensionOf(s))
 
 const TITLE_BLANK = 'Give this automation a title.'
 const ARCHIVE_BAD = 'Give an https link or an absolute path to an .autowright file.'
-const IMAGE_BAD = 'Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif image.'
+const IMAGE_BAD = 'Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, .gif, or .svg image.'
 
 // §22.7 working-catalog entry: a reference as written. Every entry travels as
 // `path`; the editor never sends the §22.5 CLI-only fields (automationId,
@@ -93,7 +96,7 @@ const eyebrowMargin = (first: boolean): React.CSSProperties => ({ margin: first 
 
 const ARCHIVE_PLACEHOLDER = 'https://…/name.autowright or /path/to/name.autowright'
 const IMAGE_PLACEHOLDER = 'Optional: https://… or /path/to/preview.png'
-const IMAGE_CAPTION = 'A preview for the marketplace page: an https link, or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif.'
+const IMAGE_CAPTION = 'A preview for the marketplace page: an https link (a GitHub file page works too), or an absolute path to a .png, .jpg, .jpeg, .webp, .gif, or .svg.'
 
 /** §22.7 add-automation form: the entry's four fields typed in, checked on
  * Add the way Save checks an entry, then appended to the working catalog. */
@@ -135,7 +138,7 @@ function AddAutomationForm({ onAdd, onClose }: {
             <Eyebrow style={{ margin: '14px 0 8px' }}>AUTOMATION</Eyebrow>
             <input className="ad-input mono" value={path} onChange={(e) => setPath(e.target.value)} onKeyDown={onEnter}
               spellCheck={false} placeholder={ARCHIVE_PLACEHOLDER} data-testid="catalog-picker-path" style={inputStyle} />
-            <p style={caption}>An https link, or the archive's absolute path on this {copy.machine}.</p>
+            <p style={caption}>An https link (a GitHub file page works too), or the archive's absolute path on this {copy.machine}.</p>
             <Eyebrow style={{ margin: '14px 0 8px' }}>IMAGE</Eyebrow>
             <input className="ad-input mono" value={image} onChange={(e) => setImage(e.target.value)} onKeyDown={onEnter}
               spellCheck={false} placeholder={IMAGE_PLACEHOLDER} data-testid="catalog-picker-image" style={inputStyle} />
@@ -376,7 +379,7 @@ export default function CatalogEditorModal({ source, onClose, onSaved }: {
                           <input className="ad-input mono" value={entry.path} onChange={(e) => update(entry.key, { path: e.target.value })}
                             spellCheck={false} placeholder={ARCHIVE_PLACEHOLDER}
                             data-testid="catalog-entry-path" style={inputStyle} />
-                          <p style={caption}>An https link, or the archive's absolute path on this {copy.machine}.</p>
+                          <p style={caption}>An https link (a GitHub file page works too), or the archive's absolute path on this {copy.machine}.</p>
                           <Eyebrow style={eyebrowMargin(false)}>IMAGE</Eyebrow>
                           <input className="ad-input mono" value={entry.image} onChange={(e) => update(entry.key, { image: e.target.value })}
                             spellCheck={false} placeholder={IMAGE_PLACEHOLDER}
@@ -393,13 +396,23 @@ export default function CatalogEditorModal({ source, onClose, onSaved }: {
                         </>
                       ) : (
                         <>
-                          <Eyebrow style={eyebrowMargin(true)}>LOCATION</Eyebrow>
-                          <div data-testid="catalog-location" style={{ font: '400 12px/1.5 var(--mono)', color: 'var(--text-muted)', overflowWrap: 'anywhere' }}>
-                            {where}
-                          </div>
-                          <p style={caption}>
-                            {source?.location ? 'The file this editor writes.' : 'Autowright keeps the catalog. Export its file from the Marketplace page to share it.'}
-                          </p>
+                          {creating ? (
+                            /* §22.7 create mode: nothing to locate yet - one note in
+                               place of the LOCATION line. */
+                            <p data-testid="catalog-create-note" style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
+                              Create the catalog first. You can export its file from the Marketplace page afterward.
+                            </p>
+                          ) : (
+                            <>
+                              <Eyebrow style={eyebrowMargin(true)}>LOCATION</Eyebrow>
+                              <div data-testid="catalog-location" style={{ font: '400 12px/1.5 var(--mono)', color: 'var(--text-muted)', overflowWrap: 'anywhere' }}>
+                                {where}
+                              </div>
+                              <p style={caption}>
+                                {source?.location ? 'The file this editor writes.' : 'Autowright keeps the catalog. Export its file from the Marketplace page to share it.'}
+                              </p>
+                            </>
+                          )}
                           <Eyebrow style={eyebrowMargin(false)}>NAME</Eyebrow>
                           <input className="ad-input" value={name} onChange={(e) => setName(e.target.value)}
                             placeholder="My catalog" spellCheck={false} data-testid="catalog-name" style={inputStyle} />

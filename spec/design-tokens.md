@@ -105,7 +105,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   `.ad-btn-dashed`, `.ad-btn-x`, `.ad-btn-accent-ghost` (accent-tinted ghost: Add trigger,
   agent chips), `.ad-btn-danger-ghost` (red-tinted confirm), `.ad-btn-text.danger` (red text
   button), `.ad-btn-link` (accent link-styled button), `.ad-btn-tab`, `.ad-attempt-pill`,
-  `.ad-chip-btn`, `.ad-menu-row`.
+  `.ad-chip-btn`, `.ad-menu-row` (a disabled `MenuRow` sits at half opacity with the
+  default cursor - the row stays readable so the menu keeps its shape).
   Surfaces: `.ad-hover-row` (clickable list/table rows), `.ad-card-click` (clickable cards),
   `.ad-link-title` (clickable titles), `.ad-title-rename` (click-to-edit automation title/description
   on the §11 Review page — the pencil is the only click target (the text itself is inert);

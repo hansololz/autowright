@@ -1628,6 +1628,30 @@ def test_resolve_url_rules():
         transfer.resolve_url("https://github.com/alice/repo/issues/3")
 
 
+def test_github_file_pages_are_read_from_the_raw_link():
+    """§5.2 GitHub file rule: a `blob` or `raw` page is read from
+    raw.githubusercontent.com with any query dropped. Anything else - another
+    host, a repository page, an http link - comes back as it is."""
+    assert transfer.github_raw_url(
+        "https://github.com/alice/repo/blob/main/packs/manga.autowright") == \
+        "https://raw.githubusercontent.com/alice/repo/main/packs/manga.autowright"
+    assert transfer.github_raw_url(
+        "https://github.com/alice/repo/raw/v2/manga.autowright?raw=true") == \
+        "https://raw.githubusercontent.com/alice/repo/v2/manga.autowright"
+    for kept in ("https://example.com/alice/repo/blob/main/manga.autowright",
+                 "https://github.com/alice/repo",
+                 "http://github.com/alice/repo/blob/main/manga.autowright"):
+        assert transfer.github_raw_url(kept) == kept
+    # the rule runs first in resolve_url: a file page ending `.autowright`
+    # downloads from the raw link, and any other file page is no longer a
+    # github.com page by the time the rest of the rules see it.
+    assert transfer.resolve_url(
+        "https://github.com/alice/repo/blob/main/pack.autowright") == \
+        "https://raw.githubusercontent.com/alice/repo/main/pack.autowright"
+    with pytest.raises(transfer.TransferError, match="direct link"):
+        transfer.resolve_url("https://github.com/alice/repo/blob/main/README.md")
+
+
 def test_resolve_github_release_tag_and_root_fallback(monkeypatch):
     def fake_api(path):
         table = {

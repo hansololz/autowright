@@ -746,6 +746,17 @@ only matched records are granted.
 **URL rules** — anything that fits no rule answers 422 with the reason:
 
 - HTTPS only; plain `http://` is rejected.
+- A **GitHub file page** — `github.com/{owner}/{repo}/blob/{ref}/{path}` or
+  `github.com/{owner}/{repo}/raw/{ref}/{path}`, with or without a `?raw=true` query — is
+  read from `raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}` (the query dropped).
+  This is the **GitHub file rule**, one helper (`transfer.github_raw_url`) shared with the
+  §22.1 marketplace references: the link the user pasted is what every surface keeps and
+  shows; only the read translates it. `{ref}` is the one path segment after `blob/` (a
+  branch name containing `/` can't be told from the path, so such a file needs its
+  `raw.githubusercontent.com` link). The translation runs before the rules below, so a
+  file page whose path ends `.autowright` downloads directly and `resolvedUrl` carries the
+  raw link. Added 2026-09-19: a file page's link is what the browser's address bar holds,
+  and reading it as written downloaded the HTML page, which then failed as a non-archive.
 - A URL whose **path ends `.autowright`** downloads directly — any host (GitHub release
   assets, `raw.githubusercontent.com`, gist raw links, any web server).
 - A **`github.com/{owner}/{repo}`** page (optional `.git` suffix, trailing `/`, or `/releases/latest`)

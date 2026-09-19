@@ -48,12 +48,16 @@ entries:                             # required list, may be empty, max 200 entr
     description: "Checks the series you follow every morning at 8."  # optional, max 1000
     path: /Users/you/Automations/manga.autowright   # required: https URL or absolute local path
     image: /Users/you/Automations/manga.png         # optional: https URL or absolute local path
+  - title: "Inbox digest"
+    path: https://github.com/you/automations/blob/main/inbox.autowright   # a GitHub file page
+    image: https://github.com/you/automations/blob/main/inbox.svg
 ```
 
 - `name` defaults, when absent or blank, to the catalog file's stem (`shelf` for
   `shelf.yaml`; for a link, the last path segment's stem) - except for the canonical
   `marketplace-catalog.yaml`, whose stem would name every unnamed catalog alike: then a
-  file source takes its folder's name and a link source its host name. Strings are stripped; over-long
+  file source takes its folder's name and a link source its host name (a GitHub link its
+  folder's or repository's name, §22.2). Strings are stripped; over-long
   strings are rejected, not truncated.
 - The catalog says nothing about where it lives: where a copy came from, and where it is
   refreshed from, is the §22.2 catalog table's business, on this machine only. (A `url`
@@ -62,11 +66,19 @@ entries:                             # required list, may be empty, max 200 entr
   served surface. Entries carry no id: a catalog is a plain hand-written list, and the
   page re-reads it whole after every refresh, so positions are always current.
 - `path` must end in `.autowright` (after any query string is dropped). `image` must end in
-  `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` (case-insensitive). Any other form is a
-  validation error naming the entry index.
+  `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, or `.svg` (case-insensitive; `.svg` added
+  2026-09-19). Any other form is a validation error naming the entry index. An SVG is
+  safe here because the page only ever shows an image through an `<img>` on a blob URL
+  (§22.3), where a browser runs no script and loads no external resource from it; a
+  catalog image is never inlined into the page.
 - **References.** A `path` or `image` is exactly one of two forms, taken as it is, and a
   catalog may mix them; nothing is ever resolved against where the catalog came from:
-  - An `https://` URL.
+  - An `https://` URL. A **GitHub file page** (`github.com/{owner}/{repo}/blob/{ref}/{path}`,
+    or `/raw/`, with or without `?raw=true`) is one: it is kept and shown exactly as
+    pasted, and read through the §5.2 GitHub file rule (`raw.githubusercontent.com`) - so
+    the link in the browser's address bar of an archive or a picture in a repository
+    works as a reference. The extension rules above read the page link's own path
+    (`…/blob/main/manga.autowright`, `…/blob/main/cover.svg?raw=true`).
   - An **absolute local path** on this machine (`/Users/…`, `C:\…`). There is no symlink
     or containment rule: the user chose to add this catalog, and the archive it names
     still has to pass the §5.1 validation at install, so it can only ever land a real
@@ -117,7 +129,7 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
 | column | values | meaning |
 |---|---|---|
 | `id` | uuid (§4 id rule) | names the row and its directory |
-| `location` | `null`, an absolute file path, or an `https://` link | where the catalog is read from. A path or link is what **Refresh** re-reads. `null` means the app's copy is the only copy: nothing to refresh from, and the copy is what §22.7 edits. |
+| `location` | `null`, an absolute file path, or an `https://` link | where the catalog is read from. A path or link is what **Refresh** re-reads. `null` means the app's copy is the only copy: nothing to refresh from, and the copy is what §22.7 edits. A link may be a **GitHub page** (below). |
 | `shown` | bool, default `true` | whether the page renders the catalog's entries. A hidden catalog stays in the table and collapses to its header row (§22.3). |
 | `auto_refresh` | bool, default `false` | whether the backend refreshes it on its own (below). Meaningless, and kept `false`, while `location` is `null`. |
 | `added_at` | §5 UTC timestamp | when the row was made |
@@ -141,6 +153,21 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   fix or remove marketplaces.yaml" — the file is never overwritten with the empty default.
 - `kind` is **derived** from `location` wherever a surface needs it: `url`, `file`, or
   `none`. Nothing stores it.
+- **GitHub pages as locations** (added 2026-09-19). A link location is read through the
+  §5.2 GitHub file rule like every reference, so the catalog file's page
+  (`github.com/{owner}/{repo}/blob/{ref}/{path}`) works as pasted. A **repository page**
+  works too: `github.com/{owner}/{repo}` (optional `.git`, trailing `/`) reads the canonical
+  `marketplace-catalog.yaml` at the repository root on the default branch
+  (`raw.githubusercontent.com/{owner}/{repo}/HEAD/marketplace-catalog.yaml`), and a
+  folder page `github.com/{owner}/{repo}/tree/{ref}[/{folder}]` reads it in that folder
+  on that ref. The location stays the link as pasted (the row, the header chip's
+  hostname `github.com`, the settings modal, the CLI all show it); only the read
+  translates. The §22.1 default name treats a GitHub link like a file: a repository page
+  takes the repository's name, a folder page its folder's name, and a file page whose
+  stem is the canonical one its folder's name (the repository's at the root) - never
+  `github.com`, which would name every such catalog alike. Any other `github.com` link
+  (an issue, a release page) is read as written and fails as a non-catalog like any other
+  page.
 - **Add** takes a link or a file path (the §22.3 modal's three ways - a dropped or chosen
   file, a typed path, a pasted link - all land as one of those two), reads it, validates,
   and caches; any failure answers 422 and stores nothing. The row's `location` is the link
@@ -205,14 +232,10 @@ its own actions, and refetches when the §19 `marketplace.changed` WebSocket eve
 **Empty state** (no catalogs): the §14 `EmptyState` with a bold first line "No marketplaces
 yet" over the body "Add a marketplace catalog someone shared - drop the file, type its
 path, or paste its link - to browse the automations it lists." (the machine noun through
-the §9 per-OS copy rule) and an "Add marketplace…" button. Below it, one **MAKE YOUR OWN**
-section: the eyebrow, one muted line "Create a catalog here and add automations from this
-Mac. Or write the YAML by hand - list each archive by its full path on this Mac or an
-https link, save it as marketplace-catalog.yaml, then add it here.", a ghost **Create
-catalog…** button (the §22.7 create flow), and the §22.1 example catalog in a mono code
-box (`.ad-card` padding 14, `pre` at 12 px `--mono`, selectable, horizontal scroll inside
-the box). The section renders only in the empty state - once a catalog exists the user
-has seen the shape.
+the §9 per-OS copy rule) and an "Add marketplace…" button. Nothing else renders in the
+empty state (the earlier MAKE YOUR OWN section - eyebrow, hand-authoring instructions and
+the §22.1 example catalog in a code box - was removed 2026-09-19; the header's **Create
+catalog…** is the way to author one in-app, and §22.1 documents the file shape).
 
 **Per catalog** - one section each, in table order:
 - Header row: the catalog name (600, 15 px), a §14 `MetaChip` naming the location (link
@@ -224,21 +247,26 @@ has seen the shape.
   adds a muted `MetaChip` "Hidden" after the location chip. While `error` is set, an
   amber `Notice` beneath the header: "Couldn't refresh: <error>. Showing the last copy."
   (for a catalog with no readable copy - `cached` false: "Couldn't load: <error>.").
-  Quiet square icon buttons on the right (`.ad-btn-ghost.icon`; Remove adds `.danger`
-  so it reads red - never the accent-filled §12 execute shape, two orange squares beside
-  a title read as a call to action): **Edit** (`fa-pen`, `aria-label` "Edit catalog";
-  rendered when the location is a path or `null` - the copy is on this machine - and
-  opening the §22.7 editor), **Export** (`fa-file-export`, `aria-label` "Export catalog";
-  rendered while `cached` is true, for every kind of location - it saves the catalog
-  file the app holds: §19 `GET …/file` for the bytes, then the §3 `save-file` dialog with
-  the default name `marketplace-catalog.yaml`; a saved file toasts "Exported to
-  <path>.", a cancelled dialog does nothing, a failed fetch toasts the reason. This is
-  how a catalog created in the app leaves the app: the user puts the file wherever they
-  share from), **Refresh** (`fa-rotate`, spinner while running,
-  `aria-label` "Refresh"; rendered only when the catalog has a location), **Settings**
-  (`fa-gear`, `aria-label` "Catalog settings"; always) and **Remove** (`fa-trash`,
-  `aria-label` "Remove") - Remove opens a danger `ConfirmModal`, title "Remove
-  "<name>"?", body "Automations you already installed from it stay, and so does every
+  One quiet square **actions button** on the right (`.ad-btn-ghost.icon`, `fa-ellipsis`,
+  `aria-label` "Catalog actions", `title` "More actions", `data-testid`
+  `marketplace-actions`; the glyph is the §9 spinner while this catalog's own Refresh is
+  running) opening a `PopMenu` (right-aligned under the button, `min-width` 210) of
+  `MenuRow`s, each with a 14 px icon column - the §9.2 automation actions menu's shape.
+  Collapsed 2026-09-19 from five per-row icon buttons: a row of squares beside every
+  title read as clutter, and the accent-filled §12 execute shape was never an option
+  (two orange squares beside a title read as a call to action). Picking a row closes the
+  menu; the rows, in order, each rendered only when its condition holds:
+  **Edit catalog…** (`fa-pen`; rendered when the location is a path or `null` - the copy
+  is on this machine - and opening the §22.7 editor), **Export catalog…**
+  (`fa-file-export`; rendered while `cached` is true, for every kind of location - it
+  saves the catalog file the app holds: §19 `GET …/file` for the bytes, then the §3
+  `save-file` dialog with the default name `marketplace-catalog.yaml`; a saved file toasts
+  "Exported to <path>.", a cancelled dialog does nothing, a failed fetch toasts the
+  reason. This is how a catalog created in the app leaves the app: the user puts the file
+  wherever they share from), **Refresh** (`fa-rotate`; rendered only when the catalog has
+  a location; disabled while this catalog or Refresh all is running), **Catalog
+  settings…** (`fa-gear`; always) and **Remove…** (`fa-trash`, the `MenuRow` danger
+  tone; always). Remove opens a danger `ConfirmModal`, title "Remove "<name>"?", body "Automations you already installed from it stay, and so does every
   archive file it lists. You can add the marketplace again later.", confirm label
   "Remove". Removing refetches the list; no toast. The Refresh all, Add, and Install
   buttons read "Refreshing…" / "Adding…" / "Installing…" beside the §9 spinner while
@@ -248,9 +276,12 @@ has seen the shape.
   settings modal.
 - The **entry grid** (shown catalogs only): `grid-template-columns: repeat(auto-fill,
   minmax(220px, 1fr))`, gap 14. Each entry is an `.ad-card` with zero padding and
-  `overflow: hidden`: a 16:9 image area at the top (`object-fit: cover`; while the image is
-  loading, or when the entry lists no image or its image can't be loaded, a `--bg-inset`
-  placeholder with a faint centered `fa-image` icon - the no-image icon), then a 14 px
+  `overflow: hidden`: a 16:9 image area at the top (`aspect-ratio: 16 / 9`, full card
+  width) on a `--bg-inset` ground; the image is drawn with `object-fit: contain`, so the
+  whole picture always fits inside the area and is never cropped or overflowed - a picture
+  of another shape is letterboxed on the inset ground, never stretched. While the image
+  is loading, or when the entry lists no image or its image can't be loaded, the area
+  shows a faint centered `fa-image` icon - the no-image icon. Then a 14 px
   padded body holding the title (600, 13.5 px), the description (muted, 12.5 px, clamped
   to three lines with an ellipsis), and a footer row with the accent **Install** button. A
   catalog that lists no entries shows the §14 `EmptyLine` "This marketplace lists no
@@ -265,7 +296,7 @@ has seen the shape.
   fetch that lands after the unmount is revoked at once, never kept). Nothing
   is written to disk. A failed fetch (404, 502, network) keeps the no-image icon.
 
-**Catalog settings modal** (width 460, from the gear): title "Catalog settings", the
+**Catalog settings modal** (width 460, from the actions menu's Catalog settings…): title "Catalog settings", the
 catalog's name muted beneath it. Three rows under §14 eyebrows:
 - LOCATION: a mono `ad-input` holding the location (empty for `null`; placeholder
   `https://… or /path/to/marketplace-catalog.yaml`), caption "Where Refresh reads this
@@ -301,8 +332,9 @@ this Mac, or one at a link.". Three ways in, two controls:
   extension, a folder) shows the inline error "Drop one .yaml file." under the zone and
   adds nothing. While an add is in flight the zone reads "Reading…" and ignores drops.
 - The OR divider, then one field, FROM A LINK OR FILE PATH (mono, placeholder `https://…
-  or /path/to/marketplace-catalog.yaml`, caption "An https link, or the path of a catalog
-  file on this Mac."). A value starting with `https://` is sent as `{ url }`; anything
+  or /path/to/marketplace-catalog.yaml`, caption "An https link (a GitHub repository or
+  file page works too), or the path of a catalog file on this Mac."). A value starting
+  with `https://` is sent as `{ url }`; anything
   else is sent as `{ path }` exactly as typed (the backend expands a leading `~` and
   requires the result to be absolute - "give the catalog file's absolute path"). Enter
   submits.
@@ -351,8 +383,10 @@ still cached).
 - `DELETE /marketplace/sources/{id}` → `{ ok: true }`; unknown id → 404.
 - `GET /marketplace/sources/{id}/entries/{index}/image` → the entry's image bytes, read
   **on demand by reference**: an https reference is downloaded with the §22.1 caps,
-  headers, and deadline (never stored), a local path is read under the same 5 MB cap; the
-  content type matches the reference's extension. 404 when the source or entry doesn't
+  headers, and deadline (never stored; a GitHub file page through the §5.2 GitHub file
+  rule), a local path is read under the same 5 MB cap; the
+  content type matches the reference's extension (`image/svg+xml` for `.svg`, which an
+  `<img>` needs to render it at all). 404 when the source or entry doesn't
   exist or the entry lists no image; 502 with the reason when the reference can't be
   read (a missing file, a failing host, over the cap) - the page shows the no-image icon
   either way. Runs on the threadpool.
@@ -454,9 +488,13 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
 ### 22.6 Tests
 
 - Backend (`tests/test_marketplace.py`): §22.1 validation (format gate, caps, extension
-  rules, index-naming errors, a `url` key ignored), the two reference forms (https URL,
+  rules incl. `.svg`, index-naming errors, a `url` key ignored), the two reference forms (https URL,
   absolute local path) with relative references and other schemes rejected naming the
-  entry, the catalog table's lenient load (missing `shown`/`auto_refresh` defaults, a bad
+  entry, the GitHub rules (a file-page location and a file-page image read from the
+  `raw.githubusercontent.com` link with the location and reference kept as pasted; a
+  repository page and a folder page reading `marketplace-catalog.yaml` at `HEAD` / that
+  ref and folder, named after the repository / folder; a file page with the canonical
+  stem named after its folder; an issue link read as written), the catalog table's lenient load (missing `shown`/`auto_refresh` defaults, a bad
   `location` skipped), add by link and by path (`~` expanded) with the 409 duplicate rule,
   refresh re-reading the location (link downloaded, path read) and keeping the copy on
   failure, a `null` location refusing refresh (409) and being skipped by refresh-all,
@@ -465,8 +503,8 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   sweep refreshing only flagged rows with a location and recording failures in `error`,
   and every §22.4 route with the network monkeypatched (add 422/409, PATCH 422/409,
   refresh 200-with-error, the image route reading a local path and an https reference on
-  demand, 404 for no image, 502 for an unreadable one, entry preview producing a
-  confirmable token, the file route answering the copy's bytes with the yaml content
+  demand, an `.svg` served as `image/svg+xml`, 404 for no image, 502 for an unreadable
+  one, entry preview producing a confirmable token, the file route answering the copy's bytes with the yaml content
   type - 404 unknown, 422 when the copy is unreadable).
 - Backend authoring (§22.7, same file): create with a folder writes the catalog there and
   the row's location is that file, 409 on a folder that already holds one, 422 on a
@@ -494,7 +532,8 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   and `null` locations only, the editor opening on the served catalog with the details
   form viewed (its LOCATION line naming the file) and one navigator row per entry (title over its reference label), clicking
   a row viewing its entry form with the title, description, and reference editable, the
-  add form taking a title, description, reference, and image and Add appending the entry
+  add form taking a title, description, reference, and image (a GitHub file page and an
+  `.svg` image accepted as written) and Add appending the entry
   as typed (trimmed, viewed, the form closed; nothing exported, no dialog, no export
   call), Add disabled while the title is blank, a malformed reference and a malformed
   image stopping Add in place with the reason (nothing appended), Remove from
@@ -503,7 +542,7 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   (`path` for every row as written, `image` when set, never `archiveFile`), a backend
   `entry <i>:` 422 viewing that entry, the discard
   confirm on Escape with unsaved edits, Create catalog… opening the empty editor (no
-  folder anywhere; LOCATION reads "Kept by Autowright") whose Create button POSTs the
+  folder anywhere; no LOCATION line, only the create note) whose Create button POSTs the
   content alone, and the Export button fetching the file and handing it to `saveFile` as
   `marketplace-catalog.yaml` with the "Exported to <path>." toast (absent while `cached`
   is false).
@@ -539,7 +578,7 @@ file isn't on this machine).
 
 **Create** and **Edit** share one surface, the **catalog editor** (redesigned 2026-09-12
 as a two-column form; the earlier single-column list of input cards is gone).
-**Create catalog…** (page header, and the empty state's MAKE YOUR OWN section) opens it
+**Create catalog…** (the page header; the only such button on the page) opens it
 empty in create mode - no location to choose, the catalog is kept by Autowright; the
 **Edit** button on a catalog with a path or `null` location
 opens it in edit mode on `GET …/catalog` (the file at the location, or the copy; the §14
@@ -574,19 +613,24 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   guard below). Beneath, a scroll pane padded `18px 22px` holding the viewed form, every
   field under a §14 eyebrow with the §14 caption under it where one is named:
   - **Details form** (viewed when the editor opens, and after the last entry is removed).
-    First a LOCATION line: the catalog file's full path (mono, muted, 12 px, wrapping -
-    the navigator row only has room for its tail) with the caption "The file this editor
-    writes." for a path location; otherwise (a `null` location, and always in create
-    mode) "Kept by Autowright" with the caption "Autowright keeps the catalog. Export its
-    file from the Marketplace page to share it.". Then NAME (`ad-input`, placeholder "My
-    catalog") and DESCRIPTION (`ad-input`).
+    In edit mode it leads with a LOCATION line: the catalog file's full path (mono,
+    muted, 12 px, wrapping - the navigator row only has room for its tail) with the
+    caption "The file this editor writes." for a path location; for a `null` location
+    "Kept by Autowright" with the caption "Autowright keeps the catalog. Export its file
+    from the Marketplace page to share it.". In create mode there is no LOCATION line
+    (removed 2026-09-19 - there is nothing to locate yet); the form leads with one muted
+    note (12.5 px, `--text-muted`, `data-testid` `catalog-create-note`): "Create the
+    catalog first. You can export its file from the Marketplace page afterward.". Then NAME (`ad-input`, placeholder "My catalog") and DESCRIPTION
+    (`ad-input`).
   - **Entry form**: TITLE (`ad-input`), DESCRIPTION (`ad-input`), then AUTOMATION: a mono
     `ad-input` holding the reference exactly as written (placeholder
-    `https://…/name.autowright or /path/to/name.autowright`, caption "An https link, or
-    the archive's absolute path on this Mac." through the §9 per-OS copy rule) - every
+    `https://…/name.autowright or /path/to/name.autowright`, caption "An https link (a
+    GitHub file page works too), or the archive's absolute path on this Mac." through the
+    §9 per-OS copy rule) - every
     entry is a reference, whichever way it came in. Then IMAGE: a mono `ad-input` (placeholder
     `Optional: https://… or /path/to/preview.png`, caption "A preview for the marketplace
-    page: an https link, or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif."). Under
+    page: an https link (a GitHub file page works too), or an absolute path to a .png,
+    .jpg, .jpeg, .webp, .gif, or .svg."). Under
     the fields, 18 px down, a quiet danger **Remove from catalog** text button
     (`fa-trash`; `aria-label` "Remove entry") with the muted caption "Its archive file
     stays where it is." beside it. Removing views the entry after it (the one before when
@@ -600,7 +644,9 @@ navigator header carries the mode), `aria-label` "Create catalog" / "Edit catalo
   that is neither an `https://` link nor an absolute path, or doesn't end in `.autowright`
   ("Give an https link or an absolute path to an .autowright file."); a non-empty image of
   the wrong form ("Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp,
-  or .gif image."). A 422 or 409 from the backend shows in the footer as it comes, and one
+  .gif, or .svg image."). The editor's form checks read the extension off the link's own
+  path (a query dropped), so a GitHub file page passes like any https link. A 422 or 409
+  from the backend shows in the footer as it comes, and one
   whose message starts `entry <i>:` views entry `i` as well. Create POSTs
   `/marketplace/catalogs` with the content alone (never a `folder` - that option is the
   §22.5 CLI's): the backend writes the catalog to the new row's copy through the save

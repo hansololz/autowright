@@ -2518,7 +2518,8 @@ def delete_all_secrets() -> dict:
 
 # ---------- marketplace (§22) ----------
 _IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                      ".webp": "image/webp", ".gif": "image/gif"}
+                      ".webp": "image/webp", ".gif": "image/gif",
+                      ".svg": "image/svg+xml"}
 
 
 def _marketplace_json() -> dict:

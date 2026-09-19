@@ -469,6 +469,8 @@ a.ad-chip-btn, a.ad-chip-btn:hover { text-decoration: none; }
 .ad-menu-row:hover { background: rgba(255, 255, 255, 0.05); }
 .ad-menu-row.active { color: var(--text); background: rgba(255, 255, 255, 0.04); }
 .ad-menu-row.danger { color: var(--red); }
+.ad-menu-row:disabled { opacity: 0.5; cursor: default; }
+.ad-menu-row:disabled:hover { background: transparent; }
 
 @keyframes adFadeUp {
   from { opacity: 0; transform: translateY(8px); }

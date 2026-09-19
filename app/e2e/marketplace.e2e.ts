@@ -74,10 +74,9 @@ describe('marketplace e2e', () => {
     }, 10_000, 'developerMode to persist')
     await page.getByTestId('nav-marketplace').waitFor({ timeout: 10_000 })
 
-    // Empty state: the headline plus the §22.1 example catalog.
+    // Empty state: the headline and Add marketplace… alone.
     await clickNav(page, 'Marketplace')
     await page.getByText('No marketplaces yet').waitFor({ timeout: 10_000 })
-    await page.getByText('format_version: 1').waitFor({ timeout: 10_000 })
     expect(await page.getByTestId('marketplace-add').count()).toBeGreaterThan(0)
     expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(0)
     await shot(page, 'marketplace-empty.png')
@@ -95,12 +94,14 @@ describe('marketplace e2e', () => {
     // §22.2: a file location is re-read like a link, so both Refresh all and
     // the row's own Refresh are offered, and the row says when it was read.
     expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(1)
+    await page.getByTestId('marketplace-actions').click()
     expect(await page.getByRole('button', { name: 'Refresh', exact: true }).count()).toBe(1)
     await page.getByText(/^Refreshed /).waitFor()
     await shot(page, 'marketplace-source.png')
 
-    // §22.3 catalog settings: the §22.2 row's own columns behind the gear.
-    await page.getByRole('button', { name: 'Catalog settings' }).click()
+    // §22.3 catalog settings: the §22.2 row's own columns behind the gear row
+    // of the open actions menu.
+    await page.getByRole('button', { name: 'Catalog settings…' }).click()
     await page.getByTestId('catalog-settings').waitFor({ timeout: 10_000 })
     await page.getByTestId('settings-location').waitFor()
     await shot(page, 'marketplace-settings.png')
@@ -185,7 +186,8 @@ describe('marketplace e2e', () => {
     await handle.app.evaluate(({ dialog }, catalogFilePath) => {
       dialog.showSaveDialog = () => Promise.resolve({ canceled: false, filePath: catalogFilePath })
     }, path.join(authored, 'marketplace-catalog.yaml'))
-    await authoredSection.getByLabel('Export catalog').click()
+    await authoredSection.getByTestId('marketplace-actions').click()
+    await page.getByRole('button', { name: 'Export catalog…' }).click()
     await waitFor(async () => (await readdir(authored)).includes('marketplace-catalog.yaml'),
       20_000, 'the exported catalog file to land')
 

@@ -705,11 +705,11 @@ export function Caret({ open, openDeg = 0, closedDeg = -90, style }: {
   )
 }
 
-export function MenuRow({ children, onClick, danger, active }: {
-  children: React.ReactNode; onClick?: () => void; danger?: boolean; active?: boolean
+export function MenuRow({ children, onClick, danger, active, disabled }: {
+  children: React.ReactNode; onClick?: () => void; danger?: boolean; active?: boolean; disabled?: boolean
 }) {
   return (
-    <button className={`ad-btn-bare ad-menu-row${danger ? ' danger' : ''}${active ? ' active' : ''}`} onClick={onClick}>
+    <button className={`ad-btn-bare ad-menu-row${danger ? ' danger' : ''}${active ? ' active' : ''}`} onClick={onClick} disabled={disabled}>
       {children}
     </button>
   )

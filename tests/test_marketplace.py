@@ -16,6 +16,7 @@ from autowright import marketplace, paths, transfer
 from autowright.marketplace import MarketplaceError, MarketplaceStore
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
 
 
 def catalog_text(entries, **top) -> str:
@@ -106,6 +107,25 @@ def test_the_canonical_stem_names_the_folder_or_the_host():
     assert marketplace.parse_catalog(catalog_text([]))["name"] == "My catalog"
 
 
+def test_a_github_page_names_the_repository_or_the_folder():
+    """§22.2: a GitHub repository page is named after the repository and a
+    folder page after the folder; a file page whose stem is the canonical one
+    takes its folder's name (the repository's at the root). Any other stem
+    still names the catalog, and a non-GitHub link keeps the host fallback."""
+    assert marketplace.default_name("https://github.com/alice/shelf") == "shelf"
+    assert marketplace.default_name(
+        "https://github.com/alice/shelf/tree/dev/cats/mine") == "mine"
+    assert marketplace.default_name(
+        "https://github.com/alice/shelf/blob/main/marketplace-catalog.yaml") == "shelf"
+    assert marketplace.default_name(
+        "https://github.com/alice/shelf/blob/main/community/"
+        "marketplace-catalog.yaml") == "community"
+    assert marketplace.default_name(
+        "https://github.com/alice/shelf/blob/main/shelf.yaml") == "shelf"
+    assert marketplace.default_name(
+        "https://x.test/lists/marketplace-catalog.yaml") == "x.test"
+
+
 def test_string_limits_reject_rather_than_truncate():
     for top, limit in (("name", marketplace.MAX_NAME),
                        ("description", marketplace.MAX_DESCRIPTION)):
@@ -138,6 +158,22 @@ def test_entry_rules_name_the_entry_index():
     # a query string is dropped before the extension is read
     assert parse([{"title": "T", "path": "https://x.test/a.autowright?raw=1",
                    "image": "https://x.test/i.PNG?v=2"}])["entries"][0]["index"] == 0
+
+
+def test_an_svg_is_one_of_the_image_extensions():
+    """§22.1: `.svg` names a thumbnail like the raster extensions do; anything
+    else is still refused naming the entry."""
+    def parse(image):
+        return marketplace.parse_catalog(
+            catalog_text([{"title": "Manga", "path": "https://x.test/a.autowright",
+                           "image": image}]), location="/m/marketplace.yaml")
+
+    assert parse("https://x.test/cover.svg")["entries"][0]["image"] == \
+        "https://x.test/cover.svg"
+    with pytest.raises(MarketplaceError) as e:
+        parse("https://x.test/cover.bmp")
+    assert str(e.value) == ("entry 0: `image` must name a .png, .jpg, .jpeg, .webp, "
+                            ".gif, .svg file")
 
 
 def test_entries_cap_and_shape():
@@ -298,6 +334,62 @@ def test_add_expands_a_leading_tilde(market, tmp_path, monkeypatch):
     source = market.add(path=f"~/shelf/{marketplace.CATALOG_FILENAME}")
     assert source["location"] == str(shelf / marketplace.CATALOG_FILENAME)
     assert source["kind"] == "file" and source["name"] == "shelf"
+
+
+def test_a_github_file_page_location_reads_the_raw_link(market, monkeypatch):
+    """§22.2: a GitHub file page is read through the §5.2 raw link, and the row
+    keeps the link as pasted. With no name in the catalog the canonical stem
+    falls back to the file's folder - the repository at the root."""
+    page = "https://github.com/alice/shelf/blob/main/marketplace-catalog.yaml"
+    raw = "https://raw.githubusercontent.com/alice/shelf/main/marketplace-catalog.yaml"
+    nested = "https://github.com/alice/shelf/blob/main/community/marketplace-catalog.yaml"
+    nested_raw = ("https://raw.githubusercontent.com/alice/shelf/main/community/"
+                  "marketplace-catalog.yaml")
+    served = catalog_text([{"title": "Web",
+                            "path": "https://x.test/w.autowright"}]).encode()
+    asked = serve(monkeypatch, {raw: served, nested_raw: served})
+    source = market.add(url=page)
+    assert asked == [raw]
+    assert source["kind"] == "url" and source["location"] == page
+    assert source["name"] == "shelf"
+    assert market.add(url=nested)["name"] == "community"
+    assert asked == [raw, nested_raw]
+
+
+def test_a_github_repository_or_folder_page_reads_the_canonical_catalog(market,
+                                                                        monkeypatch):
+    """§22.2: a repository page reads the canonical catalog at the root on the
+    default branch, a folder page reads it in that folder on that ref - and a
+    refresh re-reads the same raw link."""
+    repo_page = "https://github.com/alice/shelf"
+    repo_raw = ("https://raw.githubusercontent.com/alice/shelf/HEAD/"
+                "marketplace-catalog.yaml")
+    folder_page = "https://github.com/alice/shelf/tree/dev/cats/mine/"
+    folder_raw = ("https://raw.githubusercontent.com/alice/shelf/dev/cats/mine/"
+                  "marketplace-catalog.yaml")
+    served = catalog_text([{"title": "Web",
+                            "path": "https://x.test/w.autowright"}]).encode()
+    asked = serve(monkeypatch, {repo_raw: served, folder_raw: served})
+    repo = market.add(url=repo_page)
+    assert asked == [repo_raw]
+    assert repo["location"] == repo_page and repo["name"] == "shelf"
+    folder = market.add(url=folder_page)
+    assert asked == [repo_raw, folder_raw]
+    assert folder["location"] == folder_page and folder["name"] == "mine"
+    market.refresh(folder["id"])
+    assert asked == [repo_raw, folder_raw, folder_raw]
+
+
+def test_a_remote_catalog_may_reference_github_file_pages(market, monkeypatch):
+    """§22.1: a GitHub file page is an https reference like any other, so the
+    origin-aware rule is satisfied and both references are listed as written."""
+    archive = "https://github.com/alice/shelf/blob/main/packs/inbox.autowright"
+    image = "https://github.com/alice/shelf/blob/main/images/cover.svg"
+    serve(monkeypatch, {CATALOG_URL: catalog_text(
+        [{"title": "Inbox", "path": archive, "image": image}], name="Shelf").encode()})
+    source = market.add(url=CATALOG_URL)
+    assert source["entries"] == [{"index": 0, "title": "Inbox", "description": "",
+                                  "archive": archive, "image": image}]
 
 
 def test_add_rejects_bad_locations_and_duplicates(market, tmp_path):
@@ -931,6 +1023,22 @@ def test_images_are_read_on_demand_and_never_stored(market, tmp_path, monkeypatc
         [marketplace.CATALOG_FILENAME]
 
 
+def test_an_image_at_a_github_file_page_is_read_from_the_raw_link(market, tmp_path,
+                                                                 monkeypatch):
+    """§22.1: an image reference on a GitHub file page is downloaded from its
+    raw link, query dropped, and answers the extension it names."""
+    page = "https://github.com/alice/shelf/blob/main/cover.svg?raw=true"
+    raw = "https://raw.githubusercontent.com/alice/shelf/main/cover.svg"
+    f = write_catalog(tmp_path, [{"title": "One",
+                                  "path": str(tmp_path / "one.autowright"),
+                                  "image": page}])
+    source = market.add(path=str(f))
+    assert source["entries"][0]["image"] == page
+    asked = serve(monkeypatch, {raw: SVG})
+    assert market.image_bytes(source["id"], 0) == (SVG, ".svg")
+    assert asked == [raw]
+
+
 # ---------- §22.4 routes ----------
 def _export(client) -> bytes:
     """A real §5.1 export, so the entry preview below lands through import."""
@@ -1112,6 +1220,19 @@ def test_image_route_reads_the_reference_on_demand(client, tmp_path, monkeypatch
     assert client.get("/marketplace/sources/nope/entries/0/image").status_code == 404
     r = client.get(f"/marketplace/sources/{source['id']}/entries/3/image")
     assert r.status_code == 502 and "couldn't read the image" in r.json()["detail"]
+
+
+def test_image_route_serves_an_svg_as_svg(client, tmp_path):
+    """§22.4: `.svg` is one of the thumbnail extensions, served with its own
+    content type."""
+    (tmp_path / "cover.svg").write_bytes(SVG)
+    f = write_catalog(tmp_path, [{"title": "One",
+                                  "path": str(tmp_path / "one.autowright"),
+                                  "image": str(tmp_path / "cover.svg")}])
+    source = client.post("/marketplace/sources", json={"path": str(f)}).json()
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/image")
+    assert r.status_code == 200 and r.content == SVG
+    assert r.headers["content-type"].startswith("image/svg+xml")
 
 
 def test_entry_preview_yields_a_confirmable_token(client, tmp_path):

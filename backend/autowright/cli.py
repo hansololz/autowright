@@ -2407,8 +2407,9 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                     "  autowright automation import https://example.com/report.autowright\n"
                     "  autowright automation import https://github.com/someone/some-repo")
     p.add_argument("path", metavar="file-or-link",
-                   help="a .autowright file on disk, a direct https link to one, or a "
-                        "github.com repository or release page holding one")
+                   help="a .autowright file on disk, a direct https link to one, its "
+                        "github.com file page, or a github.com repository or release page "
+                        "holding one")
 
     pg = _sub(ag, "param", None, "read and set an automation's parameter values",
               description="Parameters are the values an automation's steps read when they "

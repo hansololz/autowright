@@ -3,7 +3,7 @@
 // a seeded catalog's grid, a hidden catalog collapsing to its header, the
 // settings modal's PATCH, Install opening the §9.1 import modal on its preview
 // step, Export handing the catalog file to the save dialog, the add modal's
-// three ways in, and the §22.7 authoring flow (the Edit button, the two-column
+// three ways in, and the §22.7 authoring flow (the Edit catalog… row, the two-column
 // catalog editor, the typed add form - title, description, path, image - that
 // appends an entry without exporting or opening anything, Save's body, the
 // discard confirm, and create mode, which has no save location at all). App
@@ -194,6 +194,17 @@ const setDeveloperMode = (on: boolean) => {
   storeMod.useStore.setState({ settings: { ...servedSettings } })
 }
 
+// §22.3: the row's actions live behind one ellipsis button, so every per-row
+// action is reached by opening that catalog's menu first. A fresh render needs
+// a fresh open - the menu unmounts with the page.
+const openActions = async (index = 0) => {
+  fireEvent.click((await screen.findAllByTestId('marketplace-actions'))[index])
+}
+const menuRow = (label: string) => screen.getByRole('button', { name: label })
+// The open menu's rows, top to bottom - the icons carry no text.
+const menuRowLabels = () =>
+  Array.from(document.querySelectorAll('.ad-menu-row')).map((row) => row.textContent)
+
 beforeEach(() => {
   servedSettings = { ...SETTINGS }
   marketplaceList.mockReset()
@@ -265,17 +276,16 @@ describe('§22.3 preview gate', () => {
 })
 
 describe('§22.3 Marketplace page', () => {
-  it('the empty state shows the example catalog', async () => {
+  it('the empty state is the headline and Add marketplace… alone', async () => {
     render(<MarketplacePage />)
     expect(await screen.findByText('No marketplaces yet')).toBeTruthy()
-    expect(screen.getByText('MAKE YOUR OWN')).toBeTruthy()
-    expect(screen.getByText(/format_version: 1/)).toBeTruthy()
-    // §22.1: an entry names its archive by reference, never by a copy.
-    expect(screen.getByText(/path: \/Users\/you\//)).toBeTruthy()
+    // §22.3: no MAKE YOUR OWN section, no example catalog (removed 2026-09-19).
+    expect(screen.queryByText('MAKE YOUR OWN')).toBeNull()
+    expect(screen.queryByText(/format_version: 1/)).toBeNull()
     // §22.3: Refresh all needs at least one catalog with a location.
     expect(screen.queryByTestId('marketplace-refresh-all')).toBeNull()
-    // §22.7: Create catalog… in the header and again in MAKE YOUR OWN.
-    expect(screen.getAllByTestId('marketplace-create')).toHaveLength(2)
+    // §22.7: one Create catalog… - the header's.
+    expect(screen.getAllByTestId('marketplace-create')).toHaveLength(1)
   })
 
   it('a link catalog renders its entry grid, host chip and Refreshed line', async () => {
@@ -290,11 +300,24 @@ describe('§22.3 Marketplace page', () => {
     // §22.3: an entry with no image keeps the no-image icon.
     expect(screen.getByTestId('no-image')).toBeTruthy()
     expect(screen.getByTestId('marketplace-refresh-all')).toBeTruthy()
-    expect(screen.getByLabelText('Refresh')).toBeTruthy()
-    expect(screen.getByLabelText('Catalog settings')).toBeTruthy()
-    expect(screen.getByLabelText('Remove')).toBeTruthy()
-    // §22.3: the example catalog is the empty state's alone.
-    expect(screen.queryByText('MAKE YOUR OWN')).toBeNull()
+    await openActions()
+    expect(menuRow('Refresh')).toBeTruthy()
+    expect(menuRow('Catalog settings…')).toBeTruthy()
+    expect(menuRow('Remove…')).toBeTruthy()
+  })
+
+  it('the row actions menu lists what this catalog can do, in order', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
+    await openActions()
+    // §22.3: one settled order, and no Edit catalog… for a link - its file
+    // isn't on this machine.
+    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…', 'Remove…'])
+    expect(screen.getByTestId('marketplace-actions').getAttribute('aria-expanded')).toBe('true')
+    // §22.3: picking a row does that row's thing - the gear opens settings.
+    fireEvent.click(menuRow('Catalog settings…'))
+    expect(await screen.findByTestId('catalog-settings')).toBeTruthy()
   })
 
   it('a file catalog names its file and refreshes like a link', async () => {
@@ -303,7 +326,8 @@ describe('§22.3 Marketplace page', () => {
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     expect(screen.getByText('marketplace-catalog.yaml')).toBeTruthy()
     // §22.2: a path is re-read like a link - both refresh.
-    expect(screen.getByLabelText('Refresh')).toBeTruthy()
+    await openActions()
+    expect(menuRow('Refresh')).toBeTruthy()
     expect(screen.getByTestId('marketplace-refresh-all')).toBeTruthy()
     expect(screen.getByText(/^Refreshed Today, /)).toBeTruthy()
   })
@@ -314,11 +338,12 @@ describe('§22.3 Marketplace page', () => {
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     // §22.2: a null location is not refreshable - it says when it was added.
     expect(screen.getByText('Kept by Autowright')).toBeTruthy()
-    expect(screen.queryByLabelText('Refresh')).toBeNull()
+    await openActions()
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
     expect(screen.queryByTestId('marketplace-refresh-all')).toBeNull()
     expect(screen.getByText(/^Added Today, /)).toBeTruthy()
     expect(screen.queryByText(/^Refreshed /)).toBeNull()
-    expect(screen.getByLabelText('Remove')).toBeTruthy()
+    expect(menuRow('Remove…')).toBeTruthy()
   })
 
   it('a hidden catalog collapses to its header row', async () => {
@@ -330,7 +355,8 @@ describe('§22.3 Marketplace page', () => {
     // §22.3: no description, no grid - the header row and nothing else.
     expect(screen.queryByText('Automations I use.')).toBeNull()
     expect(screen.queryByTestId('marketplace-entry')).toBeNull()
-    expect(screen.getByLabelText('Catalog settings')).toBeTruthy()
+    await openActions()
+    expect(menuRow('Catalog settings…')).toBeTruthy()
   })
 
   it('a failed refresh keeps the last copy beside the reason', async () => {
@@ -359,7 +385,8 @@ describe('§22.3 Marketplace page', () => {
     saveFile.mockResolvedValue('/Users/x/out/marketplace-catalog.yaml')
     marketplaceList.mockResolvedValue({ sources: [keptSource()] })
     render(<MarketplacePage />)
-    fireEvent.click(await screen.findByLabelText('Export catalog'))
+    await openActions()
+    fireEvent.click(menuRow('Export catalog…'))
     // §22.3: the bytes come from the §19 file route, the name is the catalog's.
     await waitFor(() => expect(marketplaceCatalogFile).toHaveBeenCalledWith('s1'))
     await waitFor(() => expect(saveFile)
@@ -373,14 +400,16 @@ describe('§22.3 Marketplace page', () => {
     marketplaceList.mockResolvedValue({ sources: [source({ cached: false, entries: [] })] })
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
-    expect(screen.queryByLabelText('Export catalog')).toBeNull()
+    await openActions()
+    expect(screen.queryByRole('button', { name: 'Export catalog…' })).toBeNull()
     cleanup()
     marketplaceCatalogFile.mockRejectedValue(
       Object.assign(new Error("the saved copy couldn't be read - refresh to fetch it again"),
         { status: 422 }))
     marketplaceList.mockResolvedValue({ sources: [fileSource()] })
     render(<MarketplacePage />)
-    fireEvent.click(await screen.findByLabelText('Export catalog'))
+    await openActions()
+    fireEvent.click(menuRow('Export catalog…'))
     await waitFor(() => expect(storeMod.useStore.getState().toast)
       .toBe("the saved copy couldn't be read - refresh to fetch it again"))
     expect(saveFile).not.toHaveBeenCalled()
@@ -463,7 +492,8 @@ describe('§22.3 catalog settings', () => {
   const openSettings = async (s: MarketplaceSource) => {
     marketplaceList.mockResolvedValue({ sources: [s] })
     render(<MarketplacePage />)
-    fireEvent.click(await screen.findByLabelText('Catalog settings'))
+    await openActions()
+    fireEvent.click(menuRow('Catalog settings…'))
     return await screen.findByTestId('catalog-settings')
   }
 
@@ -621,7 +651,8 @@ describe('§22.7 catalog authoring', () => {
   const openEditor = async (s: MarketplaceSource = fileSource()) => {
     marketplaceList.mockResolvedValue({ sources: [s] })
     render(<MarketplacePage />)
-    fireEvent.click(await screen.findByLabelText('Edit catalog'))
+    await openActions()
+    fireEvent.click(menuRow('Edit catalog…'))
     return await screen.findByTestId('catalog-name') as HTMLInputElement
   }
 
@@ -644,18 +675,21 @@ describe('§22.7 catalog authoring', () => {
   it('Edit shows only for a catalog on this machine', async () => {
     marketplaceList.mockResolvedValue({ sources: [fileSource()] })
     render(<MarketplacePage />)
-    expect(await screen.findByLabelText('Edit catalog')).toBeTruthy()
+    await openActions()
+    expect(menuRow('Edit catalog…')).toBeTruthy()
     cleanup()
     // §22.7: a catalog the app keeps the only copy of is edited in place.
     marketplaceList.mockResolvedValue({ sources: [keptSource()] })
     render(<MarketplacePage />)
-    expect(await screen.findByLabelText('Edit catalog')).toBeTruthy()
+    await openActions()
+    expect(menuRow('Edit catalog…')).toBeTruthy()
     cleanup()
     // §22.7: a link catalog's file isn't here to edit.
     marketplaceList.mockResolvedValue({ sources: [source()] })
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
-    expect(screen.queryByLabelText('Edit catalog')).toBeNull()
+    await openActions()
+    expect(screen.queryByRole('button', { name: 'Edit catalog…' })).toBeNull()
   })
 
   it('the editor opens on the catalog file with the details form viewed', async () => {
@@ -735,6 +769,23 @@ describe('§22.7 catalog authoring', () => {
     expect(saveFile).not.toHaveBeenCalled()
   })
 
+  it('the add form takes a GitHub file page as the archive and as the image', async () => {
+    await openEditor()
+    await addAutomation({
+      title: 'Inbox',
+      path: 'https://github.com/alice/shelf/blob/main/inbox.autowright',
+      image: 'https://github.com/alice/shelf/blob/main/cover.svg',
+    })
+    // §22.1: a GitHub page is an https reference like any other - Add appends
+    // it exactly as typed, with nothing rejected.
+    expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(2)
+    expect((screen.getByTestId('catalog-entry-path') as HTMLInputElement).value)
+      .toBe('https://github.com/alice/shelf/blob/main/inbox.autowright')
+    expect((screen.getByTestId('catalog-entry-image') as HTMLInputElement).value)
+      .toBe('https://github.com/alice/shelf/blob/main/cover.svg')
+    expect(screen.queryByTestId('catalog-error')).toBeNull()
+  })
+
   it('a bad reference or a bad image stops Add in place', async () => {
     await openEditor()
     fireEvent.click(screen.getByTestId('catalog-add-automation'))
@@ -750,7 +801,7 @@ describe('§22.7 catalog authoring', () => {
     fireEvent.change(screen.getByTestId('catalog-picker-image'), { target: { value: '/Users/x/cover.bmp' } })
     fireEvent.click(screen.getByTestId('catalog-picker-add'))
     expect(screen.getByTestId('catalog-picker-error').textContent)
-      .toBe('Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif image.')
+      .toBe('Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, .gif, or .svg image.')
     expect(screen.getAllByTestId('catalog-nav-row')).toHaveLength(1)
     // …and the form is still open with what was typed.
     expect((screen.getByTestId('catalog-picker-title') as HTMLInputElement).value).toBe('Digest')
@@ -829,7 +880,7 @@ describe('§22.7 catalog authoring', () => {
     fireEvent.change(screen.getByTestId('catalog-entry-image'), { target: { value: '/Users/x/cover.bmp' } })
     fireEvent.click(screen.getByTestId('catalog-save'))
     expect(screen.getByTestId('catalog-error').textContent)
-      .toBe('Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, or .gif image.')
+      .toBe('Give an https link or an absolute path to a .png, .jpg, .jpeg, .webp, .gif, or .svg image.')
     expect(marketplaceCatalogSave).not.toHaveBeenCalled()
   })
 
@@ -861,18 +912,17 @@ describe('§22.7 catalog authoring', () => {
   it('Create catalog… opens the empty editor, kept by Autowright', async () => {
     marketplaceCatalogCreate.mockResolvedValue(keptSource({ id: 's9', name: 'Mine' }))
     render(<MarketplacePage />)
-    // The empty state renders a second Create catalog… button - the header's is first.
-    fireEvent.click((await screen.findAllByTestId('marketplace-create'))[0])
-    // §22.7 create mode: no GET, empty fields, and no save location to choose -
-    // Autowright keeps the catalog and Export hands the file out later.
+    fireEvent.click(await screen.findByTestId('marketplace-create'))
+    // §22.7 create mode: no GET, empty fields, and no LOCATION line - one note
+    // says to create first and export from the Marketplace page afterward.
     expect(await screen.findByTestId('catalog-editor')).toBeTruthy()
     expect(screen.getByText('CREATE CATALOG')).toBeTruthy()
     expect(marketplaceCatalogRead).not.toHaveBeenCalled()
     expect(screen.getByTestId('catalog-where').textContent).toBe('Kept by Autowright')
-    expect(screen.getByTestId('catalog-location').textContent).toBe('Kept by Autowright')
-    expect(screen.getByText(
-      'Autowright keeps the catalog. Export its file from the Marketplace page to share it.'))
-      .toBeTruthy()
+    expect(screen.queryByTestId('catalog-location')).toBeNull()
+    expect(screen.queryByText('LOCATION')).toBeNull()
+    expect(screen.getByTestId('catalog-create-note').textContent).toBe(
+      'Create the catalog first. You can export its file from the Marketplace page afterward.')
     expect(screen.queryByTestId('catalog-folder')).toBeNull()
     expect(screen.queryByTestId('catalog-choose-folder')).toBeNull()
     expect(screen.getByText('No automations yet.')).toBeTruthy()

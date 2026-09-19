@@ -1146,6 +1146,8 @@ _FETCH_CHUNK = 256 * 1024
 
 _GH_REPO_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?(?:/releases/latest)?$")
 _GH_TAG_RE = re.compile(r"^/([^/]+)/([^/]+)/releases/tag/([^/]+)$")
+# §5.2 GitHub file rule: a file page (`blob` or `raw`, one path segment of ref).
+_GH_FILE_RE = re.compile(r"^/([^/]+)/([^/]+)/(?:blob|raw)/([^/]+)/(.+)$")
 
 
 def _headers() -> dict:
@@ -1175,6 +1177,21 @@ def _github_api(path: str):
                             "and try again") from None
 
 
+def github_raw_url(url: str) -> str:
+    """§5.2 GitHub file rule: a `github.com/{owner}/{repo}/blob/{ref}/{path}`
+    (or `/raw/`) page is read from `raw.githubusercontent.com` with any query
+    (`?raw=true`) dropped. The pasted link is what every surface keeps and
+    shows; only the read translates. Anything else comes back as it is."""
+    parts = urlsplit(url)
+    if parts.scheme != "https" or parts.hostname != "github.com":
+        return url
+    m = _GH_FILE_RE.match(parts.path)
+    if not m:
+        return url
+    owner, repo, ref, path = m.groups()
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
+
+
 def _release_asset(release) -> str | None:
     for a in (release or {}).get("assets") or []:
         if isinstance(a, dict) and str(a.get("name", "")).endswith(".autowright"):
@@ -1188,6 +1205,10 @@ def resolve_url(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise TransferError("only https:// URLs can be imported")
+    # The GitHub file rule runs before the others: a file page whose path
+    # ends `.autowright` downloads directly, from the raw link.
+    url = github_raw_url(url)
+    parts = urlsplit(url)
     if parts.path.endswith(".autowright"):
         return url
     if parts.hostname != "github.com":

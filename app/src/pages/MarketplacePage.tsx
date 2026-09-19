@@ -8,8 +8,8 @@ import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import type { ImportPreview, ImportSummary, MarketplaceEntry, MarketplaceSource } from '../types'
 import {
-  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MetaChip,
-  Modal, Notice, PageLoading, PageTitle, Spinner, Toggle,
+  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MenuRow, MetaChip,
+  Modal, Notice, PageLoading, PageTitle, PopMenu, Spinner, Toggle, usePopover,
 } from '../ui'
 import CatalogEditorModal, {
   CATALOG_FILE, KEPT_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel,
@@ -17,16 +17,53 @@ import CatalogEditorModal, {
 import ImportModal from './ImportModal'
 import { ImportSummaryModal } from './AutomationsList'
 
-// §22.1 example catalog - the MAKE YOUR OWN section's code box, verbatim from
-// the spec so an author can copy it and fill it in.
-const EXAMPLE_CATALOG = `format_version: 1
-name: "Community automations"        # optional (max 200 chars): the source's title
-description: "Automations I use."    # optional (max 1000 chars)
-entries:                             # required list, may be empty, max 200 entries
-  - title: "Manga chapter watcher"   # required, non-empty, max 120 chars
-    description: "Checks the series you follow every morning at 8."  # optional, max 1000
-    path: /Users/you/Automations/manga.autowright   # required: https URL or absolute local path
-    image: /Users/you/Automations/manga.png         # optional: https URL or absolute local path`
+/** §22.3 per-catalog actions: one quiet ellipsis button opening a PopMenu of
+ * MenuRows - the §9.2 automation actions menu's shape. Each row renders only
+ * while its condition holds; picking one closes the menu. */
+function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, onRefresh, onSettings, onRemove }: {
+  source: MarketplaceSource
+  /** this catalog's own Refresh is running (the button glyph spins) */
+  refreshing: boolean
+  /** Refresh all is running (the Refresh row is disabled, nothing spins here) */
+  refreshingAll: boolean
+  onEdit: () => void; onExport: () => void; onRefresh: () => void
+  onSettings: () => void; onRemove: () => void
+}) {
+  const [open, setOpen, ref] = usePopover()
+  const pick = (act: () => void) => () => { setOpen(false); act() }
+  const icon = (cls: string) => (
+    <i className={`fa-solid ${cls}`} style={{ fontSize: 11, width: 14, textAlign: 'center', marginRight: 9 }} />
+  )
+  return (
+    <div ref={ref} style={{ position: 'relative', flex: 'none' }}>
+      <button
+        className="ad-btn-ghost icon"
+        onClick={() => setOpen(!open)}
+        title="More actions"
+        aria-label="Catalog actions"
+        aria-expanded={open}
+        data-testid="marketplace-actions"
+      >
+        <i className={refreshing ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-ellipsis'} style={{ fontSize: 12 }} />
+      </button>
+      <PopMenu show={open} style={{ top: 'calc(100% + 6px)', right: 0, minWidth: 210 }}>
+        {/* §22.7: a path or null location is on this machine, so it can be edited. */}
+        {source.kind !== 'url' && (
+          <MenuRow onClick={pick(onEdit)}>{icon('fa-pen')}Edit catalog…</MenuRow>
+        )}
+        {/* §22.3: every readable copy can leave the app as a file. */}
+        {source.cached && (
+          <MenuRow onClick={pick(onExport)}>{icon('fa-file-export')}Export catalog…</MenuRow>
+        )}
+        {source.location !== null && (
+          <MenuRow onClick={pick(onRefresh)} disabled={refreshing || refreshingAll}>{icon('fa-rotate')}Refresh</MenuRow>
+        )}
+        <MenuRow onClick={pick(onSettings)}>{icon('fa-gear')}Catalog settings…</MenuRow>
+        <MenuRow danger onClick={pick(onRemove)}>{icon('fa-trash')}Remove…</MenuRow>
+      </PopMenu>
+    </div>
+  )
+}
 
 /** §4.1 shared time labels - Today | Yesterday | weekday (2-6 days back) | the
  * locale date, with the clock time appended. A §22.4 source carries the raw §5
@@ -46,7 +83,8 @@ function relativeTime(iso: string): string {
 const locationIcon = (source: MarketplaceSource) =>
   source.kind === 'url' ? 'fa-link' : source.kind === 'file' ? 'fa-file-lines' : 'fa-box-archive'
 
-// §22.3 preview images load by reference, on demand, through the
+// §22.3 preview images sit in a 16:9 tile, contained (never cropped or
+// overflowing), and load by reference, on demand, through the
 // authenticated §19 image route, and are shown as blob URLs cached in memory
 // per (source, entry, image reference, refreshedAt) for the session - nothing
 // on disk. The reference is part of the key because a catalog kept by
@@ -100,7 +138,7 @@ function EntryImage({ sourceId, index, image, refreshedAt, has }: {
       display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
     }}>
       {url
-        ? <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+        ? <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
         : <i className="fa-regular fa-image" data-testid="no-image" style={{ fontSize: 20, color: 'var(--text-deco)' }} />}
     </div>
   )
@@ -220,7 +258,7 @@ function AddMarketplaceModal({ onClose, onAdded }: {
               style={inputStyle}
             />
             {error?.src === 'field' ? errLine(error.msg, 'marketplace-add-error') : (
-              <p style={caption}>An https link, or the path of a catalog file on this {copy.machine}.</p>
+              <p style={caption}>An https link (a GitHub repository or file page works too), or the path of a catalog file on this {copy.machine}.</p>
             )}
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 18 }}>
               <BtnGhost onClick={close} disabled={!!busy}>Cancel</BtnGhost>
@@ -447,18 +485,6 @@ export default function MarketplacePage() {
       Create catalog…
     </button>
   )
-  const iconButton = (icon: string, label: string, onClick: () => void, extra: { danger?: boolean; busy?: boolean; disabled?: boolean } = {}) => (
-    <button
-      className={`ad-btn-ghost icon${extra.danger ? ' danger' : ''}`}
-      onClick={onClick}
-      disabled={extra.disabled}
-      title={label}
-      aria-label={label}
-    >
-      <i className={extra.busy ? 'fa-solid fa-spinner fa-spin' : `fa-solid ${icon}`} style={{ fontSize: 10.5 }} />
-    </button>
-  )
-
   return (
     <div className="ad-anim-page" style={{ maxWidth: 1200, margin: '0 auto', padding: '26px 30px 70px' }}>
       <PageTitle
@@ -487,36 +513,17 @@ export default function MarketplacePage() {
         Marketplace
       </PageTitle>
       {sources === null ? <PageLoading /> : sources.length === 0 ? (
-        <>
-          <EmptyState
-            text={(
-              <>
-                <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
-                  No marketplaces yet
-                </span>
-                Add a marketplace catalog someone shared - drop the file, type its path, or paste its link - to browse the automations it lists.
-              </>
-            )}
-            cta={addButton('Add marketplace…')}
-          />
-          {/* §22.3: the shape of a catalog, shown only while there is nothing
-              to browse - once a catalog exists the user has seen it. */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 28 }}>
-            <Eyebrow>MAKE YOUR OWN</Eyebrow>
-            <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
-              Create a catalog here and add automations from this {copy.machine}. Or write the YAML by hand - list each archive by its full path on this {copy.machine} or an https link, save it as marketplace-catalog.yaml, then add it here.
-            </p>
-            <div>{createButton}</div>
-            <div className="ad-card" style={{ padding: 14, overflow: 'hidden' }}>
-              <pre style={{
-                margin: 0, font: `400 12px/1.7 var(--mono)`, color: 'var(--text-2)',
-                overflowX: 'auto', userSelect: 'text',
-              }}>
-                {EXAMPLE_CATALOG}
-              </pre>
-            </div>
-          </div>
-        </>
+        <EmptyState
+          text={(
+            <>
+              <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+                No marketplaces yet
+              </span>
+              Add a marketplace catalog someone shared - drop the file, type its path, or paste its link - to browse the automations it lists.
+            </>
+          )}
+          cta={addButton('Add marketplace…')}
+        />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 30 }}>
           {sources.map((s) => (
@@ -550,15 +557,16 @@ export default function MarketplacePage() {
                     </span>
                   )}
                 </div>
-                {/* §22.7: a path or null location is on this machine, so it can be edited. */}
-                {s.kind !== 'url' && iconButton('fa-pen', 'Edit catalog', () => setEditing(s))}
-                {/* §22.3: every readable copy can leave the app as a file. */}
-                {s.cached && iconButton('fa-file-export', 'Export catalog', () => { void exportCatalog(s.id) })}
-                {s.location !== null && iconButton('fa-rotate', 'Refresh', () => { void refreshOne(s.id) }, {
-                  busy: refreshing === s.id || refreshingAll, disabled: refreshing === s.id || refreshingAll,
-                })}
-                {iconButton('fa-gear', 'Catalog settings', () => setSettings(s))}
-                {iconButton('fa-trash', 'Remove', () => setRemoving(s), { danger: true })}
+                <CatalogActions
+                  source={s}
+                  refreshing={refreshing === s.id}
+                  refreshingAll={refreshingAll}
+                  onEdit={() => setEditing(s)}
+                  onExport={() => { void exportCatalog(s.id) }}
+                  onRefresh={() => { void refreshOne(s.id) }}
+                  onSettings={() => setSettings(s)}
+                  onRemove={() => setRemoving(s)}
+                />
               </div>
               {s.error && (
                 // §22.2: a failed refresh keeps the last good copy beside the

@@ -289,8 +289,8 @@ current directory) and never clobbers: an existing file at the target exits 1 wi
 `<path> already exists - pass --force to overwrite`; `--force` replaces it.
 
 **`automation import`** takes a `.autowright` file path or an HTTPS URL (§5.2 rules — a
-direct `*.autowright` link on any host, or a `github.com` repo/release page resolved to its
-archive asset). A URL goes through §19 `POST /automations/import/url` and confirms
+direct `*.autowright` link on any host, a `github.com` file page read through the §5.2 GitHub
+file rule, or a `github.com` repo/release page resolved to its archive asset). A URL goes through §19 `POST /automations/import/url` and confirms
 immediately — the typed command is the user's explicit action, so no interactive preview;
 when GitHub resolution changed the URL, the resolved source is printed. A file path POSTs
 `/automations/import` unchanged, after a local size check: a file over the §5.1 64 MB cap

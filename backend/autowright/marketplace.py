@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import logging
 import os
+import re
 import shutil
 import stat
 import threading
@@ -73,7 +74,13 @@ AUTO_REFRESH_INTERVAL_S = 6 * 60 * 60
 AUTO_REFRESH_STOP_S = 5
 
 ARCHIVE_EXTENSION = ".autowright"
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
+
+# §22.2 GitHub pages as locations: a repository page reads the canonical
+# catalog at the root on the default branch (`HEAD`), a folder page reads it in
+# that folder on that ref. A file page is the §5.2 GitHub file rule.
+_GH_REPO_PAGE_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?/?$")
+_GH_TREE_RE = re.compile(r"^/([^/]+)/([^/]+)/tree/([^/]+)(?:/(.+?))?/?$")
 
 # §22.2: the table's columns - the only keys a row is ever written with, so the
 # derived memo a row carries in memory (`_parsed`) never reaches disk.
@@ -156,6 +163,38 @@ def normalize_location(value: str | None) -> str | None:
         raise MarketplaceError(BAD_LOCATION) from None
 
 
+def github_catalog_url(location: str) -> tuple[str, str] | None:
+    """§22.2: for a GitHub repository or folder page, the raw link of the
+    canonical catalog there plus the name it takes (the repository's at the
+    root, the folder's otherwise). None for any other link."""
+    parts = urllib.parse.urlsplit(location)
+    if parts.scheme != "https" or parts.hostname != "github.com":
+        return None
+    if m := _GH_REPO_PAGE_RE.match(parts.path):
+        owner, repo = m.groups()
+        return (f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{CATALOG_FILENAME}",
+                repo)
+    if m := _GH_TREE_RE.match(parts.path):
+        owner, repo, ref, folder = m.groups()
+        prefix = f"{folder}/" if folder else ""
+        return (f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{prefix}{CATALOG_FILENAME}",
+                folder.rstrip("/").rsplit("/", 1)[-1] if folder else repo)
+    return None
+
+
+def _github_folder_name(location: str) -> str | None:
+    """§22.2: a GitHub file page whose stem is the canonical one is named like
+    a file - after its folder (the repository at the root). None otherwise."""
+    parts = urllib.parse.urlsplit(location)
+    if parts.hostname != "github.com":
+        return None
+    if m := transfer._GH_FILE_RE.match(parts.path):
+        _owner, repo, _ref, path = m.groups()
+        folder = Path(path).parent.name
+        return folder or repo
+    return None
+
+
 def default_name(location: str | None) -> str:
     """§22.1: the catalog's title when it names none - the file's stem (`shelf`
     for `shelf.yaml`), or the last path segment's stem for a link, except for
@@ -165,10 +204,12 @@ def default_name(location: str | None) -> str:
     if location is None:
         return KEPT_NAME
     if kind_of(location) == "url":
+        if github := github_catalog_url(location):
+            return github[1] or "marketplace"
         split = urllib.parse.urlsplit(location)
         stem = Path(split.path).stem
         if stem == CANONICAL_STEM:
-            stem = split.hostname or ""
+            stem = _github_folder_name(location) or split.hostname or ""
     else:
         path = Path(location)
         stem = path.stem
@@ -345,7 +386,9 @@ def _read_reference(reference: str, *, cap: int, what: str) -> bytes:
     for its whole length."""
     with _read_slots:
         if kind_of(reference) == "url":
-            return _fetch_url(reference, cap=cap)
+            # §22.1: a GitHub file page is read from its raw link; the
+            # reference itself stays as written everywhere else.
+            return _fetch_url(transfer.github_raw_url(reference), cap=cap)
         over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
         try:
             st = Path(reference).stat()
@@ -771,7 +814,10 @@ class MarketplaceStore:
         """The read half of a §22.2 refresh: the location read and validated,
         nothing written and no lock held - this is the half that can block on a
         host for as long as the §22.1 deadline."""
-        text = _decode(_read_reference(location, cap=MAX_CATALOG_BYTES, what="catalog file"))
+        # §22.2: a GitHub repository or folder page names the canonical
+        # catalog there; the row keeps the page link as pasted.
+        read_from = (github_catalog_url(location) or (location,))[0]
+        text = _decode(_read_reference(read_from, cap=MAX_CATALOG_BYTES, what="catalog file"))
         parse_catalog(text, location=location)
         return text
 
