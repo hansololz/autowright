@@ -233,6 +233,9 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
                             # pipeline (curl | bash spawns children)
                             **platform.current().processes.session_kwargs())
     timed_out = threading.Event()
+    # §2 pipe-release contract (§19: the cap's kill releases the install's own
+    # read): the same releasable reader harness._invoke uses.
+    reader = harness.PipeReader(proc.stdout)
 
     def _kill() -> None:
         timed_out.set()
@@ -240,12 +243,12 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
         # Windows); the layer falls back to the direct child itself.
         platform.current().processes.signal_group(proc, None)
         # An escaped child (a daemonizing grandchild that re-setsid'd) could
-        # still hold the merged pipe open — swap our read end for /dev/null so
-        # the loop sees EOF regardless, like harness._invoke's timeout kill.
-        # Never `.close()` from this thread: close() takes the buffer lock the
+        # still hold the merged pipe open — release our read end so the loop
+        # sees EOF regardless, like harness._invoke's timeout kill. Never
+        # `.close()` from this thread: close() takes the buffer lock the
         # blocked read holds and would wedge the timer instead of freeing the
         # loop.
-        harness.defuse_read_end(proc.stdout)
+        reader.defuse()
 
     timer = threading.Timer(INSTALL_TIMEOUT_S, _kill)
     timer.daemon = True
@@ -258,7 +261,7 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
                 # read loops use: iterating the pipe buffers a newline-free
                 # stream (a progress bar drawn with carriage returns) without
                 # bound before it ever yields.
-                raw = proc.stdout.readline(2_000_000)  # type: ignore[union-attr]
+                raw = reader.readline()
                 if raw == "":
                     break
                 line = raw.strip()
@@ -274,11 +277,7 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
         timer.cancel()
         # The read end closes on every path — one leaked fd per install would
         # otherwise accumulate on the long-lived backend.
-        try:
-            if proc.stdout is not None:
-                proc.stdout.close()
-        except (OSError, ValueError):
-            pass
+        reader.close()
     if timed_out.is_set() and proc.returncode != 0:
         # returncode guard: a timer firing in the instant after a successful
         # exit must not report a completed install as a timeout.

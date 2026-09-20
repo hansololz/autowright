@@ -950,7 +950,10 @@ streaming still ends. Stream size is bounded too: one invocation's stdout is cap
 anywhere near that large, and a harness stuck in a tool loop must not push the whole hard
 cap's worth of output through backend memory and every log sink; the cap is enforced on
 bounded reads, never per line, so one newline-free blob cannot buffer past it first) and stderr is drained
-into a 1 MB tail-keeping buffer (the decisive error lines come last). Both kills raise the
+into a 1 MB tail-keeping buffer (the decisive error lines come last). The kill releases both
+pipe reads itself (§2 pipe-release contract): a grandchild that escaped the CLI's session and
+still holds a pipe can neither keep the call alive past its kill nor wedge the cleanup's
+close — EOF is never required to end a killed call. Both kills raise the
 same retryable timeout error; cancelling
 the job (Start over, or an edit that supersedes an in-flight steps call, §11) kills the harness
 process. One pre-flight guards the known interactive trap: a signed-out Gemini CLI does not

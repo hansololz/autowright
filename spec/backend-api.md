@@ -639,7 +639,10 @@ remain plain dicts (§2).
   `GET /agents/install/{id}` → `{ state: idle | running | done | failed, percent?, line?, error? }`
   lets a remounted UI reattach. A 15-minute wall-clock cap applies to each install phase
   (installer subprocess run and download): on expiry the job fails with a timeout message —
-  it can never sit `running` forever and block retries; the abandoned phase's late progress
+  it can never sit `running` forever and block retries — the cap's kill also releases the
+  install's own pipe read (§2 pipe-release contract), so a daemon the script leaves behind
+  holding the pipe (a `curl | bash` grandchild in its own session) cannot hold the phase past
+  its cap; the abandoned phase's late progress
   is discarded (each job carries a generation token its emitter checks), so it can never
   write into a later install's snapshot. **Install-location principle:**
   every install lands exactly where the user's own manual install would put the tool — a

@@ -5,10 +5,12 @@ Every adapter is one-shot and non-interactive.
 from __future__ import annotations
 
 import concurrent.futures
+import io
 import json
 import logging
 import os
 import re
+import select
 import shutil
 import subprocess
 import threading
@@ -101,12 +103,17 @@ def kill_group(proc: subprocess.Popen, sig: int | None = None) -> None:
 def defuse_read_end(f) -> None:
     """Cross-thread escape hatch for a pipe read end another thread may be
     blocked reading (a kill whose EOF never arrives because an escaped child
-    still holds the write end). `dup2`s /dev/null over the fd: any further
-    read sees EOF, the fd number stays owned (no reuse hazard for the later
-    ordinary close), and — unlike TextIOWrapper.close(), which takes the
-    buffer lock the blocked reader holds — it can never wedge the calling
-    thread."""
+    still holds the write end). A `PipeReader` is released through its own
+    wakeup; a bare pipe object gets /dev/null `dup2`'d over its fd: any
+    further read sees EOF, the fd number stays owned (no reuse hazard for the
+    later ordinary close), and — unlike TextIOWrapper.close(), which takes
+    the buffer lock the blocked reader holds — it can never wedge the calling
+    thread. (Linux does not wake a read already in flight this way — that is
+    what the reader's wakeup pipe is for.)"""
     if f is None:
+        return
+    if isinstance(f, PipeReader):
+        f.defuse()
         return
     try:
         devnull = os.open(os.devnull, os.O_RDONLY)
@@ -114,8 +121,146 @@ def defuse_read_end(f) -> None:
             os.dup2(devnull, f.fileno())
         finally:
             os.close(devnull)
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError, AttributeError):
+        pass  # AttributeError: an in-memory stand-in with no fd at all
+
+
+class _WakeableRaw(io.RawIOBase):
+    """Raw read end of a child's pipe that `defuse()` can release from any
+    thread: each read waits on the pipe *and* an in-process wakeup pipe, so
+    a one-byte write ends a blocked read with EOF at once — no lock is
+    taken, and EOF from the child is never required. The child's fd is
+    borrowed, never closed here (the Popen pipe object owns it)."""
+
+    def __init__(self, fd: int):
+        super().__init__()
+        self._fd = fd
+        self._wake_r, self._wake_w = os.pipe()
+        # Guards the wakeup fds against a kill path's late `defuse()` landing
+        # after `close()` — the numbers may already belong to another file.
+        # Held only around non-blocking steps, so it can never wedge a caller.
+        self._wake_lock = threading.Lock()
+        self._poll = select.poll()
+        self._poll.register(fd, select.POLLIN)
+        self._poll.register(self._wake_r, select.POLLIN)
+        self.defused = False
+
+    def readable(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def readinto(self, b) -> int:
+        while True:
+            if self.defused:
+                return 0
+            for fd, _events in self._poll.poll():
+                # POLLHUP/POLLERR arrive unrequested: the read then returns
+                # b"" (EOF) or raises, exactly as a plain blocking read would.
+                if fd == self._fd:
+                    data = os.read(self._fd, len(b))
+                    n = len(data)
+                    b[:n] = data
+                    return n
+            # Only the wakeup fired: the flag check at the top ends the read.
+
+    def defuse(self) -> None:
+        self.defused = True
+        with self._wake_lock:
+            if self._wake_w < 0:
+                return  # already closed: nothing is blocked on us any more
+            try:
+                os.write(self._wake_w, b"x")
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        super().close()
+        with self._wake_lock:
+            fds, self._wake_r, self._wake_w = (self._wake_r, self._wake_w), -1, -1
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+class PipeReader:
+    """§2 pipe-release contract: a line reader over a child's text pipe that
+    a kill path can release from ANY thread without waiting for EOF.
+
+    A killed group can leave an escapee behind (a grandchild that started
+    its own session — daemonizing `curl | bash` installers do) still holding
+    the write end, so EOF may never arrive and a plain blocking read holds
+    the calling thread for that process's whole life; an ordinary cross-thread
+    `close()` takes the buffer lock the blocked read holds, so it wedges too.
+    POSIX: the raw read is a `_WakeableRaw`, and the text layer on top is the
+    same TextIOWrapper/BufferedReader stack Popen builds (same codec,
+    universal newlines, size-capped readline), so the read loops keep their
+    semantics. Where the pipe can't be polled (Windows, and the suites'
+    in-memory stand-ins) the calls fall through to the pipe object's own
+    blocking reads and `defuse()` redirects its fd to the null device."""
+
+    def __init__(self, f, cap: int = 2_000_000):
+        self._f = f
+        self._cap = cap
+        self._raw: _WakeableRaw | None = None
+        self._text = None
+        self._closed = False
+        if f is None:
+            return
+        try:
+            fd = f.fileno()
+        except (OSError, ValueError, AttributeError):
+            return  # an in-memory stand-in: its own reads
+        if not hasattr(select, "poll"):
+            return  # Windows: pipes can't be polled
+        self._raw = _WakeableRaw(fd)
+        self._text = io.TextIOWrapper(io.BufferedReader(self._raw),
+                                      encoding=getattr(f, "encoding", None) or "utf-8",
+                                      errors=getattr(f, "errors", None) or "replace")
+
+    def readline(self) -> str:
+        """The next line, size-capped like `readline(cap)`; "" at EOF or
+        once defused."""
+        if self._f is None:
+            return ""
+        return (self._text or self._f).readline(self._cap)
+
+    def read(self, n: int) -> str:
+        """Up to `n` characters from one bounded read; "" at EOF or once
+        defused."""
+        if self._f is None:
+            return ""
+        return (self._text or self._f).read(n)
+
+    def defuse(self) -> None:
+        """Release a read blocked on another thread. Never blocks."""
+        if self._raw is not None:
+            self._raw.defuse()
+        else:
+            defuse_read_end(self._f)
+
+    def close(self) -> None:
+        """Idempotent and safe from any thread: defuses first, so the close
+        only ever waits for a released read to let the buffer go."""
+        if self._closed:
+            return
+        self._closed = True
+        self.defuse()
+        if self._text is not None:
+            try:
+                self._text.close()  # closes the wakeup pipe, never the child's fd
+            except (OSError, ValueError):
+                pass
+        try:
+            if self._f is not None:
+                self._f.close()
+        except (OSError, ValueError):
+            pass
 
 
 # A backend launched from the Finder/Dock gets a minimal PATH without
@@ -959,20 +1104,24 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
     # then sees EOF), and stderr drains on its own thread so a chatty child
     # can't deadlock on a full pipe.
     timed_out = threading.Event()
+    # §2 pipe-release contract: both pipes are read through releasable
+    # readers, so the kill below ends a blocked read from the watchdog thread
+    # without waiting for an EOF an escaped child may never deliver.
+    out_reader = PipeReader(proc.stdout)
+    err_reader = PipeReader(proc.stderr)
 
     def _kill() -> None:
         timed_out.set()
         kill_group(proc)
-        # An escaped child could still hold the pipe — swap our read end for
-        # /dev/null so any further read sees EOF. Never `.close()` from this
-        # thread: TextIOWrapper.close() takes the buffer lock a blocked
-        # readline holds, which would wedge this watchdog instead of freeing
-        # the loop.
-        defuse_read_end(proc.stdout)
+        # An escaped child could still hold the pipe — release our read end
+        # so the loop sees EOF regardless. Never `.close()` from this thread:
+        # TextIOWrapper.close() takes the buffer lock a blocked readline
+        # holds, which would wedge this watchdog instead of freeing the loop.
+        out_reader.defuse()
         # Same for stderr: the drain thread blocks in a read an escaped child
         # keeps alive, and it holds that pipe's buffer lock while it does —
         # the cleanup below would then wedge on its own close().
-        defuse_read_end(proc.stderr)
+        err_reader.defuse()
         # §8 Windows delivery: a writer thread blocked on a prompt the dead
         # child will never drain unblocks on the closed pipe (and swallows
         # the resulting error), so the kill leaks no thread and no handle.
@@ -1018,7 +1167,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         total = 0
         try:
             while True:
-                chunk = proc.stderr.read(65536)  # type: ignore[union-attr]
+                chunk = err_reader.read(65536)
                 if not chunk:
                     return
                 with err_lock:
@@ -1055,7 +1204,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
                     # step-process loop uses — the cap is enforced on bounded
                     # reads, never per line, so one newline-free blob arrives
                     # as bounded chunks instead of buffering past it first.
-                    line = proc.stdout.readline(2_000_000)  # type: ignore[union-attr]
+                    line = out_reader.readline()
                     if line == "":
                         break
                     _reset_idle()
@@ -1137,18 +1286,12 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         # process. The last Popen is retained on the draft job (proc_holder)
         # for its whole ack lifetime, so without this two fds leak per held
         # job on the long-lived backend.
-        if drain.is_alive():
-            # A drain still blocked on a read holds the stderr buffer lock, so
-            # an ordinary close() here would wedge THIS thread on it (its join
-            # timed out, or an exception skipped the join entirely). Defuse
-            # first: the read sees EOF, lets the lock go, and the close is safe.
-            defuse_read_end(proc.stderr)
-        for pipe in (proc.stdout, proc.stderr):
-            try:
-                if pipe is not None:
-                    pipe.close()
-            except (OSError, ValueError):
-                pass
+        # A drain still blocked on a read holds the stderr buffer lock, so an
+        # ordinary close() here would wedge THIS thread on it (its join timed
+        # out, or an exception skipped the join entirely). The reader's close
+        # defuses first: the read sees EOF, lets the lock go, then closes.
+        out_reader.close()
+        err_reader.close()
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
 

@@ -69,7 +69,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (Playwright browsers, subprocesses) die with it, are never orphaned, and can never hold the
   engine's log pipe open past the kill (which would strand the automation "executing").
   The group kill runs whether or not the executor itself has already exited — a grandchild
-  that outlived it is still in the group and still holds the pipe.
+  that outlived it is still in the group and still holds the pipe. The kill also releases the
+  engine's read of that pipe itself (§2 pipe-release contract), so a grandchild that escaped
+  the group by starting its own session and still holds the pipe cannot hold the step past
+  its kill either.
   One child deliberately escapes that group: a §6.1 runtime agent call's harness CLI spawns
   in its **own** session (so the call's idle-window watchdog can kill the CLI and its helpers
   without killing the step). The executor therefore reports that child's group id to the

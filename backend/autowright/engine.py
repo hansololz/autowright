@@ -283,6 +283,10 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         **_processes().session_kwargs(),
     )
     state["proc"] = proc
+    # §2 pipe-release contract: the log pipe is read through a releasable
+    # reader, so the kill paths below end a blocked read from their own
+    # threads without waiting for an EOF an escaped grandchild may never send.
+    reader = harness.PipeReader(proc.stdout)
     # Watchdog enforces the per-step timeout even when the step produces no
     # output at all (a bare read loop would block forever on a silent hang).
     # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
@@ -304,7 +308,7 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             children can never hold the log pipe open past the kill. Shared by the
             timeout watchdog and the cancel/skip escalation (a step that ignores
             SIGTERM must not strand the execution \"executing\" forever). The read
-            end is dup2'd over, never `.close()`d cross-thread: close() takes the
+            end is released, never `.close()`d cross-thread: close() takes the
             buffer lock a blocked readline holds and would wedge this thread."""
             pipe_closed.set()
             # §7: the group kill runs whether or not the executor itself has
@@ -325,7 +329,7 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                         procs.kill_group(g)
                     except Exception:  # noqa: BLE001 — an already-gone group is fine
                         pass
-            harness.defuse_read_end(proc.stdout)
+            harness.defuse_read_end(reader)
 
         state["hard_kill"] = _hard_kill
 
@@ -364,7 +368,7 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                 # for the whole step timeout — an over-long line arrives as
                 # bounded chunks instead. CTRL lines stay far under the cap
                 # (agent prompt/reply are 200k-char capped upstream).
-                raw = proc.stdout.readline(2_000_000)  # type: ignore[union-attr]
+                raw = reader.readline()
                 if raw == "":
                     break
                 if timed_out.is_set():
@@ -470,7 +474,7 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             # persisting a log line) — never leave the group alive with no
             # handle to cancel it by.
             kill_step_group(proc)
-            _close_pipe(proc.stdout)
+            reader.close()
             try:
                 proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
@@ -478,7 +482,7 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         # Both pipes close on EVERY path, not just the still-alive one: a normal
         # EOF exit used to leave the read end open until the garbage collector
         # got to it, leaking an fd per step on a long-lived backend.
-        _close_pipe(proc.stdout)
+        reader.close()
         _close_pipe(proc.stdin)
         state["proc"] = None
         state.pop("hard_kill", None)

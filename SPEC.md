@@ -168,6 +168,21 @@ SIGKILL only for survivors whose pid still shows the same command text (the pid-
 guard). Windows: the §3 `Win32_Process` enumeration plus the `taskkill /F /T` tree kill,
 grace ignored. It returns the matched count; an unreadable process table kills nothing
 and returns 0 (never kill what can't be verified).
+Pipe-release contract, all platforms: every streamed child pipe the backend reads to its
+end (harness stdout and stderr, the §6.1 executor's log pipe, §19 installer output) goes
+through one shared reader (`harness.PipeReader`) that a kill path can release from any
+thread without waiting for EOF. A group kill can leave an escapee behind — a grandchild
+that started its own session, as daemonizing `curl | bash` installers do — still holding
+the write end, so EOF may never come; and a cross-thread `close()` takes the buffer lock
+the blocked read holds, so it wedges too (and on Linux, unlike macOS, redirecting the fd
+to the null device does not wake a read already in flight). POSIX: the raw read waits on
+the pipe alongside an in-process wakeup pipe, so `defuse()` (a one-byte write, never a
+lock) ends the read with EOF at once, and the reader's `close()` defuses first so it is
+safe from any thread; the text layer on top is the same codec / universal-newline /
+size-capped stack Popen builds, so read semantics don't change. Windows (pipes can't be
+polled): the plain blocking read, with the read end redirected to the null device on
+kill. The child's fd stays owned by the Popen pipe object — the reader never closes it
+behind the process handle.
 Pipe-encoding contract, all platforms: every text-mode subprocess pipe on a cross-OS code
 path (executor, harness invocation and probes, pip, installer streaming) is opened with
 explicit `encoding="utf-8", errors="replace"` — never the locale default, which is cp1252 on
