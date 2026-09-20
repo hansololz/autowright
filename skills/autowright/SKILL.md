@@ -195,7 +195,10 @@ autowright agent list · agent check <name>        # AI agents available to agen
   `marketplace set <name> location=… shown=on|off autoRefresh=on|off` changes where it is read
   from, whether the page shows it, and whether it refreshes on its own (at launch and every 6
   hours). `list` numbers each marketplace's entries; `install` takes that number and lands the
-  automation through the ordinary import (agents and secrets matched by name, triggers off).
+  automation through the ordinary import (agents and secrets matched by name, triggers off);
+  `marketplace audit <name> <n>` prints every text file inside that entry's archive (manifest,
+  automation, spec, notes, step scripts, agents, secrets) without installing anything, so the
+  content can be read before an install.
 - `marketplace create [<folder>]` creates a catalog (in a folder on this machine, or kept by
   Autowright without one) and adds it; `marketplace catalog add <name>
   <automation-or-.autowright-file> [--export-to DIR]` exports an automation (no parameter

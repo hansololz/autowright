@@ -29,6 +29,9 @@ const marketplaceList = vi.fn<() => Promise<{ sources: MarketplaceSource[] }>>()
 const marketplaceAdd = vi.fn()
 const marketplaceSettings = vi.fn()
 const marketplaceEntryPreview = vi.fn()
+// §22.3 archive viewer: the entry's files, fetched only on an Audit click.
+const marketplaceEntryArchive =
+  vi.fn<(id: string, index: number) => Promise<{ reference: string; files: { path: string; text: string | null }[] }>>()
 const marketplaceImage = vi.fn<() => Promise<Blob>>(() => Promise.reject(new Error('no image')))
 // §22.3 Export: the app's copy of the catalog, handed to the save dialog.
 const marketplaceCatalogFile = vi.fn<(id: string) => Promise<ArrayBuffer>>()
@@ -56,6 +59,7 @@ vi.mock('../src/api', () => ({
     marketplaceRefreshAll: vi.fn(),
     marketplaceRemove: vi.fn(),
     marketplaceEntryPreview: (id: string, index: number) => marketplaceEntryPreview(id, index),
+    marketplaceEntryArchive: (id: string, index: number) => marketplaceEntryArchive(id, index),
     marketplaceImage: () => marketplaceImage(),
     marketplaceCatalogFile: (id: string) => marketplaceCatalogFile(id),
     marketplaceCatalogCreate: (body: unknown) => marketplaceCatalogCreate(body),
@@ -220,6 +224,7 @@ beforeEach(() => {
   marketplaceSettings.mockReset()
   marketplaceSettings.mockResolvedValue(source())
   marketplaceEntryPreview.mockReset()
+  marketplaceEntryArchive.mockReset()
   marketplaceImage.mockReset()
   marketplaceImage.mockRejectedValue(new Error('no image'))
   marketplaceCatalogFile.mockReset()
@@ -1036,5 +1041,128 @@ describe('§22.7 catalog authoring', () => {
       name: 'Mine', description: '', entries: [],
     }))
     expect(pickFolder).not.toHaveBeenCalled()
+  })
+})
+
+// §22.3 archive viewer: what an entry would install, read before installing it.
+// The route is fetched on the Audit click and never before it, and nothing it
+// fetched survives the close.
+describe('§22.3 archive viewer', () => {
+  const ARCHIVE = {
+    reference: '/Users/x/shelf/automations/manga.autowright',
+    files: [
+      { path: 'manifest.yaml', text: 'format_version: 1\n' },
+      { path: 'automation/automation.yaml', text: 'name: Manga chapter watcher' },
+      { path: 'automation/spec.md', text: '# Manga chapter watcher' },
+      { path: 'automation/notes.md', text: 'Checked every morning.' },
+      { path: 'automation/01-fetch.py', text: "import os\nprint('chapter')\n" },
+      { path: 'agents.yaml', text: 'agents: []' },
+      { path: 'secrets.yaml', text: 'secrets: []' },
+      { path: 'automation/logo.png', text: null },
+    ],
+  }
+  // §22.3: two entries, so "an Audit button on every entry card" has something
+  // to count.
+  const twoEntries = source({
+    entries: [
+      source().entries[0],
+      {
+        index: 1, title: 'Inbox sweeper', description: 'Files the mail.',
+        archive: 'https://example.com/shared/automations/inbox.autowright', image: null,
+      },
+    ],
+  })
+  const audit = async (index = 0) => {
+    const buttons = await screen.findAllByTestId('marketplace-audit')
+    fireEvent.click(buttons[index])
+    return screen.findByLabelText('Archive viewer')
+  }
+
+  it('every entry card carries Audit, and the archive is fetched on that click alone', async () => {
+    marketplaceList.mockResolvedValue({ sources: [twoEntries] })
+    marketplaceEntryArchive.mockResolvedValue(ARCHIVE)
+    render(<MarketplacePage />)
+    const buttons = await screen.findAllByTestId('marketplace-audit')
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0].textContent).toBe('Audit')
+    expect(buttons[0].getAttribute('title')).toBe('Read every file inside this archive')
+    expect(buttons[0].className).toBe('ad-btn-ghost')
+    expect(buttons[0].querySelector('.fa-magnifying-glass')).toBeTruthy()
+    // §22.3: nothing about an archive is read before the click.
+    expect(marketplaceEntryArchive).not.toHaveBeenCalled()
+  })
+
+  it('Audit opens the viewer on the entry, listing every file by its title over its path', async () => {
+    marketplaceList.mockResolvedValue({ sources: [twoEntries] })
+    marketplaceEntryArchive.mockResolvedValue(ARCHIVE)
+    render(<MarketplacePage />)
+    const viewer = await audit()
+    expect(marketplaceEntryArchive).toHaveBeenCalledWith('s1', 0)
+    await waitFor(() => expect(screen.getAllByTestId('archive-file')).toHaveLength(8))
+    // §22.3: the fixed titles over their archive paths, a step script named by
+    // its stem, and a file with no title of its own showing its path alone.
+    expect(screen.getAllByTestId('archive-file').map((row) => row.textContent)).toEqual([
+      'Manifestmanifest.yaml',
+      'Automationautomation/automation.yaml',
+      'Specautomation/spec.md',
+      'Notesautomation/notes.md',
+      'fetchautomation/01-fetch.py',
+      'Agentsagents.yaml',
+      'Secretssecrets.yaml',
+      'automation/logo.png',
+    ])
+    expect(screen.getByText('ARCHIVE')).toBeTruthy()
+    // §22.3: the first file is viewed on open - its one line, numbered, in the
+    // pane (a single trailing final newline is neither rendered nor counted).
+    expect(screen.getByText('FILE 1 OF 8')).toBeTruthy()
+    expect(screen.getAllByTestId('archive-file')[0].getAttribute('aria-current')).toBe('true')
+    expect(viewer.textContent).toContain('format_version: 1')
+    expect(viewer.textContent).not.toContain('print(')
+  })
+
+  it('a navigator row views its file, and a file with no text says so', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceEntryArchive.mockResolvedValue(ARCHIVE)
+    render(<MarketplacePage />)
+    const viewer = await audit()
+    await waitFor(() => expect(screen.getAllByTestId('archive-file')).toHaveLength(8))
+    fireEvent.click(screen.getAllByTestId('archive-file')[4])
+    expect(screen.getByText('FILE 5 OF 8')).toBeTruthy()
+    // §11 highlighting splits a line into token spans, so the pane is read whole
+    expect(viewer.textContent).toContain("print('chapter')")
+    // two lines, numbered - the script's trailing newline adds no third row
+    expect(screen.getByText('2')).toBeTruthy()
+    expect(screen.queryByText('3')).toBeNull()
+    // §22.3: a member the route couldn't decode has no rows at all.
+    fireEvent.click(screen.getAllByTestId('archive-file')[7])
+    expect(screen.getByText("This file can't be shown as text.")).toBeTruthy()
+  })
+
+  it('a failed fetch shows the reason in the pane and leaves the viewer open', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceEntryArchive.mockRejectedValue(new Error('not a valid .autowright archive'))
+    render(<MarketplacePage />)
+    await audit()
+    expect(await screen.findByText('not a valid .autowright archive')).toBeTruthy()
+    expect(screen.getByLabelText('Archive viewer')).toBeTruthy()
+    expect(screen.queryAllByTestId('archive-file')).toHaveLength(0)
+  })
+
+  it('closing drops the viewer, and a second open fetches again', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceEntryArchive.mockResolvedValue(ARCHIVE)
+    render(<MarketplacePage />)
+    await audit()
+    await waitFor(() => expect(screen.getAllByTestId('archive-file')).toHaveLength(8))
+    fireEvent.click(screen.getByLabelText('Close'))
+    // the §14 exit animation falls back to its 200 ms timer in happy-dom
+    await waitFor(() => expect(screen.queryByLabelText('Archive viewer')).toBeNull(),
+      { timeout: 3000 })
+    // §22.3: nothing was kept, so the second open reads the archive again.
+    // (The count is cleared first: the render tier runs under StrictMode, which
+    // mounts every effect twice, so each open fetches twice here.)
+    marketplaceEntryArchive.mockClear()
+    await audit()
+    await waitFor(() => expect(marketplaceEntryArchive).toHaveBeenCalledWith('s1', 0))
   })
 })

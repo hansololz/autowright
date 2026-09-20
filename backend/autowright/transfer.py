@@ -313,6 +313,7 @@ MAX_ARCHIVE_BYTES = 64 * 1024 * 1024        # the upload itself
 _MAX_MEMBER_BYTES = 32 * 1024 * 1024        # one member, decompressed
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024        # whole archive, decompressed
 _MAX_ENTRIES = 1000                         # members in the archive
+MAX_AUDIT_TEXT_BYTES = 1 * 1024 * 1024      # §22.4: one member served as text
 
 
 def _check_sizes(z: zipfile.ZipFile) -> None:
@@ -736,6 +737,49 @@ def validate_archive(data: bytes) -> None:
     verdict an importer would; TransferError names the reason."""
     with _open_archive(data) as z:
         _validate(z)
+
+
+def list_archive_text(data: bytes) -> list[dict]:
+    """§22.4 archive viewer: every file member as text, in the served order -
+    no §5.1 validation, nothing written. `text` is None for a member that
+    isn't UTF-8 or is over the cap; a layout the import would refuse still
+    lists, because the point is to see what is inside."""
+    with _open_archive(data) as z:
+        _check_sizes(z)
+        files = []
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            if info.file_size > MAX_AUDIT_TEXT_BYTES:
+                # Over the cap the member is named but never read into memory.
+                files.append({"path": info.filename, "text": None})
+                continue
+            raw = _read_member(z, info.filename)
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            files.append({"path": info.filename, "text": text})
+    files.sort(key=lambda f: _audit_order(f["path"]))
+    return files
+
+
+def _audit_order(path: str) -> tuple:
+    """§22.4 served order: manifest.yaml; the automation/ members with
+    automation.yaml, spec.md and notes.md first and the rest of that folder by
+    name (so step scripts follow their NN- numbers); then agents.yaml,
+    secrets.yaml; then anything else by path."""
+    if path == "manifest.yaml":
+        return (0, 0, "")
+    if path.startswith("automation/"):
+        first = ("automation/automation.yaml", "automation/spec.md", "automation/notes.md")
+        rank = first.index(path) if path in first else len(first)
+        return (1, rank, path)
+    if path == "agents.yaml":
+        return (2, 0, "")
+    if path == "secrets.yaml":
+        return (2, 1, "")
+    return (3, 0, path)
 
 
 def _open_archive(data: bytes) -> zipfile.ZipFile:

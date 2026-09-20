@@ -311,6 +311,11 @@ export const api = {
   marketplaceEntryPreview: (id: string, index: number) =>
     req<{ token: string; preview: import('./types').ImportPreview }>(
       'POST', `/marketplace/sources/${id}/entries/${index}/preview`),
+  // §22.3 archive viewer: every text file inside the entry's archive, fetched
+  // only when the user asks - nothing is cached, here or on disk.
+  marketplaceEntryArchive: (id: string, index: number) =>
+    req<{ reference: string; files: { path: string; text: string | null }[] }>(
+      'GET', `/marketplace/sources/${id}/entries/${index}/archive`),
   // §22.7 catalog authoring: create writes an empty catalog into a folder and
   // adds it; read/save work on the catalog file on disk, not the cache.
   marketplaceCatalogCreate: (body: { folder?: string } & import('./types').MarketplaceCatalogSave) =>

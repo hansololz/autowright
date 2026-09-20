@@ -2800,11 +2800,13 @@ class _MarketClient:
         self.gets = gets or {}
         self.calls = []
         self.timeouts = []  # (method, path, timeout) per write, parallel to calls
+        self.reads = []     # (path, timeout) per GET other than the listing
 
     def req(self, method, path, body=None, timeout=30):
         if method == "GET":
             if path == "/marketplace":
                 return {"sources": copy.deepcopy(self.sources)}
+            self.reads.append((path, timeout))
             assert path in self.gets, f"unexpected GET {path}"
             return copy.deepcopy(self.gets[path])
         self.calls.append((method, path, body))
@@ -3115,6 +3117,58 @@ def test_cmd_marketplace_install_previews_by_index_then_confirms(capsys):
     assert "  no match on this machine: secret MAIL_PASS" in out
     assert "this automation needs attention" in out
     assert "triggers imported off" in out
+
+
+ARCHIVE_PATH = "/marketplace/sources/m1111111-a/entries/1/archive"
+
+# §22.4 archive route: the answer `marketplace audit` prints - one file per
+# member in the served order, `text` null for a member that isn't text.
+ARCHIVE = {"reference": "https://example.com/inbox.autowright",
+           "files": [{"path": "manifest.yaml", "text": "format_version: 2\n"},
+                     {"path": "automation/spec.md", "text": "# Inbox\n\nSweeps.\n"},
+                     {"path": "cover.png", "text": None}]}
+
+
+def test_cmd_marketplace_audit_prints_every_file_in_the_served_order(capsys):
+    """§22.5: the 1-based number rides as the §22.4 0-based index, the archive
+    is GET with the long timeout, and each file prints under its `== <path>`
+    header - `(not text)` for a member served with `text` null."""
+    c = _MarketClient(SOURCES, gets={ARCHIVE_PATH: ARCHIVE})
+    _run(c, "marketplace", "audit", "Community automations", "2")
+    # §22.5: nothing is installed or parked - the read is the only call
+    assert c.calls == []
+    assert c.reads == [(ARCHIVE_PATH, 660)]
+    assert capsys.readouterr().out.splitlines() == [
+        "== manifest.yaml",
+        "format_version: 2",
+        "== automation/spec.md",
+        "# Inbox",
+        "",
+        "Sweeps.",
+        "== cover.png",
+        "  (not text)",
+    ]
+
+
+def test_cmd_marketplace_audit_json_prints_the_answer(capsys):
+    c = _MarketClient(SOURCES, gets={ARCHIVE_PATH: ARCHIVE})
+    _run(c, "marketplace", "audit", "Community automations", "2", "--json")
+    assert json.loads(capsys.readouterr().out) == ARCHIVE
+
+
+def test_cmd_marketplace_audit_checks_the_number_first():
+    """§22.5: the out-of-range exits `install` uses, before anything is read."""
+    c = _MarketClient(SOURCES)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "audit", "Community automations", "0")
+    assert str(ei.value.code) == \
+        "entry numbers start at 1 - see `autowright marketplace list`"
+
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "audit", "Community automations", "3")
+    assert str(ei.value.code) == \
+        "'Community automations' lists 2 automation(s) - there is no entry 3"
+    assert c.reads == [] and c.calls == []
 
 
 def test_find_source_resolves_id_prefix_name_and_substring():

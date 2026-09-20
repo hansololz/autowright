@@ -1669,6 +1669,30 @@ def cmd_marketplace_install(c: Client, args) -> None:
     _print_import_summary(c, r)
 
 
+def cmd_marketplace_audit(c: Client, args) -> None:
+    s = find_source(c, args.source)
+    i = _entry_index(args.n, s.get("entries") or [], s.get("name", "?"))
+    # §22.5: the same long timeout `install` takes - the archive is fetched
+    # over the network before a single line can print. Nothing is installed.
+    r = c.req("GET", f"/marketplace/sources/{s['id']}/entries/{i}/archive",
+              timeout=660)
+    if args.json:
+        _pjson(r)
+        return
+    for f in r.get("files") or []:
+        print(f"== {f['path']}")
+        if f.get("text") is None:
+            print("  (not text)")
+            continue
+        lines = f["text"].split("\n")
+        # A file ending in a newline splits into a trailing empty string; it is
+        # the terminator, not a line of its own.
+        if lines and lines[-1] == "":
+            lines.pop()
+        for line in lines:
+            print(line)
+
+
 def cmd_marketplace_create(c: Client, args) -> None:
     # §22.5: a folder is made absolute against the current directory before it
     # travels - the backend writes the catalog into it and adds it. With no
@@ -3018,6 +3042,25 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "it declares are installed afterwards.",
              epilog="Examples:\n"
                     "  autowright marketplace install \"Community\" 2")
+    p.add_argument("source",
+                   help="which marketplace: its name, a unique part of its name, its id, or "
+                        "an id prefix")
+    p.add_argument("n", type=int, metavar="N",
+                   help="which automation, by the number `marketplace list` prints beside it")
+    p = _sub(mg, "audit", cmd_marketplace_audit,
+             "print every text file inside one of a marketplace's automations",
+             json_flag=True,
+             description="Read what the automation at the given number would install, "
+                         "before installing it. The archive is fetched and every text file "
+                         "inside it is printed in full, each under a `== <path>` header, "
+                         "starting with the manifest, then the automation's own files and "
+                         "step scripts, then the agents and secrets it refers to."
+                         "\n\n"
+                         "Nothing is installed and nothing is kept: a file that isn't text, "
+                         "or is larger than 1 MB, is listed as `(not text)` instead.",
+             epilog="Examples:\n"
+                    "  autowright marketplace audit \"Community\" 2\n"
+                    "  autowright marketplace audit \"Community\" 2 --json")
     p.add_argument("source",
                    help="which marketplace: its name, a unique part of its name, its id, or "
                         "an id prefix")

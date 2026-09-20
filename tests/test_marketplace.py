@@ -1562,6 +1562,150 @@ def test_entry_preview_maps_a_transfer_error_to_422(client, tmp_path, monkeypatc
     assert r.status_code == 422 and "404" in r.json()["detail"]
 
 
+def _zip(members: list[tuple[str, bytes]]) -> bytes:
+    """A hand-built archive, so a test can hold members in whatever order and
+    whatever layout it likes - the §22.4 archive route never validates."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for path, raw in members:
+            z.writestr(path, raw)
+    return buf.getvalue()
+
+
+def _archive_shelf(client, tmp_path, archive: bytes, name="shared.autowright") -> dict:
+    """A catalog listing one archive by absolute path, added as a source."""
+    (tmp_path / name).write_bytes(archive)
+    f = write_catalog(tmp_path, [{"title": "Shared", "path": str(tmp_path / name)}],
+                      name="Shelf")
+    return client.post("/marketplace/sources", json={"path": str(f)}).json()
+
+
+def test_archive_route_lists_a_real_exports_files_in_order(client, tmp_path):
+    """§22.4: every file member of the entry's archive as text, in the served
+    order - the manifest, the automation's own files, then agents and secrets."""
+    archive = _export(client)
+    source = _archive_shelf(client, tmp_path, archive)
+
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reference"] == str(tmp_path / "shared.autowright")
+    paths_served = [f["path"] for f in body["files"]]
+    assert paths_served[0] == "manifest.yaml"
+    assert paths_served[1:3] == ["automation/automation.yaml", "automation/spec.md"]
+    assert paths_served[-2:] == ["agents.yaml", "secrets.yaml"]
+    by_path = {f["path"]: f["text"] for f in body["files"]}
+    assert "Shared" in by_path["manifest.yaml"]
+    assert "Shared thing" in by_path["automation/automation.yaml"]
+    assert by_path["automation/spec.md"].strip() == "# T"
+    step = [p for p in paths_served if p.startswith("automation/") and p.endswith(".py")]
+    assert len(step) == 1 and by_path[step[0]] == "print(1)\n"
+    assert yaml.safe_load(by_path["agents.yaml"])["agents"][0]["harness"] == "Claude Code"
+    assert yaml.safe_load(by_path["secrets.yaml"]) == {"secrets": []}
+
+
+def test_archive_route_reads_an_https_reference(client, tmp_path, monkeypatch):
+    """§22.4: a link reference goes through the §5.2 fetch, exactly as the
+    preview route fetches it."""
+    archive = _export(client)
+    f = write_catalog(tmp_path, [{"title": "Web", "path": "https://x.test/w.autowright"}])
+    source = client.post("/marketplace/sources", json={"path": str(f)}).json()
+    monkeypatch.setattr(transfer, "fetch_archive",
+                        lambda url: (archive, url))
+
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 200
+    assert r.json()["reference"] == "https://x.test/w.autowright"
+    assert r.json()["files"][0]["path"] == "manifest.yaml"
+
+
+def test_archive_route_serves_the_fixed_order_whatever_the_zip_holds(client, tmp_path):
+    """§22.4: the served order is the route's, not the zip's - a shuffled
+    archive with an extra member still lists manifest, the automation folder
+    (its three named files first, the rest by name), agents, secrets, rest."""
+    archive = _zip([
+        ("readme.txt", b"hello"),
+        ("secrets.yaml", b"secrets: []\n"),
+        ("automation/02-two.py", b"print(2)\n"),
+        ("automation/notes.md", b"notes\n"),
+        ("automation/01-one.py", b"print(1)\n"),
+        ("agents.yaml", b"agents: []\n"),
+        ("automation/spec.md", b"# T\n"),
+        ("manifest.yaml", b"format_version: 2\n"),
+        ("automation/automation.yaml", b"name: Shared\n"),
+    ])
+    source = _archive_shelf(client, tmp_path, archive)
+
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 200
+    assert [f["path"] for f in r.json()["files"]] == [
+        "manifest.yaml",
+        "automation/automation.yaml", "automation/spec.md", "automation/notes.md",
+        "automation/01-one.py", "automation/02-two.py",
+        "agents.yaml", "secrets.yaml",
+        "readme.txt"]
+    assert r.json()["files"][-1]["text"] == "hello"
+
+
+def test_archive_route_serves_a_binary_or_oversized_member_as_null(client, tmp_path):
+    """§22.4: a member that isn't UTF-8, and one over the 1 MB cap, are named
+    with `text` null rather than dropped."""
+    big = b"a" * (transfer.MAX_AUDIT_TEXT_BYTES + 1)
+    archive = _zip([("manifest.yaml", b"format_version: 2\n"),
+                    ("cover.png", b"\xff\xfe"),
+                    ("big.txt", big)])
+    source = _archive_shelf(client, tmp_path, archive)
+
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 200
+    assert [(f["path"], f["text"]) for f in r.json()["files"]] == [
+        ("manifest.yaml", "format_version: 2\n"),
+        ("big.txt", None),
+        ("cover.png", None)]
+
+
+def test_archive_route_lists_a_zip_the_import_would_refuse(client, tmp_path):
+    """§22.4: the point is to see what is inside, whatever it is - a layout
+    §5.1 would refuse still lists."""
+    archive = _zip([("automation/spec.md", b"# T\n"), ("loose.md", b"stray\n")])
+    source = _archive_shelf(client, tmp_path, archive)
+    assert client.post(
+        f"/marketplace/sources/{source['id']}/entries/0/preview").status_code == 422
+
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 200
+    assert [f["path"] for f in r.json()["files"]] == ["automation/spec.md", "loose.md"]
+
+
+def test_archive_route_404s_and_422s(client, tmp_path):
+    """§22.4: 404 for an unknown source or entry; 422 with the reason when the
+    reference can't be read or isn't a zip."""
+    source = _archive_shelf(client, tmp_path, _export(client))
+    assert client.get(
+        f"/marketplace/sources/{source['id']}/entries/9/archive").status_code == 404
+    assert client.get("/marketplace/sources/nope/entries/0/archive").status_code == 404
+
+    (tmp_path / "shared.autowright").unlink()
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 422 and "couldn't read the archive" in r.json()["detail"]
+
+    (tmp_path / "shared.autowright").write_bytes(b"not a zip at all")
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 422
+    assert r.json()["detail"] == "not a valid .autowright archive"
+
+
+def test_archive_route_writes_nothing_under_the_data_root(client, tmp_path, home):
+    """§22.4: nothing is parked, cached, or written to disk - the request is
+    read-only."""
+    source = _archive_shelf(client, tmp_path, _export(client))
+    before = {p for p in home.rglob("*") if p.is_file()}
+
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/archive")
+    assert r.status_code == 200
+    assert {p for p in home.rglob("*") if p.is_file()} == before
+
+
 def test_url_add_route(client, monkeypatch):
     """A link location through the §22.4 route, with the network stubbed."""
     monkeypatch.setattr(

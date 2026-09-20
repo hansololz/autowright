@@ -2,7 +2,8 @@
 // plus an archive this test exports itself — driven end to end. The nav row is
 // gated on §4.9 developerMode (turned on through the real Settings toggle), the
 // §22.4 marketplace.changed event brings the added row in without a reload, the
-// §22.2 file location is refreshable like a link, and Install runs the ordinary
+// §22.2 file location is refreshable like a link, the §22.3 Audit button opens
+// the archive viewer on the entry's files, and Install runs the ordinary
 // §5.2 two-phase import, landing the automation with its triggers off. The
 // fresh data root seeds the §22.2 built-in catalog, so the page opens on that
 // section rather than the empty state: it is read from the real link, so the
@@ -137,6 +138,17 @@ describe('marketplace e2e', () => {
     await shot(page, 'marketplace-add.png')
     await page.getByRole('button', { name: 'Cancel' }).click()
     await page.getByTestId('marketplace-drop-zone').waitFor({ state: 'detached', timeout: 10_000 })
+
+    // §22.3 Audit: the archive viewer reads the entry's archive on the click
+    // and nowhere else - manifest.yaml is the first file the route serves.
+    await entry.getByTestId('marketplace-audit').click()
+    const viewer = page.locator('[aria-label="Archive viewer"]')
+    await viewer.waitFor({ timeout: 20_000 })
+    await viewer.getByTestId('archive-file').first().getByText('manifest.yaml').waitFor({ timeout: 20_000 })
+    await viewer.getByText(/format_version/).waitFor({ timeout: 10_000 })
+    await shot(page, 'marketplace-archive.png')
+    await page.keyboard.press('Escape')
+    await viewer.waitFor({ state: 'detached', timeout: 10_000 })
 
     // Install: the §9.1 import modal opens straight on its preview step. The
     // archive's own automation is already here, so it lands deduped (§5.1).

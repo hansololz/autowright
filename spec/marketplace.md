@@ -19,6 +19,8 @@ so the page is never empty the first time it opens; it can be hidden but not rem
 Installing an entry is the §5.1/§5.2 import, unchanged: the archive is fetched at install
 time, previewed, and confirmed through the same two-phase flow, so every §5.1 guarantee
 holds (triggers land off, no records are ever created, only matched records are granted).
+Before installing, the user can **audit** an entry: read every text file inside its
+`.autowright` archive in a viewer, fetched only when they ask (§22.3 archive viewer).
 
 **Visibility - preview gate.** The Marketplace page and its nav row render only while
 the §4.9 `developerMode` setting is on. That is the only thing the setting gates here: the
@@ -348,9 +350,12 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   is loading, or when the entry lists no image or its image can't be loaded, the area
   shows a faint centered `fa-image` icon - the no-image icon. Then a 14 px
   padded body holding the title (600, 13.5 px), the description (muted, 12.5 px, clamped
-  to three lines with an ellipsis), and a footer row with the accent **Install** button. A
-  catalog that lists no entries shows the §14 `EmptyLine` "This marketplace lists no
-  automations yet."
+  to three lines with an ellipsis), and a footer row (`justify-content: space-between`)
+  holding, left, the quiet **Audit** button (`.ad-btn-ghost`, a 12 px `fa-magnifying-glass`
+  before the word, `title` "Read every file inside this archive", `data-testid`
+  `marketplace-audit`; it opens the **archive viewer** below) and, right, the accent
+  **Install** button. A catalog that lists no entries shows the §14 `EmptyLine` "This
+  marketplace lists no automations yet."
 - Images load **by reference, on demand**, through the authenticated §19 image route (the
   renderer talks to the backend with a bearer header, so a plain `<img src>` can't carry
   it, and a local path can't be loaded from the page at all): for an entry whose `image`
@@ -360,6 +365,52 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   never stamps `refreshedAt`) shows the new one — and revoked when the page unmounts (a
   fetch that lands after the unmount is revoked at once, never kept). Nothing
   is written to disk. A failed fetch (404, 502, network) keeps the no-image icon.
+
+**Archive viewer** (added 2026-09-19, David's ask: a way to audit what an entry would
+install). Clicking an entry's **Audit** opens the viewer and only then fetches §19 `GET
+…/entries/{index}/archive` - nothing about an archive is read before that click, not on
+mount, not on hover, not for the grid; every open fetches again (nothing is cached and
+nothing is written to disk), and closing the viewer drops what it fetched. The viewer is the
+§9.2 step-script modal's frame put to a third use (`ArchiveViewer.tsx`, beside the version
+diff and the §22.7 editor): the same §14 `Modal` card, `min(1120px, 92vw)` wide, zero
+padding, `overflow: hidden`, no header row, a 280 px navigator on the left and a
+full-height pane on the `--bg-code` ground on the right, `aria-label` "Archive viewer".
+Its height is fixed for the life of the open viewer, sized by the LONGEST file's line count
+at the code rhythm (the step-script modal's rule and bounds: toolbar + rows × 12px/1.65 +
+padding, floored at 440 px, capped at 82vh); while the fetch is in flight, and after a
+failed one, the frame sits at the floor.
+- The **file navigator** (280 px, `--bg-menu` ground, hairline right border, its own §14
+  overlay-scrollbar pane): the 44 px header carrying a faint mono "ARCHIVE" eyebrow, then
+  one row per file the route lists, in the served order. A row shows the file's title
+  (13/600 `--text` on the viewed row, 500 `--text-muted` on the others) over its archive
+  path in dim mono: "Manifest" over `manifest.yaml`, "Automation" over
+  `automation/automation.yaml`, "Spec" over `automation/spec.md`, "Notes" over
+  `automation/notes.md`, "Agents" over `agents.yaml`, "Secrets" over `secrets.yaml`, a
+  step script's name (its file name without the `NN-` prefix and the `.py` extension)
+  over `automation/NN-name.py`; any other file shows its path as the title alone. The
+  viewed row carries the 2 px accent bar and faint fill of the step navigator, the
+  unviewed rows are buttons, the viewed row a plain block, and ↑ / ↓ or ← / → flip files
+  with the §9.2 no-focus-ring rules. The first file is viewed on open. While the fetch is
+  in flight or has failed the navigator holds its header alone.
+- The **code pane**'s fixed 44 px toolbar carries, left, the faint mono "FILE N OF M"
+  eyebrow followed by the viewed file's archive path in dimmer mono (while no file is
+  viewed - the fetch in flight, failed, or an empty zip - the eyebrow reads "FILES" alone,
+  and both chevrons are disabled), and, right, the
+  previous / next file chevrons (`.ad-btn-icon`, disabled at the ends) and a close ✕
+  (Escape and backdrop click also close). Below it, one overlay-scrollbar pane of
+  line-numbered rows exactly as the step-script modal draws them: faint mono right-aligned
+  unselectable gutter, `--code-text` at 12px/1.65 mono, §11 `PyCode` highlighting on `.py`
+  files and plain text on every other, a single trailing final newline neither rendered
+  nor counted, and switching files remounting the rows with the §14 keyed fade. A file the
+  route serves with `text` null (not UTF-8, or over the 1 MB member cap) shows the §14
+  `EmptyLine` "This file can't be shown as text." instead of rows; an empty file shows
+  zero rows; a zip with no files at all shows the `EmptyLine` "This archive holds no
+  files." in the pane under an empty navigator. While the fetch is in
+  flight the pane shows the §14 `PageLoading` spinner; a failed fetch (a 422 or 404, the
+  network) shows a red `Notice` with the reason in the pane, and the viewer stays open so
+  the reason can be read. Not in this viewer (deliberately): find, Install, and any
+  judgement of the content - the viewer shows the files and says nothing about them; the
+  §5.1 validation happens at Install, as before.
 
 **Catalog settings modal** (width 460, from the actions menu's Catalog settings…): title "Catalog settings", the
 catalog's name muted beneath it. Three rows under §14 eyebrows:
@@ -467,6 +518,25 @@ still cached).
   for a local path), fully validated, and parked under a §5.2 token; `preview.sourceUrl`
   and `preview.resolvedUrl` both carry the archive reference. Any failure answers 422;
   the confirm is the ordinary `POST /automations/import/confirm`.
+- `GET /marketplace/sources/{id}/entries/{index}/archive` → `{ reference, files: [{ path,
+  text }] }` - the §22.3 archive viewer (added 2026-09-19). The archive is fetched exactly
+  as the preview route fetches it (`transfer.fetch_archive` for an https reference with the
+  §5.2 rules, a plain read capped at the §5.1 64 MB for a local path; the §22.1
+  concurrency slots), opened as a zip under the §5.1 zip-bomb guards (member count, member
+  size, decompressed total), and every file member is served as text: `path` the member's
+  path inside the archive, `text` its content decoded as UTF-8, or `null` when the member
+  isn't UTF-8 text or is over 1 MB (`transfer.list_archive_text`). Directory members are
+  skipped. Served order, whatever order the zip holds them in: `manifest.yaml`; then the
+  `automation/` members - `automation.yaml`, `spec.md`, `notes.md`, then the rest of that
+  folder sorted by name (so step scripts follow their `NN-` numbers); then `agents.yaml`,
+  `secrets.yaml`; then anything else sorted by path. The archive is **not** validated as
+  an import would validate it - the point is to see what is inside, whatever it is; a
+  member layout the §5.1 import would refuse still lists. Nothing is parked, cached, or
+  written to disk; the request is read-only. 404 when the source or entry doesn't exist;
+  422 with the reason when the reference can't be read (a missing file, a failing host,
+  over the cap - the preview route's mapping, not the image route's 502), when the bytes
+  aren't a zip ("not a valid .autowright archive"), or when a zip-bomb guard trips. Runs
+  on the threadpool, outside the table lock.
 - `POST /marketplace/catalogs` `{ folder?, exportFolder?, name, description, entries }` →
   `Source` (§22.7 create). With `folder` (an absolute path to an existing directory, 422
   otherwise): a folder already holding `marketplace-catalog.yaml` → 409 "that folder
@@ -511,6 +581,7 @@ autowright marketplace set <source> KEY=VALUE… location= shown=on|off autoRefr
 autowright marketplace refresh [<source>]      refresh one catalog, or every one with a location
 autowright marketplace remove <source>         remove a catalog (installed automations stay)
 autowright marketplace install <source> <n>    install entry n (1-based, as `list` prints it)
+autowright marketplace audit <source> <n> [--json]   print every text file inside entry n's archive
 autowright marketplace create [<folder>]       create a catalog (in a folder, or kept by the app) (§22.7)
 autowright marketplace catalog set <source> KEY=VALUE…        name= description= (§22.7)
 autowright marketplace catalog add <source> <automation-or-file> [--title T] [--description D] [--export-to DIR]
@@ -541,7 +612,12 @@ the catalog's entry count first (`entry numbers start at 1 - see \`autowright ma
 list\`` / `'<name>' lists <count> automation(s) - there is no entry <n>`, exit 1), then
 previews the entry, confirms immediately (the typed command is the user's go-ahead, §20
 import rule), and prints exactly the §20 `automation import` summary lines (the two
-commands share one printer), including the foreground package ensure.
+commands share one printer), including the foreground package ensure. `audit <source>
+<n>` (added 2026-09-19) checks `<n>` like `install`, fetches the entry's archive through
+§22.4 `GET …/archive` (a 660 s timeout, like `install`), and prints one block per file in
+the served order: a `== <path>` header line, then the file's lines verbatim (`  (not
+text)` for a file served with `text` null); nothing is installed or parked. A 422 or 404
+exits 1 with the detail. `--json` prints the route's answer instead.
 
 The §22.7 authoring verbs go through `GET`/`PUT …/catalog`, so they take a catalog whose
 location is a path or `null` (a link location exits 1 with the 409 detail). `create
@@ -590,7 +666,17 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   refresh 200-with-error, the image route reading a local path and an https reference on
   demand, an `.svg` served as `image/svg+xml`, 404 for no image, 502 for an unreadable
   one, entry preview producing a confirmable token, the file route answering the copy's bytes with the yaml content
-  type - 404 unknown, 422 when the copy is unreadable).
+  type - 404 unknown, 422 when the copy is unreadable, the archive route listing a real
+  export's files in the served order with their text (a local path read on demand and an
+  https reference through the stubbed `fetch_archive`), a zip with members in another
+  order and an extra member still served in the fixed order, a non-UTF-8 member and one
+  over 1 MB served with `text` null, a hand-made zip the import would refuse still
+  listed, 404 for an unknown entry, 422 for a missing file and for bytes that aren't a
+  zip, and nothing parked or written under the data root by the call).
+- CLI (`tests/test_cli.py`): `marketplace audit` resolving the source and the 1-based
+  index, GETting the archive route with the 660 s timeout, printing the `== <path>`
+  blocks with `(not text)` for a null member, `--json` printing the answer, and the
+  out-of-range exits shared with `install`.
 - Backend authoring (§22.7, same file): create with a folder writes the catalog there and
   the row's location is that file, 409 on a folder that already holds one, 422 on a
   missing folder; create without a folder writes the copy and the location is `null`; GET
@@ -632,14 +718,22 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   folder anywhere; no LOCATION line, only the create note) whose Create button POSTs the
   content alone, and the Export button fetching the file and handing it to `saveFile` as
   `marketplace-catalog.yaml` with the "Exported to <path>." toast (absent while `cached`
-  is false).
+  is false), and the archive viewer: an Audit button on every entry card, the archive
+  route NOT called on mount or by rendering the grid, clicking Audit calling it with the
+  catalog id and entry index and opening the viewer listing one navigator row per served
+  file (the fixed titles over their paths, a step script named by its stem) with the
+  first file's numbered lines in the pane, clicking a row viewing that file, a null
+  `text` showing the "can't be shown as text" line, a rejected fetch showing the reason
+  in a `Notice` with the viewer still open, a second open fetching again, and closing
+  the viewer.
 - e2e: one drive with a file-based catalog under the test data root (a catalog plus one
   archive exported in the same test). The fresh data root seeds the built-in catalog,
   so the page opens on that section (pending, loaded, or failed - the drive runs against
   the real link and asserts only that the section with the "Built in" chip is there and
   keeps no Remove… row), never on the empty state; the drive's own sections are found by
-  their names, not by position or count. It asserts the page lists the file catalog and
-  Install lands the
+  their names, not by position or count. It asserts the page lists the file catalog,
+  that Audit on its entry opens the archive viewer listing `manifest.yaml` first with its
+  text in the pane and closes again, and that Install lands the
   automation with its triggers off; then, with the seeded automation exported to
   `Watcher.autowright` in a temp folder through the §19 export route, **Create catalog…**
   opens the editor, **Add automation…** opens the add form, the title and the archive's

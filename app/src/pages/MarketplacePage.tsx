@@ -11,6 +11,7 @@ import {
   BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MenuRow, MetaChip,
   Modal, Notice, PageLoading, PageTitle, PopMenu, Spinner, Toggle, usePopover,
 } from '../ui'
+import ArchiveViewer from './ArchiveViewer'
 import CatalogEditorModal, {
   CATALOG_FILE, STORED_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel,
 } from './CatalogEditor'
@@ -394,6 +395,9 @@ export default function MarketplacePage() {
     { token: string; preview: ImportPreview; source: string } | null>(null)
   const [imported, setImported] = useState<
     { name: string; automationId: string; summary: ImportSummary } | null>(null)
+  // §22.3 audit: the entry whose archive the viewer is showing.
+  const [viewing, setViewing] = useState<
+    { source: MarketplaceSource; entry: MarketplaceEntry } | null>(null)
 
   // §22.3: one list at a time wins - a stale answer (a slow first list, an
   // unmounted page) never lands over a newer one. The ref is re-armed on every
@@ -661,7 +665,18 @@ export default function MarketplacePage() {
                                 {e.description}
                               </p>
                             )}
-                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'auto', paddingTop: 4 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'auto', paddingTop: 4 }}>
+                              {/* §22.3: the archive viewer - nothing is fetched
+                                  until this click. */}
+                              <button
+                                className="ad-btn-ghost"
+                                data-testid="marketplace-audit"
+                                title="Read every file inside this archive"
+                                onClick={() => setViewing({ source: s, entry: e })}
+                              >
+                                <i className="fa-solid fa-magnifying-glass" style={{ fontSize: 12, marginRight: 7 }} />
+                                Audit
+                              </button>
                               <button
                                 className="ad-btn-primary"
                                 data-testid="marketplace-install"
@@ -731,6 +746,14 @@ export default function MarketplacePage() {
           initial={{ ...install, srcKind: 'marketplace' }}
           onDone={(r) => { void importDone(r) }}
           onClose={() => setInstall(null)}
+        />
+      )}
+      {viewing && (
+        // §22.3: every file inside the entry's archive, fetched on this open.
+        <ArchiveViewer
+          source={viewing.source}
+          entry={viewing.entry}
+          onClose={() => setViewing(null)}
         />
       )}
       {imported && (

@@ -2738,6 +2738,27 @@ async def marketplace_entry_preview(source_id: str, index: int) -> dict:
         raise HTTPException(404, "marketplace entry not found") from None
 
 
+@app.get("/marketplace/sources/{source_id}/entries/{index}/archive",
+         dependencies=[Depends(auth)])
+async def marketplace_entry_archive(source_id: str, index: int) -> dict:
+    """§22.4 archive viewer: every text file inside the entry's archive, in the
+    served order. The archive is fetched as the preview route fetches it but is
+    never validated, parked, or written anywhere - the request is read-only."""
+    def _archive() -> dict:
+        try:
+            data, reference = marketplace_store.entry_archive(source_id, index)
+            files = transfer.list_archive_text(data)
+        except (marketplace.MarketplaceError, transfer.TransferError) as e:
+            raise HTTPException(422, str(e)) from e
+        return {"reference": reference, "files": files}
+
+    try:
+        # Threadpool, not the loop: the fetch and the zip walk both block.
+        return await run_in_threadpool(_archive)
+    except KeyError:
+        raise HTTPException(404, "marketplace entry not found") from None
+
+
 # ---------- settings ----------
 @app.get("/settings", dependencies=[Depends(auth)])
 def get_settings() -> dict:
