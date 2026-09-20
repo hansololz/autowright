@@ -412,12 +412,21 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
 // which flips files with the same keys and the same no-focus-ring rules.
 // `paused` is the card's own hand-off: a popover inside it (the diff modal's
 // "to" picker) takes the arrows for as long as it is open.
+// The listener is bound once per closing / paused flip and reads the position,
+// the count and the callbacks through a ref refreshed on every render (the same
+// shape as executionView's flipRef). A listener re-bound per position would
+// trail the commit by one passive-effect flush, and a key pressed in that gap
+// (right as the diff modal's files arrive, say) would hit the stale closure and
+// be dropped against the old count.
 export function StepKeys({ i, count, closing, paused, onNav, onFind }: {
   i: number; count: number; closing: boolean; paused?: boolean; onNav: (i: number) => void; onFind?: () => void
 }) {
+  const live = useRef({ i, count, onNav, onFind })
+  live.current = { i, count, onNav, onFind }
   useEffect(() => {
     if (closing || paused) return
     const onKey = (e: KeyboardEvent) => {
+      const { i, count, onNav, onFind } = live.current
       // §9.3: both shortcuts yield to the developer-log overlay above the card
       if (devlogOverlayOpen()) return
       // …and to a card stacked above this one, the way the Modal's own Escape
@@ -440,7 +449,7 @@ export function StepKeys({ i, count, closing, paused, onNav, onFind }: {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [i, count, closing, paused]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [closing, paused])
   return null
 }
 
