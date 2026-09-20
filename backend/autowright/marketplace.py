@@ -82,9 +82,16 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
 _GH_REPO_PAGE_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?/?$")
 _GH_TREE_RE = re.compile(r"^/([^/]+)/([^/]+)/tree/([^/]+)(?:/(.+?))?/?$")
 
+# §22.2 built-in catalog: the one catalog that ships with the app. A GitHub
+# file page, read like any other link location, and the location the seeded row
+# is pinned to.
+BUILTIN_CATALOG_URL = ("https://github.com/hansololz/automation-marketplace/blob/main/"
+                       "marketplace-catalog.yaml")
+
 # §22.2: the table's columns - the only keys a row is ever written with, so the
 # derived memo a row carries in memory (`_parsed`) never reaches disk.
-COLUMNS = ("id", "location", "shown", "auto_refresh", "added_at", "refreshed_at", "error")
+COLUMNS = ("id", "location", "shown", "auto_refresh", "builtin", "added_at",
+           "refreshed_at", "error")
 
 COPY_UNREADABLE_REFRESH = "the saved copy couldn't be read - refresh to fetch it again"
 COPY_UNREADABLE_REMOVE = ("the saved copy couldn't be read - remove this marketplace and "
@@ -98,6 +105,8 @@ NO_COPY_TO_KEEP = "there's no saved copy to keep - refresh first"
 AUTO_NEEDS_LOCATION = "auto refresh needs a location"
 BAD_LOCATION = "give an https link or an absolute path"
 NO_EXPORT_FOLDER = "say where to export the automations you added"
+BUILTIN_LOCATION_PINNED = "the built-in catalog's location can't be changed"
+BUILTIN_NOT_REMOVABLE = "the built-in catalog can't be removed - hide it instead"
 TABLE_UNREADABLE = ("the marketplace table on disk couldn't be read; fix or remove "
                     "marketplaces.yaml")
 
@@ -114,6 +123,11 @@ class MarketplaceDuplicate(MarketplaceError):
 class MarketplaceNotRefreshable(MarketplaceError):
     """§22.2: a refresh of a catalog with no location - the §19 route answers
     409 with the row untouched."""
+
+
+class MarketplaceBuiltin(MarketplaceError):
+    """§22.2: a remove of the built-in catalog - the §19 route answers 409, and
+    hiding it is the way to get it off the page."""
 
 
 class MarketplaceNotEditable(MarketplaceError):
@@ -496,7 +510,10 @@ class MarketplaceStore:
         names the row's directory, so it is never joined into a path
         unchecked), or whose `location` is neither null, an absolute path, nor
         an https link, skips with a warning; a missing `shown` reads true, a
-        missing `auto_refresh` false. §5 read-only degradation: a file that
+        missing `auto_refresh` false, a missing `builtin` false (only the first
+        `builtin: true` row is the §22.2 built-in catalog). A clean table is
+        then seeded with the built-in row (§21.4) and saved, offline - loading
+        never reads the network. §5 read-only degradation: a file that
         exists but can't be read at all (bad YAML, or a shape the table isn't
         written in) loads empty and makes the table read-only for the session,
         so the user's catalogs are never replaced by the empty default."""
@@ -538,17 +555,57 @@ class MarketplaceStore:
                                 entry["id"], location)
                     unreadable = True
                     continue
+            builtin = entry.get("builtin") is True
+            if builtin and any(s["builtin"] for s in sources):
+                # §22.2: only the first `builtin: true` row is the built-in
+                # catalog - a second one loads as an ordinary row, the flag
+                # dropped. Not a skip: the row itself is readable.
+                log.warning("marketplaces.yaml row %r is a second built-in catalog - "
+                            "loading it as an ordinary one", entry["id"])
+                builtin = False
             sources.append({"id": str(entry["id"]), "location": location,
                             "shown": entry.get("shown", True) is not False,
                             "auto_refresh": entry.get("auto_refresh") is True
                                             and location is not None,
+                            "builtin": builtin,
                             "added_at": entry.get("added_at") or "",
                             "refreshed_at": entry.get("refreshed_at") or None,
                             "error": entry.get("error") or None})
+        # §22.2: a table that loaded read-only is never seeded - the file is
+        # never rewritten in that state, and the seed happens at the next
+        # clean load.
+        seeded = self._seed_builtin(sources) if not unreadable else False
         with self.lock:
             self.sources = sources
             self._unreadable = unreadable
+            if seeded:
+                self._save()
         self._sweep_orphan_dirs()
+
+    def _seed_builtin(self, sources: list[dict]) -> bool:
+        """§22.2 built-in catalog: every clean load leaves exactly one row
+        flagged `builtin`, pinned to `BUILTIN_CATALOG_URL`. A row already at
+        that link is promoted in place (its id, position, and settings kept),
+        otherwise a pending row is inserted first - the §21.4 migration for
+        every table written before the column shipped, and the first launch.
+        A flagged row whose location drifted is re-pointed; its copy stays
+        until the next refresh reads the new place. Answers whether the table
+        changed, so the caller saves it. Nothing is read from the network."""
+        flagged = next((s for s in sources if s["builtin"]), None)
+        if flagged is not None:
+            if flagged["location"] == BUILTIN_CATALOG_URL:
+                return False
+            flagged["location"] = BUILTIN_CATALOG_URL
+            return True
+        pasted = next((s for s in sources if s["location"] == BUILTIN_CATALOG_URL), None)
+        if pasted is not None:
+            pasted["builtin"] = True
+            return True
+        sources.insert(0, {"id": new_id(), "location": BUILTIN_CATALOG_URL,
+                           "shown": True, "auto_refresh": True, "builtin": True,
+                           "added_at": timefmt.now_iso(), "refreshed_at": None,
+                           "error": None})
+        return True
 
     def _sweep_orphan_dirs(self) -> None:
         """§22.2: nothing but a row's copy lives under `marketplaces/` - a
@@ -636,7 +693,8 @@ class MarketplaceStore:
         # no row to clean up at all.
         text = self._read_location(location)
         source = {"id": new_id(), "location": location, "shown": True,
-                  "auto_refresh": False, "added_at": timefmt.now_iso(),
+                  "auto_refresh": False, "builtin": False,
+                  "added_at": timefmt.now_iso(),
                   "refreshed_at": None, "error": None}
         try:
             with self.lock:
@@ -733,10 +791,34 @@ class MarketplaceStore:
                 self._save()
         return swept
 
+    def refresh_pending(self) -> list[str]:
+        """§22.2 pending: every pending row (the freshly seeded built-in
+        catalog - a location, no copy, never read), in table order, through the
+        ordinary refresh, so a first launch with a network shows the catalog
+        within seconds. A failure lands in `error` like any other refresh, and
+        the row is pending no longer. Answers the ids it read."""
+        with self.lock:
+            targets = [s["id"] for s in self.sources if self.is_pending(s)]
+        read = []
+        for source_id in targets:
+            # A stop asked for meanwhile: one row can block for the whole
+            # §22.1 60-second deadline.
+            if self._auto_stop.is_set():
+                break
+            try:
+                self.refresh(source_id)
+            except (MarketplaceError, KeyError):
+                # A row removed while this ran, or a table that can't be
+                # written: the refresh path itself recorded what it could.
+                continue
+            read.append(source_id)
+        return read
+
     def start_auto_refresh(self, on_change) -> None:
-        """§22.2: the sweep 30 s after the store loads and every 6 hours after
-        that, on a daemon thread off the boot path. `on_change` runs after a
-        sweep that touched any row (the §19 `marketplace.changed` event)."""
+        """§22.2: the pending rows first, before the wait, then the sweep 30 s
+        after the store loads and every 6 hours after that, on a daemon thread
+        off the boot path. `on_change` runs after a pass that touched any row
+        (the §19 `marketplace.changed` event)."""
         if self._auto_thread is not None:
             return
         # A fresh event every time: a sweeper that outlived its stop still
@@ -744,6 +826,11 @@ class MarketplaceStore:
         self._auto_stop = threading.Event()
 
         def run() -> None:
+            try:
+                if self.refresh_pending():
+                    on_change()
+            except Exception:  # noqa: BLE001 - a read must never kill the thread
+                log.exception("the marketplace pending refresh failed")
             wait = AUTO_REFRESH_DELAY_S
             while not self._auto_stop.wait(wait):
                 try:
@@ -779,6 +866,11 @@ class MarketplaceStore:
             # Every check first, then every write: a refused patch changes
             # nothing at all.
             new_location = source["location"]
+            if location is not ... and source["builtin"]:
+                # §22.2: the built-in catalog's location is the constant,
+                # always - a `location` key at all is refused, even the one it
+                # already holds. `shown` and `auto_refresh` change freely.
+                raise MarketplaceError(BUILTIN_LOCATION_PINNED)
             if location is not ...:
                 new_location = normalize_location(location)
                 if new_location is not None and self._taken(new_location, except_id=source_id):
@@ -801,10 +893,14 @@ class MarketplaceStore:
 
     def remove(self, source_id: str) -> None:
         """§22.2 remove: the row and its directory (the copy, nothing more).
-        Installed automations and referenced archive files are untouched."""
+        Installed automations and referenced archive files are untouched. The
+        built-in catalog isn't removable - hiding it is the way to get it off
+        the page."""
         self._require_writable()
         with self.lock:
             source = self._find(source_id)
+            if source["builtin"]:
+                raise MarketplaceBuiltin(BUILTIN_NOT_REMOVABLE)
             self.sources.remove(source)
             self._save()
         # §6: no rmtree ever runs under a store lock.
@@ -879,7 +975,8 @@ class MarketplaceStore:
                 raise MarketplaceError("there's no folder at that path")
         location = str(target / CATALOG_FILENAME) if target else None
         source = {"id": new_id(), "location": location, "shown": True,
-                  "auto_refresh": False, "added_at": timefmt.now_iso(),
+                  "auto_refresh": False, "builtin": False,
+                  "added_at": timefmt.now_iso(),
                   "refreshed_at": None, "error": None}
         # §22.7: both refusals answer before any export runs - a refused
         # create never exports - and again under the commit lock below.
@@ -1192,13 +1289,22 @@ class MarketplaceStore:
         source["_parsed"] = (stamp, catalog)
         return catalog
 
+    def is_pending(self, source: dict) -> bool:
+        """§22.2 pending: the built-in row right after the seed - a location,
+        no copy yet, never read (`refreshed_at` null) and carrying no error.
+        Served as `cached` false with `error` null, and the first thing the
+        auto-refresh thread reads. Caller holds the lock."""
+        return (source["builtin"] and source["refreshed_at"] is None
+                and not source.get("error") and self._cached(source) is None)
+
     def serialize(self, source: dict) -> dict:
         """§22.4 `Source`. The entries are derived from the copy every time (a
         small file, parsed on demand), never duplicated into the table."""
         catalog = self._cached(source)
         error = source.get("error")
-        if catalog is None and not error:
-            # A real stored refresh error wins: it says what actually happened.
+        if catalog is None and not error and not self.is_pending(source):
+            # A real stored refresh error wins: it says what actually happened,
+            # and a pending built-in row never had a copy to lose.
             error = (COPY_UNREADABLE_REFRESH if source["location"] is not None
                      else COPY_UNREADABLE_REMOVE)
         entries = [{"index": e["index"], "title": e["title"],
@@ -1208,6 +1314,7 @@ class MarketplaceStore:
         return {"id": source["id"], "kind": kind_of(source["location"]),
                 "location": source["location"], "shown": source["shown"],
                 "autoRefresh": source["auto_refresh"],
+                "builtin": source["builtin"],
                 "name": catalog["name"] if catalog else default_name(source["location"]),
                 "description": catalog["description"] if catalog else "",
                 "addedAt": source.get("added_at") or "",

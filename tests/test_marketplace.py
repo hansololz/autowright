@@ -35,10 +35,46 @@ def write_catalog(tmp_path, entries, filename="marketplace.yaml", **top):
 # §22.2: a link location - what a refresh of a `url`-kind row downloads.
 CATALOG_URL = "https://x.test/shelf/marketplace-catalog.yaml"
 
+# §22.2 built-in catalog: the pinned location every load seeds, the
+# raw.githubusercontent.com link the §5.2 GitHub file rule reads it from, and a
+# catalog to answer that link with.
+BUILTIN_URL = marketplace.BUILTIN_CATALOG_URL
+BUILTIN_RAW_URL = ("https://raw.githubusercontent.com/hansololz/automation-marketplace/"
+                   "main/marketplace-catalog.yaml")
+BUILTIN_TEXT = catalog_text([{"title": "Shipped",
+                              "path": "https://x.test/shipped.autowright"}],
+                            name="Autowright automations")
+
+
+def added(rows) -> list:
+    """Every row but the §22.2 built-in catalog, which every load seeds - the
+    rows the test itself added. Takes the store, its rows, or serialized ones."""
+    sources = rows.sources if isinstance(rows, MarketplaceStore) else rows
+    return [s for s in sources if not s.get("builtin")]
+
+
+def builtin_row(store: MarketplaceStore) -> dict:
+    """The §22.2 built-in row the store seeded when it loaded."""
+    return next(s for s in store.sources if s["builtin"])
+
+
+def settle_builtin(market) -> dict:
+    """The seeded built-in row with a copy on disk and auto refresh off: it is
+    then neither pending nor swept, so a test can be about the rows it added
+    (§22.2) without the catalog that ships joining in."""
+    row = builtin_row(market)
+    market.update_settings(row["id"], auto_refresh=False)
+    with market.lock:
+        market._write_copy(row, BUILTIN_TEXT)
+    return row
+
 
 def serve(monkeypatch, answers) -> list:
     """§22.1 download: what each https reference answers with - bytes, or an
-    exception to raise. Returns the list of urls asked for, in order."""
+    exception to raise. The §22.2 built-in catalog answers by default, since
+    every load seeds its row and a refresh-all or a sweep reaches it. Returns
+    the list of urls asked for, in order."""
+    answers = {BUILTIN_RAW_URL: BUILTIN_TEXT.encode(), **answers}
     asked = []
 
     def fetch(url, *, cap, deadline_s=marketplace.FETCH_DEADLINE_S):
@@ -216,7 +252,7 @@ def test_a_file_over_the_cap_is_refused_without_being_read(market, tmp_path,
     with pytest.raises(MarketplaceError) as e:
         market.add(path=str(big))
     assert str(e.value) == "the catalog file is larger than the 1 MB limit"
-    assert market.sources == []
+    assert added(market) == []
 
 
 def test_a_reference_is_an_https_link_or_an_absolute_path(tmp_path):
@@ -320,8 +356,9 @@ def test_add_by_path_copies_the_catalog(market, tmp_path):
         [marketplace.CATALOG_FILENAME]
     # §22.2: the row is on disk under the §5 root, derived fields are not
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
-    assert list(stored["sources"][0]) == ["id", "location", "shown", "auto_refresh",
-                                          "added_at", "refreshed_at", "error"]
+    assert list(added(stored["sources"])[0]) == ["id", "location", "shown",
+                                                 "auto_refresh", "builtin", "added_at",
+                                                 "refreshed_at", "error"]
 
 
 def test_add_expands_a_leading_tilde(market, tmp_path, monkeypatch):
@@ -416,8 +453,10 @@ def test_add_stores_nothing_when_validation_fails(market, tmp_path):
     f.write_text("format_version: 9\nentries: []\n", encoding="utf-8")
     with pytest.raises(MarketplaceError):
         market.add(path=str(f))
-    assert market.sources == []
-    assert not (paths.marketplace_dir() / "marketplaces.yaml").exists()
+    assert added(market) == []
+    # the table on disk holds the seeded built-in row and nothing else (§22.2)
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    assert added(stored["sources"]) == []
     # a reference that is neither an https link nor an absolute path is a
     # validation failure naming its entry (§22.1)
     bad = write_catalog(tmp_path, [{"title": "Scheme", "path": "file:///x.autowright"}],
@@ -425,7 +464,7 @@ def test_add_stores_nothing_when_validation_fails(market, tmp_path):
     with pytest.raises(MarketplaceError) as e:
         market.add(path=str(bad))
     assert str(e.value).startswith("entry 0: ")
-    assert market.sources == []
+    assert added(market) == []
 
 
 def test_a_path_with_a_nul_byte_is_refused_rather_than_raising(market, tmp_path):
@@ -443,7 +482,7 @@ def test_a_path_with_a_nul_byte_is_refused_rather_than_raising(market, tmp_path)
         marketplace._read_reference(bad, cap=marketplace.MAX_CATALOG_BYTES,
                                     what="catalog file")
     assert str(e.value).startswith("couldn't read the catalog file - ")
-    assert market.sources == []
+    assert added(market) == []
 
 
 def test_a_row_is_never_left_behind_when_the_table_cant_be_written(market, tmp_path,
@@ -459,11 +498,11 @@ def test_a_row_is_never_left_behind_when_the_table_cant_be_written(market, tmp_p
     monkeypatch.setattr(market, "_save", boom)
     with pytest.raises(OSError):
         market.add(path=str(f))
-    assert market.sources == []
+    assert added(market) == []
     with pytest.raises(OSError):
         market.create_catalog(None)
     with market.lock:
-        assert [market.serialize(s) for s in market.sources] == []
+        assert added([market.serialize(s) for s in market.sources]) == []
 
 
 def test_refresh_rereads_the_location(market, tmp_path, monkeypatch):
@@ -515,9 +554,10 @@ def test_refresh_keeps_the_copy_and_records_the_error(market, tmp_path):
     assert [e["title"] for e in fixed["entries"]] == ["Two"]
 
 
-def test_a_null_location_is_not_refreshable(market, tmp_path):
+def test_a_null_location_is_not_refreshable(market, tmp_path, monkeypatch):
     """§22.2: the app's copy is the only copy - a single-row refresh refuses
     with the row untouched, a refresh-all skips it and still lists it."""
+    serve(monkeypatch, {})   # the seeded built-in row is refreshed too
     kept = market.create_catalog(None)
     folder = tmp_path / "shelf"
     folder.mkdir()
@@ -526,10 +566,10 @@ def test_a_null_location_is_not_refreshable(market, tmp_path):
     with pytest.raises(marketplace.MarketplaceNotRefreshable) as e:
         market.refresh(kept["id"])
     assert str(e.value) == marketplace.NOT_REFRESHABLE
-    assert market.sources[0]["refreshed_at"] is None
-    assert market.sources[0]["error"] is None
+    assert added(market)[0]["refreshed_at"] is None
+    assert added(market)[0]["error"] is None
 
-    sources = market.refresh_all()
+    sources = added(market.refresh_all())
     assert [s["id"] for s in sources] == [kept["id"], linked["id"]]
     assert sources[0]["refreshedAt"] is None and sources[0]["error"] is None
     assert sources[1]["refreshedAt"] != linked["refreshedAt"]
@@ -548,7 +588,7 @@ def test_refresh_all_never_stops_at_the_first_bad_row(market, tmp_path, monkeypa
     bad_source = market.add(url=bad_url)
     serve(monkeypatch, {bad_url: MarketplaceError(
         "download failed - the server answered 404")})
-    sources = market.refresh_all()
+    sources = added(market.refresh_all())
     assert sources[0]["error"] is None
     assert sources[1]["id"] == bad_source["id"] and sources[1]["error"]
     assert [e["title"] for e in sources[1]["entries"]] == ["Bad"]
@@ -585,7 +625,7 @@ def test_a_slow_read_never_blocks_the_table(market, tmp_path, monkeypatch):
         # the page can still serialize the table while the read is in flight
         assert market.lock.acquire(timeout=5), "the table lock is held while reading"
         try:
-            assert market.serialize(market.sources[0])["name"]
+            assert market.serialize(added(market)[0])["name"]
         finally:
             market.lock.release()
     finally:
@@ -606,6 +646,7 @@ def test_a_row_removed_while_it_reads_writes_nothing(market, tmp_path, monkeypat
                         filename="two.yaml")
     first = market.add(path=str(one))
     second = market.add(path=str(two))
+    serve(monkeypatch, {})   # the seeded built-in row is refreshed too
     started, release = _blocking_read(monkeypatch, only=str(one))
     listed: list = []
     worker = threading.Thread(target=lambda: listed.append(market.refresh_all()))
@@ -617,10 +658,10 @@ def test_a_row_removed_while_it_reads_writes_nothing(market, tmp_path, monkeypat
         release.set()
         worker.join(5)
     assert not worker.is_alive()
-    assert [s["id"] for s in listed[0]] == [second["id"]]
+    assert [s["id"] for s in added(listed[0])] == [second["id"]]
     assert not market.source_dir(first["id"]).exists()
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
-    assert [s["id"] for s in stored["sources"]] == [second["id"]]
+    assert [s["id"] for s in added(stored["sources"])] == [second["id"]]
 
 
 def test_settings_change_the_location_shown_and_auto_refresh(market, tmp_path):
@@ -673,7 +714,7 @@ def test_settings_rules_around_a_null_location(market, tmp_path):
     with pytest.raises(MarketplaceError) as e:
         market.update_settings(source["id"], location="")
     assert str(e.value) == marketplace.NO_COPY_TO_KEEP
-    assert market.sources[0]["location"] == str(f)
+    assert added(market)[0]["location"] == str(f)
     with pytest.raises(KeyError):
         market.update_settings("nope", shown=False)
 
@@ -688,6 +729,7 @@ def test_auto_refresh_sweeps_only_flagged_rows_with_a_location(market, tmp_path)
     plain = write_catalog(tmp_path, [{"title": "Plain",
                                       "path": str(tmp_path / "p.autowright")}],
                           filename="plain.yaml")
+    settle_builtin(market)
     kept = market.create_catalog(None)
     one = market.add(path=str(flagged))
     two = market.add(path=str(plain))
@@ -698,10 +740,10 @@ def test_auto_refresh_sweeps_only_flagged_rows_with_a_location(market, tmp_path)
         market.update_settings(kept["id"], auto_refresh=True)
     flagged.write_text("format_version: 1\nentries: [oops\n", encoding="utf-8")
     assert market.auto_refresh_sweep() == [one["id"]]
-    assert market.serialize(market.sources[1])["error"]
-    assert market.serialize(market.sources[2])["error"] is None
-    assert [e["title"] for e in market.serialize(market.sources[1])["entries"]] == ["One"]
-    assert two["id"] == market.sources[2]["id"]
+    assert market.serialize(added(market)[1])["error"]
+    assert market.serialize(added(market)[2])["error"] is None
+    assert [e["title"] for e in market.serialize(added(market)[1])["entries"]] == ["One"]
+    assert two["id"] == added(market)[2]["id"]
 
 
 def test_the_auto_refresh_thread_sweeps_and_reports_the_change(market, tmp_path,
@@ -709,6 +751,7 @@ def test_the_auto_refresh_thread_sweeps_and_reports_the_change(market, tmp_path,
     """§22.2: the sweep runs on a daemon thread off the boot path and calls
     back after a sweep that touched any row (the §19 event)."""
     monkeypatch.setattr(marketplace, "AUTO_REFRESH_DELAY_S", 0.01)
+    settle_builtin(market)
     f = write_catalog(tmp_path, [{"title": "One",
                                   "path": str(tmp_path / "one.autowright")}])
     source = market.add(path=str(f))
@@ -719,13 +762,14 @@ def test_the_auto_refresh_thread_sweeps_and_reports_the_change(market, tmp_path,
         assert changed.wait(5)
     finally:
         market.stop_auto_refresh()
-    assert market.sources[0]["refreshed_at"] != source["refreshedAt"]
+    assert added(market)[0]["refreshed_at"] != source["refreshedAt"]
 
 
 def test_stopping_auto_refresh_waits_for_the_sweep(market, tmp_path, monkeypatch):
     """A start after a stop must never leave two sweepers on one table: the
     stop waits for the thread, and the next start sweeps again."""
     monkeypatch.setattr(marketplace, "AUTO_REFRESH_DELAY_S", 0.01)
+    settle_builtin(market)
     f = write_catalog(tmp_path, [{"title": "One",
                                   "path": str(tmp_path / "one.autowright")}])
     source = market.add(path=str(f))
@@ -764,6 +808,7 @@ def test_a_stopped_sweep_skips_the_rows_still_to_come(market, tmp_path, monkeypa
     second = write_catalog(tmp_path, [{"title": "Two",
                                        "path": str(tmp_path / "two.autowright")}],
                            filename="two.yaml")
+    settle_builtin(market)
     one = market.add(path=str(first))
     two = market.add(path=str(second))
     market.update_settings(one["id"], auto_refresh=True)
@@ -791,7 +836,7 @@ def test_an_unreadable_copy_still_lists_the_row(market, tmp_path):
                       name="Shelf")
     source = market.add(path=str(f))
     market.catalog_file(source["id"]).write_text("format_version: 9\n", encoding="utf-8")
-    listed = market.serialize(market.sources[0])
+    listed = market.serialize(added(market)[0])
     # §22.2: the row still lists, with zero entries and the location-derived name
     assert listed["entries"] == [] and listed["name"] == "marketplace"
     assert listed["error"] == marketplace.COPY_UNREADABLE_REFRESH
@@ -800,11 +845,11 @@ def test_an_unreadable_copy_still_lists_the_row(market, tmp_path):
     f.write_text("format_version: 1\nentries: [oops\n", encoding="utf-8")
     failed = market.refresh(source["id"])
     assert "YAML" in failed["error"]
-    assert market.serialize(market.sources[0])["error"] == failed["error"]
+    assert market.serialize(added(market)[0])["error"] == failed["error"]
     # §22.2: a catalog the app keeps by itself has nothing to refresh from
     kept = market.create_catalog(None)
     market.catalog_file(kept["id"]).write_text("format_version: 9\n", encoding="utf-8")
-    listed = market.serialize(market.sources[1])
+    listed = market.serialize(added(market)[1])
     assert listed["error"] == marketplace.COPY_UNREADABLE_REMOVE
     assert listed["cached"] is False and listed["name"] == marketplace.KEPT_NAME
 
@@ -815,7 +860,7 @@ def test_remove_drops_the_row_and_its_directory(market, tmp_path):
     directory = market.source_dir(source["id"])
     assert directory.is_dir()
     market.remove(source["id"])
-    assert market.sources == [] and not directory.exists()
+    assert added(market) == [] and not directory.exists()
     assert f.is_file()  # §22.2: the catalog file the row read is the user's
     with pytest.raises(KeyError):
         market.remove(source["id"])
@@ -867,7 +912,9 @@ def test_sources_yaml_lenient_load(market, home, caplog):
     assert market.sources[1]["shown"] is False
     assert market.sources[1]["auto_refresh"] is True
     assert list(market.sources[1]) == ["id", "location", "shown", "auto_refresh",
-                                       "added_at", "refreshed_at", "error"]
+                                       "builtin", "added_at", "refreshed_at", "error"]
+    # §22.2: a skipped row left the table read-only, so it was not seeded
+    assert not any(s["builtin"] for s in market.sources)
     # §22.2: auto refresh is meaningless, and kept false, without a location
     assert market.sources[2]["location"] is None
     assert market.sources[2]["auto_refresh"] is False
@@ -922,7 +969,7 @@ def test_an_unparsable_copy_lists_rather_than_raising(market, tmp_path):
     f = write_catalog(tmp_path, [])
     source = market.add(path=str(f))
     market.catalog_file(source["id"]).write_text("[" * 5000, encoding="utf-8")
-    listed = market.serialize(market.sources[0])
+    listed = market.serialize(added(market)[0])
     assert listed["cached"] is False and listed["entries"] == []
     assert listed["error"] == marketplace.COPY_UNREADABLE_REFRESH
 
@@ -1039,6 +1086,238 @@ def test_an_image_at_a_github_file_page_is_read_from_the_raw_link(market, tmp_pa
     assert asked == [raw]
 
 
+# ---------- §22.2 built-in catalog ----------
+def test_a_fresh_table_seeds_one_pending_builtin_row(home, monkeypatch):
+    """§22.2: the first load makes one row - the pinned location, `shown` and
+    `auto_refresh` on, `builtin` true, no copy yet - saves the table at once,
+    and reads nothing from the network to do it."""
+    def never(url, *, cap, deadline_s=marketplace.FETCH_DEADLINE_S):
+        raise AssertionError(f"{url} was read while the table loaded")
+
+    monkeypatch.setattr(marketplace, "_fetch_url", never)
+    store = MarketplaceStore()
+    store.load()
+    assert [s["builtin"] for s in store.sources] == [True]
+    row = builtin_row(store)
+    assert row["location"] == BUILTIN_URL
+    assert row["shown"] is True and row["auto_refresh"] is True
+    assert row["refreshed_at"] is None and row["error"] is None
+    assert not store.catalog_file(row["id"]).exists()
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    assert stored == {"sources": [{key: row[key] for key in marketplace.COLUMNS}]}
+
+
+def test_sources_yaml_without_builtin_seeds_the_builtin_row(home):
+    """§21.4 old-shape fixture: a table written before the column - seven
+    columns, no `builtin` key anywhere - gets the built-in row inserted first
+    and saved, and every row it already held reads `builtin` false."""
+    write_table(
+        "sources:\n"
+        f"- id: {DEFAULTS_ID}\n"
+        "  location: /m/marketplace.yaml\n"
+        "  shown: true\n"
+        "  auto_refresh: false\n"
+        "  added_at: '2026-09-11T00:00:00.000000+00:00'\n"
+        "  refreshed_at: '2026-09-11T00:10:00.000000+00:00'\n"
+        "  error: null\n"
+        f"- id: {KEPT_ID}\n"
+        "  location: null\n"
+        "  shown: false\n"
+        "  auto_refresh: false\n"
+        "  added_at: '2026-09-11T00:00:00.000000+00:00'\n"
+        "  refreshed_at: null\n"
+        "  error: null\n")
+    store = MarketplaceStore()
+    store.load()
+    assert [s["builtin"] for s in store.sources] == [True, False, False]
+    assert [s["id"] for s in store.sources][1:] == [DEFAULTS_ID, KEPT_ID]
+    assert builtin_row(store)["location"] == BUILTIN_URL
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    assert [s["builtin"] for s in stored["sources"]] == [True, False, False]
+    assert stored["sources"][1]["refreshed_at"] == "2026-09-11T00:10:00.000000+00:00"
+
+
+def test_a_row_already_at_the_builtin_link_is_promoted_in_place(home):
+    """§22.2: the user pasted that link before this shipped - the flag is
+    stamped and the row's id, position, and settings are kept."""
+    write_table(
+        "sources:\n"
+        f"- id: {KEPT_ID}\n"
+        "  location: null\n"
+        f"- id: {DEFAULTS_ID}\n"
+        f"  location: {BUILTIN_URL}\n"
+        "  shown: false\n"
+        "  auto_refresh: false\n"
+        "  refreshed_at: '2026-09-12T00:00:00.000000+00:00'\n")
+    store = MarketplaceStore()
+    store.load()
+    assert [s["id"] for s in store.sources] == [KEPT_ID, DEFAULTS_ID]
+    row = builtin_row(store)
+    assert row["id"] == DEFAULTS_ID and row["location"] == BUILTIN_URL
+    assert row["shown"] is False and row["auto_refresh"] is False
+    assert row["refreshed_at"] == "2026-09-12T00:00:00.000000+00:00"
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    assert [s["builtin"] for s in stored["sources"]] == [False, True]
+
+
+def test_a_builtin_row_whose_location_drifted_is_repointed(home):
+    """§22.2: the built-in row's location is the constant, always - a hand edit,
+    or a release that moved the catalog, is re-pointed at load and saved; its
+    copy stays until the next refresh reads the new place."""
+    write_table(
+        "sources:\n"
+        f"- id: {DEFAULTS_ID}\n"
+        "  location: https://github.com/someone/else/blob/main/marketplace-catalog.yaml\n"
+        "  builtin: true\n"
+        "  shown: false\n"
+        "  refreshed_at: '2026-09-12T00:00:00.000000+00:00'\n")
+    copy = paths.marketplace_dir() / DEFAULTS_ID
+    copy.mkdir(parents=True)
+    (copy / marketplace.CATALOG_FILENAME).write_text(BUILTIN_TEXT, encoding="utf-8")
+
+    store = MarketplaceStore()
+    store.load()
+    row = builtin_row(store)
+    assert row["id"] == DEFAULTS_ID and row["location"] == BUILTIN_URL
+    assert row["shown"] is False
+    assert store.serialize(row)["cached"] is True      # the copy stays
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    assert stored["sources"][0]["location"] == BUILTIN_URL
+
+
+def test_a_second_builtin_row_loads_as_an_ordinary_one(home, caplog):
+    """§22.2: only the first `builtin: true` row is the built-in catalog - a
+    second one loads with the flag dropped and a warning. It is not a skipped
+    row, so the table stays writable."""
+    write_table(
+        "sources:\n"
+        f"- id: {DEFAULTS_ID}\n"
+        f"  location: {BUILTIN_URL}\n"
+        "  builtin: true\n"
+        f"- id: {OLD_SHAPE_ID}\n"
+        "  location: /m/old.yaml\n"
+        "  builtin: true\n")
+    store = MarketplaceStore()
+    with caplog.at_level("WARNING"):
+        store.load()
+    assert [s["builtin"] for s in store.sources] == [True, False]
+    assert "second built-in catalog" in caplog.records[0].getMessage()
+    store.remove(OLD_SHAPE_ID)
+    assert [s["id"] for s in store.sources] == [DEFAULTS_ID]
+
+
+def test_a_read_only_table_is_never_seeded(home):
+    """§22.2: a table that loaded read-only for the session - an unparsable
+    file, or a row the user hand-edited into a skip - is never rewritten, so the
+    seed waits for the next clean load."""
+    f = write_table("sources: [oops\n")
+    before = f.read_bytes()
+    store = MarketplaceStore()
+    store.load()
+    assert store.sources == [] and f.read_bytes() == before
+
+    f = write_table("sources:\n"
+                    "- id: not-a-uuid\n"
+                    "  location: null\n")
+    before = f.read_bytes()
+    store.load()
+    assert store.sources == [] and f.read_bytes() == before
+
+
+def test_a_pending_builtin_row_is_cached_false_with_no_error(market):
+    """§22.2 pending: a location, no copy, never read and no error is served as
+    `cached` false with `error` null - not the missing-copy message, which is
+    for a copy that was there and is gone."""
+    row = builtin_row(market)
+    listed = market.serialize(row)
+    assert listed["builtin"] is True and listed["cached"] is False
+    assert listed["error"] is None and listed["entries"] == []
+    assert listed["kind"] == "url" and listed["location"] == BUILTIN_URL
+    assert listed["autoRefresh"] is True and listed["refreshedAt"] is None
+
+    with market.lock:
+        market._stamp_refresh(row, BUILTIN_TEXT)
+    assert market.serialize(row)["cached"] is True
+    # once a copy has existed, losing it is the ordinary unreadable-copy message
+    market.catalog_file(row["id"]).unlink()
+    listed = market.serialize(row)
+    assert listed["cached"] is False
+    assert listed["error"] == marketplace.COPY_UNREADABLE_REFRESH
+
+
+def test_the_auto_refresh_thread_reads_the_pending_row_before_its_first_wait(
+        market, monkeypatch):
+    """§22.2 pending: the thread refreshes every pending row first, before its
+    30-second wait, so a first launch with a network shows the catalog within
+    seconds - the copy lands, `refreshed_at` is stamped, and the §19 event
+    follows. The read is the §5.2 GitHub file rule's raw link."""
+    monkeypatch.setattr(marketplace, "AUTO_REFRESH_DELAY_S", 60)  # never reached
+    asked = serve(monkeypatch, {})
+    row = builtin_row(market)
+    changed = threading.Event()
+    market.start_auto_refresh(changed.set)
+    try:
+        assert changed.wait(5)
+    finally:
+        market.stop_auto_refresh()
+    assert asked == [BUILTIN_RAW_URL]
+    assert row["refreshed_at"] and row["error"] is None
+    listed = market.serialize(row)
+    assert listed["cached"] is True and listed["name"] == "Autowright automations"
+    # read once: the row is no longer pending
+    assert market.refresh_pending() == []
+
+
+def test_the_builtin_rows_location_is_pinned_and_it_cant_be_removed(market, monkeypatch):
+    """§22.2: a `location` key on the built-in row is refused - even the value
+    it already holds - while `shown` and `auto_refresh` change freely, and a
+    remove is refused outright (hiding it is the way to get it off the page)."""
+    row = builtin_row(market)
+    for given in (BUILTIN_URL, "", str(marketplace.CATALOG_FILENAME)):
+        with pytest.raises(MarketplaceError) as e:
+            market.update_settings(row["id"], location=given)
+        assert str(e.value) == marketplace.BUILTIN_LOCATION_PINNED
+    assert row["location"] == BUILTIN_URL
+
+    hidden = market.update_settings(row["id"], shown=False, auto_refresh=False)
+    assert hidden["shown"] is False and hidden["autoRefresh"] is False
+    with pytest.raises(marketplace.MarketplaceBuiltin) as e:
+        market.remove(row["id"])
+    assert str(e.value) == marketplace.BUILTIN_NOT_REMOVABLE
+    assert builtin_row(market)["id"] == row["id"]
+
+    # §22.2: adding the same link again is the ordinary duplicate refusal
+    serve(monkeypatch, {})
+    with pytest.raises(marketplace.MarketplaceDuplicate) as e:
+        market.add(url=BUILTIN_URL)
+    assert str(e.value) == marketplace.ALREADY_ADDED
+
+
+def test_builtin_routes_refuse_a_location_patch_and_a_delete(client):
+    """§22.4: DELETE answers 409 and a `location` key answers 422 on the
+    built-in row; `shown` and `autoRefresh` patch like any other row."""
+    from autowright.api import marketplace_store
+
+    row = builtin_row(marketplace_store)
+    listed = [s for s in client.get("/marketplace").json()["sources"] if s["builtin"]]
+    assert [s["id"] for s in listed] == [row["id"]]
+    assert listed[0]["cached"] is False and listed[0]["error"] is None
+
+    r = client.delete(f"/marketplace/sources/{row['id']}")
+    assert r.status_code == 409
+    assert r.json()["detail"] == marketplace.BUILTIN_NOT_REMOVABLE
+    for location in (BUILTIN_URL, None, ""):
+        r = client.patch(f"/marketplace/sources/{row['id']}", json={"location": location})
+        assert r.status_code == 422
+        assert r.json()["detail"] == marketplace.BUILTIN_LOCATION_PINNED
+
+    r = client.patch(f"/marketplace/sources/{row['id']}",
+                     json={"shown": False, "autoRefresh": False})
+    assert r.status_code == 200
+    assert r.json()["shown"] is False and r.json()["autoRefresh"] is False
+    assert r.json()["builtin"] is True and r.json()["location"] == BUILTIN_URL
+
+
 # ---------- §22.4 routes ----------
 def _export(client) -> bytes:
     """A real §5.1 export, so the entry preview below lands through import."""
@@ -1053,7 +1332,8 @@ def _export(client) -> bytes:
     return client.get(f"/automations/{a['id']}/export").content
 
 
-def test_routes_add_list_refresh_and_remove(client, tmp_path):
+def test_routes_add_list_refresh_and_remove(client, tmp_path, monkeypatch):
+    serve(monkeypatch, {})   # the seeded built-in row is refreshed too
     (tmp_path / "one.autowright").write_bytes(b"zip")
     (tmp_path / "cover.png").write_bytes(PNG)
     f = write_catalog(tmp_path, [{"title": "One",
@@ -1066,7 +1346,7 @@ def test_routes_add_list_refresh_and_remove(client, tmp_path):
     assert source["entries"][0]["image"] == str(tmp_path / "cover.png")
     assert source["kind"] == "file" and source["location"] == str(f)
 
-    assert client.get("/marketplace").json()["sources"] == [source]
+    assert added(client.get("/marketplace").json()["sources"]) == [source]
     # §22.4 add rules
     assert client.post("/marketplace/sources", json={}).status_code == 422
     assert client.post("/marketplace/sources",
@@ -1083,12 +1363,12 @@ def test_routes_add_list_refresh_and_remove(client, tmp_path):
     assert r.status_code == 200 and r.json()["error"]
     assert [e["title"] for e in r.json()["entries"]] == ["One"]
     r = client.post("/marketplace/refresh")
-    assert r.status_code == 200 and r.json()["sources"][0]["error"]
+    assert r.status_code == 200 and added(r.json()["sources"])[0]["error"]
     assert client.post("/marketplace/sources/nope/refresh").status_code == 404
 
     assert client.delete(f"/marketplace/sources/{source['id']}").json() == {"ok": True}
     assert client.delete(f"/marketplace/sources/{source['id']}").status_code == 404
-    assert client.get("/marketplace").json()["sources"] == []
+    assert added(client.get("/marketplace").json()["sources"]) == []
 
 
 def test_settings_route(client, tmp_path):
@@ -1170,22 +1450,23 @@ def test_the_routes_refuse_to_write_a_table_they_couldnt_read(client, home, tmp_
     assert f.read_bytes() == before
 
 
-def test_route_refuses_to_refresh_a_null_location(client, tmp_path):
+def test_route_refuses_to_refresh_a_null_location(client, tmp_path, monkeypatch):
     """§22.4: a catalog the app keeps by itself answers 409 with the row
     untouched, and a refresh-all lists it as it was."""
     from autowright.api import marketplace_store
 
+    serve(monkeypatch, {})   # the seeded built-in row is refreshed too
     source = client.post("/marketplace/catalogs", json={}).json()
     assert source["location"] is None
-    row = dict(marketplace_store.sources[0])
+    row = dict(added(marketplace_store)[0])
 
     r = client.post(f"/marketplace/sources/{source['id']}/refresh")
     assert r.status_code == 409 and r.json()["detail"] == marketplace.NOT_REFRESHABLE
-    assert marketplace_store.sources[0] == row
+    assert added(marketplace_store)[0] == row
 
     r = client.post("/marketplace/refresh")
     assert r.status_code == 200
-    listed = r.json()["sources"]
+    listed = added(r.json()["sources"])
     assert [s["id"] for s in listed] == [source["id"]]
     assert listed[0]["refreshedAt"] is None and listed[0]["error"] is None
 
@@ -1294,7 +1575,7 @@ def test_url_add_route(client, monkeypatch):
     assert source["kind"] == "url" and source["name"] == "Linked"
     assert source["location"] == "https://x.test/marketplace.yaml"
     assert source["entries"][0]["archive"] == "https://x.test/w.autowright"
-    assert client.get("/marketplace").json()["sources"][0]["id"] == source["id"]
+    assert added(client.get("/marketplace").json()["sources"])[0]["id"] == source["id"]
 
 
 def test_file_route_hands_out_the_copy(client, tmp_path):
@@ -1383,7 +1664,7 @@ def test_create_refuses_a_taken_folder_and_a_bad_path(market, tmp_path):
     with pytest.raises(marketplace.MarketplaceDuplicate) as e:
         market.create_catalog(str(folder))
     assert str(e.value) == marketplace.FOLDER_TAKEN
-    assert len(market.sources) == 1
+    assert len(added(market)) == 1
     with pytest.raises(MarketplaceError):
         market.create_catalog(str(tmp_path / "nothing"))
     with pytest.raises(MarketplaceError):
@@ -1393,7 +1674,7 @@ def test_create_refuses_a_taken_folder_and_a_bad_path(market, tmp_path):
     with pytest.raises(marketplace.MarketplaceDuplicate) as e:
         market.create_catalog(str(folder))
     assert str(e.value) == marketplace.ALREADY_ADDED
-    assert len(market.sources) == 1
+    assert len(added(market)) == 1
 
 
 def test_create_writes_the_editors_content(market, tmp_path):
@@ -1439,7 +1720,7 @@ def test_create_writes_nothing_when_an_entry_fails(market, tmp_path):
         create([{"title": "  ", "description": "", "automationId": "a1"}])
     assert str(e.value) == "entry 0: it has no title"
     assert list(folder.iterdir()) == []
-    assert market.sources == []
+    assert added(market) == []
 
 
 def test_read_catalog_answers_the_file_as_written(market, tmp_path, monkeypatch):
@@ -1823,7 +2104,7 @@ def test_a_refused_create_never_exports(market, tmp_path):
     assert str(e.value) == marketplace.FOLDER_TAKEN
     assert calls == []
     assert sorted(p.name for p in folder.iterdir()) == [marketplace.CATALOG_FILENAME]
-    assert [s["id"] for s in market.sources] == [source["id"]]
+    assert [s["id"] for s in added(market)] == [source["id"]]
 
 
 def test_a_catalog_moved_while_a_save_exports_is_refused(market, tmp_path):
@@ -1872,7 +2153,7 @@ def test_a_slow_export_never_blocks_the_table(market, tmp_path):
         assert started.wait(5)
         assert market.lock.acquire(timeout=5), "the table lock is held while exporting"
         try:
-            assert [market.serialize(s)["id"] for s in market.sources] == [source["id"]]
+            assert [market.serialize(s)["id"] for s in added(market)] == [source["id"]]
         finally:
             market.lock.release()
     finally:
@@ -1916,7 +2197,7 @@ def test_a_row_removed_while_a_save_exports_leaves_no_archives(market, tmp_path)
     assert not worker.is_alive()
     assert isinstance(failed[0], KeyError)
     assert list(folder.glob("*.autowright")) == []
-    assert market.sources == []
+    assert added(market) == []
 
 
 # ---------- §22.4 authoring routes ----------
@@ -1928,7 +2209,7 @@ def test_catalog_create_route(client, tmp_path):
     source = r.json()
     assert source["kind"] == "file" and source["name"] == "shelf"
     assert source["location"] == str(folder / marketplace.CATALOG_FILENAME)
-    assert client.get("/marketplace").json()["sources"] == [source]
+    assert added(client.get("/marketplace").json()["sources"]) == [source]
 
     r = client.post("/marketplace/catalogs", json={"folder": str(folder)})
     assert r.status_code == 409 and r.json()["detail"] == marketplace.FOLDER_TAKEN
@@ -1947,7 +2228,7 @@ def test_catalog_create_route_without_a_folder(client):
     assert source["location"] is None and source["kind"] == "none"
     assert source["name"] == marketplace.KEPT_NAME and source["entries"] == []
     assert source["refreshedAt"] is None and source["cached"] is True
-    assert client.get("/marketplace").json()["sources"] == [source]
+    assert added(client.get("/marketplace").json()["sources"]) == [source]
 
 
 def test_catalog_create_route_takes_the_editors_content(client, tmp_path):
@@ -1982,7 +2263,7 @@ def test_catalog_create_route_takes_the_editors_content(client, tmp_path):
     assert r.status_code == 409 and r.json()["detail"] == marketplace.FOLDER_TAKEN
     assert sorted(p.name for p in folder.iterdir()) == [
         "Watcher.autowright", marketplace.CATALOG_FILENAME]
-    assert len(client.get("/marketplace").json()["sources"]) == 1
+    assert len(added(client.get("/marketplace").json()["sources"])) == 1
 
 
 def test_catalog_read_route(client, tmp_path, monkeypatch):
@@ -2178,6 +2459,7 @@ def test_refresh_all_leaves_the_rows_past_the_deadline_untouched(market, tmp_pat
                                                                  monkeypatch):
     """§22.2: "One 120 s deadline bounds the whole request: catalogs not
     reached by then are left as they were, no error stamped"."""
+    serve(monkeypatch, {})   # the seeded built-in row is refreshed too
     first_dir, second_dir = tmp_path / "first", tmp_path / "second"
     first_dir.mkdir()
     second_dir.mkdir()
@@ -2192,13 +2474,16 @@ def test_refresh_all_leaves_the_rows_past_the_deadline_untouched(market, tmp_pat
 
     def slow(location):
         fetched.append(location)
-        time.sleep(0.4)
+        if location != BUILTIN_URL:
+            # the seeded built-in row comes first and is read at once, so the
+            # deadline falls between the two rows this test added
+            time.sleep(0.4)
         return real(location)
 
     monkeypatch.setattr(market, "_fetch_catalog", slow)
-    sources = market.refresh_all()
+    sources = added(market.refresh_all())
 
-    assert fetched == [first["location"]]  # the second row was never reached
+    assert fetched == [BUILTIN_URL, first["location"]]  # the second was never reached
     assert [s["id"] for s in sources] == [first["id"], second["id"]]
     assert sources[1]["error"] is None  # left as it was, not failed
     assert [e["title"] for e in sources[1]["entries"]] == ["Second"]

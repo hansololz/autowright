@@ -68,6 +68,20 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-19 - `builtin` column and the seeded built-in catalog in `marketplaces.yaml`
+  (§22.2).** Each catalog-table row gains `builtin: bool` (default `false`), and exactly
+  one row carries `true`: the built-in Autowright catalog, whose `location` is pinned to
+  the `BUILTIN_CATALOG_URL` constant. Migration on load: a table with no `builtin` row
+  (every table written before this date, and a first launch) is seeded - a row already at
+  that link is promoted in place (flag stamped, settings kept), otherwise a new pending
+  row is inserted first with `auto_refresh` on and saved; a `builtin` row whose location
+  drifted is re-pointed. Recognition is structural (no row with the flag). An absent key
+  reads `false`, so every old shape loads; a release without the column ignores it (an
+  unknown key under the §22.2 lenient load) and lists the seeded row as an ordinary
+  catalog at that link. The table is not touched while it loaded read-only. First
+  version writing the new shape: the next release after 2026-09-19; oldest shape still
+  read: v0.11.4 (the first release with the store; key absent). Fixture test:
+  `tests/test_marketplace.py::test_sources_yaml_without_builtin_seeds_the_builtin_row`.
 - **2026-09-11 - `marketplaces/` store added (§22).** A new directory under the §5 data
   root: `marketplaces.yaml` (the user's marketplace sources - id, kind, origin, timestamps, last
   error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source, each

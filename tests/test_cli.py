@@ -2776,6 +2776,16 @@ KEPT_SOURCE = {"id": "m3333333-c", "kind": "none", "location": None,
                "refreshedAt": None, "error": None, "entries": []}
 
 
+# §22.2: the built-in catalog, seeded and not read yet - the pending row.
+BUILTIN_SOURCE = {"id": "m4444444-d", "kind": "url",
+                  "location": "https://github.com/hansololz/automation-marketplace/"
+                              "blob/main/marketplace-catalog.yaml",
+                  "shown": True, "autoRefresh": True, "builtin": True,
+                  "name": "automation-marketplace", "description": "",
+                  "addedAt": "2026-09-19T08:00:00Z", "refreshedAt": None,
+                  "error": None, "cached": False, "entries": []}
+
+
 class _MarketClient:
     """§22.5 routing stub: the sources listing answers every GET (deep-copied,
     so a command that mutates a record can't leak across tests), and the §22.7
@@ -2849,6 +2859,29 @@ def test_cmd_marketplace_list_marks_hidden_and_auto_refresh(capsys):
 
     _run(_MarketClient([{**SOURCES[0], "shown": False}]), "marketplace", "list")
     assert capsys.readouterr().out.splitlines()[0].endswith("marketplace.yaml hidden")
+
+
+def test_cmd_marketplace_list_marks_the_builtin_catalog_and_its_pending_line(capsys):
+    """§22.5: ` built-in` leads the flags, and a built-in row with no copy yet
+    prints `fetching the catalog…` in place of the added/refreshed line."""
+    _run(_MarketClient([BUILTIN_SOURCE]), "marketplace", "list")
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == (f"automation-marketplace [m4444444]  {BUILTIN_SOURCE['location']}"
+                      " built-in auto-refresh")
+    assert out[1] == "  fetching the catalog…"
+    assert out[2] == "  no automations listed"
+
+    # read once, it prints the ordinary refreshed line - and the flags keep order
+    _run(_MarketClient([{**BUILTIN_SOURCE, "shown": False, "cached": True,
+                         "refreshedAt": "2026-09-19T08:05:00Z"}]), "marketplace", "list")
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].endswith("marketplace-catalog.yaml built-in hidden auto-refresh")
+    assert out[1] == "  refreshed 2026-09-19T08:05:00Z"
+
+    # §22.2: a failed first read is the ordinary error line, not the pending one
+    _run(_MarketClient([{**BUILTIN_SOURCE, "error": "download failed"}]),
+         "marketplace", "list")
+    assert capsys.readouterr().out.splitlines()[1] == "  couldn't refresh: download failed"
 
 
 def test_cmd_marketplace_list_reports_an_empty_catalog_and_a_failed_refresh(capsys):
@@ -2937,6 +2970,49 @@ def test_cmd_marketplace_set_refuses_a_key_that_isnt_one_of_the_three():
         _run(c, "marketplace", "set", "Mine", "shown=maybe")
     assert str(ei.value.code) == "shown takes on|off, got 'maybe'"
     assert c.calls == []
+
+
+class _RefusingMarketClient(_MarketClient):
+    """§22.4 answering a write with a 4xx: every write goes through the CLI's
+    ordinary HTTP error path, so what the user reads is the API's detail."""
+
+    def __init__(self, sources, status, detail):
+        super().__init__(sources)
+        self.status, self.detail = status, detail
+
+    def req(self, method, path, body=None, timeout=30):
+        if method == "GET":
+            return super().req(method, path, body, timeout)
+        import urllib.error
+
+        from autowright import cli
+
+        cli._exit_http(urllib.error.HTTPError(
+            self.base + path, self.status, "", {},
+            io.BytesIO(json.dumps({"detail": self.detail}).encode())))
+
+
+def test_cmd_marketplace_set_and_remove_refuse_the_builtin_catalog():
+    """§22.5: `location=` on the built-in catalog exits 1 with the §22.4 422
+    detail and `remove` with the 409 detail - hiding it is `shown=off`."""
+    pinned = "the built-in catalog's location can't be changed"
+    c = _RefusingMarketClient([BUILTIN_SOURCE], 422, pinned)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "set", "automation-marketplace", "location=")
+    assert str(ei.value.code) == f"422: {pinned}"
+
+    not_removable = "the built-in catalog can't be removed - hide it instead"
+    c = _RefusingMarketClient([BUILTIN_SOURCE], 409, not_removable)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "remove", "automation-marketplace")
+    assert str(ei.value.code) == f"409: {not_removable}"
+
+    # §22.2: hiding it is an ordinary settings change
+    c = _MarketClient([BUILTIN_SOURCE], writes={
+        "/marketplace/sources/m4444444-d": {"id": "m4444444-d",
+                                            "name": "automation-marketplace"}})
+    _run(c, "marketplace", "set", "automation-marketplace", "shown=off")
+    assert c.calls == [("PATCH", "/marketplace/sources/m4444444-d", {"shown": False})]
 
 
 def test_cmd_marketplace_refresh_one_resolves_the_source(capsys):

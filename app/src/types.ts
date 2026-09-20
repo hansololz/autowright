@@ -400,6 +400,9 @@ export interface MarketplaceSource {
   location: string | null
   shown: boolean
   autoRefresh: boolean
+  // §22.2: the built-in catalog - the one row the app seeds, whose location is
+  // pinned and which hides instead of being removed.
+  builtin: boolean
   name: string
   description: string
   addedAt: string

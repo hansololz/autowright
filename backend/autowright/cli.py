@@ -1537,11 +1537,19 @@ def cmd_marketplace_list(c: Client, args) -> None:
     for s in c.req("GET", "/marketplace")["sources"]:
         # §22.2: a row with no location is a copy the app holds by itself.
         location = s.get("location") or "(kept by Autowright)"
-        flags = "" if s.get("shown", True) else " hidden"
+        # §22.5: ` built-in`, ` hidden`, ` auto-refresh`, in that order.
+        flags = " built-in" if s.get("builtin") else ""
+        if not s.get("shown", True):
+            flags += " hidden"
         if s.get("autoRefresh"):
             flags += " auto-refresh"
         print(f"{s['name']} [{s['id'][:8]}]  {location}{flags}")
-        if s.get("error"):
+        if (s.get("builtin") and not s.get("cached") and not s.get("error")
+                and not s.get("refreshedAt")):
+            # §22.2 pending: the built-in catalog seeded but not read yet - the
+            # auto-refresh thread is fetching it.
+            print("  fetching the catalog…")
+        elif s.get("error"):
             # §22.2: a failed refresh leaves the copy alone - the entries
             # below are still the last good one.
             print(f"  couldn't refresh: {s['error']}")

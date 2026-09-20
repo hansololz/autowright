@@ -115,7 +115,7 @@ const MarketplacePage = (await import('../src/pages/MarketplacePage')).default
 // §22.2 catalog-table row as §22.4 serves it: a link location by default.
 const source = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => ({
   id: 's1', kind: 'url', location: 'https://example.com/shared/marketplace-catalog.yaml',
-  shown: true, autoRefresh: false,
+  shown: true, autoRefresh: false, builtin: false,
   name: 'Community', description: 'Automations I use.',
   addedAt: new Date().toISOString(), refreshedAt: new Date().toISOString(), error: null,
   cached: true,
@@ -136,6 +136,13 @@ const fileSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource =>
 // §22.2: no location at all - the app's copy is the only copy.
 const keptSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => source({
   kind: 'none', location: null, refreshedAt: null, ...over,
+})
+
+// §22.2 built-in catalog: the one row the app seeds, at the pinned link.
+const BUILTIN_LOCATION =
+  'https://github.com/hansololz/automation-marketplace/blob/main/marketplace-catalog.yaml'
+const builtinSource = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => source({
+  kind: 'url', location: BUILTIN_LOCATION, builtin: true, ...over,
 })
 
 // §22.7 picker, A CATALOG tab: another catalog on the page, listing an entry
@@ -428,6 +435,79 @@ describe('§22.3 Marketplace page', () => {
   })
 })
 
+describe('§22.2 built-in catalog', () => {
+  it('the built-in catalog wears its chip, and no other catalog does', async () => {
+    marketplaceList.mockResolvedValue({ sources: [builtinSource(), otherSource()] })
+    render(<MarketplacePage />)
+    await waitFor(() => expect(screen.getAllByTestId('marketplace-source')).toHaveLength(2))
+    const chips = screen.getAllByTestId('marketplace-builtin-chip')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].textContent).toBe('Built in')
+    expect(chips[0].getAttribute('title')).toBe("Ships with Autowright. Hide it if you don't want it.")
+    // §22.3: the chip belongs to the built-in row's own header.
+    expect(screen.getAllByTestId('marketplace-source')[0].contains(chips[0])).toBe(true)
+  })
+
+  it('the actions menu offers Hide in Remove\u2019s place, and PATCHes shown', async () => {
+    marketplaceList.mockResolvedValue({ sources: [builtinSource()] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
+    await openActions()
+    // §22.2: the built-in catalog can't be removed, so Hide takes the last row.
+    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…', 'Hide'])
+    expect(screen.queryByRole('button', { name: 'Remove…' })).toBeNull()
+    const asked = marketplaceList.mock.calls.length
+    const toast = storeMod.useStore.getState().toast
+    fireEvent.click(menuRow('Hide'))
+    // §22.2: the location is pinned, so nothing but `shown` travels.
+    await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', { shown: false }))
+    await waitFor(() => expect(marketplaceList.mock.calls.length).toBeGreaterThan(asked))
+    // §22.3: no confirm, no toast.
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull()
+    expect(storeMod.useStore.getState().toast).toBe(toast)
+  })
+
+  it('a hidden built-in catalog offers Show', async () => {
+    marketplaceList.mockResolvedValue({ sources: [builtinSource({ shown: false })] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-hidden-chip')).toBeTruthy()
+    await openActions()
+    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…', 'Show'])
+    fireEvent.click(menuRow('Show'))
+    await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', { shown: true }))
+  })
+
+  it('a pending built-in catalog says it is fetching, and nothing else', async () => {
+    // §22.2 pending: seeded, never read - no copy, no error, no refreshedAt.
+    marketplaceList.mockResolvedValue({ sources: [builtinSource({
+      cached: false, refreshedAt: null, error: null, description: '', entries: [],
+    })] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-pending')).toBeTruthy()
+    expect(screen.getByText('Fetching the catalog…')).toBeTruthy()
+    // §22.3: the header row stays; the grid, the notice, the empty line and the
+    // Refreshed line all wait for the first read.
+    expect(screen.getByTestId('marketplace-builtin-chip')).toBeTruthy()
+    expect(screen.queryByTestId('marketplace-entry')).toBeNull()
+    expect(screen.queryByText('This marketplace lists no automations yet.')).toBeNull()
+    expect(screen.queryByText(/^Couldn't /)).toBeNull()
+    expect(screen.queryByText(/^Refreshed /)).toBeNull()
+    expect(screen.queryByText(/^Added /)).toBeNull()
+  })
+
+  it('a built-in catalog whose first read failed says it could not load', async () => {
+    marketplaceList.mockResolvedValue({ sources: [builtinSource({
+      cached: false, refreshedAt: null, description: '', entries: [],
+      error: 'the server did not answer',
+    })] })
+    render(<MarketplacePage />)
+    // §22.2: an error ends the pending state - this is the ordinary notice.
+    expect(await screen.findByText("Couldn't load: the server did not answer.")).toBeTruthy()
+    expect(screen.queryByTestId('marketplace-pending')).toBeNull()
+    expect(screen.getByText('This marketplace lists no automations yet.')).toBeTruthy()
+  })
+})
+
 describe('§22.3 preview images', () => {
   it('an edited image reference fetches the new picture', async () => {
     marketplaceImage.mockResolvedValue(new Blob(['one']))
@@ -533,6 +613,21 @@ describe('§22.3 catalog settings', () => {
     await waitFor(() => expect(
       (screen.getByLabelText('Refresh on its own') as HTMLButtonElement).disabled).toBe(false))
     expect(screen.queryByText('Needs a location.')).toBeNull()
+  })
+
+  it("the built-in catalog's LOCATION is fixed and Save sends the toggles alone", async () => {
+    await openSettings(builtinSource({ autoRefresh: true }))
+    const location = screen.getByTestId('settings-location') as HTMLInputElement
+    expect(location.disabled).toBe(true)
+    expect(location.value).toBe(BUILTIN_LOCATION)
+    expect(screen.getByText("The built-in catalog's location is fixed.")).toBeTruthy()
+    expect(screen.queryByText(/^Where Refresh reads this catalog from/)).toBeNull()
+    fireEvent.click(screen.getByLabelText('Show this marketplace on the page'))
+    fireEvent.click(screen.getByTestId('settings-save'))
+    // §22.2: a location would answer 422, so the PATCH carries no location key.
+    await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', {
+      shown: false, autoRefresh: true,
+    }))
   })
 
   it('a rejected save shows the reason inline and keeps the modal open', async () => {

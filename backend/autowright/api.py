@@ -2682,11 +2682,13 @@ async def marketplace_refresh_all() -> dict:
 
 @app.delete("/marketplace/sources/{source_id}", dependencies=[Depends(auth)])
 def marketplace_remove(source_id: str) -> dict:
+    """§22.4: 404 for an unknown id; 409 for the built-in catalog, which is
+    hidden rather than removed."""
     try:
         marketplace_store.remove(source_id)
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
-    except marketplace.MarketplaceUnwritable as e:
+    except (marketplace.MarketplaceBuiltin, marketplace.MarketplaceUnwritable) as e:
         raise HTTPException(409, str(e)) from e
     hub.publish("marketplace.changed")
     return {"ok": True}

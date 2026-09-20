@@ -20,7 +20,7 @@ import { ImportSummaryModal } from './AutomationsList'
 /** §22.3 per-catalog actions: one quiet ellipsis button opening a PopMenu of
  * MenuRows - the §9.2 automation actions menu's shape. Each row renders only
  * while its condition holds; picking one closes the menu. */
-function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, onRefresh, onSettings, onRemove }: {
+function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, onRefresh, onSettings, onRemove, onToggleShown }: {
   source: MarketplaceSource
   /** this catalog's own Refresh is running (the button glyph spins) */
   refreshing: boolean
@@ -28,6 +28,8 @@ function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, o
   refreshingAll: boolean
   onEdit: () => void; onExport: () => void; onRefresh: () => void
   onSettings: () => void; onRemove: () => void
+  /** §22.2: the built-in catalog's Hide / Show, in Remove's place */
+  onToggleShown: () => void
 }) {
   const [open, setOpen, ref] = usePopover()
   const pick = (act: () => void) => () => { setOpen(false); act() }
@@ -59,7 +61,15 @@ function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, o
           <MenuRow onClick={pick(onRefresh)} disabled={refreshing || refreshingAll}>{icon('fa-rotate')}Refresh</MenuRow>
         )}
         <MenuRow onClick={pick(onSettings)}>{icon('fa-gear')}Catalog settings…</MenuRow>
-        <MenuRow danger onClick={pick(onRemove)}>{icon('fa-trash')}Remove…</MenuRow>
+        {/* §22.2: the built-in catalog can't be removed - Hide takes Remove's
+            place, and Show brings it back. */}
+        {source.builtin ? (
+          <MenuRow onClick={pick(onToggleShown)}>
+            {icon(source.shown ? 'fa-eye-slash' : 'fa-eye')}{source.shown ? 'Hide' : 'Show'}
+          </MenuRow>
+        ) : (
+          <MenuRow danger onClick={pick(onRemove)}>{icon('fa-trash')}Remove…</MenuRow>
+        )}
       </PopMenu>
     </div>
   )
@@ -82,6 +92,13 @@ function relativeTime(iso: string): string {
 
 const locationIcon = (source: MarketplaceSource) =>
   source.kind === 'url' ? 'fa-link' : source.kind === 'file' ? 'fa-file-lines' : 'fa-box-archive'
+
+// §22.2/§22.3 pending: the built-in catalog between its seed and its first
+// read - no copy, no error, never refreshed. Only the header row and the
+// "Fetching the catalog…" line render until the marketplace.changed event
+// that follows the first read swaps in the grid.
+const isPending = (source: MarketplaceSource) =>
+  source.builtin && !source.cached && source.error === null && source.refreshedAt === null
 
 // §22.3 preview images sit in a 16:9 tile, contained (never cropped or
 // overflowing), and load by reference, on demand, through the
@@ -300,9 +317,11 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
           if (busy) return
           setBusy(true); setError(null)
           try {
-            await api.marketplaceSettings(source.id, {
-              location: location.trim(), shown, autoRefresh: noLocation ? false : autoRefresh,
-            })
+            // §22.2: the built-in catalog's location is pinned - a PATCH that
+            // carried one would answer 422, so Save sends only the toggles.
+            await api.marketplaceSettings(source.id, source.builtin
+              ? { shown, autoRefresh }
+              : { location: location.trim(), shown, autoRefresh: noLocation ? false : autoRefresh })
             saved.current = true
             close()
           } catch (e) { setError((e as Error).message); setBusy(false) }
@@ -317,11 +336,16 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
               value={location}
               onChange={(e) => { setLocation(e.target.value); setError(null) }}
               spellCheck={false}
+              disabled={source.builtin}
               placeholder="https://… or /path/to/marketplace-catalog.yaml"
               data-testid="settings-location"
               style={inputStyle}
             />
-            <p style={caption}>Where Refresh reads this catalog from. Leave it empty to keep only the copy Autowright has.</p>
+            <p style={caption}>
+              {source.builtin
+                ? "The built-in catalog's location is fixed."
+                : 'Where Refresh reads this catalog from. Leave it empty to keep only the copy Autowright has.'}
+            </p>
             <Eyebrow style={{ margin: '16px 0 8px' }}>SHOWN</Eyebrow>
             <label style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, color: 'var(--text)' }}>
               <Toggle on={shown} onChange={setShown} title="Show this marketplace on the page" />
@@ -445,6 +469,16 @@ export default function MarketplacePage() {
     setRefreshing(null)
   }
 
+  // §22.2/§22.3: the built-in catalog can't be removed - Hide (and Show) is how
+  // it leaves the page and comes back. One PATCH of `shown` alone, then a
+  // refetch: no confirm, no toast.
+  const toggleShown = async (source: MarketplaceSource) => {
+    try {
+      await api.marketplaceSettings(source.id, { shown: !source.shown })
+      await load()
+    } catch (e) { showToast((e as Error).message) }
+  }
+
   const remove = async (source: MarketplaceSource) => {
     setRemoving(null)
     try {
@@ -537,6 +571,19 @@ export default function MarketplacePage() {
                       {locationLabel(s)}
                     </MetaChip>
                   </span>
+                  {/* §22.3: the one catalog that ships with the app. */}
+                  {s.builtin && (
+                    <span
+                      title="Ships with Autowright. Hide it if you don't want it."
+                      data-testid="marketplace-builtin-chip"
+                      style={{ display: 'inline-flex' }}
+                    >
+                      <MetaChip>
+                        <i className="fa-solid fa-star" style={{ fontSize: 10 }} />
+                        Built in
+                      </MetaChip>
+                    </span>
+                  )}
                   {!s.shown && (
                     <span data-testid="marketplace-hidden-chip" style={{ display: 'inline-flex' }}>
                       <MetaChip>
@@ -546,8 +593,9 @@ export default function MarketplacePage() {
                     </span>
                   )}
                   {/* §22.3: a catalog with a location says when it was last
-                      read; one kept by the app says when it was added. */}
-                  {s.location !== null ? s.refreshedAt && (
+                      read; one kept by the app says when it was added - and a
+                      pending catalog says neither. */}
+                  {!isPending(s) && (s.location !== null ? s.refreshedAt && (
                     <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                       Refreshed {relativeTime(s.refreshedAt)}
                     </span>
@@ -555,7 +603,7 @@ export default function MarketplacePage() {
                     <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                       Added {relativeTime(s.addedAt)}
                     </span>
-                  )}
+                  ))}
                 </div>
                 <CatalogActions
                   source={s}
@@ -566,66 +614,80 @@ export default function MarketplacePage() {
                   onRefresh={() => { void refreshOne(s.id) }}
                   onSettings={() => setSettings(s)}
                   onRemove={() => setRemoving(s)}
+                  onToggleShown={() => { void toggleShown(s) }}
                 />
               </div>
-              {s.error && (
-                // §22.2: a failed refresh keeps the last good copy beside the
-                // reason; a catalog with nothing cached has no copy to show.
-                <Notice tone="amber">
-                  {!s.cached
-                    ? `Couldn't load: ${s.error}.`
-                    : `Couldn't refresh: ${s.error}. Showing the last copy.`}
-                </Notice>
-              )}
-              {s.shown && s.description && (
-                <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
-                  {s.description}
-                </p>
-              )}
-              {s.shown && (s.entries.length === 0 ? (
-                <div className="ad-card">
-                  <EmptyLine>This marketplace lists no automations yet.</EmptyLine>
+              {isPending(s) ? (
+                // §22.3: the seeded built-in catalog before its first read -
+                // the header row and this line, nothing else.
+                <div
+                  data-testid="marketplace-pending"
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text-muted)' }}
+                >
+                  <Spinner size={13} /> Fetching the catalog…
                 </div>
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 14 }}>
-                  {s.entries.map((e) => (
-                    <div
-                      key={e.index}
-                      className="ad-card"
-                      data-testid="marketplace-entry"
-                      style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
-                    >
-                      <EntryImage sourceId={s.id} index={e.index} image={e.image} refreshedAt={s.refreshedAt} has={e.image !== null} />
-                      <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 7, flex: 1 }}>
-                        <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>{e.title}</div>
-                        {e.description && (
-                          <p style={{
-                            margin: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--text-muted)',
-                            display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
-                            overflow: 'hidden',
-                          }}>
-                            {e.description}
-                          </p>
-                        )}
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'auto', paddingTop: 4 }}>
-                          <button
-                            className="ad-btn-primary"
-                            data-testid="marketplace-install"
-                            onClick={() => { void startInstall(s, e) }}
-                            disabled={!!installing}
-                          >
-                            {installing === `${s.id}:${e.index}` ? (
-                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                                <Spinner size={13} /> Installing…
-                              </span>
-                            ) : 'Install'}
-                          </button>
+                <>
+                  {s.error && (
+                    // §22.2: a failed refresh keeps the last good copy beside the
+                    // reason; a catalog with nothing cached has no copy to show.
+                    <Notice tone="amber">
+                      {!s.cached
+                        ? `Couldn't load: ${s.error}.`
+                        : `Couldn't refresh: ${s.error}. Showing the last copy.`}
+                    </Notice>
+                  )}
+                  {s.shown && s.description && (
+                    <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
+                      {s.description}
+                    </p>
+                  )}
+                  {s.shown && (s.entries.length === 0 ? (
+                    <div className="ad-card">
+                      <EmptyLine>This marketplace lists no automations yet.</EmptyLine>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 14 }}>
+                      {s.entries.map((e) => (
+                        <div
+                          key={e.index}
+                          className="ad-card"
+                          data-testid="marketplace-entry"
+                          style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+                        >
+                          <EntryImage sourceId={s.id} index={e.index} image={e.image} refreshedAt={s.refreshedAt} has={e.image !== null} />
+                          <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 7, flex: 1 }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>{e.title}</div>
+                            {e.description && (
+                              <p style={{
+                                margin: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--text-muted)',
+                                display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                                overflow: 'hidden',
+                              }}>
+                                {e.description}
+                              </p>
+                            )}
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'auto', paddingTop: 4 }}>
+                              <button
+                                className="ad-btn-primary"
+                                data-testid="marketplace-install"
+                                onClick={() => { void startInstall(s, e) }}
+                                disabled={!!installing}
+                              >
+                                {installing === `${s.id}:${e.index}` ? (
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                                    <Spinner size={13} /> Installing…
+                                  </span>
+                                ) : 'Install'}
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                      </div>
+                      ))}
                     </div>
                   ))}
-                </div>
-              ))}
+                </>
+              )}
             </div>
           ))}
         </div>

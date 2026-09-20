@@ -3,7 +3,11 @@
 // gated on §4.9 developerMode (turned on through the real Settings toggle), the
 // §22.4 marketplace.changed event brings the added row in without a reload, the
 // §22.2 file location is refreshable like a link, and Install runs the ordinary
-// §5.2 two-phase import, landing the automation with its triggers off. Then the
+// §5.2 two-phase import, landing the automation with its triggers off. The
+// fresh data root seeds the §22.2 built-in catalog, so the page opens on that
+// section rather than the empty state: it is read from the real link, so the
+// drive asserts only that the section is there with its chip and keeps no
+// Remove… row, and finds its own catalogs by name, never by position or count. Then the
 // §22.7 authoring half: Create catalog… opens the editor empty (no save
 // location - Autowright keeps the catalog), the add form takes an archive this
 // test exported into a temp folder by its path, Create lands the catalog kept
@@ -74,29 +78,45 @@ describe('marketplace e2e', () => {
     }, 10_000, 'developerMode to persist')
     await page.getByTestId('nav-marketplace').waitFor({ timeout: 10_000 })
 
-    // Empty state: the headline and Add marketplace… alone.
+    // §22.2: the seeded built-in catalog is the page's first section - pending,
+    // loaded or failed, depending on what the real link answers here, so
+    // nothing is asserted about its entries.
     await clickNav(page, 'Marketplace')
-    await page.getByText('No marketplaces yet').waitFor({ timeout: 10_000 })
+    const builtinSection = page.getByTestId('marketplace-source')
+      .filter({ has: page.getByTestId('marketplace-builtin-chip') })
+    await builtinSection.waitFor({ timeout: 20_000 })
     expect(await page.getByTestId('marketplace-add').count()).toBeGreaterThan(0)
-    expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(0)
-    await shot(page, 'marketplace-empty.png')
+    // §22.3: the built-in catalog has a location, so Refresh all is always here.
+    expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(1)
+    // §22.2: it can't be removed - Hide stands in Remove's place. The menu
+    // closes the way it opened, on the button.
+    const builtinActions = builtinSection.getByTestId('marketplace-actions')
+    await builtinActions.click()
+    await page.getByRole('button', { name: 'Hide' }).waitFor({ timeout: 10_000 })
+    expect(await page.getByRole('button', { name: 'Remove…' }).count()).toBe(0)
+    await shot(page, 'marketplace-builtin.png')
+    await builtinActions.click()
+    await page.getByRole('button', { name: 'Hide' }).waitFor({ state: 'detached', timeout: 10_000 })
 
     // The add modal's file step is the native open dialog, which can't be
     // driven — add through the §22.4 route instead and let the page hear about
     // it the way a §20 CLI add would: the marketplace.changed event, no reload.
     await backend.api('POST', '/marketplace/sources', { path: catalog })
-    await waitFor(async () => (await page.getByTestId('marketplace-source').count()) === 1,
+    // The drive's own sections are found by name - the built-in one shares the
+    // page with them.
+    const shelfSection = page.getByTestId('marketplace-source').filter({ hasText: 'E2E shelf' })
+    await waitFor(async () => (await shelfSection.count()) === 1,
       20_000, 'marketplace.changed to bring the source in without a reload')
-    await page.getByText('E2E shelf', { exact: true }).waitFor({ timeout: 10_000 })
-    const entry = page.getByTestId('marketplace-entry')
+    const entry = shelfSection.getByTestId('marketplace-entry')
     await entry.getByText('Watcher', { exact: true }).waitFor({ timeout: 10_000 })
     await entry.getByText('From the e2e shelf.').waitFor()
     // §22.2: a file location is re-read like a link, so both Refresh all and
     // the row's own Refresh are offered, and the row says when it was read.
     expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(1)
-    await page.getByTestId('marketplace-actions').click()
+    await shelfSection.getByTestId('marketplace-actions').click()
+    await page.getByRole('button', { name: 'Refresh', exact: true }).waitFor()
     expect(await page.getByRole('button', { name: 'Refresh', exact: true }).count()).toBe(1)
-    await page.getByText(/^Refreshed /).waitFor()
+    await shelfSection.getByText(/^Refreshed /).waitFor()
     await shot(page, 'marketplace-source.png')
 
     // §22.3 catalog settings: the §22.2 row's own columns behind the gear row
@@ -118,7 +138,7 @@ describe('marketplace e2e', () => {
 
     // Install: the §9.1 import modal opens straight on its preview step. The
     // archive's own automation is already here, so it lands deduped (§5.1).
-    await page.getByTestId('marketplace-install').click()
+    await shelfSection.getByTestId('marketplace-install').click()
     await page.getByRole('heading', { name: 'Watcher 2' }).waitFor({ timeout: 20_000 })
     await page.getByText('E2E shelf · Watcher').waitFor()
     await shot(page, 'marketplace-install-preview.png')
@@ -170,9 +190,10 @@ describe('marketplace e2e', () => {
     // §22.7 create: the primary button reads Create and POSTs the editor's
     // content alone - the catalog is kept by Autowright.
     await page.getByTestId('catalog-save').click()
-    await waitFor(async () => (await page.getByTestId('marketplace-source').count()) === 2,
-      20_000, 'the authored catalog to land as a second source')
-    const authoredSection = page.getByTestId('marketplace-source').last()
+    // §22.1: a catalog created in the app and left untitled is "My catalog".
+    const authoredSection = page.getByTestId('marketplace-source').filter({ hasText: 'My catalog' })
+    await waitFor(async () => (await authoredSection.count()) === 1,
+      20_000, 'the authored catalog to land as its own section')
     await authoredSection.getByTestId('marketplace-entry').getByText('Watcher', { exact: true })
       .waitFor({ timeout: 10_000 })
     // §22.3: the chip says the app holds the only copy - there is no location.

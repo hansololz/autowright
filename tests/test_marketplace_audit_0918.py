@@ -108,7 +108,8 @@ def test_a_table_of_good_rows_stays_writable(home):
     store = MarketplaceStore()
     store.load()
     store.remove(kept["id"])
-    assert store.sources == []
+    # §22.2: the built-in catalog the load seeded is the only row left
+    assert [s["builtin"] for s in store.sources] == [True]
 
 
 # ---------- §22.2 the sources store holds nothing else ----------
