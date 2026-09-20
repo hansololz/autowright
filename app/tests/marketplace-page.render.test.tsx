@@ -1,5 +1,5 @@
-// §22.3/§22.6 Marketplace page: the preview gate on the nav row and the page
-// itself (the §4.9 developerMode setting), the empty state's example catalog,
+// §22.3/§22.6 Marketplace page: the visibility of the nav row and the page
+// (for everyone, no setting; the parking switch), the empty state's example catalog,
 // a seeded catalog's grid, a hidden catalog collapsing to its header, the
 // settings modal's PATCH, Install opening the §9.1 import modal on its preview
 // step, Export handing the catalog file to the save dialog, the add modal's
@@ -199,7 +199,7 @@ const auto = (over: Partial<Automation> = {}): Automation => ({
   ...over,
 })
 
-// §22.3 preview gate: the setting as both the store and the served snapshot see it.
+// §4.9 developerMode as both the store and the served snapshot see it (§22.3: it must not gate the marketplace).
 const setDeveloperMode = (on: boolean) => {
   servedSettings = { ...SETTINGS, developerMode: on }
   storeMod.useStore.setState({ settings: { ...servedSettings } })
@@ -248,12 +248,12 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); storeMod.useStore.getState().disconnect() })
 
-// §22 visibility: MARKETPLACE_HIDDEN parks the feature for everyone for now
-// (unpolished, design not settled). While it holds, the nav row renders for
-// nobody and the page is left however it was reached; the preview-gate tests
-// below cover the constant's other value so flipping it back is a one-line
-// change here too.
-describe('§22.3 preview gate', () => {
+// §22 visibility: MARKETPLACE_HIDDEN parks the feature for everyone while it
+// holds - the nav row renders for nobody and the page is left however it was
+// reached. The tests below cover the constant's other value: the marketplace
+// is a default feature, rendered for everyone with no setting gating it
+// (the Developer-mode preview gate was lifted 2026-09-19).
+describe('§22.3 visibility', () => {
   it.skipIf(!MARKETPLACE_HIDDEN)('while parked, the nav row renders for nobody and the page is left', async () => {
     setDeveloperMode(true)
     storeMod.useStore.setState({ page: 'marketplace' })
@@ -266,24 +266,23 @@ describe('§22.3 preview gate', () => {
     expect(marketplaceList).not.toHaveBeenCalled()
   })
 
-  it.skipIf(MARKETPLACE_HIDDEN)('the nav row renders only while Developer mode is on', async () => {
+  it.skipIf(MARKETPLACE_HIDDEN)('the nav row renders with Developer mode off', async () => {
     setDeveloperMode(false)
     render(<App />)
     await screen.findByTestId('nav-rail')
-    expect(screen.queryByTestId('nav-marketplace')).toBeNull()
-    cleanup()
-    setDeveloperMode(true)
-    render(<App />)
     expect(await screen.findByTestId('nav-marketplace')).toBeTruthy()
   })
 
-  it.skipIf(MARKETPLACE_HIDDEN)('the setting dropping while the page is open lands on Automations', async () => {
+  it.skipIf(MARKETPLACE_HIDDEN)('the page stays open however Developer mode flips', async () => {
+    setDeveloperMode(false)
     storeMod.useStore.setState({ page: 'marketplace' })
     render(<App />)
     await screen.findByText('Marketplace', { selector: 'h1' })
-    setDeveloperMode(false)
-    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
-    expect(screen.queryByTestId('nav-marketplace')).toBeNull()
+    setDeveloperMode(true)
+    await waitFor(() => expect(storeMod.useStore.getState().settings?.developerMode).toBe(true))
+    expect(storeMod.useStore.getState().page).toBe('marketplace')
+    expect(screen.getByText('Marketplace', { selector: 'h1' })).toBeTruthy()
+    expect(screen.getByTestId('nav-marketplace')).toBeTruthy()
   })
 })
 

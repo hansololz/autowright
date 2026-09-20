@@ -1,6 +1,6 @@
 // §22.6 e2e: one file-based marketplace under the test data root — a catalog
-// plus an archive this test exports itself — driven end to end. The nav row is
-// gated on §4.9 developerMode (turned on through the real Settings toggle), the
+// plus an archive this test exports itself — driven end to end. The nav row
+// renders for everyone with no setting gating it (§22 visibility), the
 // §22.4 marketplace.changed event brings the added row in without a reload, the
 // §22.2 file location is refreshable like a link, the §22.3 Audit button opens
 // the archive viewer on the entry's files, and Install runs the ordinary
@@ -33,7 +33,7 @@ describe('marketplace e2e', () => {
   // §22 visibility: this drive reaches the page through its nav row, which
   // renders for nobody while App.tsx's MARKETPLACE_HIDDEN parking switch is
   // true. Flip that constant and an `it.skip` here together.
-  it('gates the page on developer mode, lists a file source, and installs an entry', async () => {
+  it('shows the page to everyone, lists a file source, and installs an entry', async () => {
     backend = await new Backend().start()
     // The shelf the catalog ships from: one automation, exported to an
     // archive beside the catalog. It lives OUTSIDE the §22.2 marketplace/
@@ -65,19 +65,10 @@ describe('marketplace e2e', () => {
     const { page } = handle
     await page.getByRole('heading', { name: 'Automations' }).waitFor({ timeout: 20_000 })
 
-    // §22 preview gate: nothing in the rail until developer mode is on.
-    expect(await page.getByTestId('nav-marketplace').count()).toBe(0)
-
-    // The real §4.9 toggle, not a seeded setting.
-    await clickNav(page, 'Settings')
-    const developerCard = page.locator('.ad-card').filter({ hasText: 'Developer mode' }).last()
-    await developerCard.getByRole('switch').waitFor({ timeout: 10_000 })
-    await developerCard.getByRole('switch').click()
-    await waitFor(async () => {
-      const s = (await backend!.api('GET', '/state') as { settings: { developerMode: boolean } }).settings
-      return s.developerMode
-    }, 10_000, 'developerMode to persist')
+    // §22 visibility: the row is in the rail from the first frame, with the
+    // fresh data root's default settings (Developer mode off).
     await page.getByTestId('nav-marketplace').waitFor({ timeout: 10_000 })
+    expect((await backend.api('GET', '/state') as { settings: { developerMode: boolean } }).settings.developerMode).toBe(false)
 
     // §22.2: the seeded built-in catalog is the page's first section - pending,
     // loaded or failed, depending on what the real link answers here, so
@@ -231,13 +222,17 @@ describe('marketplace e2e', () => {
     expect((await readdir(authored)).sort())
       .toEqual(['Watcher.autowright', 'marketplace-catalog.yaml'])
 
-    // §22.3: the setting dropping while the page is open leaves for Automations.
+    // §22.3: Developer mode flipping while the page is open changes nothing -
+    // no setting gates the marketplace.
     await clickNav(page, 'Marketplace')
     await page.getByRole('heading', { name: 'Marketplace' }).waitFor({ timeout: 10_000 })
-    await backend.api('PATCH', '/settings', { developerMode: false })
-    await page.getByRole('heading', { name: 'Automations' }).waitFor({ timeout: 20_000 })
-    await waitFor(async () => (await page.getByTestId('nav-marketplace').count()) === 0,
-      10_000, 'the Marketplace nav row to go away')
-    await shot(page, 'marketplace-gate-dropped.png')
+    await backend.api('PATCH', '/settings', { developerMode: true })
+    await waitFor(async () => {
+      const s = (await backend!.api('GET', '/state') as { settings: { developerMode: boolean } }).settings
+      return s.developerMode
+    }, 10_000, 'developerMode to persist')
+    await page.getByRole('heading', { name: 'Marketplace' }).waitFor({ timeout: 10_000 })
+    expect(await page.getByTestId('nav-marketplace').count()).toBe(1)
+    await shot(page, 'marketplace-default-feature.png')
   }, 120_000)
 })

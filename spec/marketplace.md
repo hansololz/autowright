@@ -1,6 +1,6 @@
 # Marketplace
 
-## 22. Marketplace (decided, preview behind Developer mode)
+## 22. Marketplace (decided)
 
 A marketplace is a browsable set of shareable automations, described by one YAML file (the
 **marketplace catalog**, canonically named `marketplace-catalog.yaml`) listing `.autowright` archives with a title, a description, and a preview image.
@@ -22,18 +22,19 @@ holds (triggers land off, no records are ever created, only matched records are 
 Before installing, the user can **audit** an entry: read every text file inside its
 `.autowright` archive in a viewer, fetched only when they ask (§22.3 archive viewer).
 
-**Visibility - preview gate.** The Marketplace page and its nav row render only while
-the §4.9 `developerMode` setting is on. That is the only thing the setting gates here: the
-§19 routes, the §5 store, and the §20 CLI group are always live, in every mode - the §2
-rule that developer and production mode run the same code, with no dev-only paths.
-Turning Developer mode off while the page is open navigates to Automations (§22.3). The
-gate is lifted by removing the condition, nothing else; the feature is built as a normal
-surface that happens to be hidden. One renderer constant, `MARKETPLACE_HIDDEN` in
-`config.ts` (re-exported by `App.tsx`), is the **parking switch** on top of the gate: while it is `true` the page and
-its nav row render for nobody, Developer mode or not, and the §22.6 e2e drive (which
-reaches the page through the nav row) is skipped; the constant and that skip flip
-together. It is `false` now. History: parked 2026-09-12 (unpolished, design not settled),
-un-parked 2026-09-14 when work on the design resumed.
+**Visibility.** The Marketplace is a default feature: the page and its nav row render
+for everyone, in every mode, and no setting gates them. The §4.9 `developerMode` setting
+has nothing to do with the marketplace (its §19 routes, §5 store, and §20 CLI group were
+always live in every mode - the §2 rule that developer and production mode run the same
+code, with no dev-only paths). One renderer constant, `MARKETPLACE_HIDDEN` in
+`config.ts` (re-exported by `App.tsx`), is the **parking switch**: while it is `true` the
+page and its nav row render for nobody, and the §22.6 e2e drive (which reaches the page
+through the nav row) is skipped; the constant and that skip flip together. It is `false`
+now. History: the feature shipped 2026-09-11 as a preview behind Developer mode (page and
+nav row rendered only while the setting was on, and the setting dropping mid-page
+navigated to Automations); parked 2026-09-12 (unpolished, design not settled); un-parked
+2026-09-14 when work on the design resumed; the Developer-mode preview gate was lifted
+2026-09-19 and the marketplace became a default feature.
 
 ### 22.1 Catalog format
 
@@ -266,11 +267,11 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
 ### 22.3 Marketplace page
 
 **Nav.** A "Marketplace" row (icon `fa-store`) sits between Secrets and Settings in the §9
-rail, rendered only while `settings.developerMode` is true **and** `MARKETPLACE_HIDDEN`
-is false (§22 visibility - the parking switch, `false` now); it carries no count pill. The `Page` union gains `marketplace`. When the row's condition
-stops holding while `page` is `marketplace` (the Settings toggle, a §20 `settings set`
-seen through the store refresh, or the constant), an effect in the app shell calls
-`go('automations')` - the same shape as the §9.3 overlay closing itself when the setting
+rail, rendered for everyone while `MARKETPLACE_HIDDEN` is false (§22 visibility - the
+parking switch, `false` now); no setting gates it, and it carries no count pill. The
+`Page` union gains `marketplace`. While the constant holds and `page` is `marketplace`
+(a stale page restored from before a parking), an effect in the app shell calls
+`go('automations')` - the same shape as the §9.3 overlay closing itself when its setting
 drops.
 
 **Page.** Title "Marketplace" with header actions: a ghost **Create catalog…** (§22.7;
@@ -689,8 +690,8 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   §22.1 keys only, refreshes the copy, writes nothing on a 422, and leaves the archive
   file behind when its entry is removed.
 - Renderer (`app/tests/marketplace-page.render.test.tsx`, `settings-gating` style): the
-  developer-mode pair (row hidden while `developerMode` is false and shown when true,
-  redirect to Automations when the setting drops mid-page) and, dormant while the parking
+  visibility pair (the nav row and the page render with `developerMode` off, and the
+  setting flipping mid-page changes nothing - no redirect) and, dormant while the parking
   switch is `false`, the parked case (while `MARKETPLACE_HIDDEN` holds, the nav row renders
   for nobody and the `marketplace` page redirects to Automations for everyone; the tests
   key on the constant so either value runs its own pair), the empty state with the example catalog,

@@ -32,8 +32,8 @@ const NAV: { page: string; label: string; icon: string }[] = [
   { page: 'executions', label: 'Executions', icon: 'fa-clock-rotate-left' },
   { page: 'agents', label: 'Agents', icon: 'fa-microchip' },
   { page: 'secrets', label: 'Secrets', icon: 'fa-key' },
-  // §22.3: preview surface - the row renders only while the §4.9 developerMode
-  // setting is on, and carries no count pill.
+  // §22.3: rendered for everyone unless parked (MARKETPLACE_HIDDEN); carries
+  // no count pill.
   { page: 'marketplace', label: 'Marketplace', icon: 'fa-store' },
   { page: 'settings', label: 'Settings', icon: 'fa-sliders' },
 ]
@@ -64,10 +64,9 @@ function Sidebar() {
   // known and not yet installed (§3 update-available) — the accent icon alone
   // signals in the collapsed rail. Clicking opens About pre-armed (§9.4).
   const updateAvailable = useStore((s) => s.updateAvailable)
-  // §22.3 preview gate: the Marketplace row shows only in developer mode.
-  const developerMode = useStore((s) => s.settings?.developerMode) ?? false
-  // §22.3: the nav row needs Developer mode AND the feature not parked.
-  const marketplaceShown = developerMode && !MARKETPLACE_HIDDEN
+  // §22.3: the Marketplace row renders for everyone unless the feature is
+  // parked (the §22 parking switch); no setting gates it.
+  const marketplaceShown = !MARKETPLACE_HIDDEN
   const platformOs = useStore((s) => s.platformOs)
   const activeRoot = page === 'automation' ? 'automations' : page === 'execution' ? 'executions' : page === 'agentNew' ? 'agents' : page
   const counts: Record<string, number> = {
@@ -243,21 +242,17 @@ export default function App() {
   const login = useStore((s) => s.settings?.login)
   const menuBarIcon = useStore((s) => s.settings?.menuBarIcon)
   const automaticUpdateCheck = useStore((s) => s.settings?.automaticUpdateCheck)
-  // §22.3 preview gate - the redirect effect below watches it.
-  const developerMode = useStore((s) => s.settings?.developerMode)
   const go = useStore((s) => s.go)
   const platformOs = useStore((s) => s.platformOs)
 
   useEffect(() => { void boot(); return disconnect }, [])
 
-  // §22.3 preview gate: Developer mode turning off (the §4.9 toggle, or a §20
-  // `settings set` seen through the store refresh) leaves the Marketplace page
-  // for Automations - the same shape as the §9.3 overlay closing itself. While
-  // MARKETPLACE_HIDDEN holds, the page is left the same way however it was
-  // reached.
+  // §22.3: while MARKETPLACE_HIDDEN holds, the Marketplace page is left for
+  // Automations however it was reached - the same shape as the §9.3 overlay
+  // closing itself when its setting drops.
   useEffect(() => {
-    if (page === 'marketplace' && (MARKETPLACE_HIDDEN || developerMode === false)) go('automations')
-  }, [page, developerMode])
+    if (page === 'marketplace' && MARKETPLACE_HIDDEN) go('automations')
+  }, [page])
 
   // §4.9: the shell owns the OS-side settings effects (login item, tray icon,
   // §3 automatic update check) — push the stored values on every load/change

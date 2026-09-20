@@ -44,6 +44,8 @@ Or build from source - see §18 in [SPEC.md](SPEC.md).
 - **Local and file-first** - automations are YAML and Python on disk, secrets stay in the OS
   secret store (Keychain / Credential Manager), and everything runs on your machine.
 - **Share automations** - portable `.autowright` export/import, from the app or the CLI.
+- **Marketplace** - browse shared automation catalogs, install from them, and author and
+  export your own catalog for others to add.
 - **CLI with full app parity** - author automations as files, execute and follow them,
   manage secrets and triggers. Headless- and agent-friendly with explicit per-automation
   secret grants.
@@ -54,8 +56,6 @@ Or build from source - see §18 in [SPEC.md](SPEC.md).
   and run automations without opening the app); see `skills/autowright/`.
 - **Headless pip package** - run the backend and CLI without the desktop app.
 - **GitHub sync** - keep your automations in a repo and pull changes into the app.
-- **Automation & agent marketplace** - browse, share, and install automations and agents
-  made by others.
 - **More harness integrations** and **richer triggers** - file-system changes, calendar
   events, and more.
 

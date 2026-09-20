@@ -2,7 +2,6 @@
 // history retention, the on-this-Mac data section, and the §3 CLI card.
 import React, { useEffect, useState } from 'react'
 import { api } from '../api'
-import { MARKETPLACE_HIDDEN } from '../config'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import {
@@ -419,8 +418,6 @@ export default function SettingsPage() {
               <div style={rowTitle}>Developer mode</div>
               <div style={rowSub}>
                 Logs every backend request and every AI request, including the full prompt, to the backend log. Press ` to show the logs panel.
-                {/* §22: the Marketplace half of the sentence only while the page is not parked. */}
-                {!MARKETPLACE_HIDDEN && ' Also shows the Marketplace page, which is in preview.'}
               </div>
             </div>
             <Toggle on={settings.developerMode} onChange={(v) => patch({ developerMode: v })} title="Developer mode" />

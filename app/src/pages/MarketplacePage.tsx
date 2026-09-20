@@ -1,7 +1,7 @@
 // Marketplace page (§22.3): every catalog in the §22.2 catalog table, each
 // listing the entries of its copy; Install runs the ordinary §5.2 two-phase
-// import. The page and its nav row render only while the §4.9 developerMode
-// setting is on (§22 preview gate) - nothing else here is gated.
+// import. The page and its nav row render for everyone (§22 visibility; only
+// the MARKETPLACE_HIDDEN parking switch can hide them) - no setting gates them.
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
