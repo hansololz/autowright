@@ -416,7 +416,8 @@ interface LoadOptions {
 
 function loadMain(options: LoadOptions = {}): MainStub {
   const handlers = new Map<string, (e: unknown, ...args: unknown[]) => unknown>()
-  const appEvents = new Map<string, () => void>()
+  // Listeners take the Electron event: `before-quit` calls preventDefault on it.
+  const appEvents = new Map<string, (e: { preventDefault: () => void }) => void>()
   const opened: string[] = []
   const externals: string[] = []
   const revealed: string[] = []
@@ -539,7 +540,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       getVersion: () => '0.0.0',
       commandLine: { appendSwitch() {} },
       requestSingleInstanceLock: () => true,
-      on(event: string, fn: () => void) { appEvents.set(event, fn) },
+      on(event: string, fn: (e: { preventDefault: () => void }) => void) { appEvents.set(event, fn) },
       isReady: () => false,
       quit() { quits += 1 },
       // §3 reset step 6: the app quits and stays quit.
