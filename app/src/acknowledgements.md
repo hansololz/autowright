@@ -531,7 +531,7 @@ MIT License
     SOFTWARE
 ```
 
-### @types/react 19.2.18 — MIT
+### @types/react 19.3.0 — MIT
 
 ```
 MIT License
@@ -3003,7 +3003,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### react 19.2.8 — MIT
+### react 19.3.0 — MIT
 
 ```
 MIT License
@@ -3029,7 +3029,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### react-dom 19.2.8 — MIT
+### react-dom 19.3.0 — MIT
 
 ```
 MIT License
@@ -3247,7 +3247,7 @@ will be liable to anyone for any damages related to this
 software or this license, under any kind of legal claim.***
 ```
 
-### scheduler 0.27.0 — MIT
+### scheduler 0.28.0 — MIT
 
 ```
 MIT License
@@ -3772,7 +3772,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### electron 44.1.0 — MIT
+### electron 44.4.3 — MIT
 
 ```
 Copyright (c) Electron contributors
@@ -3854,7 +3854,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### anyio 4.14.2 — MIT
+### anyio 4.15.1 — MIT
 
 ```
 The MIT License (MIT)
@@ -3966,7 +3966,7 @@ documentation is licensed as follows:
     DEALINGS IN THE SOFTWARE.
 ```
 
-### charset-normalizer 3.4.9 — MIT
+### charset-normalizer 3.5.1 — MIT
 
 ```
 MIT License
@@ -3992,7 +3992,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### click 8.4.2 — BSD-3-Clause
+### click 8.5.0 — BSD-3-Clause
 
 ```
 Copyright 2014 Pallets
@@ -4023,38 +4023,6 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
-### colorama 0.4.6 — BSD License (Windows only)
-
-```
-Copyright (c) 2010 Jonathan Hartley
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
-
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-* Neither the name of the copyright holders, nor those of its contributors
-  may be used to endorse or promote products derived from this software without
-  specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### cryptography 50.0.1 — Apache-2.0 OR BSD-3-Clause (Linux only)
@@ -4161,7 +4129,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS DOCUMENTATION, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### feedparser-sgmllib 2.0.1 — PSF-2.0
+### feedparser-sgmllib 2.1.0 — PSF-2.0
 
 ```
 A. HISTORY OF THE SOFTWARE
@@ -4496,7 +4464,7 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### idna 3.18 — BSD-3-Clause
+### idna 3.20 — BSD-3-Clause
 
 ```
 BSD 3-Clause License
@@ -4649,7 +4617,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTI
 USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### lxml 6.1.1 — BSD-3-Clause
+### lxml 6.1.3 — BSD-3-Clause
 
 ```
 BSD 3-Clause License
@@ -4749,7 +4717,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### pydantic 2.13.4 — MIT
+### pydantic 2.13.5 — MIT
 
 ```
 The MIT License (MIT)
@@ -4775,7 +4743,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### pydantic_core 2.46.4 — MIT
+### pydantic_core 2.46.5 — MIT
 
 ```
 The MIT License (MIT)
@@ -5176,7 +5144,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### starlette 1.3.1 — BSD-3-Clause
+### starlette 1.6.0 — BSD-3-Clause
 
 ```
 Copyright © 2018, [Encode OSS Ltd](https://www.encode.io/).
@@ -5492,7 +5460,7 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### typing-inspection 0.4.2 — MIT
+### typing-inspection 0.4.4 — MIT
 
 ```
 MIT License
@@ -5539,7 +5507,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-### urllib3 2.7.0 — MIT
+### urllib3 2.8.0 — MIT
 
 ```
 MIT License
@@ -5565,7 +5533,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### uvicorn 0.52.1 — BSD-3-Clause
+### uvicorn 0.53.0 — BSD-3-Clause
 
 ```
 Copyright © 2017-present, [Encode OSS Ltd](https://www.encode.io/).
@@ -5597,7 +5565,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### websockets 17.0.1 — BSD-3-Clause
+### websockets 17.1 — BSD-3-Clause
 
 ```
 Copyright (c) Aymeric Augustin and contributors
