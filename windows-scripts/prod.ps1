@@ -126,6 +126,21 @@ Invoke-Native 'pip install backend' {
         -c (Join-Path $ROOT 'backend\constraints.txt') (Join-Path $ROOT 'backend')
 }
 
+# ---- shipped bytecode (§3): valid, never rewritten at runtime ---------------
+# The distribution's .pyc files are timestamp-validated against source mtimes
+# the extraction and pip install do not keep consistent, so as shipped they
+# were stale: every interpreter start recompiled the stdlib (Program Files is
+# not user-writable, so the write-back just failed and repeated on every
+# start). Recompile the whole tree in place as unchecked-hash bytecode —
+# loaded without ever consulting the source, so nothing is stale and nothing
+# is written. Same rule as the macOS leg.
+Write-Host '· compiling shipped bytecode (unchecked-hash)'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+Invoke-Native 'compiling shipped bytecode' {
+    & $STAGED_PY -m compileall -q -f --invalidation-mode unchecked-hash (Join-Path $PYSTAGE 'Lib')
+}
+Remove-Item Env:\PYTHONDONTWRITEBYTECODE
+
 # ---- smoke check: the bundled interpreter works before it is packaged -------
 # §3: the check runs *before* packaging and with PYTHONDONTWRITEBYTECODE, so
 # importing cannot add anything to the tree that is about to ship — the same

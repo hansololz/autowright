@@ -150,6 +150,34 @@ echo "· bundling Python → Contents/Resources/python"
 rm -rf "$APP/Contents/Resources/python"
 cp -R "$PYSTAGE" "$APP/Contents/Resources/python"
 
+# ---- shipped bytecode (SPEC §3): valid, never rewritten at runtime ----
+# The standalone distribution's .pyc files are timestamp-validated against a
+# source mtime the cp -R above does not preserve, so as shipped every one of
+# them was stale (through 0.13.0): each interpreter start recompiled the
+# stdlib and tried to write the result back into the sealed bundle. From a
+# child the app spawns that write can block, and the 120 s child timeout then
+# kills `service install`/`stop` — a relaunch after Quit got no backend.
+# Recompile the whole tree in place as unchecked-hash bytecode: loaded without
+# ever consulting the source, so nothing is stale and nothing is written. The
+# bundled interpreter runs it so the magic number matches; the env var keeps
+# compileall's own imports from writing timestamp .pyc first.
+echo "· compiling shipped bytecode (unchecked-hash)"
+PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m compileall -q -f \
+  --invalidation-mode unchecked-hash "$APP/Contents/Resources/python/lib" \
+  || { echo "compiling shipped bytecode failed"; exit 1; }
+# Prove it rather than assume it: an import run WITHOUT PYTHONDONTWRITEBYTECODE
+# must leave the tree untouched. Any file newer than the marker is a write the
+# sealed bundle would have taken at runtime.
+BYTECODE_MARK="$BUILD/bytecode-probe.mark"
+touch "$BYTECODE_MARK"
+"$APP/Contents/Resources/python/bin/python3" -c \
+  'import autowright, fastapi, uvicorn, websockets, yaml, keyring, requests, httpx, bs4, lxml, feedparser, dateutil' \
+  || { echo "bundled Python write probe failed to import"; exit 1; }
+WROTE="$(find "$APP/Contents/Resources/python" -type f -newer "$BYTECODE_MARK" | head -5)"
+[ -z "$WROTE" ] || { echo "bundled Python wrote into the bundle at import time:"; echo "$WROTE"; exit 1; }
+rm -f "$BYTECODE_MARK"
+echo "· shipped bytecode is read-only at import time"
+
 # ---- trim Electron locales (SPEC §3 bundle trimming) ----
 # English-only app. macOS picks the app's localization from the .lproj markers
 # in Contents/Resources (electron-packager creates one per Chromium locale, all

@@ -92,6 +92,19 @@ echo "· upgrading bundled pip"
 echo "· installing backend into bundled Python (pinned by backend/constraints.txt)"
 "$STAGED_PY" -m pip -q install -c "$ROOT/backend/constraints.txt" "$ROOT/backend"
 
+# ---- shipped bytecode (§3): valid, never rewritten at runtime ---------------
+# The distribution's .pyc files are timestamp-validated against source mtimes
+# the extraction and pip install do not keep consistent, so as shipped they
+# were stale: every interpreter start recompiled the stdlib (the AppImage is
+# read-only, so the write-back just failed and repeated on every start).
+# Recompile the whole tree in place as unchecked-hash bytecode — loaded
+# without ever consulting the source, so nothing is stale and nothing is
+# written. Same rule as the macOS leg.
+echo "· compiling shipped bytecode (unchecked-hash)"
+PYTHONDONTWRITEBYTECODE=1 "$STAGED_PY" -m compileall -q -f \
+  --invalidation-mode unchecked-hash "$PYSTAGE/lib" \
+  || { echo "compiling shipped bytecode failed"; exit 1; }
+
 # ---- smoke check: the bundled interpreter works before it is packaged -------
 # §3: before packaging and with PYTHONDONTWRITEBYTECODE, so importing cannot
 # add anything to the tree that is about to ship — the artifact is exactly

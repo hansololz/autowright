@@ -733,3 +733,67 @@ def test_packager_node_modules_ignore_allows_a_scope_directory():
     assert ignored("/node_modules/@scope/unrelated"), (
         "only the @scope directory itself is allowed, not everything under it"
     )
+
+
+# ---------------------------------------------------------------- shipped bytecode
+def test_bundled_bytecode_is_recompiled_unchecked_hash_and_probed():
+    """§3 shipped bytecode: the standalone distribution's timestamp-validated
+    .pyc files are stale once cp -R gives their sources fresh mtimes, so
+    through 0.13.0 every interpreter start recompiled the stdlib and tried to
+    write it back into the sealed bundle — from a child the app spawns that
+    write blocked, the 120 s child timeout killed `service install`, and a
+    relaunch after Quit never got its backend. prod.sh must recompile the
+    bundled tree in place as unchecked-hash bytecode after the copy into the
+    bundle and before the smoke check and signing, then prove it with an
+    import run WITHOUT PYTHONDONTWRITEBYTECODE that leaves the tree untouched.
+    The Linux and Windows legs recompile the same way. Only a release build
+    exercises any of it, so pin the text here."""
+    src = _read("scripts/prod.sh")
+    copy_python = src.index('cp -R "$PYSTAGE" "$APP/Contents/Resources/python"')
+    compile_step = src.index('echo "· compiling shipped bytecode (unchecked-hash)"')
+    smoke = src.index("bundled Python smoke check failed")
+    sign = src.index('echo "· codesigning')
+    assert copy_python < compile_step < smoke < sign, (
+        "the bytecode compile must sit after the copy into the bundle and before the "
+        "smoke check and signing")
+    step = src[compile_step:smoke]
+    assert ('PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m compileall -q -f \\\n'
+            '  --invalidation-mode unchecked-hash "$APP/Contents/Resources/python/lib"') in step, (
+        "the bundled interpreter must recompile Resources/python/lib in place as unchecked-hash bytecode")
+    assert 'touch "$BYTECODE_MARK"' in step and '-newer "$BYTECODE_MARK"' in step, (
+        "the write probe must compare the tree against a marker touched before the import run")
+    probe = step[step.index('touch "$BYTECODE_MARK"'):]
+    assert '\n"$APP/Contents/Resources/python/bin/python3" -c \\\n' in probe, (
+        "the write probe's import run must NOT set PYTHONDONTWRITEBYTECODE — it proves nothing is written")
+    assert "bundled Python wrote into the bundle at import time" in probe, (
+        "a write into the bundle at import time must fail the build")
+    for rel, needle in (
+        ("linux-scripts/prod.sh",
+         '"$STAGED_PY" -m compileall -q -f \\\n  --invalidation-mode unchecked-hash "$PYSTAGE/lib"'),
+        ("windows-scripts/prod.ps1",
+         "-m compileall -q -f --invalidation-mode unchecked-hash (Join-Path $PYSTAGE 'Lib')"),
+    ):
+        leg = _read(rel)
+        compile_at = leg.index(needle)
+        assert compile_at < leg.index("bundled Python smoke check"), (
+            f"{rel}: the bytecode compile must precede the smoke check")
+        assert "PYTHONDONTWRITEBYTECODE" in leg[max(0, compile_at - 200):compile_at], (
+            f"{rel}: compileall must run under PYTHONDONTWRITEBYTECODE so its own imports "
+            "write no timestamp .pyc first")
+
+
+def test_electron_service_children_never_write_bytecode():
+    """§3: every bundled interpreter the Electron main process spawns (the
+    ensure-backend / version-sync `install`, quit-all's and reset's `stop`)
+    runs with PYTHONDONTWRITEBYTECODE=1 — the one wedge observed was the
+    interpreter's own start-up write of a stale .pyc into the sealed bundle,
+    and a service verb must never depend on being able to write there."""
+    src = _read("app/electron/main.cjs")
+    opts = src[src.index("const SERVICE_CHILD_OPTIONS = {"):]
+    opts = opts[:opts.index("\n}\n")]
+    assert "PYTHONDONTWRITEBYTECODE: '1'" in opts and "...process.env" in opts, (
+        "SERVICE_CHILD_OPTIONS must add PYTHONDONTWRITEBYTECODE=1 on top of the inherited environment")
+    assert src.count("execFile(py, ['-m', 'autowright.service'") == 2, (
+        "the two service spawns (runServiceInstall, runServiceVerb) moved — re-pin them")
+    assert src.count("SERVICE_CHILD_OPTIONS, (") == 2, (
+        "every service child must spawn with SERVICE_CHILD_OPTIONS")

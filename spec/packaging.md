@@ -138,6 +138,33 @@ the update bullets below).
   `.pyc` files into `Resources/python`, and any write after signing breaks the bundle's resource
   seal — notarization then rejects the main binary even though the pre-write local verify passed.
   The seal is re-verified immediately before submission.
+- **Shipped bytecode (decided 2026-09-19):** the bundled tree must be read-only at runtime in
+  fact, not only by rule. The standalone CPython distribution ships timestamp-validated
+  `.pyc` files whose recorded source mtime is the distribution's fixed build epoch, and the
+  copy into the bundle (`cp -R`) does not preserve source mtimes — so every shipped `.pyc`
+  was stale, every interpreter start recompiled the stdlib, and every import tried to write
+  the result back into the sealed bundle. Observed 2026-09-19 on macOS 26: from a child the
+  app spawns, that write blocked in `rename()` (the bundle sat under a consent-gated folder),
+  the 120 s service-child timeout killed `service install`, and the app relaunched after a
+  Quit never got its backend — `service stop` wedges the same way, so Quit would not quit
+  either. Rule: after the copy into the bundle and before the smoke check and signing,
+  `prod.sh` recompiles the whole `Resources/python/lib` tree in place with
+  `compileall -f --invalidation-mode unchecked-hash` (the bundled interpreter runs it, so the
+  magic number matches): unchecked-hash bytecode is loaded without ever consulting the
+  source, so nothing is stale and nothing is rewritten. A **write probe** right after it
+  proves the property instead of assuming it: a marker file is touched, the smoke-check
+  import list runs **without** `PYTHONDONTWRITEBYTECODE`, and any file under
+  `Resources/python` newer than the marker fails the build ("bundled Python wrote into the
+  bundle at import time"). The probes that follow keep `PYTHONDONTWRITEBYTECODE=1` as
+  belt-and-braces. The Linux and Windows legs recompile the same way (their trees are
+  read-only or unwritable at runtime, so there the stale bytecode cost a full stdlib
+  recompile on every start rather than a hang). A §15 drift guard pins the compile step,
+  its position, and the write probe. The shell side keeps its own guard: every bundled
+  interpreter the Electron main process spawns (the ensure-backend and version-sync
+  `install`, quit-all's and reset's `stop`) runs with `PYTHONDONTWRITEBYTECODE=1` in its
+  environment, so a bundle that somehow ships stale bytecode again can slow the app's own
+  service children but never wedge them (the launchd plist carries no such variable: the
+  backend and its executors cache the §6.2 data-dir packages normally).
 - **Bundle trimming (decided):** the distributable ships only what runs. `prod.sh` trims in
   three places, all **before signing** (the seal covers the final tree), and the in-bundle
   smoke check runs on the trimmed tree, so a pruned module the backend or a curated package
@@ -155,7 +182,8 @@ the update bullets below).
   on arm64 and vice versa; the file is rewritten in place so its mode survives). **Never
   trimmed:** `pip` (the §6.2 installer), `__pycache__` (the sealed tree is read-only at
   runtime; without shipped bytecode the interpreter would try to write it into the bundle on
-  every import), any curated package or any part of one (`lxml.objectify` included: the
+  every import — and the shipped bytecode bullet above is what makes it valid, since stale
+  bytecode is written back exactly the same way), any curated package or any part of one (`lxml.objectify` included: the
   curated list is the user-facing step environment), and the stdlib beyond the modules named
   above (`pydoc`, `unittest`, `_pyrepl` stay: a step may reasonably use them). Every stdlib
   module the trim removes is also rejected by the §6.2 import allowlist in every mode, so
@@ -477,7 +505,11 @@ the update bullets below).
   `install`, quit-all's and reset's `stop`) carries a 120 s `execFile` timeout, and the
   quit-all/reset wait on a racing install is bounded the same way — a wedged interpreter
   answers the IPC with a plain failure line ("service stop timed out") instead of leaving
-  the QUIT card or the reset overlay spinning forever with `quittingAll` latched.
+  the QUIT card or the reset overlay spinning forever with `quittingAll` latched. Every one
+  of those children also runs with `PYTHONDONTWRITEBYTECODE=1` (the shipped-bytecode bullet
+  above): the one wedge actually observed was the interpreter's own start-up write of a
+  stale `.pyc` into the sealed bundle, and a service verb must never depend on being able
+  to write there.
   A stopped backend returns at next login (`RunAtLoad`) or next app launch (ensure-backend
   re-heals) — stopped, never uninstalled.
 - **Reset — delete all data and quit app (§4.9 RESET card, decided).** The renderer confirm

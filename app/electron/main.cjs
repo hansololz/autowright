@@ -253,11 +253,19 @@ let serviceInstallDone = Promise.resolve()
 // spawn is bounded (the child is killed on expiry and the callback carries
 // `killed`), its output capped, and every wait on one is bounded too.
 // §2 spawn policy: never show a console window for a shell child.
+// §3 shipped-bytecode guard: a service child must never depend on writing
+// into the sealed bundle. Through 0.13.0 every shipped .pyc was stale, so the
+// interpreter's own start-up tried to rewrite them there — and from a child
+// of the app that write blocked (pending folder consent), the timeout below
+// killed `service install`, and the relaunch after a Quit never got a
+// backend. The build now ships valid bytecode; this keeps a stale bundle from
+// ever wedging install/stop again (it can only slow them).
 const SERVICE_CHILD_TIMEOUT_MS = 120_000
 const SERVICE_CHILD_OPTIONS = {
   windowsHide: true,
   timeout: SERVICE_CHILD_TIMEOUT_MS,
   maxBuffer: 4 * 1024 * 1024,
+  env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
 }
 
 function runServiceInstall(py, cb) {
