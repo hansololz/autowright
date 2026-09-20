@@ -195,9 +195,11 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
     the new place), and `PATCH` with a `location` for it answers 422 "the built-in
     catalog's location can't be changed" (§22.4). `shown` and `auto_refresh` change freely.
   - **Not removable.** `DELETE` answers 409 "the built-in catalog can't be removed - hide
-    it instead" (§22.4); the page offers Hide in Remove's place (§22.3). Hiding is the
-    way to get it off the page: the row stays, refreshes on its own only while
-    `auto_refresh` is on, and comes back with Show or the settings toggle.
+    it instead" (§22.4); the page's actions menu simply has no Remove… row for it, and
+    no Hide row either - the §22.3 catalog settings modal's SHOWN toggle is the one
+    place it is hidden and shown again (David's call, 2026-09-19). Hiding is the way to
+    get it off the page: the row stays, refreshes on its own only while `auto_refresh`
+    is on, and comes back with the same toggle.
   - **Pending.** Right after the seed the row has a location and no copy, and it has never
     been read (`refreshed_at` null) and carries no `error`: that is the **pending** state,
     served as `cached` false with `error` null - not the missing-copy message above, which
@@ -289,7 +291,12 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
 **Per catalog** - one section each, in table order:
 - Header row: the catalog name (600, 15 px), a §14 `MetaChip` naming the location (link
   icon + hostname for a link, file icon + file name for a path, `fa-box-archive` +
-  "Stored by Autowright" for `null`; the full location in the `title` attribute), and a
+  "Stored by Autowright" for `null`; the full location in the `title` attribute). For a
+  link the chip is the `MetaChip` `href` variant (added 2026-09-19, David's ask): an
+  anchor to the location exactly as stored, the hostname followed by the §9
+  `fa-arrow-up-right-from-square` external-link icon (10 px), so a click opens the
+  catalog's page (the GitHub file page as pasted) in the default browser through the §9
+  external-URL policy; a file or `null` chip is inert. Then a
   muted line "Refreshed <date label>" (the §4.1 shared date-label scheme, e.g. "Refreshed
   Today, 8:00 AM"; omitted while `refreshedAt` is null) for a catalog with a location, or
   "Added <date label>" (from `addedAt`) for one without; neither line while the catalog
@@ -322,10 +329,9 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   wherever they share from), **Refresh** (`fa-rotate`; rendered only when the catalog has
   a location; disabled while this catalog or Refresh all is running), **Catalog
   settings…** (`fa-gear`; always) and, last, **Remove…** (`fa-trash`, the `MenuRow` danger
-  tone; every catalog but the built-in one) or, for the built-in catalog in its place,
-  **Hide** (`fa-eye-slash`; while `shown`) / **Show** (`fa-eye`; while hidden), which
-  PATCHes `shown` and refetches, no confirm, no toast - the built-in catalog can't be
-  removed (§22.2), and this is how it leaves the page. Remove opens a danger `ConfirmModal`, title "Remove "<name>"?", body "Automations you already installed from it stay, and so does every
+  tone; every catalog but the built-in one, whose menu ends at Catalog settings… - it
+  can't be removed (§22.2), and hiding it is the settings modal's SHOWN toggle, never a
+  menu row). Remove opens a danger `ConfirmModal`, title "Remove "<name>"?", body "Automations you already installed from it stay, and so does every
   archive file it lists. You can add the marketplace again later.", confirm label
   "Remove". Removing refetches the list; no toast. The Refresh all, Add, and Install
   buttons read "Refreshing…" / "Adding…" / "Installing…" beside the §9 spinner while
@@ -605,8 +611,8 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   a catalog with entries rendering its grid, the Refresh button and Refresh all present
   only for a catalog with a location, a hidden catalog collapsing to its header with the
   "Hidden" chip, the settings modal PATCHing the three fields with AUTO REFRESH disabled
-  while LOCATION is empty, the built-in catalog's "Built in" chip, its Hide row in
-  Remove's place (PATCHing `shown` false; Show while hidden) and its disabled LOCATION
+  while LOCATION is empty, the built-in catalog's "Built in" chip, its menu ending at
+  Catalog settings… (no Remove…, no Hide) and its disabled LOCATION
   input, a pending built-in row showing "Fetching the catalog…" and no grid, Install opening the import modal on the preview step, the add
   modal's inline 422 for a typed path and a pasted link and its drop zone adding a dropped
   `.yaml` (path through `pathForFile`) and refusing anything else, the Edit button on path

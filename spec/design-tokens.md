@@ -387,7 +387,11 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     info tag with tooltip), `MetaChip` (lowercase mono metadata — 500 11 px mono, `3px 8px`,
     radius 6, `--hairline-dim` ground, `--text-muted`; optional `c`/`bg` for the tinted
     result chips "5 of 6 checked" — trigger chips on the list and detail lede, result
-    chips on cards and in result views, attempt/outcome chips on the execution page),
+    chips on cards and in result views, attempt/outcome chips on the execution page;
+    optional `href` (added 2026-09-19) renders the same chip as an outbound anchor -
+    `target="_blank"`, `rel="noopener noreferrer"`, class `ad-meta-link`: `--text-muted`
+    at rest, `--text` on hover, never underlined, the §9 window-open handler routing it
+    to the default browser - the §22.3 catalog location chip),
     `CountPill` (nav counts). No hand-built chip spans; `.ad-chip-btn` is the example-prompt
     chip, with `.static` for the inert used-by chips on agent cards.
   - **Loading and empty:** `PageLoading` (centered Spinner 24 in an 80 px well) for a page

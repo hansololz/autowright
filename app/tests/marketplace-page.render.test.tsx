@@ -300,7 +300,14 @@ describe('§22.3 Marketplace page', () => {
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     expect(screen.getByText('Community')).toBeTruthy()
-    expect(screen.getByText('example.com')).toBeTruthy()
+    // §22.3: a link location's chip is an outbound anchor to the location as
+    // stored, the hostname followed by the external-link icon.
+    const chip = screen.getByText('example.com').closest('a') as HTMLAnchorElement
+    expect(chip.getAttribute('href')).toBe(source().location)
+    expect(chip.getAttribute('target')).toBe('_blank')
+    expect(chip.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(chip.getAttribute('title')).toBe(source().location)
+    expect(chip.querySelector('.fa-arrow-up-right-from-square')).toBeTruthy()
     expect(screen.getByText(/^Refreshed Today, /)).toBeTruthy()
     expect(screen.getAllByTestId('marketplace-entry')).toHaveLength(1)
     expect(screen.getByText('Manga chapter watcher')).toBeTruthy()
@@ -332,6 +339,8 @@ describe('§22.3 Marketplace page', () => {
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     expect(screen.getByText('marketplace-catalog.yaml')).toBeTruthy()
+    // §22.3: only a link location's chip is an anchor - a file chip is inert.
+    expect(screen.getByText('marketplace-catalog.yaml').closest('a')).toBeNull()
     // §22.2: a path is re-read like a link - both refresh.
     await openActions()
     expect(menuRow('Refresh')).toBeTruthy()
@@ -448,33 +457,26 @@ describe('§22.2 built-in catalog', () => {
     expect(screen.getAllByTestId('marketplace-source')[0].contains(chips[0])).toBe(true)
   })
 
-  it('the actions menu offers Hide in Remove\u2019s place, and PATCHes shown', async () => {
+  it('the actions menu ends at Catalog settings… - no Remove…, no Hide', async () => {
     marketplaceList.mockResolvedValue({ sources: [builtinSource()] })
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     await openActions()
-    // §22.2: the built-in catalog can't be removed, so Hide takes the last row.
-    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…', 'Hide'])
+    // §22.2/§22.3: the built-in catalog can't be removed, and hiding it is
+    // the settings modal's SHOWN toggle - never a menu row.
+    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…'])
     expect(screen.queryByRole('button', { name: 'Remove…' })).toBeNull()
-    const asked = marketplaceList.mock.calls.length
-    const toast = storeMod.useStore.getState().toast
-    fireEvent.click(menuRow('Hide'))
-    // §22.2: the location is pinned, so nothing but `shown` travels.
-    await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', { shown: false }))
-    await waitFor(() => expect(marketplaceList.mock.calls.length).toBeGreaterThan(asked))
-    // §22.3: no confirm, no toast.
-    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull()
-    expect(storeMod.useStore.getState().toast).toBe(toast)
+    expect(screen.queryByRole('button', { name: 'Hide' })).toBeNull()
+    expect(marketplaceSettings).not.toHaveBeenCalled()
   })
 
-  it('a hidden built-in catalog offers Show', async () => {
+  it('a hidden built-in catalog offers no Show row either', async () => {
     marketplaceList.mockResolvedValue({ sources: [builtinSource({ shown: false })] })
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-hidden-chip')).toBeTruthy()
     await openActions()
-    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…', 'Show'])
-    fireEvent.click(menuRow('Show'))
-    await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', { shown: true }))
+    expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…'])
+    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull()
   })
 
   it('a pending built-in catalog says it is fetching, and nothing else', async () => {

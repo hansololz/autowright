@@ -459,6 +459,10 @@ textarea:disabled, input:disabled { opacity: .45; }
 .ad-chip-btn:active { transform: translateY(1px); }
 /* link-as-chip (agent-new "Get it" links) and the inert used-by chip on agent cards */
 a.ad-chip-btn, a.ad-chip-btn:hover { text-decoration: none; }
+/* §14 MetaChip href variant (the §22.3 catalog location chip): muted at rest, plain
+   text on hover, never underlined - the chip's look, an anchor's job */
+a.ad-meta-link { color: var(--text-muted); text-decoration: none; transition: color var(--t-hover) var(--ease-enter); }
+a.ad-meta-link:hover { color: var(--text); text-decoration: none; }
 .ad-chip-btn.static { cursor: default; }
 .ad-chip-btn.static:hover { border-color: rgba(255, 255, 255, 0.09); background: rgba(255, 255, 255, 0.03); color: var(--text-muted); }
 .ad-chip-btn.static:hover i { color: var(--text-faint); }

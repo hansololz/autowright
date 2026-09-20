@@ -20,7 +20,7 @@ import { ImportSummaryModal } from './AutomationsList'
 /** §22.3 per-catalog actions: one quiet ellipsis button opening a PopMenu of
  * MenuRows - the §9.2 automation actions menu's shape. Each row renders only
  * while its condition holds; picking one closes the menu. */
-function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, onRefresh, onSettings, onRemove, onToggleShown }: {
+function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, onRefresh, onSettings, onRemove }: {
   source: MarketplaceSource
   /** this catalog's own Refresh is running (the button glyph spins) */
   refreshing: boolean
@@ -28,8 +28,6 @@ function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, o
   refreshingAll: boolean
   onEdit: () => void; onExport: () => void; onRefresh: () => void
   onSettings: () => void; onRemove: () => void
-  /** §22.2: the built-in catalog's Hide / Show, in Remove's place */
-  onToggleShown: () => void
 }) {
   const [open, setOpen, ref] = usePopover()
   const pick = (act: () => void) => () => { setOpen(false); act() }
@@ -61,13 +59,9 @@ function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, o
           <MenuRow onClick={pick(onRefresh)} disabled={refreshing || refreshingAll}>{icon('fa-rotate')}Refresh</MenuRow>
         )}
         <MenuRow onClick={pick(onSettings)}>{icon('fa-gear')}Catalog settings…</MenuRow>
-        {/* §22.2: the built-in catalog can't be removed - Hide takes Remove's
-            place, and Show brings it back. */}
-        {source.builtin ? (
-          <MenuRow onClick={pick(onToggleShown)}>
-            {icon(source.shown ? 'fa-eye-slash' : 'fa-eye')}{source.shown ? 'Hide' : 'Show'}
-          </MenuRow>
-        ) : (
+        {/* §22.2: the built-in catalog can't be removed, and hiding it is the
+            settings modal's SHOWN toggle - its menu ends here. */}
+        {!source.builtin && (
           <MenuRow danger onClick={pick(onRemove)}>{icon('fa-trash')}Remove…</MenuRow>
         )}
       </PopMenu>
@@ -469,16 +463,6 @@ export default function MarketplacePage() {
     setRefreshing(null)
   }
 
-  // §22.2/§22.3: the built-in catalog can't be removed - Hide (and Show) is how
-  // it leaves the page and comes back. One PATCH of `shown` alone, then a
-  // refetch: no confirm, no toast.
-  const toggleShown = async (source: MarketplaceSource) => {
-    try {
-      await api.marketplaceSettings(source.id, { shown: !source.shown })
-      await load()
-    } catch (e) { showToast((e as Error).message) }
-  }
-
   const remove = async (source: MarketplaceSource) => {
     setRemoving(null)
     try {
@@ -565,12 +549,23 @@ export default function MarketplacePage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)' }}>{s.name}</span>
-                  <span title={s.location ?? STORED_LABEL} style={{ display: 'inline-flex', minWidth: 0 }}>
-                    <MetaChip>
+                  {/* §22.3: a link location's chip is an outbound anchor to the
+                      catalog's page (the §14 MetaChip href variant); a file or
+                      null chip is inert. */}
+                  {s.kind === 'url' && s.location !== null ? (
+                    <MetaChip href={s.location} title={s.location} style={{ minWidth: 0 }}>
                       <i className={`fa-solid ${locationIcon(s)}`} style={{ fontSize: 10 }} />
                       {locationLabel(s)}
+                      <i className="fa-solid fa-arrow-up-right-from-square" style={{ fontSize: 10 }} />
                     </MetaChip>
-                  </span>
+                  ) : (
+                    <span title={s.location ?? STORED_LABEL} style={{ display: 'inline-flex', minWidth: 0 }}>
+                      <MetaChip>
+                        <i className={`fa-solid ${locationIcon(s)}`} style={{ fontSize: 10 }} />
+                        {locationLabel(s)}
+                      </MetaChip>
+                    </span>
+                  )}
                   {/* §22.3: the one catalog that ships with the app. */}
                   {s.builtin && (
                     <span
@@ -614,7 +609,6 @@ export default function MarketplacePage() {
                   onRefresh={() => { void refreshOne(s.id) }}
                   onSettings={() => setSettings(s)}
                   onRemove={() => setRemoving(s)}
-                  onToggleShown={() => { void toggleShown(s) }}
                 />
               </div>
               {isPending(s) ? (

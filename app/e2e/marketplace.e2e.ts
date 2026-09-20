@@ -88,15 +88,17 @@ describe('marketplace e2e', () => {
     expect(await page.getByTestId('marketplace-add').count()).toBeGreaterThan(0)
     // §22.3: the built-in catalog has a location, so Refresh all is always here.
     expect(await page.getByTestId('marketplace-refresh-all').count()).toBe(1)
-    // §22.2: it can't be removed - Hide stands in Remove's place. The menu
-    // closes the way it opened, on the button.
+    // §22.2: it can't be removed, and hiding it lives in the settings modal -
+    // its menu ends at Catalog settings…. The menu closes the way it opened,
+    // on the button.
     const builtinActions = builtinSection.getByTestId('marketplace-actions')
     await builtinActions.click()
-    await page.getByRole('button', { name: 'Hide' }).waitFor({ timeout: 10_000 })
+    await page.getByRole('button', { name: 'Catalog settings…' }).waitFor({ timeout: 10_000 })
     expect(await page.getByRole('button', { name: 'Remove…' }).count()).toBe(0)
+    expect(await page.getByRole('button', { name: 'Hide', exact: true }).count()).toBe(0)
     await shot(page, 'marketplace-builtin.png')
     await builtinActions.click()
-    await page.getByRole('button', { name: 'Hide' }).waitFor({ state: 'detached', timeout: 10_000 })
+    await page.getByRole('button', { name: 'Catalog settings…' }).waitFor({ state: 'detached', timeout: 10_000 })
 
     // The add modal's file step is the native open dialog, which can't be
     // driven — add through the §22.4 route instead and let the page hear about

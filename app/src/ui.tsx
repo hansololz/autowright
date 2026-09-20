@@ -168,16 +168,28 @@ export function Logo({ size = 26 }: { size?: number }) {
 /** §14 lowercase mono metadata chip — trigger chips (list + detail lede), tinted
  * result chips ("5 of 6 checked"), execution-page outcome chips. One geometry;
  * `c`/`bg` tint it. Never hand-built at a call site. */
-export function MetaChip({ children, c, bg, style }: {
+export function MetaChip({ children, c, bg, style, href, title }: {
   children: React.ReactNode; c?: string; bg?: string; style?: React.CSSProperties
+  /** §14: an outbound anchor in the chip's clothes - the §9 window-open handler
+   * routes it to the default browser. Color comes from `.ad-meta-link` (rest and
+   * hover), never from `c`. */
+  href?: string; title?: string
 }) {
+  const base: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 500,
+    background: bg ?? 'var(--hairline-dim)', padding: '3px 8px', borderRadius: 6,
+    whiteSpace: 'nowrap',
+  }
+  if (href !== undefined) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" title={title} className="ad-meta-link" style={{ ...base, ...style }}>
+        {children}
+      </a>
+    )
+  }
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
-      fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 500, color: c ?? 'var(--text-muted)',
-      background: bg ?? 'var(--hairline-dim)', padding: '3px 8px', borderRadius: 6,
-      whiteSpace: 'nowrap', ...style,
-    }}>
+    <span title={title} style={{ ...base, color: c ?? 'var(--text-muted)', ...style }}>
       {children}
     </span>
   )
