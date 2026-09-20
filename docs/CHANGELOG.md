@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.13.0 - 2026-09-19
+
+- The marketplace is now a standard part of Autowright rather than a preview, and it arrives with the Autowright catalog already in the list.
+- Every marketplace entry has an Audit button that shows you every file inside it before you bring it in.
+- GitHub file, repository, and folder pages now work as references and catalog locations, so a normal GitHub link is enough.
+- Adding an entry to your own catalog is now one simple form: title, description, reference, and image.
+- Quitting with Cmd+Q, the app menu, or the dock now closes Autowright completely, instead of appearing to do nothing.
+- Each catalog's actions are now under a single menu, and its location links straight to the catalog's page in your browser.
+- Long execution lists, logs, and pages load faster, and a double click on sign-in or save no longer counts twice.
+
 ## v0.12.0 - 2026-09-12
 
 - Cancelling or skipping a step now always stops the AI agent it was using, instead of leaving it running in the background.
