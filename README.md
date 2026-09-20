@@ -1,9 +1,14 @@
 # <img src="app/electron/icon/icon.png" width="40" alt="Autowright logo" align="top"> Autowright
 
-Desktop app that runs recurring jobs on your machine. You describe the job in plain
-English, an AI agent turns it into Python scripts, you read them and approve, and a local
-scheduler runs the same scripts on schedule from then on. The AI is only involved when you
-write or edit a job. It never touches a run.
+[![Latest release](https://img.shields.io/github/v/release/hansololz/autowright)](https://github.com/hansololz/autowright/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
+
+Autowright is an open-source desktop automation app for macOS and Windows. You describe a
+recurring task in plain English, an AI agent (Claude Code, Codex, Gemini CLI, or OpenCode)
+writes it as Python scripts, and a local cron-style scheduler runs those scripts on your
+machine from then on. The AI is only involved when you write or edit a task. It never
+touches a run.
 
 Website: [autowright.ai](https://autowright.ai)
 
