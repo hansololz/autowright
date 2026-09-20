@@ -392,7 +392,9 @@ const savedHome = process.env.AUTOWRIGHT_HOME
 // §3 service-child double: main.cjs's own `require` hands this to it instead
 // of child_process.execFile, so a test can hang a child or kill it on its
 // deadline without ever spawning anything.
-type ServiceChildOptions = { windowsHide: boolean, timeout: number, maxBuffer: number }
+type ServiceChildOptions = {
+  windowsHide: boolean, timeout: number, maxBuffer: number, env: Record<string, string | undefined>,
+}
 type ServiceChildError = Error & { killed?: boolean, signal?: string }
 type ServiceChildStub = (
   py: string, args: string[], options: ServiceChildOptions,
@@ -1370,9 +1372,13 @@ describe('main.cjs bounded service children (§3)', () => {
     const result = m.invoke('quit-all', { force: true }) as Promise<unknown>
     await vi.advanceTimersByTimeAsync(120_000)
     expect(await result).toEqual({ error: 'service stop timed out' })
-    // A signal name is never reported as the failure — and the spawn carried
-    // the bound plus a capped buffer.
-    expect(options).toEqual([{ windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }])
+    // A signal name is never reported as the failure, and the spawn carried
+    // the bound plus a capped buffer and the §3 no-bytecode-writes environment
+    // (the app's own environment plus PYTHONDONTWRITEBYTECODE=1).
+    expect(options).toHaveLength(1)
+    const { env, ...bounds } = options[0]
+    expect(bounds).toEqual({ windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 })
+    expect(env).toEqual({ ...process.env, PYTHONDONTWRITEBYTECODE: '1' })
     // §3: the app stays up on any stop failure.
     expect(m.quits).toBe(0)
   })

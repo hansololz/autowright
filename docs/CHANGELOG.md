@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.13.1 - 2026-09-20
+
+- Autowright now reopens normally after you quit it, instead of hanging on launch.
+- Turning the background service on or off no longer stalls, so scheduled automations keep running.
+
 ## v0.13.0 - 2026-09-19
 
 - The marketplace is now a standard part of Autowright rather than a preview, and it arrives with the Autowright catalog already in the list.
