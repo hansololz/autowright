@@ -27,7 +27,7 @@ macOS is the main target and gets updates first. Windows follows shortly after. 
 build is there for people who want to try it and may break between releases.
 
 To build from source, clone the repo and run `./scripts/dev.sh`. It sets up the venv and
-node_modules and launches the app. Details are in §18 of [spec/dev-test.md](spec/dev-test.md).
+node_modules and launches the app.
 
 ## How it works
 
