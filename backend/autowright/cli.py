@@ -1537,10 +1537,10 @@ def cmd_marketplace_list(c: Client, args) -> None:
     for s in c.req("GET", "/marketplace")["sources"]:
         # §22.2: a row with no location is a copy the app holds by itself.
         location = s.get("location") or "(kept by Autowright)"
-        # §22.5: ` built-in`, ` hidden`, ` auto-refresh`, in that order.
+        # §22.5: ` built-in`, ` collapsed`, ` auto-refresh`, in that order.
         flags = " built-in" if s.get("builtin") else ""
-        if not s.get("shown", True):
-            flags += " hidden"
+        if not s.get("expanded", True):
+            flags += " collapsed"
         if s.get("autoRefresh"):
             flags += " auto-refresh"
         print(f"{s['name']} [{s['id'][:8]}]  {location}{flags}")
@@ -1589,7 +1589,7 @@ def cmd_marketplace_add(c: Client, args) -> None:
 
 
 # §22.5: the three keys `marketplace set` takes, in the order it names them.
-SOURCE_KEYS = {"location": str, "shown": bool, "autoRefresh": bool}
+SOURCE_KEYS = {"location": str, "expanded": bool, "autoRefresh": bool}
 
 
 def cmd_marketplace_set(c: Client, args) -> None:
@@ -2944,9 +2944,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                           "keeps the only copy."
                           "\n\n"
                           "`set` changes what a catalog does: where it is read from, whether "
-                          "the app's Marketplace page shows its automations (hidden), and "
-                          "whether it is refreshed on its own (auto refresh, at launch and "
-                          "every 6 hours)."
+                          "the app's Marketplace page lists its automations (expanded or collapsed), and "
+                          "whether it is refreshed on its own (auto refresh, once a day)."
                           "\n\n"
                           "Wherever a verb takes a marketplace, name it by its name "
                           "(case-insensitive), a unique part of its name, its id, or a "
@@ -2962,7 +2961,7 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
          description="One block per marketplace: its name, its short id, where it is read "
                      "from, when it was last refreshed, and every automation it lists, "
                      "numbered. A marketplace Autowright keeps the only copy of says so in "
-                     "place of a location, and a hidden or self-refreshing one is marked."
+                     "place of a location, and a collapsed or self-refreshing one is marked."
                      "\n\n"
                      "Those numbers are what `marketplace install` takes, and they follow the "
                      "published catalog, so list again after a refresh. A marketplace that "
@@ -2987,10 +2986,11 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
              description="Change what a marketplace does here. `location` is where Refresh "
                          "reads the catalog again - an https link or the path of a catalog "
                          "file on this machine; an empty value clears it, which keeps the "
-                         "copy Autowright has and turns auto refresh off. `shown` is whether "
-                         "the app's Marketplace page shows its automations. `autoRefresh` is "
+                         "copy Autowright has and turns auto refresh off. `expanded` is whether "
+                         "the app's Marketplace page lists its automations (off collapses the "
+                         "catalog to its header). `autoRefresh` is "
                          "whether "
-                         "Autowright refreshes it on its own, at launch and every 6 hours."
+                         "Autowright refreshes it on its own, once a day."
                          "\n\n"
                          "Only the keys you type change; the copy of the catalog is left "
                          "exactly as it is until the next refresh.",
@@ -2998,12 +2998,12 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                     "  autowright marketplace set \"Community\" autoRefresh=on\n"
                     "  autowright marketplace set mine "
                     "location=https://example.com/marketplace-catalog.yaml\n"
-                    "  autowright marketplace set mine location= shown=off")
+                    "  autowright marketplace set mine location= expanded=off")
     p.add_argument("source",
                    help="which marketplace: its name, a unique part of its name, its id, or "
                         "an id prefix")
     p.add_argument("values", nargs="+", metavar="KEY=VALUE",
-                   help="one or more of location=, shown=on|off, and autoRefresh=on|off")
+                   help="one or more of location=, expanded=on|off, and autoRefresh=on|off")
     p = _sub(mg, "refresh", cmd_marketplace_refresh, "fetch a marketplace again, or all of them",
              description="Read a marketplace catalog again from its location, so automations "
                          "added to it since show up here. A marketplace Autowright keeps the "

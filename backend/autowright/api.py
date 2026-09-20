@@ -2540,7 +2540,7 @@ def _marketplace_export(automation_id: str) -> tuple[str, bytes]:
 
 @app.get("/marketplace", dependencies=[Depends(auth)])
 def marketplace_sources() -> dict:
-    """§22.4: every catalog in table order, hidden ones included, each with the
+    """§22.4: every catalog in table order, collapsed ones included, each with the
     entries derived from its copy."""
     return _marketplace_json()
 
@@ -2569,7 +2569,7 @@ async def marketplace_add(body: models.MarketplaceAdd) -> dict:
 
 @app.patch("/marketplace/sources/{source_id}", dependencies=[Depends(auth)])
 def marketplace_settings(source_id: str, body: models.MarketplaceSettings) -> dict:
-    """§22.4 settings: location, shown, auto refresh - only the given fields
+    """§22.4 settings: location, expanded, auto refresh - only the given fields
     change, nothing is fetched."""
     try:
         source = marketplace_store.update_settings(
@@ -2577,7 +2577,7 @@ def marketplace_settings(source_id: str, body: models.MarketplaceSettings) -> di
             # §22.4: an absent `location` leaves it alone, an explicit null
             # clears it - only the set of sent fields tells the two apart.
             location=(body.location if "location" in body.model_fields_set else ...),
-            shown=body.shown, auto_refresh=body.autoRefresh)
+            expanded=body.expanded, auto_refresh=body.autoRefresh)
     except KeyError:
         raise HTTPException(404, "marketplace not found") from None
     except (marketplace.MarketplaceDuplicate, marketplace.MarketplaceUnwritable) as e:
@@ -2683,7 +2683,7 @@ async def marketplace_refresh_all() -> dict:
 @app.delete("/marketplace/sources/{source_id}", dependencies=[Depends(auth)])
 def marketplace_remove(source_id: str) -> dict:
     """§22.4: 404 for an unknown id; 409 for the built-in catalog, which is
-    hidden rather than removed."""
+    collapsed rather than removed."""
     try:
         marketplace_store.remove(source_id)
     except KeyError:

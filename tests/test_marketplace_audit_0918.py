@@ -76,7 +76,7 @@ def test_a_relative_reference_still_names_its_key():
 
 # ---------- §22.2 lenient load ----------
 def _row(**over) -> dict:
-    row = {"id": str(uuid.uuid4()), "location": None, "shown": True,
+    row = {"id": str(uuid.uuid4()), "location": None, "expanded": True,
            "auto_refresh": False, "added_at": "", "refreshed_at": None, "error": None}
     row.update(over)
     return row

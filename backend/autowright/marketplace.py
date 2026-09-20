@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -66,9 +67,13 @@ _read_slots = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
 # request open for as long as the table is wide.
 REFRESH_ALL_DEADLINE_S = 120
 
-# §22.2 auto refresh: 30 s after the store loads, then every 6 hours.
+# §22.2 auto refresh, once a day: a flagged row is due when its last
+# successful read is at least this old (or it has never been read); the
+# sweeper checks for due rows 30 s after the store loads and every hour after
+# that, and reads only those.
 AUTO_REFRESH_DELAY_S = 30
-AUTO_REFRESH_INTERVAL_S = 6 * 60 * 60
+AUTO_REFRESH_INTERVAL_S = 60 * 60
+AUTO_REFRESH_MIN_AGE_S = 24 * 60 * 60
 # How long a stop waits for the sweeper: a start after a stop must never leave
 # two threads sweeping the same table.
 AUTO_REFRESH_STOP_S = 5
@@ -90,7 +95,7 @@ BUILTIN_CATALOG_URL = ("https://github.com/hansololz/automation-marketplace/blob
 
 # §22.2: the table's columns - the only keys a row is ever written with, so the
 # derived memo a row carries in memory (`_parsed`) never reaches disk.
-COLUMNS = ("id", "location", "shown", "auto_refresh", "builtin", "added_at",
+COLUMNS = ("id", "location", "expanded", "auto_refresh", "builtin", "added_at",
            "refreshed_at", "error")
 
 COPY_UNREADABLE_REFRESH = "the saved copy couldn't be read - refresh to fetch it again"
@@ -106,7 +111,7 @@ AUTO_NEEDS_LOCATION = "auto refresh needs a location"
 BAD_LOCATION = "give an https link or an absolute path"
 NO_EXPORT_FOLDER = "say where to export the automations you added"
 BUILTIN_LOCATION_PINNED = "the built-in catalog's location can't be changed"
-BUILTIN_NOT_REMOVABLE = "the built-in catalog can't be removed - hide it instead"
+BUILTIN_NOT_REMOVABLE = "the built-in catalog can't be removed - collapse it instead"
 TABLE_UNREADABLE = ("the marketplace table on disk couldn't be read; fix or remove "
                     "marketplaces.yaml")
 
@@ -127,7 +132,7 @@ class MarketplaceNotRefreshable(MarketplaceError):
 
 class MarketplaceBuiltin(MarketplaceError):
     """§22.2: a remove of the built-in catalog - the §19 route answers 409, and
-    hiding it is the way to get it off the page."""
+    collapsing it is the way to get its automations off the page."""
 
 
 class MarketplaceNotEditable(MarketplaceError):
@@ -509,17 +514,20 @@ class MarketplaceStore:
         raise at startup - a row missing `id`, whose `id` isn't uuid-shaped (it
         names the row's directory, so it is never joined into a path
         unchecked), or whose `location` is neither null, an absolute path, nor
-        an https link, skips with a warning; a missing `shown` reads true, a
-        missing `auto_refresh` false, a missing `builtin` false (only the first
-        `builtin: true` row is the §22.2 built-in catalog). A clean table is
-        then seeded with the built-in row (§21.4) and saved, offline - loading
-        never reads the network. §5 read-only degradation: a file that
+        an https link, skips with a warning; a missing `expanded` reads true
+        (a pre-2026-09-20 `shown` key is read in its place - the §21.4 rename -
+        and the table saved under the new name), a missing `auto_refresh`
+        false, a missing `builtin` false (only the first `builtin: true` row is
+        the §22.2 built-in catalog). A clean table is then seeded with the
+        built-in row (§21.4) and saved, offline - loading never reads the
+        network. §5 read-only degradation: a file that
         exists but can't be read at all (bad YAML, or a shape the table isn't
         written in) loads empty and makes the table read-only for the session,
         so the user's catalogs are never replaced by the empty default."""
         raw, ok = load_yaml_checked(self.file(), {})
         raw = raw or {}
         unreadable = not ok
+        renamed = False
         if not isinstance(raw, dict):
             log.warning("%s doesn't hold a mapping - loading no marketplaces", self.file())
             raw, unreadable = {}, True
@@ -563,8 +571,13 @@ class MarketplaceStore:
                 log.warning("marketplaces.yaml row %r is a second built-in catalog - "
                             "loading it as an ordinary one", entry["id"])
                 builtin = False
+            if "expanded" not in entry and "shown" in entry:
+                # §21.4 (2026-09-20): the column was `shown` - read it in the
+                # new column's place and save the table under the new name.
+                renamed = True
+            expanded = entry.get("expanded", entry.get("shown", True))
             sources.append({"id": str(entry["id"]), "location": location,
-                            "shown": entry.get("shown", True) is not False,
+                            "expanded": expanded is not False,
                             "auto_refresh": entry.get("auto_refresh") is True
                                             and location is not None,
                             "builtin": builtin,
@@ -578,7 +591,7 @@ class MarketplaceStore:
         with self.lock:
             self.sources = sources
             self._unreadable = unreadable
-            if seeded:
+            if (seeded or renamed) and not unreadable:
                 self._save()
         self._sweep_orphan_dirs()
 
@@ -602,7 +615,7 @@ class MarketplaceStore:
             pasted["builtin"] = True
             return True
         sources.insert(0, {"id": new_id(), "location": BUILTIN_CATALOG_URL,
-                           "shown": True, "auto_refresh": True, "builtin": True,
+                           "expanded": True, "auto_refresh": True, "builtin": True,
                            "added_at": timefmt.now_iso(), "refreshed_at": None,
                            "error": None})
         return True
@@ -692,7 +705,7 @@ class MarketplaceStore:
         # The read runs before the lock is ever taken, so a failure raises with
         # no row to clean up at all.
         text = self._read_location(location)
-        source = {"id": new_id(), "location": location, "shown": True,
+        source = {"id": new_id(), "location": location, "expanded": True,
                   "auto_refresh": False, "builtin": False,
                   "added_at": timefmt.now_iso(),
                   "refreshed_at": None, "error": None}
@@ -762,14 +775,35 @@ class MarketplaceStore:
             self._save()
             return [self.serialize(s) for s in self.sources]
 
+    @staticmethod
+    def is_due(source: dict, now: datetime | None = None) -> bool:
+        """§22.2 once a day: a flagged row with a location is due for an
+        automatic read when `refreshed_at` is null or at least 24 hours old.
+        A stamp that can't be parsed (a hand-edited file) counts as null: one
+        read fixes it."""
+        if not source["auto_refresh"] or source["location"] is None:
+            return False
+        stamp = source.get("refreshed_at")
+        if not stamp:
+            return True
+        try:
+            last = datetime.fromisoformat(stamp)
+        except (TypeError, ValueError):
+            return True
+        if last.tzinfo is None:
+            last = last.astimezone()
+        now = now or datetime.now(timezone.utc)
+        return (now - last).total_seconds() >= AUTO_REFRESH_MIN_AGE_S
+
     def auto_refresh_sweep(self) -> list[str]:
-        """§22.2 auto refresh: every row flagged `auto_refresh` with a location,
-        in table order, through the ordinary refresh. Answers the ids it
-        refreshed (a failure lands in `error` like a manual one)."""
+        """§22.2 auto refresh: every row flagged `auto_refresh` with a location
+        that is due (`is_due`: never read, or read 24 hours ago or more), in
+        table order, through the ordinary refresh. Answers the ids it
+        refreshed (a failure lands in `error` like a manual one and leaves
+        `refreshed_at` alone, so the row stays due for the next check)."""
         self._require_writable()
         with self.lock:
-            targets = [(s["id"], s["location"]) for s in self.sources
-                       if s["auto_refresh"] and s["location"] is not None]
+            targets = [(s["id"], s["location"]) for s in self.sources if self.is_due(s)]
         fetched = []
         for source_id, location in targets:
             # A stop asked for mid-sweep: one row can block for the whole
@@ -815,10 +849,11 @@ class MarketplaceStore:
         return read
 
     def start_auto_refresh(self, on_change) -> None:
-        """§22.2: the pending rows first, before the wait, then the sweep 30 s
-        after the store loads and every 6 hours after that, on a daemon thread
-        off the boot path. `on_change` runs after a pass that touched any row
-        (the §19 `marketplace.changed` event)."""
+        """§22.2: the pending rows first, before the wait, then a check for
+        due rows 30 s after the store loads and every hour after that, on a
+        daemon thread off the boot path; only the due rows (last read 24 hours
+        ago or more) are read. `on_change` runs after a pass that touched any
+        row (the §19 `marketplace.changed` event)."""
         if self._auto_thread is not None:
             return
         # A fresh event every time: a sweeper that outlived its stop still
@@ -856,7 +891,7 @@ class MarketplaceStore:
                             "%s seconds", AUTO_REFRESH_STOP_S)
 
     def update_settings(self, source_id: str, *, location: str | None = ...,
-                        shown: bool | None = None, auto_refresh: bool | None = None) -> dict:
+                        expanded: bool | None = None, auto_refresh: bool | None = None) -> dict:
         """§22.2 settings: only the given fields change; nothing is fetched.
         `location` is the user's text (blank or None = null) or the `...`
         sentinel for "not given"."""
@@ -869,7 +904,7 @@ class MarketplaceStore:
             if location is not ... and source["builtin"]:
                 # §22.2: the built-in catalog's location is the constant,
                 # always - a `location` key at all is refused, even the one it
-                # already holds. `shown` and `auto_refresh` change freely.
+                # already holds. `expanded` and `auto_refresh` change freely.
                 raise MarketplaceError(BUILTIN_LOCATION_PINNED)
             if location is not ...:
                 new_location = normalize_location(location)
@@ -886,16 +921,16 @@ class MarketplaceStore:
                 source["location"] = new_location
                 source["error"] = None
             source["auto_refresh"] = new_auto
-            if shown is not None:
-                source["shown"] = bool(shown)
+            if expanded is not None:
+                source["expanded"] = bool(expanded)
             self._save()
             return self.serialize(source)
 
     def remove(self, source_id: str) -> None:
         """§22.2 remove: the row and its directory (the copy, nothing more).
         Installed automations and referenced archive files are untouched. The
-        built-in catalog isn't removable - hiding it is the way to get it off
-        the page."""
+        built-in catalog isn't removable - collapsing it is the way to get its
+        automations off the page."""
         self._require_writable()
         with self.lock:
             source = self._find(source_id)
@@ -974,7 +1009,7 @@ class MarketplaceStore:
             if not target.is_dir():
                 raise MarketplaceError("there's no folder at that path")
         location = str(target / CATALOG_FILENAME) if target else None
-        source = {"id": new_id(), "location": location, "shown": True,
+        source = {"id": new_id(), "location": location, "expanded": True,
                   "auto_refresh": False, "builtin": False,
                   "added_at": timefmt.now_iso(),
                   "refreshed_at": None, "error": None}
@@ -1312,7 +1347,7 @@ class MarketplaceStore:
                     "image": e["image"] or None}
                    for e in (catalog["entries"] if catalog else [])]
         return {"id": source["id"], "kind": kind_of(source["location"]),
-                "location": source["location"], "shown": source["shown"],
+                "location": source["location"], "expanded": source["expanded"],
                 "autoRefresh": source["auto_refresh"],
                 "builtin": source["builtin"],
                 "name": catalog["name"] if catalog else default_name(source["location"]),

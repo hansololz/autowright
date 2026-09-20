@@ -2750,7 +2750,7 @@ def test_cmd_agent_check_human_output_says_ready_then_what_it_found(capsys):
 
 SOURCES = [
     {"id": "m1111111-a", "kind": "url", "location": "https://example.com/marketplace.yaml",
-     "shown": True, "autoRefresh": False,
+     "expanded": True, "autoRefresh": False,
      "name": "Community automations", "description": "Automations I use.",
      "addedAt": "2026-09-10T08:00:00Z", "refreshedAt": "2026-09-11T07:30:00Z",
      "error": None,
@@ -2762,7 +2762,7 @@ SOURCES = [
          {"index": 1, "title": "Inbox sweeper", "description": "",
           "archive": "https://example.com/inbox.autowright", "image": None}]},
     {"id": "m2222222-b", "kind": "file", "location": "/Users/x/shared/marketplace.yaml",
-     "shown": True, "autoRefresh": False,
+     "expanded": True, "autoRefresh": False,
      "name": "Mine", "description": "",
      "addedAt": "2026-09-09T08:00:00Z", "refreshedAt": "2026-09-09T08:00:00Z",
      "error": "the file couldn't be read", "entries": []},
@@ -2771,7 +2771,7 @@ SOURCES = [
 # §22.2: a catalog Autowright keeps the only copy of - no location, so nothing
 # to refresh from and nothing to export beside.
 KEPT_SOURCE = {"id": "m3333333-c", "kind": "none", "location": None,
-               "shown": True, "autoRefresh": False,
+               "expanded": True, "autoRefresh": False,
                "name": "Kept", "description": "", "addedAt": "2026-09-08T08:00:00Z",
                "refreshedAt": None, "error": None, "entries": []}
 
@@ -2780,7 +2780,7 @@ KEPT_SOURCE = {"id": "m3333333-c", "kind": "none", "location": None,
 BUILTIN_SOURCE = {"id": "m4444444-d", "kind": "url",
                   "location": "https://github.com/hansololz/automation-marketplace/"
                               "blob/main/marketplace-catalog.yaml",
-                  "shown": True, "autoRefresh": True, "builtin": True,
+                  "expanded": True, "autoRefresh": True, "builtin": True,
                   "name": "automation-marketplace", "description": "",
                   "addedAt": "2026-09-19T08:00:00Z", "refreshedAt": None,
                   "error": None, "cached": False, "entries": []}
@@ -2848,19 +2848,19 @@ def test_cmd_marketplace_list_dates_a_location_never_refreshed(capsys):
     assert out[2] == "  no automations listed"
 
 
-def test_cmd_marketplace_list_marks_hidden_and_auto_refresh(capsys):
-    """§22.5: ` hidden` then ` auto-refresh`, in that order, on the first line."""
-    _run(_MarketClient([{**SOURCES[0], "shown": False, "autoRefresh": True}]),
+def test_cmd_marketplace_list_marks_collapsed_and_auto_refresh(capsys):
+    """§22.5: ` collapsed` then ` auto-refresh`, in that order, on the first line."""
+    _run(_MarketClient([{**SOURCES[0], "expanded": False, "autoRefresh": True}]),
          "marketplace", "list")
     assert capsys.readouterr().out.splitlines()[0] == (
         "Community automations [m1111111]  https://example.com/marketplace.yaml"
-        " hidden auto-refresh")
+        " collapsed auto-refresh")
 
     _run(_MarketClient([{**SOURCES[0], "autoRefresh": True}]), "marketplace", "list")
     assert capsys.readouterr().out.splitlines()[0].endswith("marketplace.yaml auto-refresh")
 
-    _run(_MarketClient([{**SOURCES[0], "shown": False}]), "marketplace", "list")
-    assert capsys.readouterr().out.splitlines()[0].endswith("marketplace.yaml hidden")
+    _run(_MarketClient([{**SOURCES[0], "expanded": False}]), "marketplace", "list")
+    assert capsys.readouterr().out.splitlines()[0].endswith("marketplace.yaml collapsed")
 
 
 def test_cmd_marketplace_list_marks_the_builtin_catalog_and_its_pending_line(capsys):
@@ -2874,10 +2874,10 @@ def test_cmd_marketplace_list_marks_the_builtin_catalog_and_its_pending_line(cap
     assert out[2] == "  no automations listed"
 
     # read once, it prints the ordinary refreshed line - and the flags keep order
-    _run(_MarketClient([{**BUILTIN_SOURCE, "shown": False, "cached": True,
+    _run(_MarketClient([{**BUILTIN_SOURCE, "expanded": False, "cached": True,
                          "refreshedAt": "2026-09-19T08:05:00Z"}]), "marketplace", "list")
     out = capsys.readouterr().out.splitlines()
-    assert out[0].endswith("marketplace-catalog.yaml built-in hidden auto-refresh")
+    assert out[0].endswith("marketplace-catalog.yaml built-in collapsed auto-refresh")
     assert out[1] == "  refreshed 2026-09-19T08:05:00Z"
 
     # §22.2: a failed first read is the ordinary error line, not the pending one
@@ -2934,9 +2934,9 @@ def test_cmd_marketplace_set_patches_only_the_keys_given(capsys):
     parsed the way `settings set` parses a toggle."""
     c = _MarketClient(SOURCES, writes={"/marketplace/sources/m1111111-a": {
         "id": "m1111111-a", "name": "Community automations"}})
-    _run(c, "marketplace", "set", "community", "shown=off", "autoRefresh=yes")
+    _run(c, "marketplace", "set", "community", "expanded=off", "autoRefresh=yes")
     assert c.calls == [("PATCH", "/marketplace/sources/m1111111-a",
-                        {"shown": False, "autoRefresh": True})]
+                        {"expanded": False, "autoRefresh": True})]
     assert "updated Community automations" in capsys.readouterr().out
 
 
@@ -2961,16 +2961,16 @@ def test_cmd_marketplace_set_refuses_a_key_that_isnt_one_of_the_three():
     with pytest.raises(SystemExit) as ei:
         _run(c, "marketplace", "set", "Mine", "url=https://example.com/mine.yaml")
     assert str(ei.value.code) == \
-        "unknown marketplace key 'url' - have: location, shown, autoRefresh"
+        "unknown marketplace key 'url' - have: location, expanded, autoRefresh"
     assert c.calls == []
 
     with pytest.raises(SystemExit) as ei:
-        _run(c, "marketplace", "set", "Mine", "shown")
-    assert str(ei.value.code) == "expected KEY=VALUE, got 'shown'"
+        _run(c, "marketplace", "set", "Mine", "expanded")
+    assert str(ei.value.code) == "expected KEY=VALUE, got 'expanded'"
 
     with pytest.raises(SystemExit) as ei:
-        _run(c, "marketplace", "set", "Mine", "shown=maybe")
-    assert str(ei.value.code) == "shown takes on|off, got 'maybe'"
+        _run(c, "marketplace", "set", "Mine", "expanded=maybe")
+    assert str(ei.value.code) == "expanded takes on|off, got 'maybe'"
     assert c.calls == []
 
 
@@ -2996,25 +2996,25 @@ class _RefusingMarketClient(_MarketClient):
 
 def test_cmd_marketplace_set_and_remove_refuse_the_builtin_catalog():
     """§22.5: `location=` on the built-in catalog exits 1 with the §22.4 422
-    detail and `remove` with the 409 detail - hiding it is `shown=off`."""
+    detail and `remove` with the 409 detail - collapsing it is `expanded=off`."""
     pinned = "the built-in catalog's location can't be changed"
     c = _RefusingMarketClient([BUILTIN_SOURCE], 422, pinned)
     with pytest.raises(SystemExit) as ei:
         _run(c, "marketplace", "set", "automation-marketplace", "location=")
     assert str(ei.value.code) == f"422: {pinned}"
 
-    not_removable = "the built-in catalog can't be removed - hide it instead"
+    not_removable = "the built-in catalog can't be removed - collapse it instead"
     c = _RefusingMarketClient([BUILTIN_SOURCE], 409, not_removable)
     with pytest.raises(SystemExit) as ei:
         _run(c, "marketplace", "remove", "automation-marketplace")
     assert str(ei.value.code) == f"409: {not_removable}"
 
-    # §22.2: hiding it is an ordinary settings change
+    # §22.2: collapsing it is an ordinary settings change
     c = _MarketClient([BUILTIN_SOURCE], writes={
         "/marketplace/sources/m4444444-d": {"id": "m4444444-d",
                                             "name": "automation-marketplace"}})
-    _run(c, "marketplace", "set", "automation-marketplace", "shown=off")
-    assert c.calls == [("PATCH", "/marketplace/sources/m4444444-d", {"shown": False})]
+    _run(c, "marketplace", "set", "automation-marketplace", "expanded=off")
+    assert c.calls == [("PATCH", "/marketplace/sources/m4444444-d", {"expanded": False})]
 
 
 def test_cmd_marketplace_refresh_one_resolves_the_source(capsys):

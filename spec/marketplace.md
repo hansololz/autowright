@@ -8,14 +8,14 @@ Anyone can write one by hand and host it anywhere (a GitHub repository, a web se
 folder on disk). The user adds a catalog to the app in one of three ways - by dropping or
 choosing the file, by typing its path, or by pasting its link - and the app saves a copy
 under its own uuid and keeps one row about it in the **catalog table** (§22.2): where the
-catalog lives (its **location**: a link, a file path, or nothing), whether it is shown on
-the page, and whether it refreshes on its own. **Refresh** re-reads the location; a catalog
+catalog lives (its **location**: a link, a file path, or nothing), whether it is expanded
+on the page, and whether it refreshes on its own. **Refresh** re-reads the location; a catalog
 with no location is a copy the app holds by itself. The user can also **author** a catalog
 in the app: create one (Autowright keeps it and lists it right away), add automations
 from this app, from other catalogs, or from `.autowright` files, edit it later, and
 **export** its file to share it (§22.7, §22.3 Export). One catalog is **built in**: the
 app seeds the Autowright catalog (§22.2 built-in catalog) into the table on first launch,
-so the page is never empty the first time it opens; it can be hidden but not removed.
+so the page is never empty the first time it opens; it can be collapsed but not removed.
 Installing an entry is the §5.1/§5.2 import, unchanged: the archive is fetched at install
 time, previewed, and confirmed through the same two-phase flow, so every §5.1 guarantee
 holds (triggers land off, no records are ever created, only matched records are granted).
@@ -118,7 +118,7 @@ Every catalog the app knows is one row in the **catalog table**, `marketplaces.y
 
 ```
 marketplaces/
-  marketplaces.yaml                  # [{id, location, shown, auto_refresh, builtin, added_at, refreshed_at, error}]
+  marketplaces.yaml                  # [{id, location, expanded, auto_refresh, builtin, added_at, refreshed_at, error}]
   <id>/
     marketplace-catalog.yaml    # the app's copy: the last successful read of the location,
                                 # or the only copy when the location is null
@@ -135,7 +135,7 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
 |---|---|---|
 | `id` | uuid (§4 id rule) | names the row and its directory |
 | `location` | `null`, an absolute file path, or an `https://` link | where the catalog is read from. A path or link is what **Refresh** re-reads. `null` means the app's copy is the only copy: nothing to refresh from, and the copy is what §22.7 edits. A link may be a **GitHub page** (below). |
-| `shown` | bool, default `true` | whether the page renders the catalog's entries. A hidden catalog stays in the table and collapses to its header row (§22.3). |
+| `expanded` | bool, default `true` | whether the page lists the catalog's entries. A **collapsed** catalog stays in the table and shows only its header row (§22.3). Named `shown` until 2026-09-20 (§21.4). |
 | `auto_refresh` | bool, default `false` | whether the backend refreshes it on its own (below). Meaningless, and kept `false`, while `location` is `null`. |
 | `builtin` | bool, default `false` | `true` on exactly one row, the **built-in catalog** (below): the app seeds it, pins its location, and refuses to remove it. |
 | `added_at` | §5 UTC timestamp | when the row was made |
@@ -151,7 +151,8 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   is neither `null`, an absolute path, nor an `https://` link skips with a warning (any
   skipped row flips the table read-only for the session, exactly like a corrupt file — the
   next save must not rewrite `marketplaces.yaml` without the row the user hand-edited); a
-  missing `shown` reads `true`, a missing `auto_refresh` reads `false`, a missing `builtin`
+  missing `expanded` reads `true` (a pre-2026-09-20 `shown` key is read in its place and
+  the row saved under the new name, §21.4), a missing `auto_refresh` reads `false`, a missing `builtin`
   reads `false` (a second `builtin: true` row loads as an ordinary row, the flag dropped
   with a warning - only the first one is the built-in catalog); an `id` that isn't
   uuid-shaped skips with a warning (the id names the row's directory, so it is never joined
@@ -181,12 +182,12 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   `https://github.com/hansololz/automation-marketplace/blob/main/marketplace-catalog.yaml`
   (a constant in `marketplace.py`; a GitHub file page, read like any link location). It is
   an ordinary row with `builtin: true`, so everything above applies to it - refresh, the
-  copy, `shown`, `auto_refresh`, the error column - with these differences:
+  copy, `expanded`, `auto_refresh`, the error column - with these differences:
   - **Seeded at load.** When the table loads and no row is `builtin`, the store makes one:
     a row whose `location` equals the constant (the user pasted that link before this
     shipped) is **promoted** - `builtin` stamped, everything else kept, its position
     kept; otherwise a new row is **inserted first** with the constant as `location`,
-    `shown` true, `auto_refresh` true, `refreshed_at` null, `error` null, and no copy
+    `expanded` true, `auto_refresh` true, `refreshed_at` null, `error` null, and no copy
     yet. The table is saved at once. A table that loaded read-only for the session (a
     skipped row, an unparseable file) is not seeded - the file is never rewritten in that
     state (§5) - and the seed happens at the next clean load. A hand-deleted built-in row
@@ -196,13 +197,15 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
     `builtin` is true but whose `location` differs (a hand edit, or a release that moved
     the catalog) is re-pointed at load (saved; its copy stays until the next refresh reads
     the new place), and `PATCH` with a `location` for it answers 422 "the built-in
-    catalog's location can't be changed" (§22.4). `shown` and `auto_refresh` change freely.
-  - **Not removable.** `DELETE` answers 409 "the built-in catalog can't be removed - hide
-    it instead" (§22.4); the page's actions menu simply has no Remove… row for it, and
-    no Hide row either - the §22.3 catalog settings modal's SHOWN toggle is the one
-    place it is hidden and shown again (David's call, 2026-09-19). Hiding is the way to
-    get it off the page: the row stays, refreshes on its own only while `auto_refresh`
-    is on, and comes back with the same toggle.
+    catalog's location can't be changed" (§22.4). `expanded` and `auto_refresh` change freely.
+  - **Not removable.** `DELETE` answers 409 "the built-in catalog can't be removed -
+    collapse it instead" (§22.4); the page's actions menu simply has no Remove… row for
+    it, and no Collapse row either - the §22.3 header caret is the one place it is
+    collapsed and expanded again (David's calls, 2026-09-19 and 2026-09-20; the settings
+    modal carried a matching toggle for part of 2026-09-20 and lost it as redundant).
+    Collapsing is the way to get its automations off the page: the header row stays,
+    the catalog refreshes on its own only while `auto_refresh` is on, and it comes back
+    with the same caret.
   - **Pending.** Right after the seed the row has a location and no copy, and it has never
     been read (`refreshed_at` null) and carries no `error`: that is the **pending** state,
     served as `cached` false with `error` null - not the missing-copy message above, which
@@ -213,8 +216,8 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
     its 30-second wait - the same refresh as every other, off the boot path, the
     `marketplace.changed` event after it - so a first launch with a network shows the
     catalog within seconds; a failed first read lands in `error` like any refresh
-    failure (the row is then no longer pending; its Refresh is the retry, and the next
-    6-hour sweep). Loading the table itself never reads the network (the §5 stores load
+    failure (the row is then no longer pending; its Refresh is the retry, and so is the
+    next hourly auto-refresh check, below). Loading the table itself never reads the network (the §5 stores load
     offline; the tests load the table without the thread). Every surface that shows a
     catalog has a line for pending (§22.3 "Fetching the catalog…", §22.5 `fetching the
     catalog…`).
@@ -223,7 +226,7 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   and caches; any failure answers 422 and stores nothing. The row's `location` is the link
   exactly as pasted (stripped) or the file's resolved path (a leading `~` expanded). The same location (exact string equality; a path compares by
   resolved path) cannot be in the table twice - 409 "that marketplace is already added".
-  `shown` starts `true`, `auto_refresh` starts `false`.
+  `expanded` starts `true`, `auto_refresh` starts `false`.
 - **Refresh** (one row, or every row with a location, in table order) re-reads the
   location: a link is downloaded, a path is read. A row with a `null` location is **not
   refreshable**: a single-row refresh answers 409 "this catalog has no location to refresh
@@ -238,13 +241,21 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   validated first, then the lock is taken only to swap the copy and stamp the row (a row
   removed while its download was in flight is dropped, nothing written), so a slow host
   never blocks `GET /marketplace`, settings, or the editor.
-- **Auto refresh.** The backend refreshes every row with `auto_refresh` true and a
-  location **at startup** (30 s after the store loads, off the boot path) **and every 6
-  hours** after that, in table order, through the same refresh; a failure lands in
-  `error` like a manual one, with no notification (the page shows it beside the header).
-  A wake from sleep does not trigger one (the next 6-hour tick does). Manual Refresh is
-  always available regardless of the flag.
-- **Settings** (`PATCH`, §22.4): `location`, `shown`, and `auto_refresh` may be changed
+- **Auto refresh: once a day.** A row with `auto_refresh` true and a location is
+  refreshed on its own **at most once every 24 hours**: it is **due** when its
+  `refreshed_at` is `null` or at least 24 hours in the past (an unparseable stamp counts
+  as `null`). The backend **checks** for due rows at startup (30 s after the store loads,
+  off the boot path) and **every hour** after that, and refreshes the due ones, in table
+  order, through the same refresh; a check with nothing due reads nothing and publishes
+  nothing. Because a manual Refresh stamps `refreshed_at` too, it counts as that day's
+  read and pushes the next automatic one out a day; relaunching the app within the day
+  reads nothing (David's call, 2026-09-20: the 6-hourly read-every-time sweep it replaces
+  re-read every catalog on every launch). A failure lands in `error` like a manual one,
+  with no notification (the page shows it beside the header); it leaves `refreshed_at`
+  as it was, so the row stays due and the next hourly check retries it. A wake from sleep
+  does not trigger a check (the next hourly tick does). Manual Refresh is always available
+  regardless of the flag.
+- **Settings** (`PATCH`, §22.4): `location`, `expanded`, and `auto_refresh` may be changed
   after the fact. A changed `location` is validated for form only (absolute path, https
   link, or empty for `null`), the 409 duplicate rule applies, and the copy is untouched
   until the next Refresh reads from the new place; setting it to `null` keeps the copy and
@@ -292,7 +303,13 @@ the §22.1 example catalog in a code box - was removed 2026-09-19; the header's 
 catalog…** is the way to author one in-app, and §22.1 documents the file shape).
 
 **Per catalog** - one section each, in table order:
-- Header row: the catalog name (600, 15 px), a §14 `MetaChip` naming the location (link
+- Header row: first the **expand/collapse control** - a `.ad-btn-bare` button
+  (`data-testid` `marketplace-collapse`, `aria-expanded` the row's `expanded`, `aria-label`
+  "Collapse <name>" / "Expand <name>") holding the §14 `Caret` (down while expanded,
+  right while collapsed) and the catalog name (600, 15 px); a click PATCHes §19
+  `…/sources/{id}` `{ expanded: !expanded }`, the answered `Source` replacing the row in
+  place (a failure toasts the reason; nothing else changes). The catalog section carries
+  `data-collapsed="true"` while collapsed. Then a §14 `MetaChip` naming the location (link
   icon + hostname for a link, file icon + file name for a path, `fa-box-archive` +
   "Stored by Autowright" for `null`; the full location in the `title` attribute). For a
   link the chip is the `MetaChip` `href` variant (added 2026-09-19, David's ask): an
@@ -304,9 +321,9 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   Today, 8:00 AM"; omitted while `refreshedAt` is null) for a catalog with a location, or
   "Added <date label>" (from `addedAt`) for one without; neither line while the catalog
   is pending (§22.2). The built-in catalog (`builtin` true) adds a muted `MetaChip`
-  "Built in" (`fa-star`, `title` "Ships with Autowright. Hide it if you don't want it.")
-  after the location chip; a hidden catalog (`shown` false)
-  adds a muted `MetaChip` "Hidden" after those. While `error` is set, an
+  "Built in" (`fa-star`, `title` "Ships with Autowright. Collapse it if you don't want
+  it.") after the location chip. No chip marks a collapsed catalog: the caret's angle
+  says it (the "Hidden" chip went with the 2026-09-20 rename). While `error` is set, an
   amber `Notice` beneath the header: "Couldn't refresh: <error>. Showing the last copy."
   (for a catalog with no readable copy - `cached` false: "Couldn't load: <error>."). While
   the catalog is pending (`builtin`, `cached` false, `error` null, `refreshedAt` null),
@@ -333,16 +350,19 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   a location; disabled while this catalog or Refresh all is running), **Catalog
   settings…** (`fa-gear`; always) and, last, **Remove…** (`fa-trash`, the `MenuRow` danger
   tone; every catalog but the built-in one, whose menu ends at Catalog settings… - it
-  can't be removed (§22.2), and hiding it is the settings modal's SHOWN toggle, never a
-  menu row). Remove opens a danger `ConfirmModal`, title "Remove "<name>"?", body "Automations you already installed from it stay, and so does every
+  can't be removed (§22.2), and collapsing it is the header caret, never a menu row or
+  a settings-modal toggle). Remove opens a danger `ConfirmModal`, title "Remove "<name>"?", body "Automations you already installed from it stay, and so does every
   archive file it lists. You can add the marketplace again later.", confirm label
   "Remove". Removing refetches the list; no toast. The Refresh all, Add, and Install
   buttons read "Refreshing…" / "Adding…" / "Installing…" beside the §9 spinner while
   busy.
-- The description, muted, when present - **only while shown**. A hidden catalog renders
-  its header row and nothing else: no description, no grid. Show it again through the
-  settings modal.
-- The **entry grid** (shown catalogs only): `grid-template-columns: repeat(auto-fill,
+- The description, muted, when present, and the entry grid below it make the catalog's
+  **body**, which sits in a §14 `Collapse` (open while `expanded`) so it animates in and
+  out. A collapsed catalog shows its header row (and its error notice or pending line)
+  and nothing else: no description, no grid; entry images are requested only while the
+  catalog is expanded (a collapsed body stays mounted, inert, and fetches nothing until
+  it opens). Expand it again with the caret or through the settings modal.
+- The **entry grid** (in the body): `grid-template-columns: repeat(auto-fill,
   minmax(220px, 1fr))`, gap 14. Each entry is an `.ad-card` with zero padding and
   `overflow: hidden`: a 16:9 image area at the top (`aspect-ratio: 16 / 9`, full card
   width) on a `--bg-inset` ground; the image is drawn with `object-fit: contain`, so the
@@ -414,17 +434,18 @@ failed one, the frame sits at the floor.
   §5.1 validation happens at Install, as before.
 
 **Catalog settings modal** (width 460, from the actions menu's Catalog settings…): title "Catalog settings", the
-catalog's name muted beneath it. Three rows under §14 eyebrows:
+catalog's name muted beneath it. Two rows under §14 eyebrows (`expanded` is not here:
+the §22.3 header caret is its one control, a matching toggle having been dropped
+2026-09-20 as redundant):
 - LOCATION: a mono `ad-input` holding the location (empty for `null`; placeholder
   `https://… or /path/to/marketplace-catalog.yaml`), caption "Where Refresh reads this
   catalog from. Leave it empty to keep only the copy Autowright has.". For the built-in
   catalog the input is disabled, holding the pinned link, with the caption "The built-in
-  catalog's location is fixed." instead, and Save sends only the two toggles.
-- SHOWN: a §14 `Toggle`, label "Show this marketplace on the page".
-- AUTO REFRESH: a §14 `Toggle`, label "Refresh on its own (at launch and every 6 hours)";
+  catalog's location is fixed." instead, and Save sends only the AUTO REFRESH toggle.
+- AUTO REFRESH: a §14 `Toggle`, label "Refresh on its own (once a day)";
   disabled with the caption "Needs a location." while the LOCATION field is empty.
 Footer: quiet Cancel / accent **Save** ("Saving…" while busy). Save PATCHes §19
-`…/sources/{id}` with the three fields; a 422 or 409 shows inline in red above the
+`…/sources/{id}` with `location` and `autoRefresh` (never `expanded`); a 422 or 409 shows inline in red above the
 footer. Success closes, refetches, no toast. The location field is validated for form
 only - the copy is untouched until the next Refresh.
 
@@ -466,7 +487,7 @@ and toasts "Added <name>."
 ### 22.4 Backend API (§19 addendum)
 
 All routes authenticated like the rest of §19. `Source` (one catalog-table row with its
-derived content) is `{ id, kind, location, shown, autoRefresh, builtin, name, description,
+derived content) is `{ id, kind, location, expanded, autoRefresh, builtin, name, description,
 addedAt, refreshedAt, error, cached, entries: [{ index, title, description, archive,
 image }] }` - `kind` derived from `location` (`url`, `file`, `none`), `builtin` the §22.2
 column, `location` the
@@ -479,14 +500,14 @@ readable copy exists (false for the §22.2 unreadable-copy case and for a pendin
 built-in row, which is the one `cached` false with `error` null; an empty catalog is
 still cached).
 
-- `GET /marketplace` → `{ sources: [Source] }` in table order, hidden ones included (the
-  page collapses them; the CLI marks them).
+- `GET /marketplace` → `{ sources: [Source] }` in table order, collapsed ones included
+  (the page shows their header rows; the CLI marks them).
 - `POST /marketplace/sources` `{ url }` or `{ path }` (exactly one, non-empty) → `Source`.
   Fetches and validates first (§22.2 add): any failure answers 422 with the reason and
   stores nothing; a location already in the table answers 409. A `path` may start with
   `~` (expanded to the home directory) and must then be an absolute path to an existing
   readable file.
-- `PATCH /marketplace/sources/{id}` `{ location?, shown?, autoRefresh? }` → `Source`
+- `PATCH /marketplace/sources/{id}` `{ location?, expanded?, autoRefresh? }` → `Source`
   (§22.2 settings; every field optional, only the given ones change). `location` is a
   string or `null`: empty, blank, or an explicit `null` means `null`, otherwise an `https://` link or an absolute path
   (`~` expanded; 422 "give an https link or an absolute path" otherwise); a location
@@ -503,7 +524,7 @@ still cached).
   location, in order (the others are listed as they were). One 120 s deadline bounds the
   whole request: catalogs not reached by then are left as they were, no error stamped.
 - `DELETE /marketplace/sources/{id}` → `{ ok: true }`; unknown id → 404; the built-in row
-  → 409 "the built-in catalog can't be removed - hide it instead".
+  → 409 "the built-in catalog can't be removed - collapse it instead".
 - `GET /marketplace/sources/{id}/entries/{index}/image` → the entry's image bytes, read
   **on demand by reference**: an https reference is downloaded with the §22.1 caps,
   headers, and deadline (never stored; a GitHub file page through the §5.2 GitHub file
@@ -567,7 +588,7 @@ still cached).
 
 Request models (§19 `models.py`): `MarketplaceAdd { url?: str, path?: str }` with the
 exactly-one rule validated in the route (422 "give a link or a file path, not both" / "give
-a link or a file path"); `MarketplaceSettings { location?: str, shown?: bool, autoRefresh?:
+a link or a file path"); `MarketplaceSettings { location?: str, expanded?: bool, autoRefresh?:
 bool }`; `MarketplaceCatalogSave { exportFolder?: str, name: str, description: str,
 entries: [MarketplaceCatalogEntry { title, description, path?, image?, automationId?,
 archiveFile? }] }` with the §22.7 exactly-one rule per entry validated in the store;
@@ -578,7 +599,7 @@ archiveFile? }] }` with the §22.7 exactly-one rule per entry validated in the s
 ```
 autowright marketplace list                    every catalog with its entries
 autowright marketplace add <url-or-path>       add a marketplace by https link or file path
-autowright marketplace set <source> KEY=VALUE… location= shown=on|off autoRefresh=on|off
+autowright marketplace set <source> KEY=VALUE… location= expanded=on|off autoRefresh=on|off
 autowright marketplace refresh [<source>]      refresh one catalog, or every one with a location
 autowright marketplace remove <source>         remove a catalog (installed automations stay)
 autowright marketplace install <source> <n>    install entry n (1-based, as `list` prints it)
@@ -593,7 +614,7 @@ autowright marketplace catalog remove <source> <n>            drop entry n; its 
 exact name (case-insensitive), or a unique part of its name; ambiguity and no-match are the standard §20 errors. A file
 path given to `add` is made absolute against the current directory before it travels.
 `list` prints one block per catalog - `<name> [<id8>]  <location>` (`(kept by Autowright)`
-for `null`), with ` built-in`, ` hidden` and/or ` auto-refresh` appended to that line, in
+for `null`), with ` built-in`, ` collapsed` and/or ` auto-refresh` appended to that line, in
 that order, when set; then
 `  refreshed <when>` for a catalog with a location (`  added <when>` while it has never been
 refreshed — a folder just created with `create`; `  fetching the catalog…` for a pending
@@ -602,9 +623,9 @@ refresh from)` for one without, or `  couldn't refresh: <error>` when the last r
 failed; then each entry as `  <n>. <title> - <description>` (1-based; the description
 omitted when empty; "  no automations listed" for an empty catalog). `add` prints `added
 <name> [<id8>] - <count> automation(s)`. `set` takes `location=` (empty clears),
-`shown=on|off`, and `autoRefresh=on|off` (any other key exits 1 naming the three) and
+`expanded=on|off`, and `autoRefresh=on|off` (any other key exits 1 naming the three) and
 prints `updated <name>`; `location=` on the built-in catalog exits 1 with the §22.4 422
-detail, and `remove` on it exits 1 with the 409 detail (hide it with `shown=off`). `refresh <source>` on a catalog without a location exits 1 with
+detail, and `remove` on it exits 1 with the 409 detail (collapse it with `expanded=off`). `refresh <source>` on a catalog without a location exits 1 with
 `'<name>' has no location to refresh from`; otherwise `refresh` prints one `refreshed
 <name> - <count> automation(s)`, `couldn't refresh <name>: <error>`, or (refresh-all only)
 `skipped <name> - no location to refresh from` line per catalog (exit 1 when any failed; a
@@ -645,7 +666,7 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   `raw.githubusercontent.com` link with the location and reference kept as pasted; a
   repository page and a folder page reading `marketplace-catalog.yaml` at `HEAD` / that
   ref and folder, named after the repository / folder; a file page with the canonical
-  stem named after its folder; an issue link read as written), the catalog table's lenient load (missing `shown`/`auto_refresh` defaults, a bad
+  stem named after its folder; an issue link read as written), the catalog table's lenient load (missing `expanded`/`auto_refresh` defaults, a pre-2026-09-20 `shown` key read as `expanded` and saved under the new name - the §21.4 fixture, a bad
   `location` skipped), add by link and by path (`~` expanded) with the 409 duplicate rule,
   refresh re-reading the location (link downloaded, path read) and keeping the copy on
   failure, a `null` location refusing refresh (409) and being skipped by refresh-all,
@@ -661,7 +682,7 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   seeded; a built-in row with a drifted location is re-pointed; a second `builtin` row
   loads as ordinary; the served row reads `cached` false with `error` null while
   pending and the missing-copy message only once a copy has existed; DELETE 409 and a
-  `location` PATCH 422 on it, `shown`/`autoRefresh` PATCHes fine; the `list` line
+  `location` PATCH 422 on it, `expanded`/`autoRefresh` PATCHes fine; the `list` line
   carries ` built-in` and `fetching the catalog…`),
   and every §22.4 route with the network monkeypatched (add 422/409, PATCH 422/409,
   refresh 200-with-error, the image route reading a local path and an https reference on
@@ -696,10 +717,11 @@ with --export-to` otherwise), which is ignored for a file location; it prints `a
   for nobody and the `marketplace` page redirects to Automations for everyone; the tests
   key on the constant so either value runs its own pair), the empty state with the example catalog,
   a catalog with entries rendering its grid, the Refresh button and Refresh all present
-  only for a catalog with a location, a hidden catalog collapsing to its header with the
-  "Hidden" chip, the settings modal PATCHing the three fields with AUTO REFRESH disabled
+  only for a catalog with a location, a collapsed catalog showing its header with the
+  caret right and `aria-expanded` false and its body inert with no image fetched, the
+  caret PATCHing `expanded` and swapping the row, the settings modal PATCHing location and auto refresh only (no `expanded` key, no EXPANDED row) with AUTO REFRESH disabled
   while LOCATION is empty, the built-in catalog's "Built in" chip, its menu ending at
-  Catalog settings… (no Remove…, no Hide) and its disabled LOCATION
+  Catalog settings… (no Remove…, no Collapse) and its disabled LOCATION
   input, a pending built-in row showing "Fetching the catalog…" and no grid, Install opening the import modal on the preview step, the add
   modal's inline 422 for a typed path and a pasted link and its drop zone adding a dropped
   `.yaml` (path through `pathForFile`) and refusing anything else, the Edit button on path

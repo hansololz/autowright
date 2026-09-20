@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,17 @@ def settle_builtin(market) -> dict:
     with market.lock:
         market._write_copy(row, BUILTIN_TEXT)
     return row
+
+
+def age_read(market, source_id: str, hours: float = 25) -> None:
+    """§22.2 once a day: a row is due for an automatic read only once its last
+    read is 24 hours old, and `add` stamps it as read just now - so a test
+    about the sweep dates the stamp back first."""
+    stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(
+        timespec="microseconds")
+    with market.lock:
+        market._find(source_id)["refreshed_at"] = stamp
+        market._save()
 
 
 def serve(monkeypatch, answers) -> list:
@@ -344,7 +356,7 @@ def test_add_by_path_copies_the_catalog(market, tmp_path):
     source = market.add(path=str(f))
     assert source["name"] == "Mine" and source["kind"] == "file"
     assert source["location"] == str(f)
-    assert source["shown"] is True and source["autoRefresh"] is False
+    assert source["expanded"] is True and source["autoRefresh"] is False
     assert source["error"] is None and source["refreshedAt"] and source["cached"] is True
     assert source["entries"] == [{"index": 0, "title": "Manga", "description": "Checks it",
                                   "archive": str(tmp_path / "manga.autowright"),
@@ -356,7 +368,7 @@ def test_add_by_path_copies_the_catalog(market, tmp_path):
         [marketplace.CATALOG_FILENAME]
     # §22.2: the row is on disk under the §5 root, derived fields are not
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
-    assert list(added(stored["sources"])[0]) == ["id", "location", "shown",
+    assert list(added(stored["sources"])[0]) == ["id", "location", "expanded",
                                                  "auto_refresh", "builtin", "added_at",
                                                  "refreshed_at", "error"]
 
@@ -674,8 +686,8 @@ def test_settings_change_the_location_shown_and_auto_refresh(market, tmp_path):
                                        "path": str(tmp_path / "two.autowright")}],
                            filename="second.yaml")
     source = market.add(path=str(first))
-    moved = market.update_settings(source["id"], location=str(second), shown=False)
-    assert moved["location"] == str(second) and moved["shown"] is False
+    moved = market.update_settings(source["id"], location=str(second), expanded=False)
+    assert moved["location"] == str(second) and moved["expanded"] is False
     assert [e["title"] for e in moved["entries"]] == ["One"]  # copy untouched
     assert [e["title"] for e in market.refresh(source["id"])["entries"]] == ["Two"]
     # the form check, and the duplicate rule against another row
@@ -716,7 +728,7 @@ def test_settings_rules_around_a_null_location(market, tmp_path):
     assert str(e.value) == marketplace.NO_COPY_TO_KEEP
     assert added(market)[0]["location"] == str(f)
     with pytest.raises(KeyError):
-        market.update_settings("nope", shown=False)
+        market.update_settings("nope", expanded=False)
 
 
 def test_auto_refresh_sweeps_only_flagged_rows_with_a_location(market, tmp_path):
@@ -734,16 +746,68 @@ def test_auto_refresh_sweeps_only_flagged_rows_with_a_location(market, tmp_path)
     one = market.add(path=str(flagged))
     two = market.add(path=str(plain))
     market.update_settings(one["id"], auto_refresh=True)
+    age_read(market, one["id"])
+    age_read(market, two["id"])
     assert market.auto_refresh_sweep() == [one["id"]]
     # §22.2: a `null` location is never swept, flagged or not
     with pytest.raises(MarketplaceError):
         market.update_settings(kept["id"], auto_refresh=True)
     flagged.write_text("format_version: 1\nentries: [oops\n", encoding="utf-8")
+    # the successful read stamped the row, so it is not due again for a day
+    assert market.auto_refresh_sweep() == []
+    age_read(market, one["id"])
     assert market.auto_refresh_sweep() == [one["id"]]
     assert market.serialize(added(market)[1])["error"]
     assert market.serialize(added(market)[2])["error"] is None
     assert [e["title"] for e in market.serialize(added(market)[1])["entries"]] == ["One"]
     assert two["id"] == added(market)[2]["id"]
+
+
+def test_auto_refresh_reads_a_row_at_most_once_a_day(market, tmp_path):
+    """§22.2 once a day: a flagged row is due when it has never been read or
+    its last successful read is 24 hours old or more; a fresh read (manual or
+    automatic) pushes the next automatic one out a day; a failed read leaves
+    the stamp alone, so the row stays due for the next hourly check; a stamp
+    that can't be parsed counts as never read."""
+    f = write_catalog(tmp_path, [{"title": "One",
+                                  "path": str(tmp_path / "one.autowright")}])
+    settle_builtin(market)
+    source = market.add(path=str(f))
+    market.update_settings(source["id"], auto_refresh=True)
+    row = added(market)[0]
+    # `add` read it just now: not due, whatever the check finds
+    assert not market.is_due(row)
+    assert market.auto_refresh_sweep() == []
+    age_read(market, source["id"], hours=23.5)
+    assert not market.is_due(row)
+    assert market.auto_refresh_sweep() == []
+    age_read(market, source["id"], hours=24)
+    assert market.is_due(row)
+    assert market.auto_refresh_sweep() == [source["id"]]
+    # the automatic read stamped it: nothing more today
+    assert not market.is_due(row)
+    assert market.auto_refresh_sweep() == []
+    # a manual Refresh counts as the day's read too
+    age_read(market, source["id"])
+    market.refresh(source["id"])
+    assert not market.is_due(row)
+    # a failed read keeps the old stamp - the row stays due
+    age_read(market, source["id"])
+    old = row["refreshed_at"]
+    f.write_text("format_version: 1\nentries: [oops\n", encoding="utf-8")
+    assert market.auto_refresh_sweep() == [source["id"]]
+    assert market.serialize(row)["error"] and row["refreshed_at"] == old
+    assert market.is_due(row)
+    # a hand-edited stamp and no stamp at all both read as never read
+    with market.lock:
+        row["refreshed_at"] = "yesterday-ish"
+    assert market.is_due(row)
+    with market.lock:
+        row["refreshed_at"] = None
+    assert market.is_due(row)
+    # the flag and a location are still required
+    market.update_settings(source["id"], auto_refresh=False)
+    assert not market.is_due(row)
 
 
 def test_the_auto_refresh_thread_sweeps_and_reports_the_change(market, tmp_path,
@@ -756,6 +820,7 @@ def test_the_auto_refresh_thread_sweeps_and_reports_the_change(market, tmp_path,
                                   "path": str(tmp_path / "one.autowright")}])
     source = market.add(path=str(f))
     market.update_settings(source["id"], auto_refresh=True)
+    age_read(market, source["id"])
     changed = threading.Event()
     market.start_auto_refresh(changed.set)
     try:
@@ -774,6 +839,7 @@ def test_stopping_auto_refresh_waits_for_the_sweep(market, tmp_path, monkeypatch
                                   "path": str(tmp_path / "one.autowright")}])
     source = market.add(path=str(f))
     market.update_settings(source["id"], auto_refresh=True)
+    age_read(market, source["id"])
     started, release = _blocking_read(monkeypatch)
     market.start_auto_refresh(lambda: None)
     assert started.wait(5)
@@ -813,6 +879,8 @@ def test_a_stopped_sweep_skips_the_rows_still_to_come(market, tmp_path, monkeypa
     two = market.add(path=str(second))
     market.update_settings(one["id"], auto_refresh=True)
     market.update_settings(two["id"], auto_refresh=True)
+    age_read(market, one["id"])
+    age_read(market, two["id"])
     read: list = []
     real = marketplace._read_reference
 
@@ -883,7 +951,7 @@ def write_table(text: str) -> Path:
 def test_sources_yaml_lenient_load(market, home, caplog):
     """§5 lenient load: a row missing `id`, whose `id` isn't uuid-shaped, or
     whose `location` isn't null, an absolute path, or an https link, skips with
-    a warning; a missing `shown` reads true, a missing `auto_refresh` false,
+    a warning; a missing `expanded` reads true, a missing `auto_refresh` false,
     and the `kind`/`origin` keys an older draft wrote are simply ignored."""
     write_table(
         "sources:\n"
@@ -894,7 +962,7 @@ def test_sources_yaml_lenient_load(market, home, caplog):
         "  kind: file\n"
         "  origin: /m/old.yaml\n"
         "  location: /m/old.yaml\n"
-        "  shown: false\n"
+        "  expanded: false\n"
         "  auto_refresh: true\n"
         f"- id: {KEPT_ID}\n"
         "  location: null\n"
@@ -906,12 +974,12 @@ def test_sources_yaml_lenient_load(market, home, caplog):
     with caplog.at_level("WARNING"):
         market.load()
     assert [s["id"] for s in market.sources] == [DEFAULTS_ID, OLD_SHAPE_ID, KEPT_ID]
-    assert market.sources[0]["shown"] is True
+    assert market.sources[0]["expanded"] is True
     assert market.sources[0]["auto_refresh"] is False
     assert market.sources[0]["refreshed_at"] is None
-    assert market.sources[1]["shown"] is False
+    assert market.sources[1]["expanded"] is False
     assert market.sources[1]["auto_refresh"] is True
-    assert list(market.sources[1]) == ["id", "location", "shown", "auto_refresh",
+    assert list(market.sources[1]) == ["id", "location", "expanded", "auto_refresh",
                                        "builtin", "added_at", "refreshed_at", "error"]
     # §22.2: a skipped row left the table read-only, so it was not seeded
     assert not any(s["builtin"] for s in market.sources)
@@ -919,6 +987,42 @@ def test_sources_yaml_lenient_load(market, home, caplog):
     assert market.sources[2]["location"] is None
     assert market.sources[2]["auto_refresh"] is False
     assert len(caplog.records) == 3
+
+
+def test_sources_yaml_with_shown_reads_it_as_expanded(home):
+    """§21.4 old-shape fixture: a table written before 2026-09-20 names the
+    column `shown` - every row reads it in `expanded`'s place, a row with
+    neither key reads true, and the table is saved under the new name."""
+    write_table(
+        "sources:\n"
+        f"- id: {DEFAULTS_ID}\n"
+        "  location: /m/marketplace.yaml\n"
+        "  shown: false\n"
+        "  auto_refresh: false\n"
+        "  added_at: '2026-09-11T00:00:00.000000+00:00'\n"
+        "  refreshed_at: '2026-09-11T00:10:00.000000+00:00'\n"
+        "  error: null\n"
+        f"- id: {OLD_SHAPE_ID}\n"
+        "  location: /m/old.yaml\n"
+        "  shown: true\n"
+        "  auto_refresh: true\n"
+        f"- id: {KEPT_ID}\n"
+        "  location: null\n")
+    store = MarketplaceStore()
+    store.load()
+    rows = added(store)
+    assert [s["id"] for s in rows] == [DEFAULTS_ID, OLD_SHAPE_ID, KEPT_ID]
+    assert [s["expanded"] for s in rows] == [False, True, True]
+    # §22.2: the rest of the row is untouched by the rename
+    assert rows[0]["location"] == "/m/marketplace.yaml"
+    assert rows[0]["auto_refresh"] is False
+    assert rows[0]["added_at"] == "2026-09-11T00:00:00.000000+00:00"
+    assert rows[0]["refreshed_at"] == "2026-09-11T00:10:00.000000+00:00"
+    assert rows[1]["auto_refresh"] is True
+    # §21.4: the table is saved under the new name, the old one gone
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    assert [s["expanded"] for s in stored["sources"]] == [True, False, True, True]
+    assert not any("shown" in s for s in stored["sources"])
 
 
 def test_a_row_whose_id_is_not_a_uuid_is_skipped(market, home, caplog):
@@ -955,7 +1059,7 @@ def test_a_table_that_cant_be_read_is_read_only(market, home, tmp_path, written)
                   lambda: market.refresh_all(),
                   lambda: market.auto_refresh_sweep(),
                   lambda: market.remove("nope"),
-                  lambda: market.update_settings("nope", shown=False)):
+                  lambda: market.update_settings("nope", expanded=False)):
         with pytest.raises(marketplace.MarketplaceUnwritable) as e:
             write()
         assert str(e.value) == marketplace.TABLE_UNREADABLE
@@ -1001,7 +1105,7 @@ def test_the_copy_is_parsed_once_while_it_is_unchanged(market, tmp_path, monkeyp
     assert market._entry(source["id"], 0)["title"] == "Three and a longer title"
     assert len(parses) == 2
     # §22.2: the memo is derived, so it never reaches the table file
-    market.update_settings(source["id"], shown=False)
+    market.update_settings(source["id"], expanded=False)
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
     assert list(stored["sources"][0]) == list(marketplace.COLUMNS)
 
@@ -1088,7 +1192,7 @@ def test_an_image_at_a_github_file_page_is_read_from_the_raw_link(market, tmp_pa
 
 # ---------- §22.2 built-in catalog ----------
 def test_a_fresh_table_seeds_one_pending_builtin_row(home, monkeypatch):
-    """§22.2: the first load makes one row - the pinned location, `shown` and
+    """§22.2: the first load makes one row - the pinned location, `expanded` and
     `auto_refresh` on, `builtin` true, no copy yet - saves the table at once,
     and reads nothing from the network to do it."""
     def never(url, *, cap, deadline_s=marketplace.FETCH_DEADLINE_S):
@@ -1100,7 +1204,7 @@ def test_a_fresh_table_seeds_one_pending_builtin_row(home, monkeypatch):
     assert [s["builtin"] for s in store.sources] == [True]
     row = builtin_row(store)
     assert row["location"] == BUILTIN_URL
-    assert row["shown"] is True and row["auto_refresh"] is True
+    assert row["expanded"] is True and row["auto_refresh"] is True
     assert row["refreshed_at"] is None and row["error"] is None
     assert not store.catalog_file(row["id"]).exists()
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
@@ -1154,7 +1258,7 @@ def test_a_row_already_at_the_builtin_link_is_promoted_in_place(home):
     assert [s["id"] for s in store.sources] == [KEPT_ID, DEFAULTS_ID]
     row = builtin_row(store)
     assert row["id"] == DEFAULTS_ID and row["location"] == BUILTIN_URL
-    assert row["shown"] is False and row["auto_refresh"] is False
+    assert row["expanded"] is False and row["auto_refresh"] is False
     assert row["refreshed_at"] == "2026-09-12T00:00:00.000000+00:00"
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
     assert [s["builtin"] for s in stored["sources"]] == [False, True]
@@ -1179,7 +1283,7 @@ def test_a_builtin_row_whose_location_drifted_is_repointed(home):
     store.load()
     row = builtin_row(store)
     assert row["id"] == DEFAULTS_ID and row["location"] == BUILTIN_URL
-    assert row["shown"] is False
+    assert row["expanded"] is False
     assert store.serialize(row)["cached"] is True      # the copy stays
     stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
     assert stored["sources"][0]["location"] == BUILTIN_URL
@@ -1270,8 +1374,8 @@ def test_the_auto_refresh_thread_reads_the_pending_row_before_its_first_wait(
 
 def test_the_builtin_rows_location_is_pinned_and_it_cant_be_removed(market, monkeypatch):
     """§22.2: a `location` key on the built-in row is refused - even the value
-    it already holds - while `shown` and `auto_refresh` change freely, and a
-    remove is refused outright (hiding it is the way to get it off the page)."""
+    it already holds - while `expanded` and `auto_refresh` change freely, and a
+    remove is refused outright (collapsing it is the way to get it off the page)."""
     row = builtin_row(market)
     for given in (BUILTIN_URL, "", str(marketplace.CATALOG_FILENAME)):
         with pytest.raises(MarketplaceError) as e:
@@ -1279,8 +1383,8 @@ def test_the_builtin_rows_location_is_pinned_and_it_cant_be_removed(market, monk
         assert str(e.value) == marketplace.BUILTIN_LOCATION_PINNED
     assert row["location"] == BUILTIN_URL
 
-    hidden = market.update_settings(row["id"], shown=False, auto_refresh=False)
-    assert hidden["shown"] is False and hidden["autoRefresh"] is False
+    collapsed = market.update_settings(row["id"], expanded=False, auto_refresh=False)
+    assert collapsed["expanded"] is False and collapsed["autoRefresh"] is False
     with pytest.raises(marketplace.MarketplaceBuiltin) as e:
         market.remove(row["id"])
     assert str(e.value) == marketplace.BUILTIN_NOT_REMOVABLE
@@ -1295,7 +1399,7 @@ def test_the_builtin_rows_location_is_pinned_and_it_cant_be_removed(market, monk
 
 def test_builtin_routes_refuse_a_location_patch_and_a_delete(client):
     """§22.4: DELETE answers 409 and a `location` key answers 422 on the
-    built-in row; `shown` and `autoRefresh` patch like any other row."""
+    built-in row; `expanded` and `autoRefresh` patch like any other row."""
     from autowright.api import marketplace_store
 
     row = builtin_row(marketplace_store)
@@ -1312,9 +1416,9 @@ def test_builtin_routes_refuse_a_location_patch_and_a_delete(client):
         assert r.json()["detail"] == marketplace.BUILTIN_LOCATION_PINNED
 
     r = client.patch(f"/marketplace/sources/{row['id']}",
-                     json={"shown": False, "autoRefresh": False})
+                     json={"expanded": False, "autoRefresh": False})
     assert r.status_code == 200
-    assert r.json()["shown"] is False and r.json()["autoRefresh"] is False
+    assert r.json()["expanded"] is False and r.json()["autoRefresh"] is False
     assert r.json()["builtin"] is True and r.json()["location"] == BUILTIN_URL
 
 
@@ -1382,9 +1486,9 @@ def test_settings_route(client, tmp_path):
     other = client.post("/marketplace/sources", json={"path": str(second)}).json()
 
     r = client.patch(f"/marketplace/sources/{source['id']}",
-                     json={"shown": False, "autoRefresh": True})
+                     json={"expanded": False, "autoRefresh": True})
     assert r.status_code == 200
-    assert r.json()["shown"] is False and r.json()["autoRefresh"] is True
+    assert r.json()["expanded"] is False and r.json()["autoRefresh"] is True
     # §22.2: clearing the location keeps the copy and turns auto refresh off
     r = client.patch(f"/marketplace/sources/{source['id']}", json={"location": "  "})
     assert r.status_code == 200
@@ -1400,9 +1504,9 @@ def test_settings_route(client, tmp_path):
     r = client.patch(f"/marketplace/sources/{source['id']}",
                      json={"location": str(second)})
     assert r.status_code == 409 and r.json()["detail"] == marketplace.ALREADY_ADDED
-    assert client.patch("/marketplace/sources/nope", json={"shown": True}).status_code == 404
+    assert client.patch("/marketplace/sources/nope", json={"expanded": True}).status_code == 404
     assert client.patch(f"/marketplace/sources/{other['id']}",
-                        json={"shown": "no"}).status_code == 422
+                        json={"expanded": "no"}).status_code == 422
     # §22.2: a row whose copy can't be read has nothing to keep
     from autowright.api import marketplace_store
 
@@ -1423,7 +1527,7 @@ def test_settings_route_clears_the_location_with_an_explicit_null(client, tmp_pa
 
     # an absent location leaves it alone
     patched = client.patch(f"/marketplace/sources/{source['id']}",
-                           json={"shown": False}).json()
+                           json={"expanded": False}).json()
     assert patched["location"] == str(f) and patched["autoRefresh"] is True
 
     r = client.patch(f"/marketplace/sources/{source['id']}", json={"location": None})

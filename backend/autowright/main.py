@@ -205,8 +205,9 @@ def main() -> None:
     def startup() -> None:
         scheduler.start()
         listeners.start()
-        # §22.2 auto refresh: 30 s after load, then every 6 hours, off the
-        # boot path; a sweep that touched a row announces it like a CLI change.
+        # §22.2 auto refresh: a check for due rows (last read 24 h ago or
+        # more) 30 s after load, then hourly, off the boot path; a check that
+        # touched a row announces it like a CLI change.
         api.marketplace_store.start_auto_refresh(
             lambda: api.hub.publish("marketplace.changed"))
 

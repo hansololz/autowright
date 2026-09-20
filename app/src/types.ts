@@ -398,10 +398,12 @@ export interface MarketplaceSource {
   id: string
   kind: 'url' | 'file' | 'none'
   location: string | null
-  shown: boolean
+  // §22.2: whether the page lists the catalog's entries; false collapses it to
+  // its header row (named `shown` before 2026-09-20).
+  expanded: boolean
   autoRefresh: boolean
   // §22.2: the built-in catalog - the one row the app seeds, whose location is
-  // pinned and which hides instead of being removed.
+  // pinned and which collapses instead of being removed.
   builtin: boolean
   name: string
   description: string

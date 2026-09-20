@@ -270,7 +270,7 @@ class MarketplaceSettings(BaseModel):
     (§22.4), so `| None` here is a real value, not just the default."""
 
     location: StrictStr | None = None
-    shown: StrictBool | None = None
+    expanded: StrictBool | None = None
     autoRefresh: StrictBool | None = None
 
 

@@ -1,7 +1,8 @@
 // §22.3/§22.6 Marketplace page: the visibility of the nav row and the page
 // (for everyone, no setting; the parking switch), the empty state's example catalog,
-// a seeded catalog's grid, a hidden catalog collapsing to its header, the
-// settings modal's PATCH, Install opening the §9.1 import modal on its preview
+// a seeded catalog's grid, a collapsed catalog showing its header row alone and
+// the caret that flips it, the settings modal's PATCH, Install opening the
+// §9.1 import modal on its preview
 // step, Export handing the catalog file to the save dialog, the add modal's
 // three ways in, and the §22.7 authoring flow (the Edit catalog… row, the two-column
 // catalog editor, the typed add form - title, description, path, image - that
@@ -119,7 +120,7 @@ const MarketplacePage = (await import('../src/pages/MarketplacePage')).default
 // §22.2 catalog-table row as §22.4 serves it: a link location by default.
 const source = (over: Partial<MarketplaceSource> = {}): MarketplaceSource => ({
   id: 's1', kind: 'url', location: 'https://example.com/shared/marketplace-catalog.yaml',
-  shown: true, autoRefresh: false, builtin: false,
+  expanded: true, autoRefresh: false, builtin: false,
   name: 'Community', description: 'Automations I use.',
   addedAt: new Date().toISOString(), refreshedAt: new Date().toISOString(), error: null,
   cached: true,
@@ -302,8 +303,14 @@ describe('§22.3 Marketplace page', () => {
   it('a link catalog renders its entry grid, host chip and Refreshed line', async () => {
     marketplaceList.mockResolvedValue({ sources: [source()] })
     render(<MarketplacePage />)
-    expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
+    const section = await screen.findByTestId('marketplace-source')
+    expect(section.getAttribute('data-collapsed')).toBeNull()
     expect(screen.getByText('Community')).toBeTruthy()
+    // §22.3: expanded, the caret offers to close and the body is live.
+    const caret = screen.getByTestId('marketplace-collapse')
+    expect(caret.getAttribute('aria-expanded')).toBe('true')
+    expect(caret.getAttribute('aria-label')).toBe('Collapse Community')
+    expect(screen.getByTestId('marketplace-body').closest('[inert]')).toBeNull()
     // §22.3: a link location's chip is an outbound anchor to the location as
     // stored, the hostname followed by the external-link icon.
     const chip = screen.getByText('example.com').closest('a') as HTMLAnchorElement
@@ -366,17 +373,51 @@ describe('§22.3 Marketplace page', () => {
     expect(menuRow('Remove…')).toBeTruthy()
   })
 
-  it('a hidden catalog collapses to its header row', async () => {
-    marketplaceList.mockResolvedValue({ sources: [source({ shown: false })] })
+  it('a collapsed catalog shows its header row only', async () => {
+    // an entry with an image, so a collapsed body's idle image loader has
+    // something it could have fetched
+    marketplaceList.mockResolvedValue({
+      sources: [{ ...imaged('/Users/x/shelf/images/manga.png'), expanded: false }],
+    })
     render(<MarketplacePage />)
     const section = await screen.findByTestId('marketplace-source')
-    expect(section.getAttribute('data-hidden')).toBe('true')
-    expect(screen.getByTestId('marketplace-hidden-chip')).toBeTruthy()
-    // §22.3: no description, no grid - the header row and nothing else.
-    expect(screen.queryByText('Automations I use.')).toBeNull()
-    expect(screen.queryByTestId('marketplace-entry')).toBeNull()
+    expect(section.getAttribute('data-collapsed')).toBe('true')
+    // §22.3: the "Hidden" chip is gone - the caret says the state instead.
+    expect(screen.queryByTestId('marketplace-hidden-chip')).toBeNull()
+    const caret = screen.getByTestId('marketplace-collapse')
+    expect(caret.getAttribute('aria-expanded')).toBe('false')
+    expect(caret.getAttribute('aria-label')).toBe('Expand Community')
+    // §22.3: the body stays mounted inside the §14 Collapse, inert while closed.
+    expect(section.querySelector('[inert] [data-testid="marketplace-body"]')).toBeTruthy()
+    // §22.3: nothing is fetched for a body nobody can see.
+    expect(marketplaceImage).not.toHaveBeenCalled()
     await openActions()
     expect(menuRow('Catalog settings…')).toBeTruthy()
+  })
+
+  it('the caret PATCHes expanded and swaps the row in place', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceSettings.mockResolvedValue(source({ expanded: false }))
+    render(<MarketplacePage />)
+    const section = await screen.findByTestId('marketplace-source')
+    // the mount's own list calls (StrictMode runs the effect twice)
+    const listed = marketplaceList.mock.calls.length
+    fireEvent.click(screen.getByTestId('marketplace-collapse'))
+    await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', { expanded: false }))
+    // §22.3: the answered row replaces this one - the page never asks for the
+    // list again.
+    await waitFor(() => expect(section.getAttribute('data-collapsed')).toBe('true'))
+    expect(marketplaceList.mock.calls.length).toBe(listed)
+  })
+
+  it('a rejected caret toasts the reason and leaves the row open', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceSettings.mockRejectedValue(new Error('that marketplace is gone'))
+    render(<MarketplacePage />)
+    const section = await screen.findByTestId('marketplace-source')
+    fireEvent.click(screen.getByTestId('marketplace-collapse'))
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('that marketplace is gone'))
+    expect(section.getAttribute('data-collapsed')).toBeNull()
   })
 
   it('a failed refresh keeps the last copy beside the reason', async () => {
@@ -456,7 +497,7 @@ describe('§22.2 built-in catalog', () => {
     const chips = screen.getAllByTestId('marketplace-builtin-chip')
     expect(chips).toHaveLength(1)
     expect(chips[0].textContent).toBe('Built in')
-    expect(chips[0].getAttribute('title')).toBe("Ships with Autowright. Hide it if you don't want it.")
+    expect(chips[0].getAttribute('title')).toBe("Ships with Autowright. Collapse it if you don't want it.")
     // §22.3: the chip belongs to the built-in row's own header.
     expect(screen.getAllByTestId('marketplace-source')[0].contains(chips[0])).toBe(true)
   })
@@ -466,21 +507,27 @@ describe('§22.2 built-in catalog', () => {
     render(<MarketplacePage />)
     expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
     await openActions()
-    // §22.2/§22.3: the built-in catalog can't be removed, and hiding it is
-    // the settings modal's SHOWN toggle - never a menu row.
+    // §22.2/§22.3: the built-in catalog can't be removed, and collapsing it is
+    // the header caret - never a menu row.
     expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…'])
     expect(screen.queryByRole('button', { name: 'Remove…' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Hide' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Collapse' })).toBeNull()
     expect(marketplaceSettings).not.toHaveBeenCalled()
   })
 
-  it('a hidden built-in catalog offers no Show row either', async () => {
-    marketplaceList.mockResolvedValue({ sources: [builtinSource({ shown: false })] })
+  it('a collapsed built-in catalog offers no Expand row either', async () => {
+    marketplaceList.mockResolvedValue({ sources: [builtinSource({ expanded: false })] })
     render(<MarketplacePage />)
-    expect(await screen.findByTestId('marketplace-hidden-chip')).toBeTruthy()
+    const section = await screen.findByTestId('marketplace-source')
+    expect(section.getAttribute('data-collapsed')).toBe('true')
     await openActions()
     expect(menuRowLabels()).toEqual(['Export catalog…', 'Refresh', 'Catalog settings…'])
+    expect(screen.queryByRole('button', { name: 'Expand' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Show' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Hide' })).toBeNull()
+    // §22.3: the caret in its header row is the only way to open it again.
+    expect(screen.getByTestId('marketplace-collapse').getAttribute('aria-label'))
+      .toBe('Expand Community')
   })
 
   it('a pending built-in catalog says it is fetching, and nothing else', async () => {
@@ -583,16 +630,18 @@ describe('§22.3 catalog settings', () => {
     return await screen.findByTestId('catalog-settings')
   }
 
-  it('Save PATCHes the location, SHOWN and AUTO REFRESH', async () => {
+  it('Save PATCHes the location and AUTO REFRESH, never expanded', async () => {
     await openSettings(fileSource())
     const location = screen.getByTestId('settings-location') as HTMLInputElement
     expect(location.value).toBe('/Users/x/shelf/marketplace-catalog.yaml')
-    fireEvent.click(screen.getByLabelText('Show this marketplace on the page'))
+    // §22.3: the header caret is the one control for expanded - no row here.
+    expect(screen.queryByLabelText('Expanded')).toBeNull()
+    expect(screen.queryByText('EXPANDED')).toBeNull()
     fireEvent.click(screen.getByLabelText('Refresh on its own'))
     fireEvent.change(location, { target: { value: '/Users/x/moved/marketplace-catalog.yaml' } })
     fireEvent.click(screen.getByTestId('settings-save'))
     await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', {
-      location: '/Users/x/moved/marketplace-catalog.yaml', shown: false, autoRefresh: true,
+      location: '/Users/x/moved/marketplace-catalog.yaml', autoRefresh: true,
     }))
     // §22.3: a success closes and refetches, with no toast.
     await waitFor(() => expect(screen.queryByTestId('catalog-settings')).toBeNull(), { timeout: 3000 })
@@ -608,7 +657,7 @@ describe('§22.3 catalog settings', () => {
     fireEvent.click(screen.getByTestId('settings-save'))
     // §22.2: auto refresh is meaningless, and kept false, without a location.
     await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', {
-      location: '', shown: true, autoRefresh: false,
+      location: '', autoRefresh: false,
     }))
   })
 
@@ -621,18 +670,18 @@ describe('§22.3 catalog settings', () => {
     expect(screen.queryByText('Needs a location.')).toBeNull()
   })
 
-  it("the built-in catalog's LOCATION is fixed and Save sends the toggles alone", async () => {
+  it("the built-in catalog's LOCATION is fixed and Save sends the toggle alone", async () => {
     await openSettings(builtinSource({ autoRefresh: true }))
     const location = screen.getByTestId('settings-location') as HTMLInputElement
     expect(location.disabled).toBe(true)
     expect(location.value).toBe(BUILTIN_LOCATION)
     expect(screen.getByText("The built-in catalog's location is fixed.")).toBeTruthy()
     expect(screen.queryByText(/^Where Refresh reads this catalog from/)).toBeNull()
-    fireEvent.click(screen.getByLabelText('Show this marketplace on the page'))
+    fireEvent.click(screen.getByLabelText('Refresh on its own'))
     fireEvent.click(screen.getByTestId('settings-save'))
     // §22.2: a location would answer 422, so the PATCH carries no location key.
     await waitFor(() => expect(marketplaceSettings).toHaveBeenCalledWith('s1', {
-      shown: false, autoRefresh: true,
+      autoRefresh: false,
     }))
   })
 

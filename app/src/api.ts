@@ -320,9 +320,9 @@ export const api = {
   // adds it; read/save work on the catalog file on disk, not the cache.
   marketplaceCatalogCreate: (body: { folder?: string } & import('./types').MarketplaceCatalogSave) =>
     req<import('./types').MarketplaceSource>('POST', '/marketplace/catalogs', body),
-  // §22.2 settings: location / shown / auto refresh - only the given fields
+  // §22.2 settings: location / expanded / auto refresh - only the given fields
   // change, nothing is fetched.
-  marketplaceSettings: (id: string, body: { location?: string; shown?: boolean; autoRefresh?: boolean }) =>
+  marketplaceSettings: (id: string, body: { location?: string; expanded?: boolean; autoRefresh?: boolean }) =>
     req<import('./types').MarketplaceSource>('PATCH', `/marketplace/sources/${id}`, body),
   marketplaceCatalogRead: (id: string) =>
     req<import('./types').MarketplaceCatalog>('GET', `/marketplace/sources/${id}/catalog`),

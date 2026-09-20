@@ -68,6 +68,19 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-09-20 - `shown` renamed `expanded` in `marketplaces.yaml` (§22.2).** The
+  catalog-table column that says whether the page lists a catalog's entries is now
+  `expanded: bool` (default `true`); the concept is expanded/collapsed rather than
+  shown/hidden (David's ask), and the API field, the CLI key (`expanded=on|off`) and the
+  `list` marker (` collapsed`) follow. Migration on load: a row with no `expanded` key
+  reads its `shown` key in its place (absent → `true`), and a table that held any `shown`
+  key is saved under the new name once loaded (not while it loaded read-only).
+  Recognition is per row (the old key present, the new one absent). A release without
+  the rename ignores `expanded` (an unknown key under the §22.2 lenient load) and reads
+  the missing `shown` as `true`, so a collapsed catalog shows expanded on downgrade;
+  nothing is lost. First version writing the new shape: the next release after
+  2026-09-20; oldest shape still read: v0.11.4 (`shown`). Fixture test:
+  `tests/test_marketplace.py::test_sources_yaml_with_shown_reads_it_as_expanded`.
 - **2026-09-19 - `builtin` column and the seeded built-in catalog in `marketplaces.yaml`
   (§22.2).** Each catalog-table row gains `builtin: bool` (default `false`), and exactly
   one row carries `true`: the built-in Autowright catalog, whose `location` is pinned to

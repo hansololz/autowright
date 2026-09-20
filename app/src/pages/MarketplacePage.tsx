@@ -8,8 +8,8 @@ import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import type { ImportPreview, ImportSummary, MarketplaceEntry, MarketplaceSource } from '../types'
 import {
-  BtnGhost, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MenuRow, MetaChip,
-  Modal, Notice, PageLoading, PageTitle, PopMenu, Spinner, Toggle, usePopover,
+  BtnGhost, Caret, Collapse, ConfirmModal, EmptyLine, EmptyState, Eyebrow, HeaderActions, MenuRow,
+  MetaChip, Modal, Notice, PageLoading, PageTitle, PopMenu, Spinner, Toggle, usePopover,
 } from '../ui'
 import ArchiveViewer from './ArchiveViewer'
 import CatalogEditorModal, {
@@ -61,7 +61,7 @@ function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, o
         )}
         <MenuRow onClick={pick(onSettings)}>{icon('fa-gear')}Catalog settings…</MenuRow>
         {/* §22.2: the built-in catalog can't be removed, and hiding it is the
-            settings modal's SHOWN toggle - its menu ends here. */}
+            header caret - its menu ends here. */}
         {!source.builtin && (
           <MenuRow danger onClick={pick(onRemove)}>{icon('fa-trash')}Remove…</MenuRow>
         )}
@@ -110,13 +110,15 @@ const imageUrls = new Map<string, string>()
 // than repopulating the cache nothing will ever revoke again.
 let imageGeneration = 0
 
-function EntryImage({ sourceId, index, image, refreshedAt, has }: {
+function EntryImage({ sourceId, index, image, refreshedAt, has, load }: {
   sourceId: string; index: number; image: string | null; refreshedAt: string | null; has: boolean
+  /** §22.3: a collapsed catalog's body stays mounted but fetches nothing until it opens */
+  load: boolean
 }) {
   const key = `${sourceId}:${index}:${image}:${refreshedAt ?? ''}`
   const [url, setUrl] = useState<string | null>(() => imageUrls.get(key) ?? null)
   useEffect(() => {
-    if (!has) return
+    if (!has || !load) return
     const cached = imageUrls.get(key)
     if (cached) { setUrl(cached); return }
     let gone = false
@@ -299,7 +301,6 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
   onSaved: () => void
 }) {
   const [location, setLocation] = useState(source.location ?? '')
-  const [shown, setShown] = useState(source.shown)
   const [autoRefresh, setAutoRefresh] = useState(source.autoRefresh)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -314,9 +315,10 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
           try {
             // §22.2: the built-in catalog's location is pinned - a PATCH that
             // carried one would answer 422, so Save sends only the toggles.
+            // §22.3: `expanded` is the header caret's alone - never sent from here.
             await api.marketplaceSettings(source.id, source.builtin
-              ? { shown, autoRefresh }
-              : { location: location.trim(), shown, autoRefresh: noLocation ? false : autoRefresh })
+              ? { autoRefresh }
+              : { location: location.trim(), autoRefresh: noLocation ? false : autoRefresh })
             saved.current = true
             close()
           } catch (e) { setError((e as Error).message); setBusy(false) }
@@ -341,15 +343,10 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
                 ? "The built-in catalog's location is fixed."
                 : 'Where Refresh reads this catalog from. Leave it empty to keep only the copy Autowright has.'}
             </p>
-            <Eyebrow style={{ margin: '16px 0 8px' }}>SHOWN</Eyebrow>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, color: 'var(--text)' }}>
-              <Toggle on={shown} onChange={setShown} title="Show this marketplace on the page" />
-              Show this marketplace on the page
-            </label>
             <Eyebrow style={{ margin: '16px 0 8px' }}>AUTO REFRESH</Eyebrow>
             <label style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, color: noLocation ? 'var(--text-muted)' : 'var(--text)' }}>
               <Toggle on={!noLocation && autoRefresh} onChange={setAutoRefresh} disabled={noLocation} title="Refresh on its own" />
-              Refresh on its own (at launch and every 6 hours)
+              Refresh on its own (once a day)
             </label>
             {noLocation && <p style={caption}>Needs a location.</p>}
             {error && errLine(error, 'settings-error')}
@@ -457,6 +454,14 @@ export default function MarketplacePage() {
       if (path) showToast(`Exported to ${path}.`)
     } catch (e) { showToast((e as Error).message) }
   }
+  // §22.3: the header caret flips `expanded` in place - one PATCH, the
+  // answered row replacing this one; a failure toasts and changes nothing.
+  const toggleExpanded = async (s: MarketplaceSource) => {
+    try {
+      const source = await api.marketplaceSettings(s.id, { expanded: !s.expanded })
+      setSources((prev) => prev?.map((row) => (row.id === s.id ? source : row)) ?? null)
+    } catch (e) { showToast((e as Error).message) }
+  }
   const refreshOne = async (id: string) => {
     if (refreshing) return
     setRefreshing(id)
@@ -549,10 +554,24 @@ export default function MarketplacePage() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 30 }}>
           {sources.map((s) => (
-            <div key={s.id} data-testid="marketplace-source" data-hidden={s.shown ? undefined : 'true'} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div key={s.id} data-testid="marketplace-source" data-collapsed={s.expanded ? undefined : 'true'} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)' }}>{s.name}</span>
+                  {/* §22.3: the expand/collapse control - the caret and the name
+                      make one button; the chips beside it stay outside. */}
+                  <button
+                    className="ad-btn-bare ad-focus-inset"
+                    onClick={() => { void toggleExpanded(s) }}
+                    aria-expanded={s.expanded}
+                    aria-label={`${s.expanded ? 'Collapse' : 'Expand'} ${s.name}`}
+                    data-testid="marketplace-collapse"
+                    // .ad-btn-bare is a full-width block: sized to its content here so the
+                    // chips sit beside the name and only the name toggles.
+                    style={{ display: 'inline-flex', width: 'auto', alignItems: 'center', gap: 8, minWidth: 0, cursor: 'pointer' }}
+                  >
+                    <Caret open={s.expanded} style={{ color: 'var(--text-muted)', width: 10 }} />
+                    <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)' }}>{s.name}</span>
+                  </button>
                   {/* §22.3: a link location's chip is an outbound anchor to the
                       catalog's page (the §14 MetaChip href variant); a file or
                       null chip is inert. */}
@@ -573,21 +592,13 @@ export default function MarketplacePage() {
                   {/* §22.3: the one catalog that ships with the app. */}
                   {s.builtin && (
                     <span
-                      title="Ships with Autowright. Hide it if you don't want it."
+                      title="Ships with Autowright. Collapse it if you don't want it."
                       data-testid="marketplace-builtin-chip"
                       style={{ display: 'inline-flex' }}
                     >
                       <MetaChip>
                         <i className="fa-solid fa-star" style={{ fontSize: 10 }} />
                         Built in
-                      </MetaChip>
-                    </span>
-                  )}
-                  {!s.shown && (
-                    <span data-testid="marketplace-hidden-chip" style={{ display: 'inline-flex' }}>
-                      <MetaChip>
-                        <i className="fa-solid fa-eye-slash" style={{ fontSize: 10 }} />
-                        Hidden
                       </MetaChip>
                     </span>
                   )}
@@ -635,12 +646,17 @@ export default function MarketplacePage() {
                         : `Couldn't refresh: ${s.error}. Showing the last copy.`}
                     </Notice>
                   )}
-                  {s.shown && s.description && (
+                  {/* §22.3: the body - description and grid - animates through
+                      the §14 Collapse; collapsed, it stays mounted and inert and
+                      its images wait until it opens. */}
+                  <Collapse open={s.expanded}>
+                  <div data-testid="marketplace-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {s.description && (
                     <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
                       {s.description}
                     </p>
                   )}
-                  {s.shown && (s.entries.length === 0 ? (
+                  {s.entries.length === 0 ? (
                     <div className="ad-card">
                       <EmptyLine>This marketplace lists no automations yet.</EmptyLine>
                     </div>
@@ -653,7 +669,7 @@ export default function MarketplacePage() {
                           data-testid="marketplace-entry"
                           style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
                         >
-                          <EntryImage sourceId={s.id} index={e.index} image={e.image} refreshedAt={s.refreshedAt} has={e.image !== null} />
+                          <EntryImage sourceId={s.id} index={e.index} image={e.image} refreshedAt={s.refreshedAt} has={e.image !== null} load={s.expanded} />
                           <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 7, flex: 1 }}>
                             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>{e.title}</div>
                             {e.description && (
@@ -694,7 +710,9 @@ export default function MarketplacePage() {
                         </div>
                       ))}
                     </div>
-                  ))}
+                  )}
+                  </div>
+                  </Collapse>
                 </>
               )}
             </div>

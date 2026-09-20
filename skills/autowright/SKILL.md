@@ -192,9 +192,10 @@ autowright agent list · agent check <name>        # AI agents available to agen
   `marketplace remove <name>` / `marketplace install <name> <n>` work with marketplaces -
   catalogs someone published listing shareable automations. Each catalog has a location (a link,
   a file path, or none when Autowright keeps the only copy); `refresh` re-reads that location.
-  `marketplace set <name> location=… shown=on|off autoRefresh=on|off` changes where it is read
-  from, whether the page shows it, and whether it refreshes on its own (at launch and every 6
-  hours). `list` numbers each marketplace's entries; `install` takes that number and lands the
+  `marketplace set <name> location=… expanded=on|off autoRefresh=on|off` changes where it is read
+  from, whether the page lists its automations (collapsed = header only), and whether it
+  refreshes on its own (once a day). `list`
+  numbers each marketplace's entries; `install` takes that number and lands the
   automation through the ordinary import (agents and secrets matched by name, triggers off);
   `marketplace audit <name> <n>` prints every text file inside that entry's archive (manifest,
   automation, spec, notes, step scripts, agents, secrets) without installing anything, so the
