@@ -93,8 +93,37 @@ version that writes the new shape, and the oldest shape still read.
   unknown key under the §22.2 lenient load) and lists the seeded row as an ordinary
   catalog at that link. The table is not touched while it loaded read-only. First
   version writing the new shape: the next release after 2026-09-19; oldest shape still
-  read: v0.11.4 (the first release with the store; key absent). Fixture test:
+  read: v0.11.4 (`sources.yaml`, through the 2026-09-30 migration). Fixture test:
   `tests/test_marketplace.py::test_sources_yaml_without_builtin_seeds_the_builtin_row`.
+- **2026-09-30 - v0.11.4 `marketplaces/sources.yaml` migrated to `marketplaces.yaml`.**
+  v0.11.4 (2026-09-11, marketplace preview in Developer mode) wrote the table as
+  `marketplaces/sources.yaml` — `{sources: [{id, kind (url | file), origin, added_at,
+  refreshed_at, error}]}` — with each catalog's copy at `marketplaces/<id>/marketplace-catalog.yaml`
+  plus an `images/` cache beside it. The reshaped store (same-day entry above) never read
+  that file, and worse, its orphan-directory sweep deleted every `<id>/` directory the new
+  table did not name: a v0.11.4 user updating lost the list of added catalogs and their
+  copies on the first load. Migration at the read seam: when `marketplaces.yaml` is absent
+  and `sources.yaml` is present, each readable row maps to a table row — `location` from
+  `origin` (a `url` row's link, a `file` row's absolute path; a row whose origin isn't a
+  valid §22.2 location skips with a warning), `expanded` true, `auto_refresh` false,
+  `builtin` false, `added_at` / `refreshed_at` / `error` carried over — the table is saved
+  under the new name, the built-in row is then seeded as usual, and `sources.yaml` is
+  **left in place** (never deleted or rewritten; keep-on-disk). The copies stay where they
+  are (same path); a v0.11.4 copy carries the then-optional catalog `url` key, which the
+  §22.1 parser ignores as unknown, and v0.11.4 allowed **relative** `path` and `image`
+  references (resolved against the origin) that fail today's origin-aware rule — so the
+  **saved-copy read is lenient** where add/refresh validation stays strict: an entry
+  whose `image` is malformed reads as no image (the no-image icon), an entry whose `path`
+  is malformed is dropped with a warning, and the copy still lists the rest until the next
+  refresh rewrites it. The `images/` cache is inert
+  (not a uuid-shaped directory, never swept). The orphan sweep runs only after the
+  migration has named the rows; a `sources.yaml` that exists but can't be parsed migrates
+  nothing (warning), loads a fresh writable table (the built-in row seeded as usual), and
+  **skips the orphan sweep for that session** so the old copies survive until the user
+  sorts the file out — never the read-only 409 degradation, which is for a corrupt
+  *current* table. First version writing the new shape: unchanged (the
+  next release after 2026-09-11); oldest shape still read: v0.11.4 (`sources.yaml`).
+  Fixture test: `tests/test_marketplace.py::test_v0_11_4_sources_yaml_migrates_to_marketplaces_yaml`.
 - **2026-09-11 - `marketplaces/` store added (§22).** A new directory under the §5 data
   root: `marketplaces.yaml` (the user's marketplace sources - id, kind, origin, timestamps, last
   error) plus one cached `marketplace-catalog.yaml` and an `images/` cache per source, each
@@ -103,8 +132,10 @@ version that writes the new shape, and the oldest shape still read.
   without `url` is a one-time download). Also same day: §22.7 catalog authoring. Later the
   same day, still unreleased, the store was reshaped into the **catalog table** (`location`
   null | path | link, `shown`, `auto_refresh`; `kind`/`origin` dropped; the catalog's
-  `url` key dropped; no `images/` cache) with no migration, by decision - nothing shipped
-  the earlier shapes. Additive: no
+  `url` key dropped; no `images/` cache) with no migration, by decision - on the belief
+  that nothing had shipped the earlier shapes. **That belief was wrong** (found
+  2026-09-30): v0.11.4 shipped the `sources.yaml` shape behind the Developer-mode preview
+  gate; see the 2026-09-30 entry for the migration that now reads it. Additive: no
   existing file changes shape, data written before this date holds no such directory, and a
   release without the feature never reads it (the directory is inert on downgrade). The
   catalog people share carries its own `format_version: 1` hard gate, like §5.1 archives

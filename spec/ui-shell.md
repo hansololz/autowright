@@ -264,7 +264,7 @@ are inert (the history entry is pushed back): a modal's `guardClose` (§14) cove
 the backdrop, and an unmount-by-navigation would bypass it and drop the doc editor's typed
 text without its discard confirm. Page navigation (`go()`) always lands in the app
 shell: if the create/edit surface is active, it exits back to `surface: app` — so sidebar tabs work
-while editing an automation. Popovers close on outside mousedown. Modals render through a React portal on
+while editing an automation. Popovers close on outside mousedown **and on Escape** (every menu goes through the shared `usePopover`, whose capture-phase Escape closes the menu and stops the key there, so a modal behind an open menu stays open — one Escape per layer). Modals render through a React portal on
 `document.body`: page containers animate `transform` (`.ad-anim-page`, fill
 both), which makes them the containing block for `position: fixed` — an
 in-tree modal would anchor to the scrolled page instead of the viewport and
@@ -325,8 +325,12 @@ animation animates `transform` and would knock the toast off-center while it pla
 - Modal cards cap at 84 vh and scroll inside (`ScrollArea`, built into the `Modal` shell) —
   content and footer buttons can never render off-screen. (The §9.4 doc modal keeps its
   tighter 62 vh body.)
-- Buttons that fire a multi-request commit disable **and** show busy feedback (spinner or
-  label swap) while in flight; sibling actions that would double-fire the commit disable
+- Buttons that fire a commit — multi-request commits and single-request start actions
+  alike: Execute now, Execute again, Retry, Export, Add agent / Save changes, and the §11
+  Create / Save / Start over / Discard — disable **and** show busy feedback (spinner or
+  label swap) while their request is in flight, so a double-click never fires twice (two
+  runs started blind past the §9.2 capacity popup, two automations created from one
+  draft); sibling actions that would double-fire the commit disable
   with them.
 
 Text selection: all text is selectable by default — any piece of information on screen
@@ -773,7 +777,9 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   is lost.") (accent
   Restore / quiet Keep; while an execution is live the row's Restore action is `disabled`
   with the tooltip "Blocked while an execution is live" — never a silent no-op click — and
-  a raced 409 still surfaces as a toast);
+  a raced 409 still surfaces as a toast; the **Snapshot** and **Clear memory** buttons are
+  disabled the same way with the same tooltip while an execution is live, since the
+  backend answers both with the same 409);
   Rename swaps to a name input (Save / Cancel; empty clears the name back to "Snapshot");
   Delete swaps to "Delete this snapshot?" (red Delete / quiet Keep). Every inline swap —
   the card's button row and the snapshot rows alike — fades in (`.ad-anim-fade`, a keyed

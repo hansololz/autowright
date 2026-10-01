@@ -78,10 +78,17 @@ export type Find = {
  * on a new query or a new key. */
 export function useFind(lines: React.ReactNode[][], scroller: React.RefObject<HTMLElement | null>, resetKey: unknown): Find {
   const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const [cur, setCur] = useState(0)
+  const [query, setQueryState] = useState('')
+  const [curState, setCur] = useState(0)
+  // A new query starts at the first match on the render it lands, not one
+  // effect later.
+  const setQuery = (q: string) => { setQueryState(q); setCur(0) }
   const input = useRef<HTMLInputElement>(null)
   const matches = useMemo(() => findInLines(lines, query), [lines, query])
+  // Clamped at render: new lines (a streamed log, a step flip before the
+  // reset effect runs) can shrink the match list under the current index, and
+  // the counter must never read "7 of 3".
+  const cur = matches.length ? Math.min(curState, matches.length - 1) : 0
   useEffect(() => { setCur(0) }, [query, resetKey])
   const show = () => {
     setOpen(true)
@@ -89,7 +96,7 @@ export function useFind(lines: React.ReactNode[][], scroller: React.RefObject<HT
     requestAnimationFrame(() => { input.current?.focus(); input.current?.select() })
   }
   const close = () => { setOpen(false); setQuery('') }
-  const step = (d: 1 | -1) => { if (matches.length) setCur((c) => (c + d + matches.length) % matches.length) }
+  const step = (d: 1 | -1) => { if (matches.length) setCur((c) => (Math.min(c, matches.length - 1) + d + matches.length) % matches.length) }
   // The scroll is keyed on the current match's identity, never on the matches
   // array: a streamed line re-runs the search and hands back a new array, and
   // the pane must only move when the current match itself changes (§7).

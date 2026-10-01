@@ -125,10 +125,14 @@ function AutoCard({ a }: { a: Automation }) {
   // fresh reference on every /state refresh and re-render every card.
   const draftJobStatus = useStore((s) => s.draftJobs.find((j) => j.owner === a.id)?.status)
   const executing = a.live.length > 0
+  // §9 busy rule: the play button disables while its start request is in
+  // flight — a double-click never starts two runs.
+  const [starting, setStarting] = useState(false)
 
   const execute = (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (executing) return
+    if (executing || starting) return
+    setStarting(true)
     void (async () => {
       try {
         await api.executeNow(a.id)
@@ -139,9 +143,12 @@ function AutoCard({ a }: { a: Automation }) {
         showToast(er.status === 409 && er.reason === 'capacity'
           ? executingToast(a.maxParallel, a.maxQueued)
           : er.message)
+      } finally {
+        setStarting(false)
       }
     })()
   }
+  const execTitle = starting ? 'Starting…' : executing ? 'Executing…' : 'Execute now'
 
   return (
     <div
@@ -173,14 +180,14 @@ function AutoCard({ a }: { a: Automation }) {
         <button
           className="ad-btn-exec"
           onClick={execute}
-          disabled={executing}
-          title={executing ? 'Executing…' : 'Execute now'}
-          aria-label={executing ? 'Executing…' : 'Execute now'}
+          disabled={executing || starting}
+          title={execTitle}
+          aria-label={execTitle}
         >
           {/* play glyph sits 1px right of center optically */}
           <i
-            className={executing ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-play'}
-            style={{ fontSize: 9, marginLeft: executing ? 0 : 1 }}
+            className={executing || starting ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-play'}
+            style={{ fontSize: 9, marginLeft: executing || starting ? 0 : 1 }}
           />
         </button>
       </div>

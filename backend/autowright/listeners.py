@@ -550,8 +550,11 @@ class Listeners:
                         if any((t["kind"] == "imessage" if key == IMSG_KEY
                                 else t["kind"] == "discord" and t.get("secret") == key)
                                for t in a["triggers"])]
-        for automation_id, row in affected:
-            hub.publish("automation.changed", automationId=automation_id, automation=row)
+            # §19: published inside the hold that serialized the rows (the
+            # publish only schedules the send, never blocks) — rows reach
+            # clients in serialization order.
+            for automation_id, row in affected:
+                hub.publish("automation.changed", automationId=automation_id, automation=row)
 
     def dispatch(self, secret: str, d: dict, bot_id: str | None,
                  bot_roles: set[str] | None = None,

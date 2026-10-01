@@ -218,17 +218,28 @@ class Result:
         emit("result", field="chip", value=str(text)[:1_000])
 
 
+def substantive_probe(part: str) -> bool:
+    """§4.8: whether one line of a multi-line secret value is matched on its
+    own — at least 8 characters once stripped, with at least one letter or
+    digit. A structural line (`{`, `}`, `-----`, a short indent) would
+    otherwise redact or block every text that happens to contain it. Shared
+    by the outbound scan here and the engine's log redaction
+    (`engine.build_redactions`, which also gates §6.1 replies)."""
+    stripped = part.strip()
+    return len(stripped) >= 8 and any(c.isalnum() for c in stripped)
+
+
 def scan_outbound(text: str, what: str, scan: dict[str, str]) -> None:
     """§6: refuse to send `text` anywhere off this Mac if it carries a secret
     value. `scan` is every value of the automation, not just the calling step's:
     a value written to workspace/memory by an earlier step must be caught too.
-    Multi-line values are probed line by line, so a partial paste of a key is
-    caught. Passed in explicitly — a default would let a missed wiring silently
+    Multi-line values are probed line by line (each substantive line — §4.8),
+    so a partial paste of a key is caught. Passed in explicitly — a default would let a missed wiring silently
     turn the scan into a no-op."""
     for sname, val in scan.items():
         if not val:
             continue
-        probes = [val] + [p for p in val.splitlines() if p.strip()] if "\n" in val else [val]
+        probes = [val] + [p for p in val.splitlines() if substantive_probe(p)] if "\n" in val else [val]
         if any(p in text for p in probes):
             raise RuntimeError(f"{what} contains the value of secret {sname} — refusing to send")
 
@@ -378,20 +389,30 @@ class _LineWriter(io.TextIOBase):
         self.kind = kind
         self.buf = ""
 
+    def _emit(self, text: str) -> None:
+        """One logical line as ≤ MAX_LINE pieces — every control line stays
+        far under the engine's size-capped readline, so an oversize print is
+        streamed in bounded chunks instead of arriving torn (and dropped as
+        unparsable JSON)."""
+        for start in range(0, len(text), self.MAX_LINE):
+            piece = text[start:start + self.MAX_LINE]
+            if piece.strip():
+                emit("log", kind=self.kind, text=piece)
+
     def write(self, s: str) -> int:  # type: ignore[override]
         self.buf += s
         while "\n" in self.buf:
             line, self.buf = self.buf.split("\n", 1)
             if line.strip():
-                emit("log", kind=self.kind, text=line)
+                self._emit(line)
         if len(self.buf) > self.MAX_LINE:
-            emit("log", kind=self.kind, text=self.buf)
+            self._emit(self.buf)
             self.buf = ""
         return len(s)
 
     def flush(self) -> None:
         if self.buf.strip():
-            emit("log", kind=self.kind, text=self.buf)
+            self._emit(self.buf)
         self.buf = ""
 
 

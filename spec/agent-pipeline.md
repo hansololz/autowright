@@ -21,11 +21,17 @@ file-writing harnesses (same section). Drafting invocations run **web-enabled** 
 web-read tools are turned on (the §6 per-harness flag list) so the agent fetches the pages the
 request names and grounds the spec, selectors, and notes in the real DOM; runtime `agent.ask`
 calls stay fully tool-locked (§6). Everything below is otherwise harness-independent;
-handlers translate "send prompt, receive text" plus the progress events. **Prompt delivery is per-OS:** on POSIX the
-prompt rides as the command's last argv element (unchanged); on Windows the whole command
-line is capped at 32,767 characters — smaller than any real drafting prompt (a minimal
-build prompt already measures ~38 K) — so the adapter omits the argv prompt and pipes it to
-the child's **stdin** instead (UTF-8 per the §2 pipe-encoding contract, written from a
+handlers translate "send prompt, receive text" plus the progress events. **Prompt delivery is
+stdin on every OS** (2026-09-30; before that POSIX passed the prompt as the command's last
+argv element): the adapter never puts the prompt in argv. Linux caps one argv string at
+128 KiB and macOS the whole argv plus environment at 1 MiB, and a repair round — the two
+instruction files (~51 K) plus up to 80 K of the previous response plus the RECENT
+EXECUTIONS section — crosses the Linux cap routinely; a spawn refused with E2BIG is an
+`OSError`, not a `HarnessError`, and would settle the job "failed unexpectedly" with no
+repair round exactly when the user asked for help. Windows further caps the whole command
+line at 32,767 characters — smaller than any real drafting prompt (a minimal
+build prompt already measures ~38 K). So the adapter omits the argv prompt everywhere and pipes it to
+the child's **stdin** (UTF-8 per the §2 pipe-encoding contract, written from a
 dedicated writer thread that closes stdin at EOF — writing from the stdout read loop's
 thread could deadlock against a child that fills its stdout pipe first). Every §8 CLI has a
 non-interactive piped-stdin mode; the Windows forms: Claude Code — same `claude -p …` flags
@@ -82,11 +88,20 @@ can override it.
   file rule (two digits, gapless from `01`, then lowercase letters, digits, and hyphens
   only), the `note` as the §4.4 version note, the `test_values` policy (only values the
   SPEC states outright, never guessed, never secret-like), the optional `notes.md` block a
-  sync may return, and the fact that the validator drops unknown manifest, step, **and
-  param** keys silently (a param entry is normalized to the §4.2 definition fields — `name`,
-  `kind`, `label`, `help`, `default`, `min`, `placeholder`, `validate` — so a misspelled key
-  never reaches a version file or a §5.1 archive), so a misspelled key never errors and its
-  setting never lands; the
+  sync may return, and the validator's key rule (2026-09-30): an **unknown manifest or
+  step key is a validation error** — one line per key, `unknown manifest key: trigger` /
+  `step 2: unknown key timeout_seconds` — fixed in the repair round like every other error
+  (a misspelled `timeout_seconds` must not save as the default timeout without a word;
+  `actions.yaml` already treats unknown keys that way), while a **param** entry is still
+  normalized to the §4.2 definition fields (`name`, `kind`, `label`, `help`, `default`,
+  `min`, `placeholder`, `validate` — a param entry describes a form field, and an unknown
+  key there drops silently so it never reaches a version file or a §5.1 archive). The
+  known manifest keys include everything the §20 workdir `pull` writes (`name`,
+  `description`, `note`, `triggers`, `params`, `packages`, `steps`). The validator never
+  raises on a wrongly typed value: a `steps` or `params` that isn't a list, a `kind` or
+  `file` that isn't a string, a `steps` entry that isn't a mapping, are validation errors
+  like any other — a `TypeError` escaping the validator would fail the job "unexpectedly"
+  and skip the repair round, or print a traceback from the CLI; the
   `autowright` SDK reference with worked examples (a typical memory-diff last step; a
   validated `agent.ask` call) — the reference covers the **whole** §6.1 surface, message-trigger
   names included (`execution.trigger_payload` is the message context and the only place
@@ -481,7 +496,11 @@ Fix-with-AI entry — regardless of age) additionally carries full detail: per-s
 and durations, the §4.5 error (message + reason), the failing step's log tail plus earlier
 steps' log tails (the cause is often upstream), and on success the result chip plus a
 clipped `result.md` excerpt and the result-file list. Log lines are the already-redacted
-execution output (§6); secret values never travel.
+execution output (§6); secret values never travel. The section is bounded: each log-tail
+line is clipped to 2,000 characters (marker `… [clipped]`) and the whole section to
+64 K characters — runs are dropped oldest-first past that, the newest run's detail always
+kept — so a step that logs one JSON document per line (§6 lines run to 2 MB) can never push
+the prompt past the §8 clip budget.
 
 **actions.yaml** — follow-up actions the editor performs after applying the response's
 rewrites (§11 owns the choreography). Schema — unknown keys are validation errors:
@@ -949,7 +968,10 @@ streaming still ends. Stream size is bounded too: one invocation's stdout is cap
 50 MB of characters (the call is killed and fails non-retryably — no valid response is
 anywhere near that large, and a harness stuck in a tool loop must not push the whole hard
 cap's worth of output through backend memory and every log sink; the cap is enforced on
-bounded reads, never per line, so one newline-free blob cannot buffer past it first) and stderr is drained
+bounded reads, never per line, so one newline-free blob cannot buffer past it first; the
+scratch watcher applies the same 50 MB cap to a response document — a document whose size
+passes it fails the call the same way, since the watcher re-reads a growing document on
+every poll) and stderr is drained
 into a 1 MB tail-keeping buffer (the decisive error lines come last). The kill releases both
 pipe reads itself (§2 pipe-release contract): a grandchild that escaped the CLI's session and
 still holds a pipe can neither keep the call alive past its kill nor wedge the cleanup's

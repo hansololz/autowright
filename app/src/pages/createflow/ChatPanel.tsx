@@ -294,19 +294,27 @@ export function ChatPanel({
   // below uses. Sending is the one exception: the user's own bubble always
   // pins the thread to the bottom.
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
+  // Whether the thread sits at (or near) the bottom, measured on the user's
+  // last scroll - never after the growth, so a tall landing entry can't push
+  // the distance past 60 px and unpin a thread that was at the bottom.
+  const pinnedRef = useRef(true)
+  const onThreadScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+  }
   const chatLen = rev.chat.length
   const ownMessageLast = rev.chat[chatLen - 1]?.kind === 'user'
   useEffect(() => {
     const el = chatScrollRef.current
     if (!el) return
-    if (ownMessageLast || el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight
+    if (ownMessageLast || pinnedRef.current) { el.scrollTop = el.scrollHeight; pinnedRef.current = true }
   }, [chatLen, anyJobBusy, ownMessageLast])
   // §11: while the progress entry's feed grows, follow it only when already at
   // (or near) the bottom — a user who scrolled up is never yanked back down.
   useEffect(() => {
     const el = chatScrollRef.current
     if (!el || !anyJobBusy) return
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight
+    if (pinnedRef.current) el.scrollTop = el.scrollHeight
   }, [anyJobBusy, rev.genDetail, rev.genEvents])
   // §11 Clear chat: confirm step before the thread is emptied.
   const [confirmClear, setConfirmClear] = useState(false)
@@ -420,7 +428,7 @@ export function ChatPanel({
       {/* thread — no header row (§11); the composer below carries the pane's identity */}
       {/* §11 thread spacing: no flex gap — each entry carries its own top
           margin (uniform 12px group gap, 0 between chained operation blocks) */}
-      <ScrollArea scrollRef={chatScrollRef} testId="chat-thread" wrapStyle={{ flex: 1, minHeight: 0 }} style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column' }}>
+      <ScrollArea scrollRef={chatScrollRef} onScroll={onThreadScroll} testId="chat-thread" wrapStyle={{ flex: 1, minHeight: 0 }} style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column' }}>
         {rev.chat.length === 0 && !anyJobBusy && (isCreateEmpty ? (
           <div style={{ padding: '10px 4px' }}>
             <h2 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 8px' }}>
@@ -719,7 +727,9 @@ export function ChatPanel({
             value={chatText} rows={1} disabled={inputDisabled}
             ref={attachChatInput}
             onChange={(e) => setChatText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
+            // §11: an IME composition's confirming Enter is the input method's,
+            // never a send
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendMessage() } }}
             placeholder={testLive ? 'Wait for the test to finish.'
               : viewingOld ? 'Back to the draft to edit or ask.'
                 // §11: a pending "Question for you" wins over the whole

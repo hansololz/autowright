@@ -291,7 +291,21 @@ def _publish_auto_changed(a: dict) -> None:
     `automation.changed` stays the many-changed resync signal."""
     with store.lock:
         payload = store.auto_json(a, full=False)
-    hub.publish("automation.changed", automationId=a["id"], automation=payload)
+        # Published inside the hold that serialized the row (`hub.publish`
+        # only schedules the send, never blocks) — two writers' rows reach
+        # clients in serialization order.
+        hub.publish("automation.changed", automationId=a["id"], automation=payload)
+
+
+def _memory_stats_landed(a: dict) -> None:
+    """§19: a background memory walk landed new stats — announce the row so an
+    open detail page refetches. A record DELETE already removed stays quiet."""
+    with store.lock:
+        if store.autos.get(a["id"]) is a:
+            _publish_auto_changed(a)
+
+
+store.on_memory_stats_changed = _memory_stats_landed
 
 
 def _agent_or_404(agent_id: str) -> dict:
@@ -848,7 +862,8 @@ def create_auto(body: models.AutomationCreate) -> dict:
     if err:
         raise HTTPException(422, err)
     _validate_draft_steps(d)  # §19: the §8 validators run server-side
-    _cancel_live_draft_work(None)  # §11/§19: Create settles the pending slot — its live test and jobs die
+    if body.settlePending:
+        _cancel_live_draft_work(None)  # §11/§19: Create settles the pending slot — its live test and jobs die
     a = store.create_automation(
         _draft_to_version(d),
         # §4.1/§19: the name may be agent-seeded or the fallback, so create
@@ -869,15 +884,18 @@ def create_auto(body: models.AutomationCreate) -> dict:
     if conc := (body.concurrency.model_dump(exclude_unset=True)
                 if body.concurrency is not None else None):
         store.patch_automation(a, conc)
-    # §4.4 thread lifetime: the slot's chat moves onto the new automation —
-    # the conversation continues on its edit page — behind the boundary
-    # marker, so the pre-create session never reaches a later chat's agent.
-    store.migrate_pending_chat(a)
-    store.append_chat_marker(a, "Created as v1.")
-    # §4.4: Create consumes the pending create-mode slot — settled drafts are
-    # never resurrected.
-    _publish_execs_deleted(store.delete_draft(None))
-    hub.publish("draft.changed")
+    # §19 settlePending false (the §20 CLI create): the pending slot, its
+    # chat, its jobs and its draft test are unrelated — nothing below runs.
+    if body.settlePending:
+        # §4.4 thread lifetime: the slot's chat moves onto the new automation —
+        # the conversation continues on its edit page — behind the boundary
+        # marker, so the pre-create session never reaches a later chat's agent.
+        store.migrate_pending_chat(a)
+        store.append_chat_marker(a, "Created as v1.")
+        # §4.4: Create consumes the pending create-mode slot — settled drafts are
+        # never resurrected.
+        _publish_execs_deleted(store.delete_draft(None))
+        hub.publish("draft.changed")
     _publish_auto_changed(a)
     return _auto_json_locked(a)
 
@@ -1533,7 +1551,7 @@ def get_memory_file(automation_id: str, name: str) -> dict:
     # the backend and the UI. The cap answers with the directory instead.
     if size > 8 * 1024 * 1024:
         raise HTTPException(413, "file is larger than 8 MB; open it from the memory "
-                                 f"directory on disk instead: {store.memory_stats(a)['path']}")
+                                 f"directory on disk instead: {store.auto_dir(a) / 'memory'}")
     try:
         data = p.read_bytes()
     except OSError as e:
@@ -1543,7 +1561,7 @@ def get_memory_file(automation_id: str, name: str) -> dict:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise HTTPException(422, "binary file — open it from the memory directory on disk "
-                                 f"instead: {store.memory_stats(a)['path']}")
+                                 f"instead: {store.auto_dir(a) / 'memory'}")
     return {"name": name, "size": len(data), "text": text}
 
 
@@ -1562,19 +1580,23 @@ def clear_memory(automation_id: str) -> dict:
                 raise HTTPException(409, "an execution is in progress")
         staged = store.stage_snapshot(a, "pre-clear")  # §6.3 — None when memory is empty or the toggle is off
         with store.lock:
-            if a.get("_live"):
+            # §6: no rmtree under the lock — a raced copy is discarded after
+            # the hold ends.
+            raced = bool(a.get("_live"))
+            if not raced:
                 if staged is not None:
-                    store.discard_snapshot(staged[0])
-                raise HTTPException(409, "an execution is in progress")
+                    store.commit_snapshot(a, staged, "pre-clear")
+                try:
+                    store.clear_memory(a)
+                except OSError as e:
+                    # §19: same rule as the delete routes — memory/ couldn't be
+                    # moved aside, so nothing was cleared and the client is told.
+                    raise HTTPException(
+                        409, f"couldn't remove it from disk: {e.strerror or e}") from e
+        if raced:
             if staged is not None:
-                store.commit_snapshot(a, staged, "pre-clear")
-            try:
-                store.clear_memory(a)
-            except OSError as e:
-                # §19: same rule as the delete routes — memory/ couldn't be
-                # moved aside, so nothing was cleared and the client is told.
-                raise HTTPException(
-                    409, f"couldn't remove it from disk: {e.strerror or e}") from e
+                store.discard_snapshot(staged[0])
+            raise HTTPException(409, "an execution is in progress")
     _publish_auto_changed(a)
     return {"ok": True}
 
@@ -1594,11 +1616,15 @@ def create_snapshot(automation_id: str, body: models.SnapshotCreate | None = Non
         if staged is None:
             raise HTTPException(422, "memory is empty")
         with store.lock:
-            if a.get("_live"):
-                store.discard_snapshot(staged[0])
-                raise HTTPException(409, "an execution is in progress")
-            meta = store.commit_snapshot(a, staged, "manual",
-                                         name=((body.name if body else None) or "").strip() or None)
+            # §6: no rmtree under the lock — a raced copy is discarded after
+            # the hold ends.
+            raced = bool(a.get("_live"))
+            if not raced:
+                meta = store.commit_snapshot(a, staged, "manual",
+                                             name=((body.name if body else None) or "").strip() or None)
+        if raced:
+            store.discard_snapshot(staged[0])
+            raise HTTPException(409, "an execution is in progress")
     if meta is None:
         raise HTTPException(422, "memory is empty")
     _publish_auto_changed(a)
@@ -1666,6 +1692,11 @@ def post_draft(body: models.DraftJobStart) -> dict:
     # stale-automationId 404 on /tests) — never a silent fall-back to the
     # no-automation grant defaults below.
     auto = _auto_or_404(body.automationId) if body.automationId else None
+    if auto is not None:
+        with store.lock:
+            # §19: an automation mid-DELETE is already gone to every caller.
+            if auto.get("_deleting"):
+                raise HTTPException(404, "automation not found")
     current = body.current.plain() if body.current is not None else None
     if auto and current is None:
         current = auto["versions"][auto["current_version"]]
@@ -1985,10 +2016,13 @@ def add_agent(body: models.AgentAdd) -> dict:
         ag = {"id": str(uuid.uuid4()), "name": _clean_name(body.name), "description": body.description or "",
               "harness": harness_name, "mode": mode, "model": model}
         _check_grant_name_free(ag)
-        store.agents.append(ag)
-        if store.default_agent_id is None:
-            store.default_agent_id = ag["id"]  # §4.7: the first agent is the default
-        store.save_agents()
+        # §5 disk-first: build, write, then assign.
+        agents = [*store.agents, ag]
+        # §4.7: the first agent is the default
+        default_id = store.default_agent_id if store.default_agent_id is not None else ag["id"]
+        store.save_agents(agents, default_id)
+        store.agents = agents
+        store.default_agent_id = default_id
     hub.publish("agents.changed")
     return {**ag, "default": ag["id"] == store.default_agent_id}
 
@@ -2023,16 +2057,22 @@ def patch_agent(agent_id: str, patch: models.AgentPatch) -> dict:
         # After the last 422 above — a refused patch must not have already
         # flipped the in-memory default pointer (unsaved, unpublished, and
         # silently divergent from what clients show).
-        if body.get("default"):
-            store.default_agent_id = agent_id  # §4.7: single pointer
+        # §5 disk-first: the patched entry and pointer are built as copies,
+        # written, and only then swapped into memory.
+        default_id = agent_id if body.get("default") else store.default_agent_id  # §4.7: single pointer
+        updated = dict(ag)
         if "harness" in body:
-            ag["harness"] = body["harness"]
+            updated["harness"] = body["harness"]
         for k in ("name", "model", "mode", "description"):
             if k in body:
-                ag[k] = body[k]
-        if ag.get("mode", "default") == "default":
-            ag["model"] = None
-        store.save_agents()
+                updated[k] = body[k]
+        if updated.get("mode", "default") == "default":
+            updated["model"] = None
+        agents = [updated if g is ag else g for g in store.agents]
+        store.save_agents(agents, default_id)
+        ag.clear()
+        ag.update(updated)
+        store.default_agent_id = default_id
     hub.publish("agents.changed")
     return {**ag, "default": ag["id"] == store.default_agent_id}
 
@@ -2041,22 +2081,26 @@ def patch_agent(agent_id: str, patch: models.AgentPatch) -> dict:
 def delete_agent(agent_id: str) -> dict:
     store.require_writable(paths.agents_file())
     with store.lock:
-        ag = _agent_or_404(agent_id)
-        store.agents = [g for g in store.agents if g["id"] != agent_id]
+        _agent_or_404(agent_id)
+        agents = [g for g in store.agents if g["id"] != agent_id]
         # §4.7: repoint the default
-        if store.default_agent_id == agent_id:
-            store.default_agent_id = store.agents[0]["id"] if store.agents else None
+        default_id = store.default_agent_id
+        if default_id == agent_id:
+            default_id = agents[0]["id"] if agents else None
+        # §5 disk-first: agents.yaml lands before anything in memory changes,
+        # and the automations re-point only after it did — a failed write
+        # never re-points automations at nothing.
+        store.save_agents(agents, default_id)
+        store.agents = agents
+        store.default_agent_id = default_id
         for a in store.autos.values():
-            changed = False
+            repoint: dict = {}
             if a["agent_id"] == agent_id:
-                a["agent_id"] = store.default_agent_id
-                changed = True
+                repoint["agentId"] = default_id
             if agent_id in a["enabled_agents"]:
-                a["enabled_agents"] = [x for x in a["enabled_agents"] if x != agent_id]
-                changed = True
-            if changed:
-                store.patch_automation(a, {})
-        store.save_agents()
+                repoint["stepAgents"] = [x for x in a["enabled_agents"] if x != agent_id]
+            if repoint:
+                store.patch_automation(a, repoint)
     hub.publish("agents.changed")
     hub.publish("automation.changed")
     return {"ok": True}
@@ -2432,12 +2476,29 @@ def create_secret(body: models.SecretCreate) -> dict:
     with store.lock:
         # A racing create may have landed the name while the Keychain IPC ran.
         lost_race = any(s["name"] == name for s in store.secrets)
+        save_error: Exception | None = None
         if not lost_race:
             entry = {"id": secret_id, "name": name, "description": body.description or "",
                      "set": bool(body.value)}
-            store.secrets.append(entry)
-            store.save_secrets()
-            out = _secret_entity(entry)
+            # §5 disk-first: build, write, then assign — a failed write leaves
+            # no row in memory.
+            secrets = [*store.secrets, entry]
+            try:
+                store.save_secrets(secrets)
+            except Exception as e:  # noqa: BLE001 — re-raised below, after the undo
+                save_error = e
+            else:
+                store.secrets = secrets
+                out = _secret_entity(entry)
+    if save_error is not None:
+        # §5: the row never landed, so the fresh Keychain value must not
+        # outlive it — undone outside the lock (blocking IPC, see above).
+        if body.value:
+            try:
+                keychain.delete_secret(secret_id)
+            except Exception:  # noqa: BLE001 — keyring's error zoo is open-ended
+                log.warning("couldn't undo the keychain entry after the failed secrets.yaml write")
+        raise save_error
     if lost_race:
         # Undo the fresh Keychain entry outside the lock — the delete is the
         # same blocking IPC the set was, and a failed undo leaves an orphaned
@@ -2470,12 +2531,17 @@ def put_secret(secret_id: str, body: models.SecretPut) -> dict:
         existing = next((s for s in store.secrets if s["id"] == secret_id), None)
         if existing is None:
             raise HTTPException(404, "no such secret")
+        # §5 disk-first: the updated row is built as a copy, written, and
+        # only then swapped into memory.
+        updated = dict(existing)
         if body.value:
-            existing["set"] = True
+            updated["set"] = True
         if "description" in sent:
-            existing["description"] = body.description or ""
-        store.save_secrets()
-        out = _secret_entity(existing)
+            updated["description"] = body.description or ""
+        secrets = [updated if s is existing else s for s in store.secrets]
+        store.save_secrets(secrets)
+        store.secrets = secrets
+        out = _secret_entity(updated)
     hub.publish("secrets.changed")
     return out
 
@@ -2489,8 +2555,9 @@ def delete_secret(secret_id: str) -> dict:
         # §5: the row goes first, the Keychain item second — a crash between
         # the two leaves a harmless orphan Keychain item, never a row claiming
         # a value the Keychain no longer holds.
-        store.secrets = [s for s in store.secrets if s["id"] != secret_id]
-        store.save_secrets()
+        secrets = [s for s in store.secrets if s["id"] != secret_id]
+        store.save_secrets(secrets)  # §5 disk-first: write, then assign
+        store.secrets = secrets
     keychain.delete_secret(secret_id)  # Keychain IPC — outside the lock (see create_secret)
     hub.publish("secrets.changed")
     return {"ok": True}
@@ -2508,8 +2575,9 @@ def delete_all_secrets() -> dict:
         # §5: the rows go first, the Keychain items second — every secret-delete
         # path drops the row before the value, so a crash between the two leaves
         # orphan Keychain items, never rows claiming values that are gone.
-        store.secrets = [s for s in store.secrets if s["id"] not in set(swept)]
-        store.save_secrets()
+        secrets = [s for s in store.secrets if s["id"] not in set(swept)]
+        store.save_secrets(secrets)  # §5 disk-first: write, then assign
+        store.secrets = secrets
     for secret_id in swept:  # Keychain IPC — outside the lock (see create_secret)
         keychain.delete_secret(secret_id)
     hub.publish("secrets.changed")  # one event covers the whole sweep
@@ -2698,7 +2766,8 @@ def marketplace_remove(source_id: str) -> dict:
          dependencies=[Depends(auth)])
 async def marketplace_image(source_id: str, index: int):
     """§22.4: the entry's image read on demand by reference - never stored.
-    404 for no such entry or no image; 502 when the reference can't be read."""
+    404 for no such entry or no image; 502 when the reference can't be read;
+    503 when no §22.1 read slot came free within the bounded wait."""
     from fastapi.responses import Response
 
     try:
@@ -2706,6 +2775,8 @@ async def marketplace_image(source_id: str, index: int):
         found = await run_in_threadpool(marketplace_store.image_bytes, source_id, index)
     except KeyError:
         raise HTTPException(404, "marketplace entry not found") from None
+    except marketplace.MarketplaceBusy as e:
+        raise HTTPException(503, str(e)) from e
     except marketplace.MarketplaceError as e:
         raise HTTPException(502, str(e)) from e
     if found is None:
@@ -2775,11 +2846,15 @@ def patch_settings(body: models.SettingsPatch) -> dict:
     if "days" in patch:
         patch["days"] = max(1, patch["days"])  # §4.9: floor 1
     with store.lock:
+        # §5 disk-first: build, write, then assign — a failed write never
+        # leaves a retention `days` in memory that disk never held.
+        settings = dict(store.settings)
         for k in ("login", "menuBarIcon", "keepAwake", "automaticUpdateCheck", "notifications", "days",
                   "keepForever", "developerMode", "cliEnabled"):
             if k in patch:
-                store.settings[k] = patch[k]
-        store.save_settings()
+                settings[k] = patch[k]
+        store.save_settings(settings)
+        store.settings = settings
     # §3: applies live, no restart — through the §2 platform layer.
     platform.current().power.reconcile(bool(store.settings.get("keepAwake")))
     hub.publish("settings.changed")
@@ -2794,6 +2869,10 @@ def set_data_path(body: models.DataPath) -> dict:
     if not raw:
         raise HTTPException(422, "path required")
     new_root = Path(raw).expanduser()
+    # §5: absolute only — a relative path would resolve against the backend's
+    # cwd, which is `/` under launchd.
+    if not new_root.is_absolute():
+        raise HTTPException(422, "the data folder must be an absolute path")
     target = new_root if new_root.name == "executions" else new_root / "executions"
     # Refuse before creating anything: a 409'd request must not leave a stray
     # executions/ dir inside the folder the user picked. The swap below
@@ -2839,10 +2918,25 @@ def set_data_path(body: models.DataPath) -> dict:
         # and its sender is never told. Refuse rather than strand it.
         if any(h["status"] == "queued" for h in store.execs.values()):
             raise HTTPException(409, "a queued execution is waiting — try again when the queue is empty")
-        store.close_exec_db()
-        store.settings["dataPath"] = str(target)
-        store.save_settings()
-        store.load_all()
+        # §5 disk-first: settings.yaml lands with the new dataPath before
+        # anything in memory changes — a failed write answers 500 with the old
+        # index still open and the old path still in memory.
+        old_settings = dict(store.settings)
+        store.save_settings({**old_settings, "dataPath": str(target)})
+        try:
+            store.close_exec_db()
+            store.settings["dataPath"] = str(target)
+            store.load_all()
+        except BaseException:
+            # A reload that raises never leaves a half-switched store: the old
+            # path returns to memory and disk, and the old index reopens.
+            store.close_exec_db()
+            store.settings = old_settings
+            try:
+                store.save_settings()
+            finally:
+                store.load_all()
+            raise
     # The new location may hold records a crashed backend left "executing" —
     # repair them here too, or the automation would be wedged in 409s. Outside
     # the swap's lock block: the repair's orphan kills read the process table.

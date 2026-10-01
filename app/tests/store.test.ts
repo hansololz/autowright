@@ -7,6 +7,8 @@
 // are exercised through their observable behavior — the onOpenTarget deep-link
 // callback and history.pushState dedupe — instead of direct calls.
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { createElement, useEffect } from 'react'
+import { act, cleanup, render } from '@testing-library/react'
 import type { Automation, Execution, LogLine, WsEvent } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -376,21 +378,25 @@ describe('applyEvent', () => {
     expect(store.useStore.getState().toast).toBeNull()
   })
 
-  it('exec.finished refetches the full automation record only when one is loaded (§19)', () => {
+  it('exec.finished refetches the full automation record only when this client fetched it (§19)', async () => {
     const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    // ids of their own: the full-record set lives for the process
     const row = (over: Record<string, unknown> = {}) =>
-      ({ id: 'a1', name: 'Auto', lastStatus: 'none', triggers: [], live: [], ...over }) as never
+      ({ id: 'fin-a1', name: 'Auto', lastStatus: 'none', triggers: [], live: [], ...over }) as never
     const finished = (id: string, over: Partial<Execution> = {}) => // cancelled: no toast timer to flush
-      execEv('execution.finished', ex(id, 1, { status: 'cancelled', ...over }), row())
-    // list-shape row only (detail page never opened) → no refetch
+      execEv('execution.finished', ex(id, 1, { status: 'cancelled', automationId: 'fin-a1', ...over }), row())
+    // never opened → no refetch, even when the row carries the full fields
+    // (/state rows do: the set, not the row's keys, says what was fetched)
     getAutomation.mockClear()
-    store.useStore.setState({ automations: [row()] })
+    store.useStore.setState({ automations: [row({ latest: null })] })
     store.useStore.getState().applyEvent(finished('e1'))
     expect(getAutomation).not.toHaveBeenCalled()
-    // full record loaded (`latest` key present, even null) → refetch
-    store.useStore.setState({ automations: [row({ latest: null })] })
+    // opened (fetched through loadAuto) → refetch
+    getAutomation.mockResolvedValueOnce(row({ latest: null }))
+    await store.useStore.getState().loadAuto('fin-a1')
+    getAutomation.mockClear()
     store.useStore.getState().applyEvent(finished('e2'))
-    expect(getAutomation).toHaveBeenCalledWith('a1')
+    expect(getAutomation).toHaveBeenCalledWith('fin-a1')
     // §4.5 test executions are draft-scoped — never refetch
     getAutomation.mockClear()
     store.useStore.getState().applyEvent(finished('e3', { test: true }))
@@ -476,29 +482,76 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     expect(store.useStore.getState().version).toBe('0.8.0')
   })
 
-  it('a full record catches up with one GET — the event carries no body (§19)', () => {
+  it('a full record catches up with one GET — the event carries no body (§19)', async () => {
     // The merge is synchronous; steps/spec/params/versions/memory never ride
     // the event, so a change made elsewhere is fetched right behind it.
     const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    const full = auto('full-a1', { latest: { executionId: 'e1' }, steps: [{ name: 's1' }] })
+    store.useStore.setState({ automations: [full] })
+    getAutomation.mockResolvedValueOnce(full)
+    await store.useStore.getState().loadAuto('full-a1')
     getAutomation.mockClear()
-    store.useStore.setState({ automations: [auto('a1', { latest: { executionId: 'e1' }, steps: [{ name: 's1' }] })] })
     store.useStore.getState().applyEvent({
-      event: 'automation.changed', automationId: 'a1', automation: auto('a1', { name: 'Renamed' }),
+      event: 'automation.changed', automationId: 'full-a1', automation: auto('full-a1', { name: 'Renamed' }),
     })
     expect(store.useStore.getState().automations[0].name).toBe('Renamed')
     expect(getAutomation).toHaveBeenCalledTimes(1)
-    expect(getAutomation).toHaveBeenCalledWith('a1')
+    expect(getAutomation).toHaveBeenCalledWith('full-a1')
   })
 
-  it('a list-shape-only row fetches nothing — there is no body to catch up (§19)', () => {
+  it('a record this client never fetched fetches nothing, whatever fields its row holds (§19)', () => {
     const getAutomation = vi.mocked(apiMod.api.getAutomation)
     getAutomation.mockClear()
-    store.useStore.setState({ automations: [auto('a1')] })
+    // /state rows carry the full fields too — `latest` on the row proves nothing
+    store.useStore.setState({ automations: [auto('never-opened', { latest: null })] })
     store.useStore.getState().applyEvent({
-      event: 'automation.changed', automationId: 'a1', automation: auto('a1', { name: 'Renamed' }),
+      event: 'automation.changed', automationId: 'never-opened', automation: auto('never-opened', { name: 'Renamed' }),
     })
     expect(store.useStore.getState().automations[0].name).toBe('Renamed')
     expect(getAutomation).not.toHaveBeenCalled()
+  })
+
+  it('a delete drops the id from the full-record set — a re-created row fetches nothing (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [auto('del-a1')] })
+    getAutomation.mockResolvedValueOnce(auto('del-a1'))
+    await store.useStore.getState().loadAuto('del-a1')
+    store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'del-a1', automation: null })
+    store.useStore.setState({ automations: [auto('del-a1')] })
+    getAutomation.mockClear()
+    store.useStore.getState().applyEvent({
+      event: 'automation.changed', automationId: 'del-a1', automation: auto('del-a1', { name: 'Back' }),
+    })
+    expect(getAutomation).not.toHaveBeenCalled()
+  })
+
+  it('loadAuto orders per id: an older GET resolving after a newer one is dropped (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [auto('seq-a1')] })
+    let landOld!: (v: unknown) => void
+    let landNew!: (v: unknown) => void
+    getAutomation.mockImplementationOnce(() => new Promise((r) => { landOld = r }) as never)
+    getAutomation.mockImplementationOnce(() => new Promise((r) => { landNew = r }) as never)
+    const older = store.useStore.getState().loadAuto('seq-a1')
+    const newer = store.useStore.getState().loadAuto('seq-a1')
+    landNew(auto('seq-a1', { paramValues: { n: 2 } }))
+    await newer
+    landOld(auto('seq-a1', { paramValues: { n: 1 } }))
+    await older
+    expect((store.useStore.getState().automations[0] as { paramValues?: unknown }).paramValues).toEqual({ n: 2 })
+  })
+
+  it('loadAuto ordering is per id — another id\u2019s newer GET never drops this one', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [auto('per-a'), auto('per-b')] })
+    let landA!: (v: unknown) => void
+    getAutomation.mockImplementationOnce(() => new Promise((r) => { landA = r }) as never)
+    getAutomation.mockResolvedValueOnce(auto('per-b', { name: 'B fresh' }))
+    const a = store.useStore.getState().loadAuto('per-a')
+    await store.useStore.getState().loadAuto('per-b')
+    landA(auto('per-a', { name: 'A fresh' }))
+    await a
+    expect(store.useStore.getState().automations.map((x) => x.name)).toEqual(['A fresh', 'B fresh'])
   })
 
   it('automation: null removes the deleted row', () => {
@@ -1090,5 +1143,142 @@ describe('trayAlertOn (§13 tray dot predicate)', () => {
 
   it('tolerates event rows without a problems field', () => {
     expect(store.trayAlertOn([{ id: 'a2', name: 'B', lastStatus: 'none' } as never])).toBe(false)
+  })
+})
+
+describe('eventSeq — single-row events make an in-flight /state stale (§19)', () => {
+  const snap = (over: Record<string, unknown> = {}) => ({
+    version: 'v', automations: [], executions: [], agents: [], secrets: [],
+    settings: null, pendingDraft: null, draftJobs: [], ...over,
+  })
+
+  it('a draftjob.changed consumed mid-/state keeps the job removed', async () => {
+    const job = { owner: 'a1', jobId: 'j-mid', status: 'done', mode: 'chat' as const }
+    const state = vi.mocked(apiMod.api.state)
+    state.mockClear()
+    store.useStore.setState({ draftJobs: [job] })
+    state.mockImplementationOnce(async () => {
+      // serialized before the consume: applying it would bring the job back
+      store.useStore.getState().applyEvent(
+        { event: 'draftjob.changed', owner: 'a1', jobId: 'j-mid', status: 'consumed', mode: 'chat' })
+      return snap({ draftJobs: [job] }) as never
+    })
+    state.mockResolvedValueOnce(snap() as never)
+    await store.useStore.getState().refresh()
+    expect(state).toHaveBeenCalledTimes(2)
+    expect(store.useStore.getState().draftJobs).toEqual([])
+  })
+
+  it('an automation.changed row patch mid-/state is never rolled back by the older snapshot', async () => {
+    const row = (name: string) => ({ id: 'seq-row', name, lastStatus: 'none', triggers: [], live: [] }) as never
+    const state = vi.mocked(apiMod.api.state)
+    state.mockClear()
+    store.useStore.setState({ automations: [row('Old')] })
+    state.mockImplementationOnce(async () => {
+      store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'seq-row', automation: row('New') })
+      return snap({ automations: [row('Old')] }) as never
+    })
+    state.mockResolvedValueOnce(snap({ automations: [row('New')] }) as never)
+    await store.useStore.getState().refresh()
+    expect(state).toHaveBeenCalledTimes(2)
+    expect(store.useStore.getState().automations[0].name).toBe('New')
+  })
+})
+
+describe('ws.open — the viewed execution without a body (§7/§19)', () => {
+  it('refetches the viewed execution whose first GET failed — only the header is held', () => {
+    const getExecution = vi.mocked(apiMod.api.getExecution)
+    getExecution.mockClear()
+    store.useStore.setState({
+      page: 'execution', executionId: 'header-only', executionFull: {},
+      executions: [ex('header-only', 1, { status: 'executing' })],
+    })
+    store.useStore.getState().applyEvent({ event: 'ws.open' } as never)
+    expect(getExecution).toHaveBeenCalledWith('header-only')
+  })
+})
+
+describe('loadExecLogs — a failed first fetch (§7/§19)', () => {
+  const getLogs = () => vi.mocked(apiMod.api.getExecutionLogs)
+  const stream = (executionId: string, sequence: number) =>
+    store.useStore.getState().applyEvent(logEv(executionId, line(sequence)))
+
+  it('the next streamed line past sequence 1 asks for the snapshot again', async () => {
+    getLogs().mockClear()
+    getLogs().mockRejectedValueOnce(new Error('offline'))
+    await store.useStore.getState().loadExecLogs('lf-1')
+    // the bucket stays open, so live lines keep buffering…
+    expect(store.useStore.getState().execLogs['lf-1']['x.0']).toEqual([])
+    let land!: (v: { lines: LogLine[] }) => void
+    getLogs().mockReturnValueOnce(new Promise((r) => { land = r }) as never)
+    // …and the first one past line 1 exposes the missing head: fetch it
+    stream('lf-1', 5)
+    expect(getLogs()).toHaveBeenCalledTimes(2)
+    // lines streamed while that fetch is on the wire ask for nothing more
+    stream('lf-1', 6)
+    expect(getLogs()).toHaveBeenCalledTimes(2)
+    land({ lines: [line(1), line(2), line(3), line(4), line(5)] })
+    await vi.waitFor(() => expect(store.useStore.getState().execLogs['lf-1']['x.0'].map((l) => l.sequence))
+      .toEqual([1, 2, 3, 4, 5, 6]))
+  })
+
+  it('a log that starts at line 1 after the failure is whole — nothing refetches', async () => {
+    getLogs().mockClear()
+    getLogs().mockRejectedValueOnce(new Error('offline'))
+    await store.useStore.getState().loadExecLogs('lf-2')
+    stream('lf-2', 1)
+    stream('lf-2', 2)
+    expect(getLogs()).toHaveBeenCalledTimes(1)
+  })
+
+  it('a fetched snapshot whose head sits past line 1 (the §7 tail) is no gap', async () => {
+    getLogs().mockClear()
+    getLogs().mockResolvedValueOnce({ lines: [line(40), line(41)] })
+    await store.useStore.getState().loadExecLogs('lf-3')
+    stream('lf-3', 42)
+    expect(getLogs()).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('boot generation under the StrictMode render tier (§19)', () => {
+  // App.tsx's shape: boot on mount, disconnect as the cleanup. The render tier
+  // runs under StrictMode, so the effect mounts, cleans up, and mounts again.
+  function BootHarness() {
+    useEffect(() => {
+      void store.useStore.getState().boot()
+      return () => store.useStore.getState().disconnect()
+    }, [])
+    return null
+  }
+
+  afterEach(() => cleanup())
+
+  it('the superseded boot opens no socket — the boot connection is not counted as a reconnect', async () => {
+    const connect = vi.mocked(apiMod.connectInfo)
+    const openWs = vi.mocked(apiMod.openWs)
+    const state = vi.mocked(apiMod.api.state)
+    openWs.mockClear()
+    connect.mockResolvedValue(true)
+    state.mockResolvedValue({
+      version: 'v', automations: [], executions: [], executionsTotal: 0, agents: [], secrets: [],
+      settings: { cliEnabled: false }, pendingDraft: null, draftJobs: [],
+    } as never)
+    // every socket opens right away, like a live backend
+    openWs.mockImplementation((onEvent) => {
+      queueMicrotask(() => onEvent({ event: 'ws.open' } as never))
+      return () => {}
+    })
+    try {
+      render(createElement(BootHarness))
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(openWs).toHaveBeenCalledTimes(1)
+      expect(store.useStore.getState().connected).toBe(true)
+      expect(store.useStore.getState().reconnects).toBe(0)
+    } finally {
+      cleanup()
+      connect.mockResolvedValue(false)
+      state.mockImplementation(() => Promise.reject(new Error('offline')))
+      openWs.mockImplementation(() => () => {})
+    }
   })
 })

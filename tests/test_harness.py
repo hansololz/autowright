@@ -10,11 +10,8 @@ import pytest
 from conftest import fake_cli
 
 
-# §8 prompt delivery is per-OS: the prompt is the command's last argv element
-# on POSIX, and is absent from argv — piped to the child's stdin — on Windows,
-# where the 32,767-char command-line cap can't hold a drafting prompt.
-PIPES_PROMPT = os.name == "nt"
-
+# §8 prompt delivery is stdin on every OS: the prompt is never in argv — a
+# writer thread pipes it to the child's stdin and closes the pipe at EOF.
 PROMPT = "question: hi?"
 
 
@@ -53,7 +50,7 @@ class _FakeStdout:
         if not self._rest:
             return ""
         assert self._proc.prompt_written.wait(10), \
-            "the §8 Windows prompt-writer thread never wrote to stdin"
+            "the §8 prompt-writer thread never wrote to stdin"
         nl = self._rest.find("\n")
         end = len(self._rest) if nl < 0 else nl + 1
         if limit is not None and limit >= 0:
@@ -73,10 +70,7 @@ class _FakeProc:
     def __init__(self):
         self.stdin_text = ""
         self.stdin_closed = False
-        # POSIX delivers the prompt in argv, so nothing ever waits on it.
         self.prompt_written = threading.Event()
-        if not PIPES_PROMPT:
-            self.prompt_written.set()
         self.stdout = _FakeStdout(self)
         self.stderr = io.StringIO("")
         self.stdin = _FakeStdin(self)
@@ -92,15 +86,11 @@ class _FakeProc:
 
 
 def _assert_prompt_delivered(cmd, proc, prompt=PROMPT):
-    """The §8 per-OS delivery rule, asserted against one captured spawn."""
-    if PIPES_PROMPT:
-        assert prompt not in cmd, "Windows: the prompt must never reach argv (§8)"
-        assert "--" not in cmd, "the `--` separator goes with the positional prompt"
-        assert proc.stdin_text == prompt
-        assert proc.stdin_closed, "stdin must be closed so the child sees EOF"
-    else:
-        assert cmd[-1] == prompt
-        assert proc.stdin_text == ""
+    """The §8 stdin delivery rule, asserted against one captured spawn."""
+    assert not any(prompt in arg for arg in cmd), "the prompt must never reach argv (§8)"
+    assert "--" not in cmd, "the `--` separator went with the positional prompt"
+    assert proc.stdin_text == prompt
+    assert proc.stdin_closed, "stdin must be closed so the child sees EOF"
 
 
 def _captured_invoke(monkeypatch, agent, web=False):
@@ -327,11 +317,11 @@ def test_web_enabled_codex_adds_top_level_search_flag(monkeypatch):
     assert "--skip-git-repo-check" in cmd
 
 
-def test_prompt_delivery_follows_the_per_os_rule(monkeypatch):
-    # §8: on POSIX the prompt is the command's last argv element and stdin is
-    # /dev/null; on Windows — where the command line caps at 32,767 chars and
-    # a drafting prompt is ~38 K — argv carries no prompt at all and the whole
-    # of it goes down a stdin pipe instead.
+def test_prompt_is_piped_to_stdin_on_every_os(monkeypatch):
+    # §8: argv carries no prompt at all on any OS — Linux caps one argv
+    # string at 128 KiB, macOS argv plus environment at 1 MiB, Windows the
+    # whole command line at 32,767 chars — and the whole of it goes down a
+    # stdin pipe instead, for every provider's command builder.
     import subprocess
 
     from autowright import harness
@@ -353,19 +343,29 @@ def test_prompt_delivery_follows_the_per_os_rule(monkeypatch):
         assert harness.invoke({"harness": name}, long_prompt) == "ok"
         cmd, proc = cap["cmd"], cap["proc"]
         assert cmd[0].endswith(head)
-        if PIPES_PROMPT:
-            assert long_prompt not in cmd
-            assert max(len(a) for a in cmd) < 100  # nothing prompt-sized in argv
-            assert sum(len(a) + 1 for a in cmd) < 32_767  # under the OS cap
-            assert cap["stdin"] is subprocess.PIPE
-            assert proc.stdin_text == long_prompt
-            assert proc.stdin_closed
-            if name == "Gemini CLI":
-                assert "-p" not in cmd  # -p <prompt> drops entirely
-        else:
-            assert cmd[-1] == long_prompt
-            assert cap["stdin"] is subprocess.DEVNULL
-            assert proc.stdin_text == ""
+        assert not any("question: " in arg for arg in cmd), name
+        assert max(len(a) for a in cmd) < 100  # nothing prompt-sized in argv
+        assert "--" not in cmd  # the separator went with the positional prompt
+        assert cap["stdin"] is subprocess.PIPE
+        assert proc.stdin_text == long_prompt
+        assert proc.stdin_closed
+        if name == "Gemini CLI":
+            assert "-p" not in cmd  # -p <prompt> drops entirely
+
+
+@pytest.mark.parametrize("name", ["Claude Code", "Gemini CLI", "Codex", "OpenCode"])
+@pytest.mark.parametrize("writing", [False, True])
+def test_command_builders_never_carry_the_prompt(name, writing):
+    # §8: no provider's command builder takes the prompt at all, so no argv
+    # element can ever hold it (web-enabled drafting and plain calls alike).
+    from autowright import harness
+
+    handler = harness.HANDLERS[name]({"harness": name, "model": "m"}, writing)
+    cmd = handler.command(writing)
+    assert "--" not in cmd
+    assert not any(PROMPT in arg for arg in cmd)
+    if name == "Gemini CLI":
+        assert "-p" not in cmd
 
 
 def test_web_flag_adds_gemini_yolo_and_leaves_opencode_unchanged(monkeypatch):
@@ -383,8 +383,6 @@ def test_web_flag_adds_gemini_yolo_and_leaves_opencode_unchanged(monkeypatch):
     i = web.index("--approval-mode")
     assert web[i + 1] == "yolo"
     assert [a for j, a in enumerate(web) if j not in (i, i + 1)] == bare
-    if not PIPES_PROMPT:
-        assert i < web.index("-p")  # the flags precede the prompt argv
 
 
 def test_detect_reports_all_four_with_sign_in_state(monkeypatch):
@@ -1015,16 +1013,13 @@ def test_invoke_aborts_a_child_that_floods_stdout(monkeypatch, tmp_path, home):
     assert ei.value.retryable is False
 
 
-def test_windows_prompt_is_piped_to_a_real_child(monkeypatch, tmp_path, home):
-    # §8 per-OS prompt delivery: on Windows the prompt never reaches argv: a
-    # writer thread pipes it to the child's stdin and closes the pipe at EOF.
-    # The fake CLI answers only after reading stdin, so a parsed reply is the
-    # proof that both halves happened.
-    from autowright import harness, paths
-    from autowright import platform as platmod
+def test_prompt_is_piped_to_a_real_child(monkeypatch, tmp_path, home):
+    # §8 stdin prompt delivery: the prompt never reaches argv: a writer thread
+    # pipes it to the child's stdin and closes the pipe at EOF. The fake CLI
+    # answers only after reading stdin, so a parsed reply is the proof that
+    # both halves happened.
+    from autowright import harness
 
-    platmod.current()  # cache the HOST platform: the §2 spawn policy is the host's
-    monkeypatch.setattr(paths, "current_os", lambda: "windows")
     real_popen = harness.subprocess.Popen
     captured = {}
 
@@ -1034,8 +1029,8 @@ def test_windows_prompt_is_piped_to_a_real_child(monkeypatch, tmp_path, home):
 
     monkeypatch.setattr(harness.subprocess, "Popen", spy_popen)
     assert harness.invoke({"harness": "Claude Code"}, PROMPT) == "Mock answer: nothing new."
-    assert PROMPT not in captured["cmd"], "Windows: the prompt must never reach argv (§8)"
-    assert "--" not in captured["cmd"], "the `--` separator goes with the positional prompt"
+    assert PROMPT not in captured["cmd"], "the prompt must never reach argv (§8)"
+    assert "--" not in captured["cmd"], "the `--` separator went with the positional prompt"
     assert "-p" in captured["cmd"]
 
 
@@ -1532,6 +1527,70 @@ def test_recombine_clips_stdout_blocks_the_agent_also_printed():
     out = harness._recombine(stdout, [("spec.md", "# fresh\n")])
     assert out == "Here is the plan.\n===FILE: spec.md===\n# fresh\n\n===END==="
     assert "# stale" not in out
+
+
+def test_scratch_watcher_fails_an_oversized_document_on_its_stat(monkeypatch, tmp_path):
+    # §8: the scratch watcher applies the 50 MB stdout cap to a response
+    # document, checked on the stat before any re-read — the oversized
+    # document is never read, no `file` event fires, the kill callback runs,
+    # and the error is the stdout cap's own.
+    from autowright import harness
+
+    (tmp_path / "spec.md").write_text("# small on disk\n", encoding="utf-8")
+    real_scandir = harness.os.scandir
+
+    class _HugeEntry:
+        def __init__(self, entry):
+            self._entry = entry
+            self.name = entry.name
+
+        def is_file(self, follow_symlinks=True):
+            return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+        def stat(self, follow_symlinks=True):
+            real = self._entry.stat(follow_symlinks=follow_symlinks)
+
+            class _Stat:
+                st_size = harness.STDOUT_CAP_CHARS + 1
+                st_mtime_ns = real.st_mtime_ns
+            return _Stat()
+
+    monkeypatch.setattr(harness.os, "scandir",
+                        lambda d: [_HugeEntry(e) for e in real_scandir(d)])
+    ev = _Events()
+    kills = []
+    watcher = harness._ScratchWatcher(tmp_path, ev.sink, "Codex",
+                                      on_overflow=lambda: kills.append(1))
+    monkeypatch.setattr(watcher, "_read",
+                        lambda name: pytest.fail("an oversized document was read"))
+    watcher._poll()
+    watcher._poll()
+    assert ev.files == []
+    assert kills == [1]  # killed once, not once per poll
+    assert isinstance(watcher.overflow, harness.HarnessError)
+    assert str(watcher.overflow) == "Codex produced over 50 MB of output — aborting"
+    assert watcher.overflow.retryable is False
+    with pytest.raises(harness.HarnessError, match="produced over 50 MB"):
+        watcher.documents()
+
+
+def test_oversized_scratch_document_fails_the_call(monkeypatch, tmp_path, home):
+    # §8: a document past the cap fails the whole call the way an oversized
+    # stdout does, and the scratch dir still goes.
+    from autowright import harness, paths
+
+    monkeypatch.setattr(harness, "STDOUT_CAP_CHARS", 10)
+    script = fake_cli(tmp_path,
+                       "open('spec.md', 'w', encoding='utf-8').write('# ' + 'x' * 100)\n"
+                       "print('done')\n",
+                       name="codex")
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    with pytest.raises(harness.HarnessError) as ei:
+        harness.invoke({"harness": "Codex"}, PROMPT, web=True)
+    assert str(ei.value).startswith("Codex produced over ")
+    assert str(ei.value).endswith(" MB of output — aborting")
+    assert ei.value.retryable is False
+    assert list(paths.harness_scratch("codex").iterdir()) == []
 
 
 # ---------- §8 file-writing delivery: the scratch dir's lifecycle ----------

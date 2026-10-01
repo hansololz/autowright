@@ -1701,22 +1701,22 @@ class _FakeResp:
 
 
 def test_fetch_archive_download_cap_and_redirect_guard(monkeypatch):
-    monkeypatch.setattr(transfer.urllib.request, "urlopen",
-                        lambda req, timeout: _FakeResp(b"DATA"))
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, timeout, refuse: _FakeResp(b"DATA"))
     data, resolved = transfer.fetch_archive("https://x/a.autowright")
     assert data == b"DATA" and resolved == "https://x/a.autowright"
 
     # the byte cap aborts mid-download
     monkeypatch.setattr(transfer, "MAX_ARCHIVE_BYTES", 4)
-    monkeypatch.setattr(transfer.urllib.request, "urlopen",
-                        lambda req, timeout: _FakeResp(b"toolarge"))
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, timeout, refuse: _FakeResp(b"toolarge"))
     with pytest.raises(transfer.TransferError, match="64 MB import limit"):
         transfer.fetch_archive("https://x/a.autowright")
 
-    # a redirect off https is refused even though the pasted URL was https
+    # the landing URL is re-checked as a belt behind the redirect handler
     monkeypatch.setattr(transfer, "MAX_ARCHIVE_BYTES", 64 * 1024 * 1024)
-    monkeypatch.setattr(transfer.urllib.request, "urlopen",
-                        lambda req, timeout: _FakeResp(b"D", url="http://x/a.autowright"))
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, timeout, refuse: _FakeResp(b"D", url="http://x/a.autowright"))
     with pytest.raises(transfer.TransferError, match="redirected off https"):
         transfer.fetch_archive("https://x/a.autowright")
 
@@ -1784,3 +1784,58 @@ def test_safe_filename_rules():
     assert transfer.safe_filename('  "quoted"  ') == "quoted"
     assert transfer.safe_filename("...") == "automation"
     assert transfer.safe_filename("漫画ウォッチャー") == "漫画ウォッチャー"
+
+
+def redirect_to(monkeypatch, location: str) -> list:
+    """A fake network below urllib's handlers (nothing leaves the machine):
+    every https request answers `302 Found` to `location`, and every plain
+    http request is recorded - it must never be opened. Answers that record."""
+    import email.message
+    import urllib.request
+    import urllib.response
+
+    opened_http: list = []
+
+    def https_open(self, req):
+        headers = email.message.Message()
+        headers["Location"] = location
+        response = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url,
+                                              code=302)
+        response.msg = "Found"
+        return response
+
+    def http_open(self, req):
+        opened_http.append(req.full_url)
+        raise AssertionError("a plaintext request was made")
+
+    monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", https_open)
+    monkeypatch.setattr(urllib.request.HTTPHandler, "http_open", http_open)
+    return opened_http
+
+
+def test_a_redirect_off_https_is_refused_before_it_is_followed(monkeypatch):
+    """§5.2/§22.1: the redirect handler rejects a hop to http:// - a 302 to a
+    plaintext or LAN address never makes the second request at all."""
+    opened_http = redirect_to(monkeypatch, "http://192.168.1.1/a.autowright")
+    with pytest.raises(transfer.TransferError, match="redirected off https"):
+        transfer.fetch_archive("https://x.test/a.autowright")
+    assert opened_http == []
+
+
+def test_the_archive_viewer_serves_at_most_the_total_text_cap(monkeypatch):
+    """§22.1/§22.4: at most 16 MB of text in total per archive - the members
+    past the running total are named with `text` null, like a non-UTF-8 one."""
+    assert transfer.ARCHIVE_TEXT_TOTAL_CAP == 16 * 1024 * 1024
+    monkeypatch.setattr(transfer, "ARCHIVE_TEXT_TOTAL_CAP", 10)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.txt", b"1234")     # 4 served
+        z.writestr("b.bin", b"\xff\xfe")  # not text, counts nothing
+        z.writestr("c.txt", b"5678")     # 8 served
+        z.writestr("d.txt", b"9012")     # 12 would cross the cap
+        z.writestr("e.txt", b"34")       # 10 - still fits after d was skipped
+        z.writestr("f.txt", b"5")        # 11 would cross the cap
+    files = transfer.list_archive_text(buf.getvalue())
+    assert [(f["path"], f["text"]) for f in files] == [
+        ("a.txt", "1234"), ("b.bin", None), ("c.txt", "5678"), ("d.txt", None),
+        ("e.txt", "34"), ("f.txt", None)]

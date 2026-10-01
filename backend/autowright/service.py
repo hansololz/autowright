@@ -15,6 +15,7 @@ registration.
 """
 from __future__ import annotations
 
+import functools
 import os
 import plistlib
 import subprocess
@@ -101,7 +102,14 @@ def _remove_shim() -> str | None:
 
 
 LAUNCHCTL_TIMEOUT_S = 30
+# §3: one wall-clock budget per command, shared by every launchctl call the
+# command makes — under the Electron ensure-backend step's own 120 s wait, so
+# a launchctl that answers every call just under its 30 s timeout can't
+# stretch one verb past the caller. Each call gets min(30 s, what's left).
+COMMAND_BUDGET_S = 100.0
 _TIMED_OUT = "launchctl timed out"
+# The running command's deadline (monotonic) — None outside a command.
+_command_deadline: float | None = None
 # The §3 registration polls are bounded by wall-clock deadlines, never a poll
 # count: a slow `launchctl print` must not stretch one verb into minutes.
 _UNLOAD_DEADLINE_S = 10.0
@@ -120,11 +128,39 @@ class _TimedOut:
     stderr = _TIMED_OUT
 
 
+def _budgeted(fn):
+    """Run a §3 command under one shared launchctl budget. A command called
+    from another (none today) keeps the outer command's deadline."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        global _command_deadline
+        outer = _command_deadline
+        if outer is None:
+            _command_deadline = time.monotonic() + COMMAND_BUDGET_S
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _command_deadline = outer
+    return run
+
+
+def _budget_exhausted() -> bool:
+    return _command_deadline is not None and time.monotonic() >= _command_deadline
+
+
 def _launchctl(*args: str) -> subprocess.CompletedProcess | _TimedOut:
-    """Every `launchctl` call goes through here: captured, text, time-boxed."""
+    """Every `launchctl` call goes through here: captured, text, time-boxed —
+    by the per-call timeout and the command's shared budget, whichever ends
+    first. An exhausted budget answers the plain timed-out result at once."""
+    timeout: float = LAUNCHCTL_TIMEOUT_S
+    if _command_deadline is not None:
+        remaining = _command_deadline - time.monotonic()
+        if remaining <= 0:
+            return _TimedOut()
+        timeout = min(timeout, remaining)
     try:
         return subprocess.run(["launchctl", *args], capture_output=True,
-                              text=True, timeout=LAUNCHCTL_TIMEOUT_S)
+                              text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return _TimedOut()
 
@@ -146,7 +182,7 @@ def _unload(p: Path) -> None:
     while True:
         if not _registered():
             return
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline or _budget_exhausted():
             return
         time.sleep(_POLL_INTERVAL_S)
 
@@ -169,6 +205,7 @@ def _load(p: Path) -> str | None:
     return None
 
 
+@_budgeted
 def install() -> str:
     plist = {
         "Label": LABEL,
@@ -190,6 +227,7 @@ def install() -> str:
     return f"installed and started ({p}) · {_heal_shim()}"
 
 
+@_budgeted
 def uninstall() -> str:
     p = plist_path()
     _unload(p)
@@ -202,6 +240,7 @@ def uninstall() -> str:
     return f"{out} · {shim_note}" if shim_note else out
 
 
+@_budgeted
 def status() -> str:
     r = _launchctl("list")
     for line in r.stdout.splitlines():
@@ -235,6 +274,7 @@ def _sweep_strays() -> int:
     return platform.current().processes.kill_matching(paths.sweep_markers())
 
 
+@_budgeted
 def stop() -> str:
     """§3 quit-entirely backend half: unload the job and sweep stray
     processes, keep plist and shim."""
@@ -259,7 +299,7 @@ def stop() -> str:
         while True:
             if not _registered():
                 break
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= deadline or _budget_exhausted():
                 break
             time.sleep(_POLL_INTERVAL_S)
     if _registered():
@@ -268,6 +308,7 @@ def stop() -> str:
     return f"stopped — returns at next login or app launch{note}"
 
 
+@_budgeted
 def restart() -> str:
     p = plist_path()
     if not p.exists():

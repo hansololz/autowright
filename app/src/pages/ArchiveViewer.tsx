@@ -137,7 +137,9 @@ export default function ArchiveViewer({ source, entry, onClose }: {
   const file = list[viewed]
   // §22.3: fixed for the life of the open viewer — the floor while the fetch is
   // in flight and after a failed one.
-  const frame = files ? archiveModalFrame(files) : '440px'
+  // Memoized on the fetched list: the frame walks every file's text, and a
+  // navigator flip re-renders the viewer with the same files.
+  const frame = useMemo(() => (files ? archiveModalFrame(files) : '440px'), [files])
   const onNav = (i: number) => setViewed(Math.max(0, Math.min(list.length - 1, i)))
 
   return (

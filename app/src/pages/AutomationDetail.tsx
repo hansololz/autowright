@@ -8,7 +8,7 @@ import type { Automation, Execution } from '../types'
 import {
   BackLink, Badge, BtnGhost, BtnPrimary, Caret, Collapse, ConfirmModal, EmptyNotice, executingToast,
   Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, MenuItemRow, MenuRow, MetaChip, MiniBadge, Modal, Notice,
-  PageTitle, PopMenu, ScrollArea, Toggle, nextIn, usePopover,
+  PageTitle, PopMenu, ScrollArea, Spinner, Toggle, nextIn, usePopover,
 } from '../ui'
 import { StepList } from '../steps'
 import { VersionDiffModal } from '../versiondiff'
@@ -51,6 +51,10 @@ export default function AutomationDetail() {
   const [execAsk, setExecAsk] = useState<'parallel' | 'queue' | 'full' | null>(null)
   const [exportAsk, setExportAsk] = useState(false)
   const [exportValues, setExportValues] = useState(true)
+  // §9 busy rule: Execute now and Export disable and show busy feedback while
+  // their request is in flight — a double-click never fires twice.
+  const [starting, setStarting] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [specOpen, setSpecOpen] = useState(true)
   const [, setTick] = useState(0)
 
@@ -161,10 +165,12 @@ export default function AutomationDetail() {
     : noNext ? `No upcoming occurrence — ${copy.manualStillWorks}`
     : `Next execution in ${countdown}${nextShort ? ` (${nextShort})` : ''} · executes even when the app is closed.`
   const trigChipOn = executing || (!allOff && !noTrigs)
-  const execLabel = executing ? 'Executing…' : 'Execute now'
+  const execLabel = starting ? 'Starting…' : executing ? 'Executing…' : 'Execute now'
   const execIconCls = executing ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-play'
 
   const runExecute = (queue = false) => {
+    if (starting) return
+    setStarting(true)
     void (async () => {
       try {
         const r = await api.executeNow(auto.id, undefined, 'manual', queue)
@@ -177,12 +183,15 @@ export default function AutomationDetail() {
         // detail verbatim, since the busy copy would promise the wrong thing.
         const er = err as Error & { status?: number; reason?: string }
         showToast(er.status === 409 && er.reason === 'capacity' ? busyToast : er.message)
+      } finally {
+        setStarting(false)
       }
     })()
   }
   // §9.2 capacity popup: anything live never fires blind — the click opens the
   // modal whose case is decided by the store's state right now.
   const doExecute = () => {
+    if (starting) return
     if (executing) {
       setExecAsk(!atCapacity ? 'parallel' : waiting < auto.maxQueued ? 'queue' : 'full')
       return
@@ -239,8 +248,10 @@ export default function AutomationDetail() {
           <button className="ad-btn-ghost" onClick={() => setSurface('create', 'edit')}>
             Edit
           </button>
-          <BtnPrimary onClick={() => doExecute()}>
-            <i className={execIconCls} style={{ fontSize: 9 }} /> {execLabel}
+          <BtnPrimary onClick={() => doExecute()} disabled={starting}>
+            {starting
+              ? <Spinner size={9} color="currentColor" style={{ verticalAlign: '-1px' }} />
+              : <i className={execIconCls} style={{ fontSize: 9 }} />} {execLabel}
           </BtnPrimary>
           <div ref={actRef} style={{ position: 'relative' }}>
             <button
@@ -443,7 +454,9 @@ export default function AutomationDetail() {
       )}
 
       {/* triggers */}
-      <TriggersCard auto={auto} statusText={trigStatusText} />
+      {/* keyed by automation: detail → detail keeps this page mounted, and an
+          open trigger editor must not carry over to the next automation */}
+      <TriggersCard key={auto.id} auto={auto} statusText={trigStatusText} />
 
       {/* parameters */}
       {params.length > 0 && (
@@ -535,13 +548,19 @@ export default function AutomationDetail() {
           {(close) => {
             // §5.1/§9.2: fetch the archive, then hand it to the native save dialog.
             const doExport = async () => {
+              if (exporting) return
+              setExporting(true)
               try {
                 const data = await api.exportAutomation(auto.id, exportValues)
                 close()
                 const safe = auto.name.replace(/[/\\:*?"<>|]+/g, ' ').trim() || 'automation'
                 const path = await window.autowright?.saveFile(`${safe}.autowright`, data)
                 if (path) showToast(`Exported to ${path}.`)
-              } catch (e) { showToast((e as Error).message) }
+              } catch (e) {
+                showToast((e as Error).message)
+              } finally {
+                setExporting(false)
+              }
             }
             return (
               <>
@@ -566,7 +585,10 @@ export default function AutomationDetail() {
                     Secret values and memory are never included in the file
                   </span>
                   <BtnGhost onClick={close}>Cancel</BtnGhost>
-                  <BtnPrimary onClick={() => { void doExport() }}>Export</BtnPrimary>
+                  <BtnPrimary onClick={() => { void doExport() }} disabled={exporting}>
+                    {exporting && <Spinner size={10} color="currentColor" style={{ marginRight: 5, verticalAlign: '-1px' }} />}
+                    {exporting ? 'Exporting…' : 'Export'}
+                  </BtnPrimary>
                 </div>
               </>
             )

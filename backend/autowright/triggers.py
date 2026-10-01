@@ -98,9 +98,22 @@ def interval_display(every: str) -> tuple[str, str]:
 def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime) -> datetime:
     """§4.3 interval semantics: the later of the trigger's enable stamp and
     the automation's run baseline; `fallback` (the request moment) when the
-    caller has neither — the §19 preview, which anchors at now."""
-    cands = [x for x in (enabled_since(t), run_baseline) if x is not None]
-    return max(cands) if cands else fallback
+    caller has neither — the §19 preview, which anchors at now. Compared as
+    aware UTC instants: the stamp is read exactly, and a caller may pass an
+    aware baseline (the §6 scheduler) or a local naive one."""
+    cands = [x.astimezone(UTC) for x in (enabled_instant(t), run_baseline) if x is not None]
+    return max(cands) if cands else fallback.astimezone(UTC)
+
+
+def local_instant(naive: datetime, not_after: datetime) -> datetime:
+    """A local naive time of the past as the aware UTC instant it was. A
+    reading inside a DST fall-back fold is ambiguous; the latest reading at
+    or before `not_after` (the aware current instant) wins — a baseline can
+    never lie in the future — else the earliest (§4.3: interval math runs on
+    instants)."""
+    readings = sorted({naive.replace(fold=f).astimezone(UTC) for f in (0, 1)})
+    past = [r for r in readings if r <= not_after]
+    return past[-1] if past else readings[0]
 
 
 def interval_instant(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
@@ -501,6 +514,18 @@ def stamp_enabled(new: list[dict], old: list[dict] | None = None,
             t[ENABLED_AT] = was[ENABLED_AT]
         out.append(t)
     return out
+
+
+def enabled_instant(t: dict) -> datetime | None:
+    """§4.3 `enabledAt` as the aware instant it was stamped at (no fold
+    ambiguity). None exactly when `enabled_since` is None."""
+    raw = t.get(ENABLED_AT)
+    if not isinstance(raw, str):
+        return None
+    try:
+        return timefmt.parse_local(raw)
+    except ValueError:
+        return None
 
 
 def enabled_since(t: dict) -> datetime | None:

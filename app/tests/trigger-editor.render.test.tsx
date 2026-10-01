@@ -37,6 +37,8 @@ vi.mock('../src/api', () => ({
 let storeMod: typeof import('../src/store')
 let TriggerEditor: typeof import('../src/pages/detail/TriggerEditor').TriggerEditor
 let kindIcon: typeof import('../src/pages/detail/TriggerEditor').kindIcon
+let TriggersCard: typeof import('../src/pages/detail/TriggersCard').TriggersCard
+let Modal: typeof import('../src/ui').Modal
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -47,6 +49,8 @@ beforeAll(async () => {
   const editorMod = await import('../src/pages/detail/TriggerEditor')
   TriggerEditor = editorMod.TriggerEditor
   kindIcon = editorMod.kindIcon
+  TriggersCard = (await import('../src/pages/detail/TriggersCard')).TriggersCard
+  Modal = (await import('../src/ui')).Modal
 })
 
 describe('§9.2 kind icon', () => {
@@ -183,6 +187,23 @@ describe('§9.2 timezone picker', () => {
     })
   })
 
+  it('Escape closes the open picker and not the modal behind it (§14)', async () => {
+    const onClose = vi.fn()
+    render(<Modal onClose={onClose} width={480}>{() => editor()}</Modal>)
+    fireEvent.change(
+      screen.getByPlaceholderText(/^0 8 \* \* \*/), { target: { value: '0 8 * * *' } })
+    fireEvent.click(screen.getByTitle("Timezone the trigger's times read in"))
+    const filter = screen.getByPlaceholderText('Filter timezones…')
+    fireEvent.keyDown(filter, { key: 'Escape' })
+    expect(screen.queryByPlaceholderText('Filter timezones…')).toBeNull()
+    // the modal's 200 ms exit fallback would have fired by now had it closed
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    expect(onClose).not.toHaveBeenCalled()
+    // with the menu closed, the next Escape reaches the modal
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+  })
+
   it('a filter matching nothing says so', () => {
     cronEditor()
     fireEvent.change(screen.getByPlaceholderText('Filter timezones…'), { target: { value: 'zzz' } })
@@ -281,5 +302,72 @@ describe('§9.2 interval trigger', () => {
     render(editor(stored('P1D')))
     expect(amountInput().value).toBe('1')
     expect(unitPill().textContent).toContain('days')
+  })
+})
+
+// §9.2: a verdict belongs to the entry it was fetched for — while the fields
+// differ from it (inside the preview debounce), Add waits for the fresh one.
+describe('§9.2 stale preview verdict', () => {
+  it('a keystroke holds Add until the preview for the new entry lands', async () => {
+    render(editor())
+    fireEvent.click(screen.getByText('Interval'))
+    await waitFor(() => expect(saveButton('Add').disabled).toBe(false))
+    fireEvent.change(screen.getByLabelText('interval amount'), { target: { value: '6' } })
+    // the PT1H verdict is still held, but it answers the old entry
+    expect(saveButton('Add').disabled).toBe(true)
+    await waitFor(() => expect(saveButton('Add').disabled).toBe(false))
+    fireEvent.click(saveButton('Add'))
+    expect(onSave).toHaveBeenCalledWith({ kind: 'interval', every: 'PT6H', source: 'user' })
+  })
+})
+
+// §9.2 TRIGGERS card: an editor closes only once the whole-list PATCH landed —
+// a rejected save (a 422) keeps the editor open with what was typed.
+describe('§9.2 TRIGGERS card save', () => {
+  const cardAuto = (triggers: Trigger[] = []) => ({
+    id: 'a1', name: 'Job', description: '', version: 1, triggers, triggerChip: '',
+    allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
+    live: [], maxParallel: 1, maxQueued: 10, resultChip: null, resultStatus: null,
+    lastExecutionLabel: '', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
+    unresolvedReferences: {}, snapshotSettings: { preVersion: true, preClear: true, preRestore: true }, specMeta: '',
+  }) as unknown as import('../src/types').Automation
+  const cron: Trigger = {
+    id: 't1', kind: 'cron', expression: '0 9 * * *', source: 'user', enabled: true,
+    label: 'Every day at 9:00', short: 'daily 9:00',
+  } as Trigger
+  const cronInput = () =>
+    screen.getByPlaceholderText(/minute hour day month weekday/) as HTMLInputElement
+  const reject422 = () => vi.mocked(api.patchAutomation).mockRejectedValueOnce(
+    Object.assign(new Error('the cron expression is not valid'), { status: 422 }))
+
+  it('a rejected edit keeps the editor open with the typed expression and toasts why', async () => {
+    reject422()
+    render(<TriggersCard auto={cardAuto([cron])} statusText="" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit trigger' }))
+    fireEvent.change(cronInput(), { target: { value: '*/5 * * * *' } })
+    await waitFor(() => expect(saveButton('Save').disabled).toBe(false))
+    fireEvent.click(saveButton('Save'))
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('the cron expression is not valid'))
+    expect(cronInput().value).toBe('*/5 * * * *')
+  })
+
+  it('a saved edit closes the editor', async () => {
+    vi.mocked(api.patchAutomation).mockResolvedValueOnce(cardAuto([cron]) as never)
+    render(<TriggersCard auto={cardAuto([cron])} statusText="" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit trigger' }))
+    await waitFor(() => expect(saveButton('Save').disabled).toBe(false))
+    fireEvent.click(saveButton('Save'))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).toBeNull())
+  })
+
+  it('a rejected add keeps the add form open with what was typed', async () => {
+    reject422()
+    render(<TriggersCard auto={cardAuto()} statusText="" />)
+    fireEvent.click(screen.getByText('Add trigger'))
+    fireEvent.change(cronInput(), { target: { value: '0 7 * * 1' } })
+    await waitFor(() => expect(saveButton('Add').disabled).toBe(false))
+    fireEvent.click(saveButton('Add'))
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('the cron expression is not valid'))
+    expect(cronInput().value).toBe('0 7 * * 1')
   })
 })

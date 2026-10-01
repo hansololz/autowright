@@ -39,8 +39,8 @@ note: Drafted by the mock agent
 params:
   - { name: notify_only_on_changes, kind: toggle, label: Notify only on changes, help: Skip the notification when nothing is new., default: true }
 steps:
-  - { file: 01-check.py, name: Check for changes, desc: Looks for anything new since the last run. }
-  - { file: 02-report.py, name: Build the result, desc: Summarizes what it found. }
+  - { file: 01-check.py, name: Check for changes, description: Looks for anything new since the last run. }
+  - { file: 02-report.py, name: Build the result, description: Summarizes what it found. }
 ===FILE: 01-check.py===
 from autowright import log, memory
 

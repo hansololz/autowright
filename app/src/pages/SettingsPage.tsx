@@ -177,7 +177,21 @@ export default function SettingsPage() {
     let n = parseInt(days, 10)
     if (!Number.isFinite(n) || n < 1) n = 90
     setDays(String(n))
-    if (n !== settings.days) patch({ days: n })
+    // A rejected PATCH puts the stored value back — the field must never keep
+    // showing a number the backend refused (the settings effect only re-runs
+    // when the stored value moves, which a refusal never does).
+    if (n !== settings.days) {
+      const stored = settings.days
+      api.patchSettings({ days: n }).catch((e: Error) => {
+        showToast(e.message)
+        setDays(String(stored))
+      })
+    }
+  }
+  // §9: a user action never fails silently — the bridge can refuse a reveal.
+  const reveal = (path: string) => {
+    void window.autowright?.revealPath(path)
+      .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
   }
 
   // Native folder picker; the chosen directory simply becomes the
@@ -314,7 +328,7 @@ export default function SettingsPage() {
                 // §19 always serializes appPath; no hardcoded per-OS path may
                 // stand in for it (§9 per-OS copy rule) — absent, the reveal
                 // is a no-op and the box shows nothing.
-                onClick={() => { if (settings.appPath) void window.autowright?.revealPath(settings.appPath) }}
+                onClick={() => { if (settings.appPath) reveal(settings.appPath) }}
                 style={{ flex: 'none' }}
               >
                 {copy.reveal}
@@ -335,7 +349,7 @@ export default function SettingsPage() {
                 <button className="ad-btn-soft" onClick={() => { void changeDataPath() }}>Change</button>
                 <button
                   className="ad-btn-soft"
-                  onClick={() => { void window.autowright?.revealPath(settings.dataPath) }}
+                  onClick={() => reveal(settings.dataPath)}
                 >
                   {copy.reveal}
                 </button>

@@ -215,6 +215,14 @@ export const LOG_TAIL = 2000
 // this is what makes it one and not a loop.
 const executionRefetched = new Set<string>()
 
+// §19 log snapshots: `<executionId>/<bucket key>` for buckets whose fetch is on
+// the wire, and for buckets a fetched snapshot has landed in. A bucket in
+// neither holds only streamed lines — its first fetch failed — so a streamed
+// line that leaves its head past sequence 1 is a gap like any other: the lines
+// before it were never fetched, and one real fetch fills them in (§7).
+const logFetching = new Set<string>()
+const logFetched = new Set<string>()
+
 // §19 log gaps: `<executionId>/<bucket key>` for buckets whose one gap refetch
 // has already been asked for. Log sequences are gapless from 1 (§5), so a
 // streamed line past `last + 1` means the socket dropped what sits between —
@@ -232,6 +240,24 @@ const executionStepFetching = new Set<string>()
 // per event. The flag clears when the refresh settles, so the next burst gets
 // its own.
 let refreshPending = false
+
+// §19 full records: ids this client fetched through GET /automations/{id}
+// (loadAuto) — the detail page and the editor. Tracked here, never inferred
+// from a row's fields: /state rows carry the full fields too. A delete drops
+// the id.
+const fullLoaded = new Set<string>()
+
+// §19 per-id ordering: the newest GET /automations/{id} issued for an id wins —
+// an older response resolving later (a finish refetch slowed by the memory
+// walk, overtaken by a PATCH's refetch) is dropped rather than regressing
+// paramValues, triggers, or versions.
+const loadAutoSequence = new Map<string, number>()
+
+// §19 boot generation: bumped by every boot and by disconnect. A boot that is
+// superseded while awaiting (the StrictMode unmount/remount, a teardown) bails
+// before it opens a socket — the stacked socket's open would otherwise count
+// as a reconnect at boot.
+let bootGeneration = 0
 function coalescedRefresh(refresh: () => Promise<void>) {
   if (refreshPending) return
   refreshPending = true
@@ -326,15 +352,19 @@ export const useStore = create<Model>((set, get) => ({
     // One retry chain only: a re-entrant boot (StrictMode re-mount) must not
     // leave a second timer chain hammering discovery in parallel.
     clearTimeout(bootTimer)
+    const generation = ++bootGeneration
+    const superseded = () => generation !== bootGeneration
     // A rejected bridge call is just "not connected yet" — swallowing it here
     // is what arms the retry; an escaping rejection would leave boot() dead
     // with `connected` false and no timer to fix it.
     const ok = await connectInfo().catch(() => false)
+    if (superseded()) return
     if (!ok) { set({ connected: false }); bootTimer = setTimeout(() => get().boot(), 1200); return }
     // §9 gating: the flags must be known before the app shell mounts, so this
     // read is awaited on the same cycle that just re-read backend.json —
     // `connected` only flips true below.
     await get().readHealth()
+    if (superseded()) return
     try {
       // Boot's snapshot rides the same ordering guard as refresh() — a WS
       // reconnect during boot must not let the older of the two /state
@@ -343,6 +373,9 @@ export const useStore = create<Model>((set, get) => ({
       // snapshot fields yield to the newer refresh.
       const n = ++refreshSeq
       const s: StateSnapshot = await api.state()
+      // A newer boot (or a disconnect) took over while /state was on the wire
+      // — it owns the socket and the retry chain; this one does nothing more.
+      if (superseded()) return
       // Existing automations do NOT bypass onboarding: step 1 always shows; with
       // prior data its Continue goes straight to the app (§10).
       const onboarded = localStorage.getItem('ad-onboarded') === '1'
@@ -380,12 +413,16 @@ export const useStore = create<Model>((set, get) => ({
       }).catch(() => {}) // the main process may answer late or not at all — never an unhandled rejection
       updateTrayAlert(s.automations)
     } catch {
+      if (superseded()) return
       set({ connected: false })
       bootTimer = setTimeout(() => get().boot(), 1200)
     }
   },
 
   disconnect() {
+    // A boot still awaiting is superseded — it must not open a socket after
+    // the teardown.
+    bootGeneration++
     clearTimeout(bootTimer)
     closeWs?.()
     closeWs = null
@@ -439,7 +476,10 @@ export const useStore = create<Model>((set, get) => ({
       const staleIds = new Set(
         Object.values(m.executionFull).filter((e) => e.status === 'executing').map((e) => e.id),
       )
-      if (m.executionId && m.executionFull[m.executionId]) staleIds.add(m.executionId)
+      // The viewed execution is refetched whether or not its body landed: a
+      // page whose first GET failed holds the header alone, and this open is
+      // what brings the body (§7).
+      if (m.executionId && (m.executionFull[m.executionId] || m.page === 'execution')) staleIds.add(m.executionId)
       for (const id of staleIds) {
         void m.loadExecution(id)
         for (const key of Object.keys(m.execLogs[id] ?? {})) {
@@ -459,6 +499,7 @@ export const useStore = create<Model>((set, get) => ({
       const cur = get().automations
       if (row === null) {
         eventSeq++ // an in-flight /state snapshot is stale from here on
+        fullLoaded.delete(id)
         // §19: the delete form also stamps `automationDeleted` on every held
         // execution row for that id — exactly what a fresh /state would
         // serialize, so Retry / Execute again never stay offered on orphans.
@@ -477,7 +518,10 @@ export const useStore = create<Model>((set, get) => ({
             : {}),
         })
       }
-      else if (cur.some((a) => a.id === id)) set({ automations: cur.map((a) => (a.id === id ? { ...a, ...row } : a)) })
+      else if (cur.some((a) => a.id === id)) {
+        eventSeq++ // an in-flight /state snapshot is stale from here on
+        set({ automations: cur.map((a) => (a.id === id ? { ...a, ...row } : a)) })
+      }
       else coalescedRefresh(m.refresh)
       updateTrayAlert(get().automations)
     }
@@ -517,10 +561,11 @@ export const useStore = create<Model>((set, get) => ({
         if (full) void m.loadExecution(ej.id)
         // §19: full-only fields (latest/memory/snapshots/versions) never ride
         // events — refetch the full record so an open detail page's LATEST
-        // RESULT card shows this run. Only when the full record was ever
-        // fetched; never for tests (draft-scoped, they don't touch `latest`).
-        const row = ej.automationId ? get().automations.find((a) => a.id === ej.automationId) : undefined
-        if (!ej.test && row && 'latest' in row) void m.loadAuto(row.id)
+        // RESULT card shows this run. Only when this client fetched the full
+        // record (the tracked set, never the row's fields); never for tests
+        // (draft-scoped, they don't touch `latest`).
+        if (!ej.test && ej.automationId && fullLoaded.has(ej.automationId)
+          && get().automations.some((a) => a.id === ej.automationId)) void m.loadAuto(ej.automationId)
         // §7: the finished execution gets a summary toast (prototype pattern:
         // "<name> finished — <chip>."). Cancelled executions are user-initiated —
         // no toast; §11 tests report in the Test card instead.
@@ -614,7 +659,11 @@ export const useStore = create<Model>((set, get) => ({
           // the socket dropped lines — refetch the bucket once to fill them in
           // (an empty bucket is the in-flight first fetch, which brings them).
           const gapKey = `${executionId}/${key}`
-          if (last > 0 && line.sequence > last + 1 && !logGapRefetched.has(gapKey)) {
+          // A bucket whose snapshot never landed (the first fetch failed)
+          // holds streamed lines only — a head past line 1 is the same gap.
+          if (!logFetching.has(gapKey) && !logFetched.has(gapKey) && next[0].sequence > 1) {
+            void get().loadExecLogs(executionId, msg.stepIndex ?? undefined, msg.attempt ?? undefined)
+          } else if (last > 0 && line.sequence > last + 1 && !logGapRefetched.has(gapKey)) {
             // Bounded, like the body refetch set: clearing merely re-arms one
             // benign refetch per bucket.
             if (logGapRefetched.size > 1000) logGapRefetched.clear()
@@ -650,9 +699,9 @@ export const useStore = create<Model>((set, get) => ({
         // followed by one GET — steps/spec/params/versions/memory never ride the
         // event, so a change made elsewhere (the CLI, a second window) would
         // otherwise leave an open detail page showing the old body.
-        const held = msg.automation !== null && get().automations.find((a) => a.id === id)
+        const held = msg.automation !== null && get().automations.some((a) => a.id === id)
         patchAutomation(id, msg.automation)
-        if (held && 'latest' in held) void m.loadAuto(id)
+        if (held && fullLoaded.has(id)) void m.loadAuto(id)
       } else {
         coalescedRefresh(m.refresh)
       }
@@ -661,6 +710,7 @@ export const useStore = create<Model>((set, get) => ({
     if (ev === 'draftjob.changed') {
       // §19 background continuation: cancelled/consumed remove the row,
       // everything else upserts it (a held outcome stays listed until consumed).
+      eventSeq++ // an in-flight /state snapshot is stale from here on
       const others = m.draftJobs.filter((j) => j.jobId !== msg.jobId)
       set({
         draftJobs: msg.status === 'cancelled' || msg.status === 'consumed'
@@ -776,6 +826,8 @@ export const useStore = create<Model>((set, get) => ({
 
   async loadExecLogs(executionId, step, attempt) {
     const key = logKey(step ?? null, attempt ?? null)
+    const fetchKey = `${executionId}/${key}`
+    logFetching.add(fetchKey)
     // Open the bucket before the fetch: the exec.log handler drops lines with
     // no bucket, so a line streamed while the snapshot request is in flight —
     // and written after the backend read the snapshot — would vanish for good.
@@ -801,12 +853,28 @@ export const useStore = create<Model>((set, get) => ({
           [executionId]: { ...buckets, [key]: merged.length > LOG_TAIL ? merged.slice(-LOG_TAIL) : merged },
         },
       })
-    } catch { /* deleted */ }
+      // Bounded, like the other per-bucket sets: clearing merely re-arms one
+      // benign refetch for a bucket whose head sits past line 1.
+      if (logFetched.size > 1000) logFetched.clear()
+      logFetched.add(fetchKey)
+    } catch {
+      // Deleted, or the backend did not answer. The bucket stays open and
+      // unmarked: the next streamed line past sequence 1 (or the next
+      // selection) asks again, instead of the view holding a headless log.
+      logFetched.delete(fetchKey)
+    } finally {
+      logFetching.delete(fetchKey)
+    }
   },
 
   async loadAuto(automationId, opts) {
+    const sequence = (loadAutoSequence.get(automationId) ?? 0) + 1
+    loadAutoSequence.set(automationId, sequence)
     try {
       const a = await api.getAutomation(automationId)
+      // §19 per-id ordering: a newer GET for this id was issued while this one
+      // was on the wire — its answer is the fresher one.
+      if (loadAutoSequence.get(automationId) !== sequence) return
       const automations = get().automations
       const held = automations.some((x) => x.id === automationId)
       // Update-only by default: a refresh that lands after the row was removed
@@ -814,6 +882,7 @@ export const useStore = create<Model>((set, get) => ({
       // back. Only the creator — which knows the row is new — asks for the
       // insert, and it is the one caller the list ordering can't come from.
       if (!held && !opts?.insert) return
+      fullLoaded.add(automationId)
       set({
         automations: held
           ? automations.map((x) => (x.id === automationId ? a : x))

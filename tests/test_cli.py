@@ -3043,42 +3043,49 @@ def test_cmd_marketplace_refresh_one_without_a_location_exits_before_asking(caps
 
 
 def test_cmd_marketplace_refresh_all_reports_each_and_exits_1_on_a_failure(capsys):
-    """§22.5: refresh-all never stops at the first bad source - every source
-    prints its own line, and the exit code says one of them failed."""
-    c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
-        {"id": "m1111111-a", "name": "Community automations", "error": None,
-         "location": "https://example.com/marketplace.yaml", "entries": [{"index": 0}]},
-        {"id": "m2222222-b", "name": "Mine", "error": "the file couldn't be read",
-         "location": "https://example.com/mine.yaml", "entries": []}]}})
+    """§22.5: refresh-all walks the table itself, in table order, one row at a
+    time through the single-row route (660 s each) - it never stops at the
+    first bad source, every source prints its own line, and the exit code
+    says one of them failed."""
+    c = _MarketClient(SOURCES, writes={
+        "/marketplace/sources/m1111111-a/refresh": {
+            "id": "m1111111-a", "name": "Community automations", "error": None,
+            "location": "https://example.com/marketplace.yaml", "entries": [{"index": 0}]},
+        "/marketplace/sources/m2222222-b/refresh": {
+            "id": "m2222222-b", "name": "Mine", "error": "the file couldn't be read",
+            "location": "/Users/x/shared/marketplace.yaml", "entries": []}})
     with pytest.raises(SystemExit) as ei:
         _run(c, "marketplace", "refresh")
     assert ei.value.code == 1
-    assert c.calls == [("POST", "/marketplace/refresh", None)]
+    assert c.calls == [("POST", "/marketplace/sources/m1111111-a/refresh", None),
+                       ("POST", "/marketplace/sources/m2222222-b/refresh", None)]
+    assert [t for _, _, t in c.timeouts] == [660, 660]
     out = capsys.readouterr().out
-    assert "refreshed Community automations - 1 automation(s)" in out
-    assert "couldn't refresh Mine: the file couldn't be read" in out
+    assert out.splitlines() == ["refreshed Community automations - 1 automation(s)",
+                                "couldn't refresh Mine: the file couldn't be read"]
 
 
 def test_cmd_marketplace_refresh_all_succeeds_quietly(capsys):
-    c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
-        {"id": "m1111111-a", "name": "Community automations", "error": None,
-         "location": "https://example.com/marketplace.yaml", "entries": []}]}})
+    c = _MarketClient(SOURCES[:1], writes={"/marketplace/sources/m1111111-a/refresh": {
+        "id": "m1111111-a", "name": "Community automations", "error": None,
+        "location": "https://example.com/marketplace.yaml", "entries": []}})
     _run(c, "marketplace", "refresh")  # no SystemExit
     assert "refreshed Community automations - 0 automation(s)" in capsys.readouterr().out
 
 
 def test_cmd_marketplace_refresh_all_skips_a_source_without_a_location(capsys):
-    """§22.5: refresh-all skips a catalog with no location and says so - a skip
-    is not a failure, so the exit code stays 0."""
-    c = _MarketClient(SOURCES, writes={"/marketplace/refresh": {"sources": [
-        {"id": "m1111111-a", "name": "Community automations", "error": None,
-         "location": "https://example.com/marketplace.yaml", "entries": [{"index": 0}]},
-        {"id": "m3333333-c", "name": "Kept", "error": None, "location": None,
-         "entries": []}]}})
+    """§22.5: refresh-all skips a catalog with no location and says so - it
+    never asks the backend to refresh it, and a skip is not a failure, so the
+    exit code stays 0."""
+    c = _MarketClient([SOURCES[0], KEPT_SOURCE], writes={
+        "/marketplace/sources/m1111111-a/refresh": {
+            "id": "m1111111-a", "name": "Community automations", "error": None,
+            "location": "https://example.com/marketplace.yaml", "entries": [{"index": 0}]}})
     _run(c, "marketplace", "refresh")  # no SystemExit
+    assert c.calls == [("POST", "/marketplace/sources/m1111111-a/refresh", None)]
     out = capsys.readouterr().out
-    assert "refreshed Community automations - 1 automation(s)" in out
-    assert "skipped Kept - no location to refresh from" in out
+    assert out.splitlines() == ["refreshed Community automations - 1 automation(s)",
+                                "skipped Kept - no location to refresh from"]
 
 
 def test_cmd_marketplace_remove(capsys):
@@ -3648,3 +3655,117 @@ def test_req_and_req_raw_exit_on_an_http_error(home, monkeypatch):
     with pytest.raises(SystemExit) as ei:
         c.req_raw("GET", "/automations/x/export")
     assert str(ei.value.code) == "409: already running"
+
+
+# ---------------------------------------------------------------- 2026-09-30 audit fixes
+
+def test_find_auto_exact_name_outranks_an_id_prefix():
+    """§20 reference order: id → exact name → unique id prefix → unique name
+    substring. An automation named `feed` is never shadowed by another whose
+    id happens to start with `feed`."""
+    from autowright.cli import find_automation
+
+    autos = [{"id": "feed1234-9a0b-4e4e-b5f2-e04cf88cba12", "name": "Morning digest"},
+             {"id": "abc12345-1c2d-4a5b-8e9f-a0b1c2d3e4f5", "name": "feed"}]
+    assert find_automation(_ListClient(autos), "feed")["id"].startswith("abc12345")
+    assert find_automation(_ListClient(autos), "FEED")["id"].startswith("abc12345")
+    # the prefix still resolves when no name matches exactly
+    assert find_automation(_ListClient(autos), "feed12")["name"] == "Morning digest"
+
+
+def test_memory_and_snapshot_copies_take_the_long_timeout():
+    """§20 HTTP timeouts: memory clear, snapshot create, and snapshot restore
+    each copy the whole memory directory, so they get 660 s."""
+    auto = dict(FULL_AUTO, snapshots=SNAPS)
+
+    c = _RouteClient(_auto_gets(auto))
+    _run(c, "automation", "memory", "clear", "Daily Report")
+    assert c.timeouts == [("POST", f"/automations/{AUTO_ID}/memory/clear", 660)]
+
+    c = _RouteClient(_auto_gets(auto), reply={"snapshot": {"id": "s3333333-c"}})
+    _run(c, "automation", "snapshot", "create", "Daily Report")
+    assert c.timeouts == [("POST", f"/automations/{AUTO_ID}/memory/snapshots", 660)]
+
+    c = _RouteClient(_auto_gets(auto))
+    _run(c, "automation", "snapshot", "restore", "Daily Report", "s1")
+    assert c.timeouts == [
+        ("POST", f"/automations/{AUTO_ID}/memory/snapshots/s1111111-a/restore", 660)]
+
+
+def test_main_pins_stdio_to_utf8(monkeypatch):
+    """§2 pipe-encoding contract: a redirected cp1252 stdout (Windows) must not
+    crash printing `→` — the entry point reconfigures the streams first."""
+    import sys
+
+    from autowright import cli
+
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="cp1252")
+    stdin = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    c = _RouteClient(_auto_gets(DIFF_AUTO, **{
+        f"/automations/{AUTO_ID}/diff?from=v1&to=v4": TINY_DIFF}))
+    monkeypatch.setattr(cli, "Client", lambda: c)
+    monkeypatch.setattr(sys, "argv", ["autowright", "automation", "diff", "Daily Report",
+                                      "--from", "v1"])
+    cli.main()  # no UnicodeEncodeError
+    stdout.flush()
+    assert "Daily Report: v1 → v4" in raw.getvalue().decode("utf-8")
+    assert stdout.encoding == "utf-8" and stdin.encoding == "utf-8"
+
+
+def test_settings_set_data_path_is_made_absolute(tmp_path, monkeypatch, capsys):
+    """§20: `dataPath=` is made absolute against the current directory before
+    it travels — the backend refuses a relative path."""
+    monkeypatch.chdir(tmp_path)
+    c = _RouteClient()
+    _run(c, "settings", "set", "dataPath=aw-data")
+    expected = os.path.abspath("aw-data")
+    assert c.calls == [("POST", "/settings/data-path", {"path": expected})]
+    assert f"execution data now at {expected}" in capsys.readouterr().out
+
+
+def test_marketplace_set_location_path_is_made_absolute(tmp_path, monkeypatch):
+    """§22.5: a file path given as `set location=` is made absolute against the
+    current directory, like `add`; a link and an empty value travel as typed."""
+    monkeypatch.chdir(tmp_path)
+    c = _MarketClient(SOURCES, writes={"/marketplace/sources/m2222222-b": {
+        "id": "m2222222-b", "name": "Mine"}})
+    _run(c, "marketplace", "set", "Mine", "location=shared/marketplace.yaml")
+    assert c.calls == [("PATCH", "/marketplace/sources/m2222222-b",
+                        {"location": os.path.abspath("shared/marketplace.yaml")})]
+
+
+def test_push_refuses_an_unsaved_app_draft_without_discard_draft(tmp_path, capsys):
+    """§20: push never destroys in-app draft work silently — an automation with
+    an unsaved draft exits 1 with nothing written unless --discard-draft."""
+    auto = dict(copy.deepcopy(FULL_AUTO), draft={"spec": []})
+    d = tmp_path / "wd"
+    from autowright import cli
+    cli.write_workdir(d, auto)
+
+    c = _WorkdirClient(auto)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "push", "Daily Report", str(d))
+    assert str(ei.value.code) == ("'Daily Report' has an unsaved draft in the app - "
+                                  "pass --discard-draft to replace it")
+    assert c.posted == []
+
+    c = _WorkdirClient(auto)
+    _run(c, "automation", "push", "Daily Report", str(d), "--discard-draft")
+    assert any(p[1] == f"/automations/{auto['id']}/versions" for p in c.posted)
+    assert "saved 'Daily Report' as v2" in capsys.readouterr().out
+
+
+def test_create_never_settles_the_pending_app_draft(tmp_path):
+    """§20/§19: create sends settlePending false, so the app's pending
+    create-mode draft, its chat, and any building job stay where they are."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, FULL_AUTO)
+    c = _WorkdirClient()
+    _run(c, "automation", "create", str(d), "--grant-secret", "API_TOKEN")
+    _, _, body = next(p for p in c.posted if p[:2] == ("POST", "/automations"))
+    assert body["settlePending"] is False

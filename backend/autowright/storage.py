@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -20,6 +21,7 @@ import stat
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -83,7 +85,11 @@ PARAM_VALUE_KEYS = ("on", "lines", "rows", "value")
 def manifest_step_entry(s: dict, fname: str) -> dict[str, Any]:
     """The one §5 manifest entry for a step — written by the version-folder
     writer and dumped again by the §19 version diff's manifest text."""
-    entry: dict[str, Any] = {"file": fname, "name": s["name"], "description": s.get("description", "")}
+    # §19 step field typing: the request models type these fields, but a
+    # hand-edited stored version is read leniently — `timeout: abc` degrades
+    # to the default instead of a 500.
+    entry: dict[str, Any] = {"file": fname, "name": s.get("name", ""),
+                             "description": s.get("description", "")}
     if s.get("agent"):
         entry["agent"] = True
         entry["why"] = s.get("why", "")
@@ -96,12 +102,12 @@ def manifest_step_entry(s: dict, fname: str) -> dict[str, Any]:
     # §4.1 per-step time limit + §7 retry pair. The internal shape is
     # snake_case only — the API boundary normalizes the camelCase client
     # spelling before anything reaches storage.
-    if s.get("timeout"):
-        entry["timeout"] = int(s["timeout"])
+    if lenient_int(s.get("timeout")):
+        entry["timeout"] = lenient_int(s.get("timeout"))
     if s.get("no_timeout"):
         entry["no_timeout"] = True
-    if s.get("retries"):
-        entry["retries"] = int(s["retries"])
+    if lenient_int(s.get("retries")):
+        entry["retries"] = lenient_int(s.get("retries"))
     if s.get("infinite_retries"):
         entry["infinite_retries"] = True
     return entry
@@ -420,6 +426,14 @@ class Store:
         # (a draft container's `test.yaml`, the §4.4 pending slot's
         # `automation.yaml`). The key changes the moment the file does.
         self._yaml_summaries: dict[Path, tuple[tuple, Any]] = {}
+        # §19 memory_stats: guards each record's memo, in-flight flag and
+        # generation — the walk thread lands its answer under it, never under
+        # self.lock.
+        self._memory_stats_lock = threading.Lock()
+        # §19: called (off every lock) with the automation record when a
+        # background memory walk lands stats that differ from what was last
+        # served — the API wires its single-row automation.changed publisher.
+        self.on_memory_stats_changed = None
 
     # ---------- paths ----------
     def data_path(self) -> Path:
@@ -558,8 +572,12 @@ class Store:
                 if a:
                     self.autos[a["id"]] = a
             self.close_exec_db()
+            # Stat'd before the open: opening may touch the file, and the
+            # reconcile compares every execution.yaml against the index's last
+            # durable write.
+            index_mtime = self._exec_index_mtime()
             self.execdb, self.execs = self._open_exec_index()
-            self._reconcile_exec_index()
+            self._reconcile_exec_index(index_mtime)
             self._refresh_exec_derived()
 
     def _load_toplevel_mapping(self, path: Path) -> dict:
@@ -648,11 +666,62 @@ class Store:
             log.warning("executions dir is unavailable (%s) — using an in-memory index this session", e)
         return ExecDB(None), {}
 
-    def _reconcile_exec_index(self) -> None:
+    def _exec_index_mtime(self) -> float | None:
+        """The index database file's mtime, None when there is no file."""
+        try:
+            return (self.executions_dir() / "executions.db").stat().st_mtime
+        except OSError:
+            return None
+
+    def _header_from_yaml(self, execution_id: str) -> dict | None:
+        """An index header rebuilt from `execution.yaml` — None when the yaml
+        can't back a row; raises on values the serializers would choke on."""
+        y = self.read_exec_yaml(execution_id)
+        if not y or y.get("id") != execution_id or not y.get("started_at"):
+            return None
+        # Timestamps must parse the way the serializers will parse them
+        # later — an unparsable value upserted here would 500 the whole
+        # executions list (and, via _latest_exec, the automations list)
+        # on every request until the row is removed by hand.
+        timefmt.parse_local(str(y["started_at"]))
+        for k in ("queued_at", "finished_at"):
+            if y.get(k):
+                timefmt.parse_local(str(y[k]))
+        return self.exec_header(y)
+
+    def _refresh_stale_row(self, ed: Path, index_mtime: float | None) -> None:
+        """§5 lost-update repair: a power loss under `synchronous=NORMAL` can
+        drop the newest *updates* to a row that already existed (a retry's
+        `failed` → `succeeded`). A yaml newer than the index file is re-read
+        and its header upserted when it differs — one stat per row."""
+        if index_mtime is not None:
+            try:
+                if (ed / "execution.yaml").stat().st_mtime <= index_mtime:
+                    return
+            except OSError:
+                return
+        try:
+            h = self._header_from_yaml(ed.name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("execution %s has an unusable execution.yaml (%s) — keeping its index row",
+                        ed.name, e)
+            return
+        if h is None:
+            return
+        indexed = self.execs[ed.name]
+        if all(indexed.get(k) == v for k, v in h.items()):
+            return
+        self.execdb.upsert(h)
+        self.execs[ed.name] = h
+        log.warning("execution %s's index row was behind its execution.yaml — refreshed", ed.name)
+
+    def _reconcile_exec_index(self, index_mtime: float | None = None) -> None:
         """§5: `execution.yaml` is authoritative; the DB is only an index. An
         execution directory the index doesn't know (crash between the yaml write
         and the DB upsert, or a schema wipe) is restored from its yaml here, so
-        startup truly rebuilds everything from disk."""
+        startup truly rebuilds everything from disk. An indexed row whose yaml
+        is newer than the index file (`index_mtime`; None re-reads every row)
+        is refreshed from it."""
         d = self.executions_dir()
         if not d.exists():
             return
@@ -664,7 +733,10 @@ class Store:
                 # finish the delete here rather than leaving dead bytes.
                 shutil.rmtree(ed, ignore_errors=True)
                 continue
-            if not ed.is_dir() or ed.name in self.execs:
+            if not ed.is_dir():
+                continue
+            if ed.name in self.execs:
+                self._refresh_stale_row(ed, index_mtime)
                 continue
             if not (ed / "execution.yaml").exists():
                 # §5: the directory is made before the record is written, so
@@ -680,18 +752,9 @@ class Store:
                     pass
                 continue
             try:
-                y = self.read_exec_yaml(ed.name)
-                if not y or y.get("id") != ed.name or not y.get("started_at"):
+                h = self._header_from_yaml(ed.name)
+                if h is None:
                     continue
-                # Timestamps must parse the way the serializers will parse them
-                # later — an unparsable value upserted here would 500 the whole
-                # executions list (and, via _latest_exec, the automations list)
-                # on every request until the row is removed by hand.
-                timefmt.parse_local(str(y["started_at"]))
-                for k in ("queued_at", "finished_at"):
-                    if y.get(k):
-                        timefmt.parse_local(str(y[k]))
-                h = self.exec_header(y)
                 self.execdb.upsert(h)
             except Exception as e:  # noqa: BLE001
                 # §5: a hand-damaged execution.yaml (bad timestamps, missing
@@ -776,7 +839,14 @@ class Store:
         self._recover_draft_swap(d / "draft")  # §5: repair a half-finished save_draft swap
         self._recover_memory_swap(d)  # §6.3: repair a half-finished restore_snapshot swap
         if (d / "draft" / "automation" / "automation.yaml").exists():
-            a["draft"] = self._load_version_folder(d / "draft" / "automation")
+            try:
+                a["draft"] = self._load_version_folder(d / "draft" / "automation")
+            except Exception as e:  # noqa: BLE001
+                # §5: a hand-damaged draft never drops the whole automation at
+                # load — the saved versions still stand; the draft reads as none.
+                log.warning("the draft at %s can't be loaded (%s) — treating it as absent",
+                            d / "draft", e)
+                a["draft"] = None
         if not a["versions"]:
             log.warning("automation %r at %s has no version folders — skipping it at load", a["name"], d)
             return None
@@ -890,7 +960,16 @@ class Store:
                         "treating the folder as absent", vd)
             return None
         steps = []
-        for s in meta.get("steps", []) or []:
+        raw_steps = meta.get("steps", []) or []
+        if not isinstance(raw_steps, list):
+            log.warning("version folder %s: 'steps' isn't a list — reading it as no steps", vd)
+            raw_steps = []
+        for s in raw_steps:
+            if not isinstance(s, dict):
+                # §5 lenient load: a hand-edited entry that isn't a mapping
+                # can't name a script — skipped, never a crash.
+                log.warning("version folder %s: skipping a step entry that isn't a mapping (%r)", vd, s)
+                continue
             code = ""
             f = vd / (s.get("file") or "")
             # is_file(): a missing/empty `file` key resolves to the version dir
@@ -904,8 +983,10 @@ class Store:
             steps.append({**s, "code": code})
         notes = ""
         if (vd / "notes.md").exists():
-            notes = (vd / "notes.md").read_text(encoding="utf-8").strip()
-        spec_md = (vd / "spec.md").read_text(encoding="utf-8") if (vd / "spec.md").exists() else ""
+            # errors="replace": §5 lenient load, like the step scripts above.
+            notes = (vd / "notes.md").read_text(encoding="utf-8", errors="replace").strip()
+        spec_md = (vd / "spec.md").read_text(encoding="utf-8", errors="replace") \
+            if (vd / "spec.md").exists() else ""
         return {
             "when": meta.get("when"),
             "note": meta.get("note"),
@@ -1023,9 +1104,13 @@ class Store:
 
     def _latest_exec(self, automation_id: str) -> dict | None:
         # Test records (§4.5) are draft-scoped and never count either.
-        hs = [h for h in self._own_execs(automation_id)
-              if not self.never_ran(h) and not is_test(h)]
-        return max(hs, key=lambda h: h["started_at"] or "") if hs else None
+        # Ordered by the PARSED stamp: a raw string compare would let a
+        # letter-led corrupt value outrank every real date. A stamp that can't
+        # be parsed is never "latest".
+        dated = [(dt, h) for h in self._own_execs(automation_id)
+                 if not self.never_ran(h) and not is_test(h)
+                 and (dt := lenient_local(h["started_at"]) if h["started_at"] else None)]
+        return max(dated, key=lambda pair: pair[0])[1] if dated else None
 
     def queued_execs(self, automation_id: str) -> list[dict]:
         """§6 firing queue, oldest first — the queue *is* the automation's
@@ -1106,7 +1191,8 @@ class Store:
             fname = safe_step_filename(s.get("file"), i, s.get("name"), keep)
             manifest_steps.append(manifest_step_entry(s, fname))
             keep.add(fname)
-            atomic_write_text(vd / fname, s.get("code", ""))
+            code = s.get("code")
+            atomic_write_text(vd / fname, code if isinstance(code, str) else "")
         atomic_write_text(vd / "spec.md", blocks_to_md(ver.get("spec", [])))
         # §4.1 notes — the agent-owned working-knowledge doc; absent when empty
         if (ver.get("notes") or "").strip():
@@ -1954,8 +2040,20 @@ class Store:
         if step_idx is None:
             name = self.EXEC_LOG
         else:
-            full = self.exec_full(execution_id)
-            steps = (full or {}).get("steps") or []
+            # §19: the header is looked up under the lock, a finished record's
+            # execution.yaml read outside it (get_exec's rule) — a 1 Hz log
+            # poll never holds the engine's lock across disk.
+            with self.lock:
+                h = self.execs.get(execution_id)
+                live_steps = None
+                if h is not None and "steps" in h:
+                    live_steps = [{"file": st.get("file")} for st in h.get("steps") or []]
+            if h is None:
+                return []
+            if live_steps is None:
+                live_steps = (self.read_exec_yaml(execution_id) or {}).get("steps") or []
+            steps = [st for st in live_steps if isinstance(st, dict)] \
+                if isinstance(live_steps, list) else []
             if step_idx < 0 or step_idx >= len(steps):
                 return []
             name = self.log_name(steps[step_idx].get("file"), step_idx, attempt or 1)
@@ -1968,9 +2066,13 @@ class Store:
             # (a crash mid-append) is replaced rather than raising, and an
             # unreadable file answers empty lines, never a 500 on a pane that
             # polls at 1 Hz.
-            raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            raw, since_done = self._log_lines(p, tail, since)
+            if raw is None:
+                raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             return []
+        if since_done:
+            since = None  # _log_lines already judged (and applied) the slice
         if since is not None and since >= 1 and len(raw) >= since:
             # §19: the line at that 1-based position must really carry that
             # sequence before the slice is trusted — a hand-edited or
@@ -1998,6 +2100,57 @@ class Store:
                     line["time"] = ""
             out.append(line)
         return out
+
+    LOG_TAIL_CHUNK = 64 * 1024
+
+    @classmethod
+    def _log_lines(cls, p: Path, tail: int | None,
+                   since: int | None) -> tuple[list[str] | None, bool]:
+        """§19 fast paths for `read_log`, so a 1 Hz follow of a long log never
+        loads the whole file: a bare `tail` seeks back from the end, and
+        `since` streams the file keeping only the lines past the verified
+        position (bounded by `tail` when both are sent). Answers (lines,
+        whether `since` was already judged); lines is None when the whole file
+        is needed after all (no fast path applies, or the line at `since`
+        doesn't carry that sequence, so no slice applies) — the result always
+        equals the naive whole-file read's."""
+        if since is not None and since >= 1:
+            kept: deque[str] | list[str] = deque(maxlen=tail) if tail and tail >= 1 else []
+            probe_line = None
+            count = 0
+            with open(p, encoding="utf-8", errors="replace") as f:
+                for count, line in enumerate(f, 1):
+                    line = line.rstrip("\n")
+                    if count == since:
+                        probe_line = line
+                    elif count > since:
+                        kept.append(line)
+            if count < since or probe_line is None:
+                return None, True
+            try:
+                probe = json.loads(probe_line)
+            except ValueError:
+                return None, True
+            if not (isinstance(probe, dict) and probe.get("sequence") == since):
+                return None, True
+            return list(kept), True
+        if tail is None or tail < 1:
+            return None, False
+        with open(p, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            buf = b""
+            while pos > 0 and buf.count(b"\n") <= tail:
+                step = min(cls.LOG_TAIL_CHUNK, pos)
+                pos -= step
+                f.seek(pos)
+                buf = f.read(step) + buf
+        lines = buf.split(b"\n")
+        if lines and lines[-1] == b"":
+            lines.pop()  # the final line's own newline
+        if pos > 0:
+            lines = lines[1:]  # the chunk began mid-line
+        return [ln.rstrip(b"\r").decode("utf-8", errors="replace") for ln in lines[-tail:]], False
 
     def result_files(self, execution_id: str) -> list[dict]:
         """§4.5: the file list IS the directory listing."""
@@ -2137,11 +2290,22 @@ class Store:
                 n = None
             days = max(1, n) if n is not None else 90
             cutoff = datetime.now().timestamp() - days * 86400
+            # §5: each automation's latest real execution (the §4.1 lastStatus
+            # population — the `_latest_exec` rule) is exempt whatever its
+            # age: it is the §4.1 overdue baseline and the §4.3 interval
+            # anchor, and deleting it would reset both to created_at.
+            exempt = set()
+            for automation_id in {h["automation_id"] for h in self.execs.values()}:
+                latest = self._latest_exec(automation_id)
+                if latest is not None:
+                    exempt.add(latest["id"])
             doomed = []
             for h in self.execs.values():
                 # §5: `queued` records ARE the §6 firing queue — deleting one
                 # would silently drop a firing that never ran.
                 if h["status"] in ("executing", "queued") or not h["started_at"]:
+                    continue
+                if h["id"] in exempt:
                     continue
                 try:
                     if datetime.fromisoformat(h["started_at"]).timestamp() < cutoff:
@@ -2179,18 +2343,26 @@ class Store:
         if str(path) in self._unreadable:
             raise StoreUnwritableError(path)
 
-    def save_agents(self) -> None:
+    # §5 disk-first: each save_* optionally takes the NEW content, so a route
+    # builds it, writes it, and only then assigns it into memory — a failed
+    # write leaves the in-memory store exactly as disk still holds it.
+    _UNSET: Any = object()
+
+    def save_agents(self, agents: list[dict] | None = None,
+                    default_agent_id: Any = _UNSET) -> None:
         self.require_writable(paths.agents_file())
-        save_yaml(paths.agents_file(), {"agents": self.agents,
-                                        "default_agent": self.default_agent_id})
+        save_yaml(paths.agents_file(), {
+            "agents": self.agents if agents is None else agents,
+            "default_agent": (self.default_agent_id if default_agent_id is self._UNSET
+                              else default_agent_id)})
 
-    def save_secrets(self) -> None:
+    def save_secrets(self, secrets: list[dict] | None = None) -> None:
         self.require_writable(paths.secrets_file())
-        save_yaml(paths.secrets_file(), {"secrets": self.secrets})
+        save_yaml(paths.secrets_file(), {"secrets": self.secrets if secrets is None else secrets})
 
-    def save_settings(self) -> None:
+    def save_settings(self, settings: dict | None = None) -> None:
         self.require_writable(paths.settings_file())
-        save_yaml(paths.settings_file(), self.settings)
+        save_yaml(paths.settings_file(), self.settings if settings is None else settings)
 
     def secret_used_by(self, secret_id: str) -> list[dict]:
         """§4.8 usedBy: automations whose current version uses the secret,
@@ -2208,33 +2380,104 @@ class Store:
 
     # ---------- API serialization (§4 shapes) ----------
     # §19 /state cost: memory_stats walks the whole memory tree, and /state
-    # pays that walk per automation under store.lock. The answer is memoized on
-    # the in-memory record for this long — a live execution writing memory/
+    # serializes every automation under store.lock. The walk therefore never
+    # runs inside a request: like §4.9 dataSize, an expired (or missing) memo
+    # starts one background walk and the call answers at once with the last
+    # label computed for this path, or the placeholder before the first one
+    # lands. The memo lives for this long — a live execution writing memory/
     # shows a size at most this stale, and every operation that replaces the
     # dir wholesale drops the memo outright.
     MEMORY_STATS_TTL_S = 5
+    MEMORY_STATS_COMPUTING = "computing…"
 
     def memory_stats(self, a: dict) -> dict:
-        memo = a.get("_memory_stats")
-        if memo is not None and time.monotonic() - memo[0] < self.MEMORY_STATS_TTL_S:
-            return memo[1]
         d = self.auto_dir(a) / "memory"
-        size = 0
-        newest: float | None = None
-        for st in iter_file_stats(d):
-            size += st.st_size
-            newest = max(newest or 0, st.st_mtime)
-        label = size_label(size) if size else "empty"
-        updated = timefmt.date_label(datetime.fromtimestamp(newest)) if newest else "never written"
-        stats = {"size": label, "updated": updated, "path": str(d)}
-        a["_memory_stats"] = (time.monotonic(), stats)
-        return stats
+        key = str(d)
+        with self._memory_stats_lock:
+            # (when the walk landed, the memory dir it walked, the stats) —
+            # in-memory `_` keys, never persisted.
+            memo = a.get("_memory_stats")
+            known = memo is not None and memo[1] == key
+            fresh = known and time.monotonic() - memo[0] < self.MEMORY_STATS_TTL_S
+            if not fresh and not a.get("_memory_stats_walking"):
+                a["_memory_stats_walking"] = True
+                threading.Thread(target=self._memory_stats_walk,
+                                 args=(a, d, a.get("_memory_stats_generation", 0)),
+                                 name="memorystats", daemon=True).start()
+            # An expired or cleared memo still answers the last known stats;
+            # the placeholder only when this path never had a value.
+            served = memo[2] if known else {"size": self.MEMORY_STATS_COMPUTING,
+                                            "updated": "", "path": key}
+            a["_memory_stats_served"] = served
+            return served
+
+    def _memory_stats_walk(self, a: dict, d: Path, generation: int) -> None:
+        """The memory-tree walk, on its own thread — nothing waits on it. A
+        walk that started before an invalidation lands nothing: its answer may
+        predate the replacement the invalidation stands for."""
+        stats = None
+        try:
+            size = 0
+            newest: float | None = None
+            for st in iter_file_stats(d):
+                size += st.st_size
+                newest = max(newest or 0, st.st_mtime)
+            label = size_label(size) if size else "empty"
+            updated = (timefmt.date_label(datetime.fromtimestamp(newest))
+                       if newest else "never written")
+            stats = {"size": label, "updated": updated, "path": str(d)}
+        except OSError as e:
+            # An unreadable memory dir is a §5 degradation: the label stays at
+            # what it was until the next call tries again.
+            log.warning("can't size %s (%s)", d, e)
+        finally:
+            changed = False
+            with self._memory_stats_lock:
+                current = a.get("_memory_stats_generation", 0) == generation
+                if stats is not None and current:
+                    a["_memory_stats"] = (time.monotonic(), str(d), stats)
+                    changed = a.get("_memory_stats_served") != stats
+                # A voided walk leaves the flag alone: it belongs to the walk
+                # the invalidation started under the new generation.
+                if current:
+                    a["_memory_stats_walking"] = False
+        # §19: a landing that differs from what was last served announces the
+        # automation's row, so an open detail page refetches. Outside the memo
+        # guard — the publisher takes store.lock itself (memory_stats is called
+        # under store.lock and then takes the guard, so never the reverse).
+        if changed and self.on_memory_stats_changed is not None:
+            try:
+                self.on_memory_stats_changed(a)
+            except Exception:  # noqa: BLE001 — a display nudge never kills the walk thread
+                log.exception("publishing the memory stats change failed")
 
     def invalidate_memory_stats(self, a: dict) -> None:
-        """Drop the memory_stats memo (in-memory `_` key, never persisted) —
+        """Expire the memory_stats memo (in-memory `_` key, never persisted) —
         every operation that replaces the memory dir wholesale calls it, so the
-        §9.2 MEMORY card never shows the pre-operation size afterwards."""
-        a.pop("_memory_stats", None)
+        card's new size. The generation bump voids a walk already in flight.
+
+        When this record's stats were ever asked for (a memo exists or a walk
+        was in flight), the invalidation starts the fresh walk itself under the
+        new generation: a reader that arrived just before (memo still fresh, or
+        its walk voided here) would otherwise leave the card stale until its
+        next refetch. A record nobody asked about starts nothing. Safe under
+        store.lock: only the memo guard is taken and the thread start never
+        blocks."""
+        d = self.auto_dir(a) / "memory"
+        with self._memory_stats_lock:
+            memo = a.get("_memory_stats")
+            watched = memo is not None or bool(a.get("_memory_stats_walking"))
+            if memo is not None:
+                # Expired, not dropped: the last known stats keep answering
+                # until the next walk lands (and announces the change).
+                a["_memory_stats"] = (float("-inf"), memo[1], memo[2])
+            generation = a.get("_memory_stats_generation", 0) + 1
+            a["_memory_stats_generation"] = generation
+            a["_memory_stats_walking"] = watched
+            if watched:
+                threading.Thread(target=self._memory_stats_walk,
+                                 args=(a, d, generation),
+                                 name="memorystats", daemon=True).start()
 
     def clear_memory(self, a: dict) -> None:
         # §19: the guard and the writes are one hold — checking registration and
@@ -2504,6 +2747,9 @@ class Store:
                 self.discard_snapshot(pre[0])
             shutil.rmtree(tmp, ignore_errors=True)
             raise
+        # §6: no rmtree ever runs under the lock — an abandoned swap's staged
+        # copies are only noted inside the hold and deleted after it.
+        abandoned: BaseException | None = None
         with self.lock:
             try:
                 # §6.3: the swap re-checks that the automation is still
@@ -2511,26 +2757,30 @@ class Store:
                 # otherwise see the rename re-create the removed directory,
                 # resurrecting memory/ at the next boot.
                 self._still_registered(a)
-            except AutomationGoneError:
-                if pre is not None:
-                    self.discard_snapshot(pre[0])
-                shutil.rmtree(tmp, ignore_errors=True)
-                raise
-            if a.get("_live"):
-                if pre is not None:
-                    self.discard_snapshot(pre[0])
-                shutil.rmtree(tmp, ignore_errors=True)
-                raise LiveExecutionError("an execution is in progress")
-            if pre is not None:
-                self.commit_snapshot(a, pre, "pre-restore", keep=sid)
-            if mem.exists():
-                mem.rename(old)
-            tmp.rename(mem)
-            # §6: the displaced tree is as big as memory/ — reaped, not walked
-            # under the lock.
-            self._remove_tree(old)
-            self.invalidate_memory_stats(a)
-            return meta
+            except AutomationGoneError as e:
+                abandoned = e
+            if abandoned is None and a.get("_live"):
+                abandoned = LiveExecutionError("an execution is in progress")
+            if abandoned is None:
+                return self._restore_swap(a, meta, sid, pre, mem, tmp, old)
+        if pre is not None:
+            self.discard_snapshot(pre[0])
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise abandoned
+
+    def _restore_swap(self, a: dict, meta: dict, sid: str, pre, mem: Path,
+                      tmp: Path, old: Path) -> dict:
+        """The O(1) rename half of `restore_snapshot`. Caller holds the lock."""
+        if pre is not None:
+            self.commit_snapshot(a, pre, "pre-restore", keep=sid)
+        if mem.exists():
+            mem.rename(old)
+        tmp.rename(mem)
+        # §6: the displaced tree is as big as memory/ — reaped, not walked
+        # under the lock.
+        self._remove_tree(old)
+        self.invalidate_memory_stats(a)
+        return meta
 
     def snapshot_json(self, m: dict) -> dict:
         dt = lenient_local(m["created_at"])

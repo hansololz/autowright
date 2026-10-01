@@ -8,7 +8,7 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import { BackLink, Badge, EmptyNotice, Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, settingsRow, settingsRowSub, settingsRowTitle, waitedLabel } from '../ui'
+import { BackLink, Badge, EmptyNotice, executingToast, Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, settingsRow, settingsRowSub, settingsRowTitle, Spinner, waitedLabel } from '../ui'
 import { ResultSection, ViewCard } from '../result'
 import { ExecutionView } from '../executionView'
 import type { Execution, ParamDef, TriggerPayload } from '../types'
@@ -182,6 +182,9 @@ export default function ExecutionPage() {
   // §7 in-place retry keeps the execution id — bumping this remounts the view
   // so its selection and live auto-follow start over with the new attempt.
   const [retryKey, setRetryKey] = useState(0)
+  // §9 busy rule: Execute again / Retry disable and show busy feedback while
+  // their request is in flight — a double-click never starts two runs.
+  const [starting, setStarting] = useState<'again' | 'retry' | null>(null)
 
   const steps = full?.steps ?? []
   const executing = e?.status === 'executing'
@@ -224,21 +227,26 @@ export default function ExecutionPage() {
     </div>
   )
 
+  // §7: a GET that failed for any reason but a 404 — the notice with a retry.
+  const loadFailedNotice = (style?: React.CSSProperties) => (
+    <EmptyNotice
+      title="Couldn’t load this execution"
+      body={(
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+          <span>The backend didn’t answer. It may just be restarting.</span>
+          <button className="ad-btn-ghost" onClick={() => setReloadKey((n) => n + 1)}>
+            Try again
+          </button>
+        </div>
+      )}
+      style={style}
+    />
+  )
+
   if (!e) {
     return shell(
       loadFailed ? (
-        <EmptyNotice
-          title="Couldn’t load this execution"
-          body={(
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
-              <span>The backend didn’t answer. It may just be restarting.</span>
-              <button className="ad-btn-ghost" onClick={() => setReloadKey((n) => n + 1)}>
-                Try again
-              </button>
-            </div>
-          )}
-          style={{ marginTop: 20 }}
-        />
+        loadFailedNotice({ marginTop: 20 })
       ) : loadedOnce ? (
         <EmptyNotice
           title="This execution no longer exists"
@@ -258,20 +266,33 @@ export default function ExecutionPage() {
     void api.skipStep(e.id, i).catch((err: Error) => showToast(err.message))
   }
   const retry = () => {
+    if (starting) return
     // §7 in-place retry: same execution record — stay on this page, the
     // re-published exec.started flips the badge back to Executing.
     setRetryKey((k) => k + 1)
-    void api.retryExecution(e.id).catch((err: Error) => showToast(err.message))
+    setStarting('retry')
+    void api.retryExecution(e.id)
+      .catch((err: Error) => showToast(err.message))
+      .finally(() => setStarting(null))
   }
   const executeAgain = () => {
-    if (!e.automationId) return // §4.5: create-mode tests have no automation to re-execute
+    if (!e.automationId || starting) return // §4.5: create-mode tests have no automation to re-execute
     const automationId = e.automationId
+    setStarting('again')
     void (async () => {
       try {
         const r = await api.executeNow(automationId)
         go('execution', { executionId: r.executionId })
       } catch (err) {
-        showToast((err as Error).message)
+        // §19: only the no-free-slot 409 carries `reason: "capacity"` — it
+        // gets the same §7 busy toast Execute now shows (§9.2); every other
+        // error its own detail verbatim.
+        const er = err as Error & { status?: number; reason?: string }
+        showToast(er.status === 409 && er.reason === 'capacity' && auto
+          ? executingToast(auto.maxParallel, auto.maxQueued)
+          : er.message)
+      } finally {
+        setStarting(null)
       }
     })()
   }
@@ -326,9 +347,11 @@ export default function ExecutionPage() {
               <button
                 className="ad-btn-ghost"
                 onClick={executeAgain}
+                disabled={starting !== null}
                 title="Executes the automation again from the start"
               >
-                Execute again
+                {starting === 'again' && <Spinner size={10} style={{ marginRight: 5, verticalAlign: '-1px' }} />}
+                {starting === 'again' ? 'Starting…' : 'Execute again'}
               </button>
             )}
             {/* §6: one endpoint covers both — a queued entry leaves the queue and
@@ -342,9 +365,11 @@ export default function ExecutionPage() {
               <button
                 className="ad-btn-primary"
                 onClick={retry}
+                disabled={starting !== null}
                 title="Retries this execution from the failed step. Steps that already succeeded keep their results."
               >
-                Retry
+                {starting === 'retry' && <Spinner size={10} color="currentColor" style={{ marginRight: 5, verticalAlign: '-1px' }} />}
+                {starting === 'retry' ? 'Retrying…' : 'Retry'}
               </button>
             )}
           </HeaderActions>
@@ -413,6 +438,11 @@ export default function ExecutionPage() {
             <FlaggedResultNotice chip={result.chip} />
           )}
 
+          {/* §7: the first GET failed (not a 404) and no body has landed — the
+              couldn't-load notice stands in for the RESULT and LOGS bodies,
+              never a spinner that nothing will ever resolve. */}
+          {loadFailed && !full ? loadFailedNotice() : (
+          <>
           {/* Full-width RESULT card (§7) — the execution's outcome, above the machinery */}
           {!full ? (
             <div className="ad-card" style={{ padding: '16px 18px' }}>
@@ -440,6 +470,8 @@ export default function ExecutionPage() {
             summary={e}
             layout="page"
           />
+          </>
+          )}
 
           {/* §7 WORKSPACE — last, so its reveal never competes with the RESULT
               card's Show in Finder (the user-facing output) */}

@@ -61,6 +61,9 @@ _FETCH_CHUNK = 64 * 1024
 # request worker the backend has.
 MAX_CONCURRENT_READS = 4
 _read_slots = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
+# §22.3: how long an image read waits for a slot before the route answers 503
+# (the page shows the no-image icon). Catalog reads keep the blocking wait.
+IMAGE_SLOT_WAIT_S = 30
 
 # §22.2: one deadline bounds a whole POST /marketplace/refresh - with a
 # per-catalog 60 s deadline, a table of slow locations would otherwise keep the
@@ -111,6 +114,7 @@ AUTO_NEEDS_LOCATION = "auto refresh needs a location"
 BAD_LOCATION = "give an https link or an absolute path"
 NO_EXPORT_FOLDER = "say where to export the automations you added"
 BUILTIN_LOCATION_PINNED = "the built-in catalog's location can't be changed"
+BUSY = "the marketplace is busy reading other references - try again"
 BUILTIN_NOT_REMOVABLE = "the built-in catalog can't be removed - collapse it instead"
 TABLE_UNREADABLE = ("the marketplace table on disk couldn't be read; fix or remove "
                     "marketplaces.yaml")
@@ -144,6 +148,12 @@ class MarketplaceMoved(MarketplaceError):
     """§22.7: the row's location changed while a save was exporting - the
     archives went beside the location it started from, so the save is refused
     rather than written to the new place; the §19 route answers 409."""
+
+
+class MarketplaceBusy(MarketplaceError):
+    """§22.1/§22.3: an image read that waited `IMAGE_SLOT_WAIT_S` for a
+    concurrency slot without getting one - the §19 image route answers 503
+    rather than pinning a request worker."""
 
 
 class MarketplaceUnwritable(MarketplaceError):
@@ -283,13 +293,19 @@ def _check_reference(value: str, key: str, where: str, remote: bool) -> None:
         raise MarketplaceError(f"{where}a remote catalog can't reference a local path")
 
 
-def parse_catalog(text: str, *, location: str | None = None) -> dict:
+def parse_catalog(text: str, *, location: str | None = None,
+                  lenient_entries: bool = False) -> dict:
     """§22.1: parse and validate one marketplace catalog. Unknown keys at any
     level are ignored so the format can grow inside one version (the `url` key
     an older draft carried is one of them). References are checked for form
     here and used as written everywhere else. Errors name the entry index.
     `location` only feeds the default name, and whether it is an https link -
-    a remote catalog may carry only https references (§22.1)."""
+    a remote catalog may carry only https references (§22.1).
+    `lenient_entries` is for reading the app's copy (a v0.11.4 copy's
+    relative references, §21.4 2026-09-30): an entry whose `path` is malformed
+    is dropped, and a malformed `image` reads as no image, each with a warning,
+    rather than making the whole copy unreadable. The entries left keep their
+    positions as their index."""
     try:
         raw = yaml.safe_load(text)
     except Exception as e:  # noqa: BLE001 - untrusted text: a deeply nested
@@ -325,15 +341,28 @@ def parse_catalog(text: str, *, location: str | None = None) -> dict:
         archive = _text(item, "path", where)
         if not archive:
             raise MarketplaceError(f"{where}it has no `path`")
-        if _extension(archive) != ARCHIVE_EXTENSION:
-            raise MarketplaceError(f"{where}`path` must name an {ARCHIVE_EXTENSION} file")
-        _check_reference(archive, "path", where, remote)
+        try:
+            if _extension(archive) != ARCHIVE_EXTENSION:
+                raise MarketplaceError(
+                    f"{where}`path` must name an {ARCHIVE_EXTENSION} file")
+            _check_reference(archive, "path", where, remote)
+        except MarketplaceError as e:
+            if not lenient_entries:
+                raise
+            log.warning("reading the saved catalog copy without an entry - %s", e)
+            continue
         image = _text(item, "image", where)
-        if image and _extension(image) not in IMAGE_EXTENSIONS:
-            raise MarketplaceError(
-                f"{where}`image` must name a {', '.join(IMAGE_EXTENSIONS)} file")
-        if image:
-            _check_reference(image, "image", where, remote)
+        try:
+            if image and _extension(image) not in IMAGE_EXTENSIONS:
+                raise MarketplaceError(
+                    f"{where}`image` must name a {', '.join(IMAGE_EXTENSIONS)} file")
+            if image:
+                _check_reference(image, "image", where, remote)
+        except MarketplaceError as e:
+            if not lenient_entries:
+                raise
+            log.warning("reading the saved catalog copy without its image - %s", e)
+            image = ""
         entries.append({"index": index, "title": title,
                         "description": _text(item, "description", where,
                                              MAX_ENTRY_DESCRIPTION),
@@ -364,14 +393,17 @@ def dump_catalog(name: str, description: str, entries: list[dict]) -> str:
 # ---------- fetching (§22.1 caps and headers) ----------
 def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> bytes:
     """§22.1 download: the §5.2 headers and per-read timeout, a whole-download
-    deadline, https only with redirects re-checked, and a hard byte cap."""
+    deadline, https only with redirects refused before they are followed, and
+    a hard byte cap."""
     request = urllib.request.Request(url, headers=transfer._headers())
     try:
-        with urllib.request.urlopen(request, timeout=transfer.FETCH_TIMEOUT) as response:
-            # urllib follows redirects - a hop off https would sidestep the
-            # §22.1 HTTPS-only rule, so re-check the landing URL.
+        with transfer.open_https_only(
+                request, timeout=transfer.FETCH_TIMEOUT,
+                refuse=lambda: MarketplaceError(transfer.REDIRECTED_OFF_HTTPS)) as response:
+            # §22.1: the redirect handler refuses a hop off https before it is
+            # followed; the landing URL is re-checked as a belt.
             if urllib.parse.urlsplit(response.geturl()).scheme != "https":
-                raise MarketplaceError("the download redirected off https")
+                raise MarketplaceError(transfer.REDIRECTED_OFF_HTTPS)
             # The per-read timeout can't catch a server trickling bytes forever;
             # only a whole-download deadline can, and this runs on a threadpool
             # worker the backend needs back.
@@ -395,41 +427,53 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
     return b"".join(chunks)
 
 
-def _read_reference(reference: str, *, cap: int, what: str) -> bytes:
+def _read_reference(reference: str, *, cap: int, what: str,
+                    slot_wait_s: float | None = None) -> bytes:
     """§22.1: the bytes behind a reference - downloaded for an https link, read
     from disk for a path, both under `cap`. An over-sized file is refused on
     its size and never read whole (an untrusted reference may name a huge
     file), and the read itself stops one byte past the cap, so a file that
     grows between the two can't be loaded into memory either. Every read - a
     catalog, an image, an archive - takes one of the §22.1 concurrency slots
-    for its whole length."""
-    with _read_slots:
-        if kind_of(reference) == "url":
-            # §22.1: a GitHub file page is read from its raw link; the
-            # reference itself stays as written everywhere else.
-            return _fetch_url(transfer.github_raw_url(reference), cap=cap)
-        over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
-        try:
-            st = Path(reference).stat()
-            if not stat.S_ISREG(st.st_mode):
-                # §22.1: a FIFO or a device is refused on its kind, before any
-                # open() - opening one blocks until something writes to it,
-                # which an untrusted reference must never be able to arrange.
-                raise MarketplaceError(f"couldn't read the {what} - not a regular file")
-            if st.st_size > cap:
-                raise MarketplaceError(over)
-            with open(reference, "rb") as f:
-                data = f.read(cap + 1)
-        except MarketplaceError:
-            raise  # the refusals above, not a failure to read
-        except (OSError, ValueError) as e:
-            # A path pathlib refuses outright - an embedded NUL byte raises
-            # ValueError, not OSError - is an unreadable reference, never a 500.
-            raise MarketplaceError(
-                f"couldn't read the {what} - {getattr(e, 'strerror', None) or e}") from None
-        if len(data) > cap:
+    for its whole length. With `slot_wait_s` the wait for a slot is bounded
+    and MarketplaceBusy answers a timeout (the §22.3 image route); without it
+    the wait blocks."""
+    if not _read_slots.acquire(timeout=slot_wait_s):
+        raise MarketplaceBusy(BUSY)
+    try:
+        return _read_slotted(reference, cap=cap, what=what)
+    finally:
+        _read_slots.release()
+
+
+def _read_slotted(reference: str, *, cap: int, what: str) -> bytes:
+    """`_read_reference`'s body, run while it holds a slot."""
+    if kind_of(reference) == "url":
+        # §22.1: a GitHub file page is read from its raw link; the
+        # reference itself stays as written everywhere else.
+        return _fetch_url(transfer.github_raw_url(reference), cap=cap)
+    over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
+    try:
+        st = Path(reference).stat()
+        if not stat.S_ISREG(st.st_mode):
+            # §22.1: a FIFO or a device is refused on its kind, before any
+            # open() - opening one blocks until something writes to it,
+            # which an untrusted reference must never be able to arrange.
+            raise MarketplaceError(f"couldn't read the {what} - not a regular file")
+        if st.st_size > cap:
             raise MarketplaceError(over)
-        return data
+        with open(reference, "rb") as f:
+            data = f.read(cap + 1)
+    except MarketplaceError:
+        raise  # the refusals above, not a failure to read
+    except (OSError, ValueError) as e:
+        # A path pathlib refuses outright - an embedded NUL byte raises
+        # ValueError, not OSError - is an unreadable reference, never a 500.
+        raise MarketplaceError(
+            f"couldn't read the {what} - {getattr(e, 'strerror', None) or e}") from None
+    if len(data) > cap:
+        raise MarketplaceError(over)
+    return data
 
 
 def _decode(data: bytes) -> str:
@@ -502,6 +546,11 @@ class MarketplaceStore:
     def file(self) -> Path:
         return paths.marketplace_dir() / "marketplaces.yaml"
 
+    def legacy_file(self) -> Path:
+        """§21.4 (2026-09-30): the v0.11.4 table, read once by the migration
+        and left in place."""
+        return paths.marketplace_dir() / "sources.yaml"
+
     def source_dir(self, source_id: str) -> Path:
         return paths.marketplace_dir() / source_id
 
@@ -524,7 +573,19 @@ class MarketplaceStore:
         exists but can't be read at all (bad YAML, or a shape the table isn't
         written in) loads empty and makes the table read-only for the session,
         so the user's catalogs are never replaced by the empty default."""
-        raw, ok = load_yaml_checked(self.file(), {})
+        migrated = False
+        sweep = True
+        if not self.file().exists() and self.legacy_file().exists():
+            # §21.4 (2026-09-30): a v0.11.4 table, read before the orphan sweep
+            # below could take the copies it names. One that can't be parsed
+            # migrates nothing and loads a fresh, writable table, but the sweep
+            # is skipped this session so the copies it names survive until the
+            # user sorts the file out.
+            raw, sweep = self._read_legacy_table()
+            migrated = sweep
+            ok = True
+        else:
+            raw, ok = load_yaml_checked(self.file(), {})
         raw = raw or {}
         unreadable = not ok
         renamed = False
@@ -591,9 +652,57 @@ class MarketplaceStore:
         with self.lock:
             self.sources = sources
             self._unreadable = unreadable
-            if (seeded or renamed) and not unreadable:
+            if (seeded or renamed or migrated) and not unreadable:
                 self._save()
-        self._sweep_orphan_dirs()
+        # After the migration named its rows: the sweep compares against them.
+        if sweep:
+            self._sweep_orphan_dirs()
+
+    def _read_legacy_table(self) -> tuple[dict, bool]:
+        """§21.4 (2026-09-30): v0.11.4's `sources.yaml` - `{sources: [{id,
+        kind (url | file), origin, added_at, refreshed_at, error}]}` - mapped to
+        the §22.2 table shape: `location` from `origin`, `expanded` true,
+        `auto_refresh` and `builtin` false, the timestamps and the error carried
+        over. A row whose id isn't uuid-shaped or whose origin isn't a §22.2
+        location skips with a warning; that is a migration dropping what it
+        can't read, not a corrupt current table, so it flips nothing read-only.
+        A file that can't be parsed at all answers no rows and not-ok: the
+        caller loads a fresh table and skips the orphan sweep for the session.
+        The file itself is never deleted or rewritten."""
+        raw, ok = load_yaml_checked(self.legacy_file(), {})
+        raw = raw or {}
+        if not ok or not isinstance(raw, dict) or not isinstance(raw.get("sources") or [], list):
+            log.warning("%s couldn't be read - migrating no marketplaces", self.legacy_file())
+            return {}, False
+        rows = []
+        for entry in raw.get("sources") or []:
+            if not isinstance(entry, dict):
+                log.warning("skipping a sources.yaml row that isn't a mapping")
+                continue
+            try:
+                uuid.UUID(str(entry.get("id")))
+            except ValueError:
+                log.warning("skipping sources.yaml row %r - its id isn't a uuid",
+                            entry.get("id"))
+                continue
+            origin = entry.get("origin")
+            location = None
+            if isinstance(origin, str) and is_reference(origin):
+                try:
+                    location = normalize_location(origin)
+                except MarketplaceError:
+                    location = None
+            if location is None:
+                log.warning("skipping sources.yaml row %r - %r isn't a location",
+                            entry.get("id"), origin)
+                continue
+            rows.append({"id": str(entry["id"]), "location": location, "expanded": True,
+                         "auto_refresh": False, "builtin": False,
+                         "added_at": entry.get("added_at") or "",
+                         "refreshed_at": entry.get("refreshed_at") or None,
+                         "error": entry.get("error") or None})
+        log.info("migrating %d marketplace(s) from %s", len(rows), self.legacy_file())
+        return {"sources": rows}, True
 
     def _seed_builtin(self, sources: list[dict]) -> bool:
         """§22.2 built-in catalog: every clean load leaves exactly one row
@@ -748,8 +857,8 @@ class MarketplaceStore:
             # Removed while it downloaded: the KeyError is the route's 404 and
             # nothing is written.
             source = self._find(source_id)
-            self._apply_to_row(source_id, text, error)
-            self._save()
+            if self._apply_to_row(source_id, location, text, error):
+                self._save()
             return self.serialize(source)
 
     def refresh_all(self) -> list[dict]:
@@ -768,11 +877,12 @@ class MarketplaceStore:
                 # §22.2: the rows this request never reached are left exactly
                 # as they were - no error stamped - and listed as they stand.
                 break
-            fetched.append((source_id, *self._fetch_catalog(location)))
+            fetched.append((source_id, location, *self._fetch_catalog(location)))
         with self.lock:
-            for source_id, text, error in fetched:
-                self._apply_to_row(source_id, text, error)
-            self._save()
+            applied = [self._apply_to_row(source_id, location, text, error)
+                       for source_id, location, text, error in fetched]
+            if any(applied):
+                self._save()
             return [self.serialize(s) for s in self.sources]
 
     @staticmethod
@@ -811,15 +921,15 @@ class MarketplaceStore:
             # rather than swept long past the daemon's lifespan.
             if self._auto_stop.is_set():
                 break
-            fetched.append((source_id, *self._fetch_catalog(location)))
+            fetched.append((source_id, location, *self._fetch_catalog(location)))
         swept = []
         if self._auto_stop.is_set():
             # A stopped sweeper writes nothing at all - not the copies, not
             # the table: what it read on the way out is dropped.
             return swept
         with self.lock:
-            for source_id, text, error in fetched:
-                if self._apply_to_row(source_id, text, error):
+            for source_id, location, text, error in fetched:
+                if self._apply_to_row(source_id, location, text, error):
                     swept.append(source_id)
             if swept:
                 self._save()
@@ -918,7 +1028,11 @@ class MarketplaceStore:
                     raise MarketplaceError(AUTO_NEEDS_LOCATION)
                 new_auto = False
             if location is not ... and new_location != source["location"]:
+                # §22.2: the new place has never been read - the header shows
+                # "added", and with auto refresh on the row is due at the next
+                # hourly check rather than a day later.
                 source["location"] = new_location
+                source["refreshed_at"] = None
                 source["error"] = None
             source["auto_refresh"] = new_auto
             if expanded is not None:
@@ -960,14 +1074,21 @@ class MarketplaceStore:
         except MarketplaceError as e:
             return None, str(e)
 
-    def _apply_to_row(self, source_id: str, text: str | None, error: str | None) -> bool:
+    def _apply_to_row(self, source_id: str, location: str, text: str | None,
+                      error: str | None) -> bool:
         """The write half of a §22.2 refresh: the copy swapped and the row
         stamped, or the failure recorded as its `error`. A row removed while
-        its read was in flight is dropped and nothing is written at all.
-        Answers whether the row was still there. Caller holds the lock."""
+        its read was in flight is dropped and nothing is written at all, and
+        so is one whose `location` changed meanwhile (the settings modal saved
+        during the download): the old place's catalog must never land as the
+        new place's copy with a fresh `refreshed_at`. `location` is the one
+        that was read. Answers whether the result was applied. Caller holds
+        the lock."""
         try:
             source = self._find(source_id)
         except KeyError:
+            return False
+        if source["location"] != location:
             return False
         if text is None:
             source["error"] = error
@@ -1286,15 +1407,15 @@ class MarketplaceStore:
                     f"couldn't write into the catalog's folder - {e.strerror or e}") from None
             raise
         if source["location"] is not None:
-            # §22.7 step 6: the catalog file is on disk, so a failed re-read of
-            # it is the row's `error`, not the save's 422. The location is a
-            # file on this machine (the editor never sees a link), so nothing
-            # here blocks on a host.
-            text, error = self._fetch_catalog(source["location"])
-            if text is None:
-                source["error"] = error
-            else:
+            # §22.7 step 6: the copy is stamped from the text just written -
+            # never by re-reading the location, which would wait for a §22.1
+            # read slot with the table lock held (§22.2). The catalog file is
+            # on disk, so a failed copy write is the row's `error`, not the
+            # save's 422.
+            try:
                 self._stamp_refresh(source, text)
+            except OSError as e:
+                source["error"] = f"couldn't write the saved copy - {e.strerror or e}"
 
     # ---------- serialization (§22.4) ----------
     def _cached(self, source: dict) -> dict | None:
@@ -1315,7 +1436,7 @@ class MarketplaceStore:
             if memo is not None and memo[0] == stamp:
                 return memo[1]
             catalog = parse_catalog(_decode(path.read_bytes()),
-                                    location=source["location"])
+                                    location=source["location"], lenient_entries=True)
         except Exception:  # noqa: BLE001 - the copy is a file the user can edit
             source.pop("_parsed", None)
             return None
@@ -1364,7 +1485,8 @@ class MarketplaceStore:
             source = self._find(source_id)
             catalog = self._cached(source)
         if catalog is None:
-            raise MarketplaceError(COPY_UNREADABLE_REFRESH)
+            raise MarketplaceError(COPY_UNREADABLE_REFRESH if source["location"] is not None
+                                   else COPY_UNREADABLE_REMOVE)
         entry = next((e for e in catalog["entries"] if e["index"] == index), None)
         if entry is None:
             raise KeyError(index)
@@ -1378,7 +1500,8 @@ class MarketplaceStore:
         entry = self._entry(source_id, index)
         if not entry["image"]:
             return None
-        return (_read_reference(entry["image"], cap=MAX_IMAGE_BYTES, what="image"),
+        return (_read_reference(entry["image"], cap=MAX_IMAGE_BYTES, what="image",
+                                slot_wait_s=IMAGE_SLOT_WAIT_S),
                 _extension(entry["image"]))
 
     def entry_archive(self, source_id: str, index: int) -> tuple[bytes, str]:
@@ -1388,7 +1511,11 @@ class MarketplaceStore:
         capped here, and the §5.1 validation of the bytes is the caller's."""
         reference = self._entry(source_id, index)["archive"]
         if kind_of(reference) == "url":
-            data, _resolved = transfer.fetch_archive(reference)
+            # §22.1/§22.4: a link download takes a concurrency slot exactly
+            # like the local-path read below, so repeated Audit or Install
+            # clicks are bounded, not unbounded downloads in parallel.
+            with _read_slots:
+                data, _resolved = transfer.fetch_archive(reference)
             return data, reference
         return (_read_reference(reference, cap=transfer.MAX_ARCHIVE_BYTES, what="archive"),
                 reference)

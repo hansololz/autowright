@@ -4,7 +4,7 @@
 // stubbed before connectInfo() is called, which fills the module-level
 // base/token used by every request.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, connectInfo, openWs } from '../src/api'
+import { api, connectInfo, LONG_REQUEST_TIMEOUT_MS, openWs, REQUEST_TIMEOUT_MS, requestTimeoutMs } from '../src/api'
 
 const setBackendInfo = (info: { port: number; token: string } | null) => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -43,6 +43,7 @@ describe('req (via api.state / api.executeNow)', () => {
       method: 'GET',
       headers: { Authorization: 'Bearer tok' },
       body: undefined,
+      signal: expect.any(AbortSignal),
     })
   })
 
@@ -57,6 +58,7 @@ describe('req (via api.state / api.executeNow)', () => {
       method: 'POST',
       headers: { Authorization: 'Bearer tok', 'Content-Type': 'application/json' },
       body: JSON.stringify({ version: undefined, trigger: 'manual' }),
+      signal: expect.any(AbortSignal),
     })
   })
 
@@ -89,6 +91,66 @@ describe('req (via api.state / api.executeNow)', () => {
     const err = await api.state().then(() => null, (e: Error & { status?: number }) => e)
     expect(err!.message).toBe('Conflict')
     expect(err!.status).toBe(409)
+  })
+})
+
+// §19 client timeout: a wedged-but-listening backend fails requests instead of
+// hanging every surface — 30 s, and 660 s for the long routes like the §20 CLI.
+describe('client request timeout (§19)', () => {
+  beforeEach(async () => {
+    setBackendInfo({ port: 4242, token: 'tok' })
+    await connectInfo()
+  })
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
+
+  it('a never-answering backend fails the request at 30 s instead of hanging', async () => {
+    vi.useFakeTimers()
+    // AbortSignal.timeout runs on the platform clock — route it through the
+    // fake timers so the test can walk the 30 s.
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const controller = new AbortController()
+      setTimeout(() => controller.abort(new DOMException('The operation timed out.', 'TimeoutError')), ms)
+      return controller.signal
+    })
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason))
+    })))
+    let settled: unknown = 'pending'
+    const pending = api.state().then(() => 'answered', (e: Error) => e.name)
+    void pending.then((v) => { settled = v })
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1)
+    expect(settled).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await pending).toBe('TimeoutError')
+  })
+
+  it('every request builds its signal from the route\u2019s timeout — /health included', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) }) as unknown as Response))
+    await api.health()
+    await api.state()
+    await api.installPackages([])
+    expect(timeout.mock.calls.map((c) => c[0])).toEqual([REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS])
+  })
+
+  it('gives the install/import/delete/memory-copy routes 660 s and everything else 30 s', () => {
+    const long = [
+      ['POST', '/packages/install'], ['POST', '/packages/update'],
+      ['POST', '/automations/import'], ['POST', '/automations/import/preview'],
+      ['POST', '/automations/import/url'], ['POST', '/automations/import/confirm'],
+      ['POST', '/marketplace/sources/s1/entries/3/preview'],
+      ['DELETE', '/automations/a1'],
+      ['POST', '/automations/a1/memory/clear'], ['POST', '/automations/a1/memory/snapshots'],
+      ['POST', '/automations/a1/memory/snapshots/s1/restore'],
+    ]
+    for (const [method, path] of long) expect(requestTimeoutMs(method, path)).toBe(LONG_REQUEST_TIMEOUT_MS)
+    const short = [
+      ['GET', '/state'], ['GET', '/automations/a1'], ['PATCH', '/automations/a1'],
+      ['POST', '/automations/a1/execute'], ['POST', '/packages/check'],
+      ['DELETE', '/automations/a1/memory/snapshots/s1'], ['DELETE', '/marketplace/sources/s1'],
+      ['POST', '/triggers/preview'],
+    ]
+    for (const [method, path] of short) expect(requestTimeoutMs(method, path)).toBe(REQUEST_TIMEOUT_MS)
   })
 })
 

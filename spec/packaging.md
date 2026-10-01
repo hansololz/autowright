@@ -462,7 +462,16 @@ the update bullets below).
   a stop failure a native error box ("Autowright couldn't stop its backend, so it stays
   open." + the failure line): the app never quits its UI while the backend it promised to
   stop keeps running. One stop-and-quit is in flight at a time — the `quit-all` IPC and
-  the native path share it, and a repeated Cmd+Q while it runs is ignored. One dev-only
+  the native path share it, and a repeated Cmd+Q while it runs is ignored. The flight
+  covers the native busy dialog too: while it is up, a second Cmd+Q, the dock's Quit, a
+  second SIGINT, or a late `quit-all` from the renderer is a no-op (never a second stacked
+  dialog, never the renderer's force modal beside the native one). "A loaded main window"
+  includes the boot splash — the §9 quit overlay is mounted on the splash branch as well,
+  so a Cmd+Q while ensure-backend is still installing shows the overlay and its outcome
+  rather than running natively for up to four minutes with no feedback. An OS quit that
+  arrives **while a reset (below) is in flight is ignored** — the reset ends the process
+  itself with `app.exit(0)`, and a second `service stop` racing its `deleteAllData` would
+  let the app exit half-erased — and a `quit-all` IPC then answers `{ error }`. One dev-only
   corner: with no bundled interpreter and no `backend.json` there is nothing to stop (the
   §3 discovery guard makes an absent file mean a stopped backend), so the flow logs
   `no backend to stop` and quits the UI instead of failing with "No backend interpreter
@@ -743,9 +752,18 @@ the update bullets below).
     swapping the bundle mid-execution risks a step lazily importing mixed versions; an
     unreachable backend counts as idle. Otherwise it calls electron-updater's
     `quitAndInstall()` — Squirrel already staged during download, so this quits straight
-    into the swap. The updater's error stream is listened to, and a `quitAndInstall` that
-    returns without quitting (the NSIS/AppImage classes refuse when nothing is staged or
-    the installer spawn fails) answers `{ error }` with the updater's message — the §9.4
+    into the swap. **The §13 panel is destroyed right before the call** (and its
+    height/anchor state reset), not only in `before-quit`: Squirrel's `quitAndInstall`
+    closes every window first and emits `before-quit` only once they have all closed, and
+    the panel is deliberately non-closable — left alone, a panel that had ever been opened
+    vetoed the close walk, the main window closed, and the app sat resident with no window,
+    no restart, and `uiQuit` latched (so the next Cmd+Q was a UI-only quit that left the
+    backend running). The updater's error stream is listened to, and a `quitAndInstall` that
+    returns without quitting answers `{ error }` with the updater's message — the
+    NSIS/AppImage classes report a refusal (nothing staged, the installer spawn failed) on
+    the **error stream and return nothing**, never `false`, so the handler treats an error
+    emitted during the call with no quit underway as the refusal, clears `uiQuit`, and
+    answers `{ error }` — the §9.4
     card renders it; a silent no-op is never an acceptable outcome.
     ShipIt swaps the bundle at the same path, so the LaunchAgent's absolute interpreter path
     stays valid. On a platform whose §2 module serves no update feed URL, **every** update
@@ -1163,7 +1181,12 @@ CLI is enabled, so the full surface below is live:
   must never claim success for an unregistered service; (c) a wedged `launchctl` must never hang
   the caller (the app's ensure-backend step waits on it), so every `launchctl` invocation carries
   a 30-second timeout and a timed-out call reports the same plain-word failure as a non-zero
-  exit ("launchctl timed out"), never a traceback.
+  exit ("launchctl timed out"), never a traceback — and every service command (`install`,
+  `uninstall`, `status`, `stop`, `restart`) shares **one 100 s wall-clock budget** across
+  all of its launchctl calls (each call's timeout is the smaller of 30 s and what remains;
+  an exhausted budget answers the timed-out line without running the call), so a wedged
+  launchctl can never stretch an install past the shell's 120 s child timeout and swallow
+  the result line entirely.
 - **Secret-store constraint** — secrets live in the OS user secret store, which is locked
   until the user session unlocks: the login Keychain on macOS, the freedesktop Secret
   Service keyring (GNOME Keyring / KWallet, reached through the same `keyring` code) on

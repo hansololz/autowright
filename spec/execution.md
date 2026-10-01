@@ -51,10 +51,15 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   and a step that prints nothing shows the "No log lines here." empty state rather than a
   header-only log. Execution-level lines (package installs, secret failures, the manual in-place retry
   marker, the final failure line) go to `logs/execution.ndjson`; a single line is clipped to
-  128 KB (the executor's own per-line cap, so a child writing to the inherited fd gets the
-  same bound; a clipped line ends in "… [line truncated]") **after** redaction and before
+  128 KB (a child writing to the inherited fd gets the same bound; a clipped line ends in
+  "… [line truncated]") **after** redaction and before
   storage and the live event — redaction runs on the whole line first, so a secret straddling
-  the cut can never leave its head behind as an unmatched fragment. Then the execution gets its final status,
+  the cut can never leave its head behind as an unmatched fragment. The executor's own
+  line writer (the `log()` SDK path and captured `print`) never emits a control line longer
+  than its per-line cap: a longer line, or a newline-free overflow buffer, is **sliced** into
+  consecutive pieces of at most that size, each a well-formed event, so no line can ever
+  exceed the engine's bounded read and be dropped or split into escaped fragments that
+  redaction would miss. Then the execution gets its final status,
   duration, result object; automation gets latest/resultChip/lastExecutionLabel "Today"; toast
   summarizes. An execution whose steps include `skipped` ones but no failures finishes
   `succeeded`.
@@ -64,15 +69,28 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   one step was actually cancelled or left non-terminal** — a cancel that lands after the
   last step already succeeded changes nothing and the record finishes `succeeded`: the
   status reports what happened to the steps, not that a button was pressed too late.
+  A **backend shutdown** (§3 quit, `service stop`, an update restart) is not a cancel: the
+  shutdown sweep hard-kills every live step group and marks the live records with a
+  shutdown flag, and the engine thread that then observes the EOF finalizes them
+  `interrupted` with the sys line "backend stopped mid-execution" — never `cancelled`,
+  never "cancelled by you" (the user pressed nothing). Startup recovery (§3) finds those
+  records already settled; it marks `interrupted` itself only the ones a crash left live.
 - **Kill semantics:** each step's executor runs in its own process group
   (`start_new_session`), and timeout/cancel/skip signal the whole group — a step's children
   (Playwright browsers, subprocesses) die with it, are never orphaned, and can never hold the
   engine's log pipe open past the kill (which would strand the automation "executing").
   The group kill runs whether or not the executor itself has already exited — a grandchild
-  that outlived it is still in the group and still holds the pipe. The kill also releases the
-  engine's read of that pipe itself (§2 pipe-release contract), so a grandchild that escaped
-  the group by starting its own session and still holds the pipe cannot hold the step past
-  its kill either.
+  that outlived it is still in the group and still holds the pipe. It runs at **every step
+  end**, a normal exit included: once the executor process has exited, the engine gives the
+  log pipe a short drain grace (2 s) for the trailing lines, then kills the group and
+  defuses the pipe's read end regardless — a background child a step left behind (a
+  server it spawned, an `&` shell job) neither holds the step "executing" until the
+  watchdog fires nor survives as an orphan — and a cancel's TERM→KILL escalation is never
+  cancelled while the group may still have members. The read loop therefore ends on EOF
+  *or* on the executor's exit plus the grace, never on EOF alone.
+  A kill also releases the engine's read of that pipe itself (§2 pipe-release contract), so
+  a grandchild that escaped the group by starting its own session and still holds the pipe
+  cannot hold the step past its kill either.
   One child deliberately escapes that group: a §6.1 runtime agent call's harness CLI spawns
   in its **own** session (so the call's idle-window watchdog can kill the CLI and its helpers
   without killing the step). The executor therefore reports that child's group id to the

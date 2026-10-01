@@ -45,6 +45,15 @@ PARAM_KINDS = {"toggle", "list", "kv", "number", "text"}
 # these (§8: every other key drops silently).
 PARAM_FIELDS = ("name", "kind", "label", "help", "default", "min",
                 "placeholder", "validate")
+# §8 validator key rule: every key a manifest may carry — the §8 sync
+# manifest's own plus the §20 workdir identity fields `pull` writes (`name`,
+# `description`). Any other top-level key is a validation error.
+MANIFEST_KEYS = ("name", "description", "note", "params", "test_values",
+                 "packages", "triggers", "steps")
+# §8 validator key rule: every key a step entry may carry (the per-step §4.1
+# keys, snake_case). Any other step key is a validation error.
+STEP_KEYS = ("file", "name", "description", "agent", "why", "agents", "secrets",
+             "packages", "timeout", "no_timeout", "retries", "infinite_retries")
 # §8 envelope shape constants — canonical in harness.py (its recombiner and
 # scratch watcher need them, and harness never imports drafting); aliased
 # here for the parsers and progress scanners below.
@@ -1115,6 +1124,12 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
     if not isinstance(manifest, dict):
         return {}, ["manifest.yaml must be a mapping"]
 
+    # §8 key rule: an unknown manifest key is an error, never dropped — a
+    # misspelled `trigger:` must not save as "no triggers" without a word.
+    for key in manifest:
+        if key not in MANIFEST_KEYS:
+            errors.append(f"unknown manifest key: {key}")
+
     # §8 rule 3: the manifest's text fields are checked, not assumed — YAML
     # 1.1 turns `note: on` into a boolean and a mis-indented block into a
     # mapping, and either would land verbatim in the version and break the
@@ -1123,6 +1138,9 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         errors.append("manifest `note` must be a string")
 
     params = manifest.get("params") or []
+    if not isinstance(params, list):
+        errors.append("params must be a list of param entries")
+        params = []
     norm_params: list[dict] = []
     seen_params: set[str] = set()
     reported_params: set[str] = set()
@@ -1142,15 +1160,19 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             reported_params.add(p["name"])
             errors.append(f"param `{p['name']}` is declared twice")
         seen_params.add(p["name"])
+        if not isinstance(p["kind"], str):
+            errors.append(f"param {p['name']}: `kind` must be a string")
+            continue
         if p["kind"] not in PARAM_KINDS:
             errors.append(f"param {p['name']}: unknown kind {p['kind']}")
         if "default" not in p:
             errors.append(f"param {p['name']}: missing default")
         if p["kind"] == "number" and "min" not in p:
             p["min"] = 0
-        # §8: unknown param keys drop silently, exactly as unknown manifest and
-        # step keys do — the entry is normalized to the §4.2 definition fields,
-        # so a misspelled key never reaches a version file or a §5.1 archive.
+        # §8: unknown param keys drop silently (unlike unknown manifest and
+        # step keys, which are errors) — the entry is normalized to the §4.2
+        # definition fields, so a stray key never reaches a version file or
+        # a §5.1 archive.
         norm_params.append({k: p[k] for k in PARAM_FIELDS if k in p})
 
     # §8: optional best-effort draft-test values — keys must name manifest
@@ -1163,7 +1185,8 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             errors.append("test_values must be a mapping of param name → value")
             test_values = None
         else:
-            names = {p.get("name") for p in params if isinstance(p, dict)}
+            names = {p.get("name") for p in params
+                     if isinstance(p, dict) and isinstance(p.get("name"), str)}
             bad = sorted(str(k) for k in test_values if k not in names)
             if bad:
                 errors.append(f"test_values names unknown params {bad} — "
@@ -1194,21 +1217,41 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
     pkg_imports = [p["import"] for p in norm_pkgs]
 
     steps = manifest.get("steps") or []
-    if not steps:
+    # Set when a step list or file name is the wrong type: already reported
+    # once, so the file-matching checks below (which read file names) skip.
+    bad_file = False
+    if not isinstance(steps, list):
+        errors.append("steps must be a list of step entries")
+        steps = []
+        bad_file = True
+    elif not steps:
         errors.append("steps must be nonempty")
     # A non-dict entry (a bare `- 01-fetch.py` string is a plausible agent
     # shorthand) would otherwise be dropped by every filter below and produce
     # a validated draft with zero steps — reject it so the repair round fires.
-    for s in steps:
+    # A present `file` that isn't a string (`file: 1`, `file: [a]`, a blank
+    # `file:`) is reported here once, and the step drops out of every check
+    # below that reads it as a file name.
+    for i, s in enumerate(steps, 1):
         if not isinstance(s, dict):
             errors.append(f"steps entry must be a mapping with file/name/description — got {s!r}")
-    listed = [s.get("file", "") for s in steps if isinstance(s, dict)]
+            continue
+        # §8 key rule: an unknown step key is an error — a misspelled
+        # `timeout_seconds` must not save as the default timeout.
+        for key in s:
+            if key not in STEP_KEYS:
+                errors.append(f"step {i}: unknown key {key}")
+        if "file" in s and not isinstance(s["file"], str):
+            errors.append(f"step {i}: `file` must be a string naming its NN-name.py file")
+            bad_file = True
+    listed = [s.get("file", "") for s in steps
+              if isinstance(s, dict) and isinstance(s.get("file", ""), str)]
     # §8: the sync call may return an optional notes.md beside the manifest — the
     # agent's updated working-knowledge doc, excluded from step-file matching.
     blocks = [f for f in files if f not in ("manifest.yaml", "notes.md")]
-    if sorted(listed) != sorted(blocks):
+    if not bad_file and sorted(listed) != sorted(blocks):
         errors.append(f"steps[].file and file blocks don't match 1:1 (manifest: {listed}, blocks: {blocks})")
-    for i, fname in enumerate(listed, 1):
+    for i, fname in enumerate([] if bad_file else listed, 1):
         m = STEP_FILE_RE.match(fname or "")
         if not m:
             errors.append(f"step file {fname!r} doesn't follow NN-name.py")
@@ -1239,7 +1282,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         return None
 
     for i, s in enumerate(steps, 1):
-        if not isinstance(s, dict):
+        if not isinstance(s, dict) or not isinstance(s.get("file", ""), str):
             continue
         # §8 rule 3: a step's text fields are checked, not assumed — YAML 1.1
         # turns `name: on` into a boolean and a mis-indented block into a
@@ -1372,7 +1415,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
 
     norm_steps = []
     for s in steps:
-        if not isinstance(s, dict):
+        if not isinstance(s, dict) or not isinstance(s.get("file", ""), str):
             continue
         code = files.get(s.get("file", ""), "")
         try:
@@ -1520,14 +1563,15 @@ class DraftJobs:
         # client courtesy — a new job for an owner whose previous one is
         # still building cancels it first (its harness is killed, its record
         # settles cancelled), so two agent runs can never write the same
-        # draft. Outside the registration lock below: cancel() takes it.
-        with self._lock:
-            live = [k for k, v in self.jobs.items()
-                    if v["status"] == "building" and v.get("_owner") == owner_id]
-        for k in live:
-            self.cancel(k)
+        # draft. The scan, the cancel marks, and the insert below are ONE
+        # lock hold: two concurrent starts for one owner could otherwise
+        # each scan before the other inserts and both survive building.
         superseded: list[dict] = []
         with self._lock:
+            cancelled = [v for v in self.jobs.values()
+                         if v["status"] == "building" and v.get("_owner") == owner_id]
+            for v in cancelled:
+                self._mark_cancelled_locked(v)
             # §19: one held outcome per owner — a new job for the same owner
             # supersedes (consumes) the previous terminal record, and the
             # job just cancelled above is consumed the same way.
@@ -1541,6 +1585,11 @@ class DraftJobs:
             for k in terminal[:-20]:
                 superseded.append(self.jobs.pop(k))
             self.jobs[job_id] = job
+        # Outside the lock: the harness kill (and its term-then-kill thread)
+        # never runs while other callers wait on the registry.
+        for v in cancelled:
+            self._publish(v)
+            self._kill_harness(v)
         for v in superseded:
             if v["status"] in _HELD_STATUSES:
                 self._publish(v, "consumed")
@@ -1567,6 +1616,13 @@ class DraftJobs:
             out["stageTimes"] = list(j["stageTimes"])
         return out
 
+    @staticmethod
+    def _mark_cancelled_locked(j: dict) -> None:
+        """Settle a building job cancelled — caller holds self._lock."""
+        j["_cancel"] = True
+        j["status"] = "cancelled"
+        j["endedTime"] = time.time()  # §8 stage timing: bounds the last stage
+
     def cancel(self, job_id: str) -> bool:
         with self._lock:
             j = self.jobs.get(job_id)
@@ -1574,10 +1630,15 @@ class DraftJobs:
             # done/blocked/failed job — the Review page would lose the result.
             if not j or j["status"] != "building":
                 return False
-            j["_cancel"] = True
-            j["status"] = "cancelled"
-            j["endedTime"] = time.time()  # §8 stage timing: bounds the last stage
+            self._mark_cancelled_locked(j)
         self._publish(j)
+        self._kill_harness(j)
+        return True
+
+    @staticmethod
+    def _kill_harness(j: dict) -> None:
+        """§8 "cancelling the job kills the harness process" — never under
+        self._lock."""
         proc = j["_proc"].get("proc")
         if proc and proc.poll() is None:
             # The whole session group (§8 "cancelling the job kills the harness
@@ -1596,7 +1657,6 @@ class DraftJobs:
 
             threading.Thread(target=_hard_kill, daemon=True,
                              name="ad-draft-kill").start()
-        return True
 
     def cancel_for(self, owner_id: str | None) -> None:
         """§19 draft settle: cancel every still-building job stamped with this

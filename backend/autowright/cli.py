@@ -115,18 +115,20 @@ class Client:
 
 def _resolve(items: list[dict], ref: str, noun: str) -> dict:
     """§20 reference rule, shared by every id-and-name lookup: the id, then an
-    id prefix, then an exact name, then a unique name substring."""
+    exact name (case-insensitive), then a unique id prefix, then a unique name
+    substring."""
     for it in items:
         if it["id"] == ref:
             return it
-    # §20: the short ids the CLI prints must resolve back — try id prefix
-    # before names.
-    matches = [it for it in items if it["id"].startswith(ref)]
-    # §4.1 names are unique at write time, but duplicates already on disk
-    # still load — §20: ambiguity exits with the candidate list, never a
-    # silent first-match (substring matches can still collide anyway).
+    # §20: an exact name outranks an id prefix, so an item named `feed` is
+    # never shadowed (or deleted in its place) by another whose id happens to
+    # start with those characters. §4.1 names are unique at write time, but
+    # duplicates already on disk still load — ambiguity exits with the
+    # candidate list, never a silent first-match.
+    matches = [it for it in items if it["name"].lower() == ref.lower()]
     if not matches:
-        matches = [it for it in items if it["name"].lower() == ref.lower()]
+        # §20: the short ids the CLI prints must resolve back.
+        matches = [it for it in items if it["id"].startswith(ref)]
     if not matches:
         matches = [it for it in items if ref.lower() in it["name"].lower()]
     if len(matches) == 1:
@@ -733,6 +735,11 @@ def cmd_automation_pull(c: Client, args) -> None:
 def cmd_automation_push(c: Client, args) -> None:
     a = find_automation(c, args.automation)
     full = c.req("GET", f"/automations/{a['id']}")
+    if full.get("draft") and not args.discard_draft:
+        # §20: a push never destroys in-app draft work silently — the §19
+        # save would settle that draft (its live test and sync job die).
+        sys.exit(f"{full['name']!r} has an unsaved draft in the app - pass "
+                 "--discard-draft to replace it")
     agents, secrets = _grant_stores(c)
     draft = validate_workdir(Path(args.dir), agents, secrets)
     if args.note:
@@ -782,8 +789,12 @@ def cmd_automation_create(c: Client, args) -> None:
         agent_id = match[0]["id"]
     # §20 grant model: create grants exactly the --grant-* flags — no all-on seed.
     step_agents, allowed_secrets = _grants(args, draft, agents, secrets)
+    # §19 settlePending false: a CLI-made automation is unrelated to whatever
+    # the user is drafting in the app — the pending create-mode draft, its
+    # chat, and any building job stay where they are.
     body = {"draft": draft, "name": name, "agentId": agent_id,
-            "stepAgents": step_agents, "allowedSecrets": allowed_secrets}
+            "stepAgents": step_agents, "allowedSecrets": allowed_secrets,
+            "settlePending": False}
     r = c.req("POST", "/automations", body)
     n = len(r.get("triggers") or [])
     print(f"created {r['name']!r} [{r['id'][:8]}] — "
@@ -1235,7 +1246,8 @@ def cmd_memory_show(c: Client, args) -> None:
 
 def cmd_memory_clear(c: Client, args) -> None:
     a = find_automation(c, args.automation)
-    c.req("POST", f"/automations/{a['id']}/memory/clear")
+    # §20 HTTP timeouts: the clear snapshots the whole memory directory first.
+    c.req("POST", f"/automations/{a['id']}/memory/clear", timeout=660)
     print("memory cleared (a pre-clear snapshot was taken when memory existed)")
 
 
@@ -1262,15 +1274,19 @@ def cmd_snapshot_list(c: Client, args) -> None:
 
 def cmd_snapshot_create(c: Client, args) -> None:
     a = find_automation(c, args.automation)
+    # §20 HTTP timeouts: a snapshot copies the whole memory directory.
     r = c.req("POST", f"/automations/{a['id']}/memory/snapshots",
-              {"name": args.name} if args.name else {})
+              {"name": args.name} if args.name else {}, timeout=660)
     print(f"snapshot {r.get('snapshot', {}).get('id', '')[:8]} created")
 
 
 def cmd_snapshot_restore(c: Client, args) -> None:
     a = find_automation(c, args.automation)
     s = _find_snapshot(c, a, args.snapshot)
-    c.req("POST", f"/automations/{a['id']}/memory/snapshots/{s['id']}/restore")
+    # §20 HTTP timeouts: a restore copies the whole memory directory (twice,
+    # with the pre-restore snapshot).
+    c.req("POST", f"/automations/{a['id']}/memory/snapshots/{s['id']}/restore",
+          timeout=660)
     print(f"restored snapshot {s['id'][:8]} (a pre-restore snapshot was taken first)")
 
 
@@ -1603,6 +1619,10 @@ def cmd_marketplace_set(c: Client, args) -> None:
             sys.exit(f"unknown marketplace key {k!r} - have: {', '.join(SOURCE_KEYS)}")
         if SOURCE_KEYS[k] is bool:
             patch[k] = _toggle(k, raw)
+        elif raw and not raw.startswith(("http://", "https://")):
+            # §22.5: a file path is made absolute against the current
+            # directory before it travels, exactly as `add` does.
+            patch[k] = os.path.abspath(raw)
         else:
             # §22.4: an empty location clears it - the copy stays, there is
             # just nothing to refresh from any more.
@@ -1619,19 +1639,25 @@ def cmd_marketplace_refresh(c: Client, args) -> None:
             # §22.2: a catalog with no location is the app's only copy - the
             # backend's 409, said up front rather than as an HTTP detail.
             sys.exit(f"{s['name']!r} has no location to refresh from")
-        # §22.4: a single-source refresh answers 200 either way - the failure
-        # is in `error`, not in the status code.
-        sources = [c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=660)]
+        sources = [s]
     else:
-        sources = c.req("POST", "/marketplace/refresh", timeout=660)["sources"]
+        # §22.5: refresh-all walks the table itself, in table order, one row
+        # at a time through the single-row route — each under its own 660 s
+        # timeout, so the §22.4 refresh-all route's shared deadline can never
+        # leave a slow later catalog unreached.
+        sources = c.req("GET", "/marketplace")["sources"]
     failed = False
     for s in sources:
+        if not s.get("location"):
+            # §22.5: refresh-all skips a catalog with no location; not a failure.
+            print(f"skipped {s['name']} - no location to refresh from")
+            continue
+        # §22.4: a single-source refresh answers 200 either way - the failure
+        # is in `error`, not in the status code.
+        s = c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=660)
         if s.get("error"):
             failed = True
             print(f"couldn't refresh {s['name']}: {s['error']}")
-        elif not s.get("location"):
-            # §22.5: refresh-all skips a catalog with no location; not a failure.
-            print(f"skipped {s['name']} - no location to refresh from")
         else:
             print(f"refreshed {s['name']} - {len(s.get('entries') or [])} automation(s)")
     if failed:
@@ -1843,7 +1869,10 @@ def cmd_settings_set(c: Client, args) -> None:
         if not sep:
             sys.exit(f"expected KEY=VALUE, got {item!r}")
         if k == "dataPath":
-            data_path = raw
+            # §20: made absolute against the current directory before it
+            # travels — the backend would resolve a relative path against its
+            # own cwd, so it refuses one with 422.
+            data_path = os.path.abspath(raw)
             continue
         if k not in SETTINGS_KEYS:
             sys.exit(f"unknown setting {k!r} — have: {', '.join(SETTINGS_KEYS)}, dataPath")
@@ -2280,7 +2309,11 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "manifest round-trips unchanged. Message and app-start triggers, and anything you added "
                          "with `trigger add`, survive a push untouched. Packages the saved "
                          "version declares are installed afterwards, and an install that "
-                         "fails warns without failing the save.",
+                         "fails warns without failing the save."
+                         "\n\n"
+                         "If the automation has an unsaved draft in the app, the push is "
+                         "refused and nothing is saved; pass --discard-draft to replace that "
+                         "draft with this save.",
              epilog="Examples:\n"
                     "  autowright automation push report ./report\n"
                     "  autowright automation push report ./report --note \"retry on 429\"\n"
@@ -2289,6 +2322,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p.add_argument("dir", help="the workdir to validate and save")
     p.add_argument("--note", metavar="TEXT",
                    help="a short note describing this version, shown in the version history")
+    p.add_argument("--discard-draft", action="store_true",
+                   help="replace an unsaved draft the automation has in the app")
     _grant_flags(p)
     p = _sub(ag, "create", cmd_automation_create, "create a new automation from a directory",
              description="Validate a workdir and create a new automation from it, as version "
@@ -2306,7 +2341,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "own name; a name already taken gets a number appended rather than "
                          "colliding. The new automation's triggers arrive from the manifest "
                          "switched on, so check them with `trigger list` if you are not ready "
-                         "for it to execute on its own.",
+                         "for it to execute on its own. A new automation you are drafting in "
+                         "the app is left untouched.",
              epilog="Examples:\n"
                     "  autowright automation create ./report\n"
                     "  autowright automation create ./report --name \"Daily report\"\n"
@@ -3165,7 +3201,27 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     return ap
 
 
+def _utf8_stdio() -> None:
+    """§2 pipe-encoding contract: the CLI's lines carry `→` and automation
+    names, and a piped or redirected stdout is the locale codec (cp1252 on
+    Windows) — pin stdout/stderr to UTF-8 with errors="replace" so printing
+    can never crash the exit-code contract after a successful run, and stdin
+    to UTF-8 so `secret set --stdin` decodes a non-ASCII value correctly."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+    if hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+
 def main() -> None:
+    _utf8_stdio()
     args = build_parser().parse_args()
     c = Client() if args.client else None
     try:

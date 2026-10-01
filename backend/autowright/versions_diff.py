@@ -26,7 +26,7 @@ def manifest_text(ver: dict) -> str:
         "params": strip_param_values(ver.get("params")),
         **({"packages": pkgs} if pkgs else {}),
         "steps": [manifest_step_entry(s, s.get("file") or "")
-                  for s in ver.get("steps", []) or []],
+                  for s in ver.get("steps", []) or [] if isinstance(s, dict)],
     })
 
 
@@ -52,7 +52,12 @@ def _step_keys(ver: dict) -> list[tuple[tuple[str, int], dict]]:
     seen: dict[str, int] = {}
     out = []
     for s in ver.get("steps", []) or []:
-        name = s.get("name", "")
+        if not isinstance(s, dict):
+            continue
+        # §19 lenient read: a hand-edited stored version's step name may be
+        # any YAML value — it still keys the match as text.
+        name = s.get("name")
+        name = name if isinstance(name, str) else ("" if name is None else str(name))
         k = seen.get(name, 0)
         seen[name] = k + 1
         out.append(((name, k), s))

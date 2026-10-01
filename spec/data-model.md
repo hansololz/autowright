@@ -1042,9 +1042,14 @@ Step scripts reference them by id subscript with the name in a trailing comment
 (`secrets["<id>"]  # NAME`, §6.1 — always a literal quoted id); values are injected at
 runtime and redacted from logs. Redaction labels, error copy, and `redactedSecrets` stay
 names — ids are the binding, names are the display. Because log lines are
-redacted one at a time, each non-blank line of a multi-line value is redacted individually as well,
-and the §6 agent-prompt scan likewise checks every non-blank line of a multi-line value, not just
-the whole string. Deleting a secret in use warns: the automation "uses it and will stop
+redacted one at a time, each **substantive** line of a multi-line value is redacted
+individually as well — a line of at least 8 characters holding at least one letter or
+digit; the `{` / `}` lines of a service-account JSON or the bare punctuation of a PEM
+block are not probes, or every brace in every log line would become `•••` and every agent
+prompt containing one would be refused — and the §6 agent-prompt scan checks the same
+substantive lines, not just the whole string. Redaction replaces **longer values first**
+(the redaction map is applied sorted by value length, descending), so a secret whose value
+is a prefix of another secret's value never leaves the longer value's tail in the clear. Deleting a secret in use warns: the automation "uses it and will stop
 working."
 
 ### 4.9 Settings

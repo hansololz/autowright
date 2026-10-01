@@ -72,6 +72,25 @@ describe('AgentNewPage (§12)', () => {
     expect(storeMod.useStore.getState().page).toBe('agents')
   })
 
+  // §9 busy rule: the submit disables and reads Adding… while the POST is in
+  // flight — a double-click never adds the agent twice.
+  it('a double-click on Add agent sends one POST', async () => {
+    let land!: (v: unknown) => void
+    ;(mockedApi.addAgent as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((r) => { land = r }))
+    render(<AgentNewPage />)
+    fireEvent.click(screen.getByText('Claude Code'))
+    fireEvent.change(screen.getByPlaceholderText('Name this agent'), { target: { value: 'Writer' } })
+    fireEvent.click(screen.getByText('Add agent'))
+    await waitFor(() => expect(mockedApi.addAgent).toHaveBeenCalledTimes(1))
+    const busy = screen.getByRole('button', { name: /Adding…/ }) as HTMLButtonElement
+    expect(busy.disabled).toBe(true)
+    fireEvent.click(busy)
+    expect(mockedApi.addAgent).toHaveBeenCalledTimes(1)
+    await act(async () => { land({ id: 'new' }) })
+    expect(storeMod.useStore.getState().page).toBe('agents')
+  })
+
   it('submitting without a name shows the inline error, scrolls to and focuses the name field, posts nothing', async () => {
     const scrollSpy = vi.spyOn(Element.prototype, 'scrollIntoView')
     render(<AgentNewPage />)

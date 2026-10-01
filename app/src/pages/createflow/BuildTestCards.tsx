@@ -14,7 +14,7 @@ import { useStore } from '../../store'
 import { useTriggerPreview } from '../../triggers'
 import type { Automation, ChatEntry, DraftTrigger, ParamDef } from '../../types'
 import { Eyebrow, Spinner } from '../../ui'
-import { type Rev, analyzeTestMessage, applyTestValues, serializeDraft, stepsFingerprint } from './model'
+import { type Rev, analyzeTestMessage, applyTestValues, serializeDraft, stepsFingerprint, testOutcomeStale } from './model'
 import { type MsgTrigger, type TestMock, TestRunModal } from './TestRunModal'
 
 // §11 card buttons: compact borderless text buttons (the card-header
@@ -144,12 +144,18 @@ export interface TestCardProps {
   runTestSignal: number
   // §11: the create empty state has no draft to test — the modal closes
   isCreateEmpty: boolean
+  // §11 stale-outcome rule: the fingerprint of the steps the tracked test ran
+  // against (null for a re-attached test — unknown, so never stale). Owned by
+  // the page, which gates the thread's Analyze-the-failure pill on it too.
+  testedFp: string | null
+  setTestedFp: (fingerprint: string | null) => void
 }
 
 export function TestCard({
   rev, up, appendEntry, isEdit, auto,
   outOfSync, anyJobBusy, busyRewrite, viewingOld,
   lockStyle, runSync, flushHeldChips, sendChat, runTestSignal, isCreateEmpty,
+  testedFp, setTestedFp,
 }: TestCardProps) {
   // Per-field selectors (UI-GUIDE): a bare useStore() re-renders the whole
   // card on every store write anywhere — every toast, every log line.
@@ -174,9 +180,6 @@ export function TestCard({
   // §11 test trigger message: the mock rides §19 `triggerMock` only when the
   // message text is nonempty — an empty message runs the test without a payload.
   const [testMock, setTestMock] = useState<TestMock | null>(null)
-  // §11 stale-outcome rule: the fingerprint of the steps the tracked test ran
-  // against (null for a re-attached test — unknown, so never stale).
-  const [testedFp, setTestedFp] = useState<string | null>(null)
   // §11: true from the click until POST /tests answers. `testLive` only turns
   // true once the record is tracked, so without this a second click during the
   // POST starts a second test run.
@@ -373,9 +376,7 @@ export function TestCard({
   // Memoized: the hash walks every step's code, and this card re-renders on
   // every store write its selectors see.
   const fp = useMemo(() => stepsFingerprint(rev.steps), [rev.steps])
-  const stale = test
-    ? testedFp !== null && testedFp !== fp
-    : !!rev.lastTest && !!rev.lastTest.stepsFingerprint && rev.lastTest.stepsFingerprint !== fp
+  const stale = testOutcomeStale(!!test, testedFp, rev.lastTest?.stepsFingerprint, fp)
   // §11 state 5: a resumed last test opens the modal on its run while the
   // record still exists (retention may outlive it); a stale outcome opens
   // the setup phase for the new steps instead.

@@ -7,6 +7,7 @@ import json
 import os
 import plistlib
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -175,6 +176,39 @@ def test_wedged_launchctl_times_out_into_a_plain_failure(svc, monkeypatch):
     # and the read-only actions degrade instead of raising
     assert svc.mod.status() == "stopped (plist present) — returns at next login or app launch"
     assert svc.mod.restart() == "restart failed: launchctl timed out"
+
+
+@launchd_only
+def test_launchctl_calls_share_one_command_budget(svc, monkeypatch):
+    """§3: one wall-clock budget per command, shared by every launchctl call
+    in it — each call's timeout is min(30 s, what's left), and an exhausted
+    budget answers the plain timed-out line at once, so a launchctl that
+    answers every call just under its timeout can't outlast the caller."""
+    import subprocess
+
+    monkeypatch.setattr(svc.mod, "COMMAND_BUDGET_S", 0.6)
+    monkeypatch.setattr(svc.mod, "LAUNCHCTL_TIMEOUT_S", 0.25)
+    timeouts = []
+
+    def slow(cmd, **kw):
+        timeouts.append(kw["timeout"])
+        time.sleep(kw["timeout"])
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(svc.mod.subprocess, "run", slow)
+    started = time.monotonic()
+    out = svc.mod.install()
+    elapsed = time.monotonic() - started
+    assert out == "install failed: launchctl timed out"
+    assert svc.mod.result_code(out) == 1
+    assert all(t <= 0.25 for t in timeouts)
+    assert sum(timeouts) <= 0.6 + 1e-6
+    assert elapsed < 0.6 + 0.5
+    # The budget is per command: the next one starts fresh.
+    timeouts.clear()
+    assert svc.mod.restart() == "restart failed: launchctl timed out"
+    assert timeouts and timeouts[0] == 0.25
+    assert svc.mod._command_deadline is None
 
 
 # ---------------------------------------------------------------- CLI shim

@@ -234,6 +234,10 @@ export default function App() {
   // The error boundary's key and the §22.3 preview-gate redirect need this -
   // the pages select it themselves.
   const page = useStore((s) => s.page)
+  // §9: the error boundary's key also names the record, so moving between two
+  // records of the same page kind clears a latched error.
+  const automationId = useStore((s) => s.automationId)
+  const executionId = useStore((s) => s.executionId)
   const toast = useStore((s) => s.toast)
   const reportOpen = useStore((s) => s.reportOpen)
   const whatsNewOpen = useStore((s) => s.whatsNewOpen)
@@ -267,8 +271,11 @@ export default function App() {
       ?.catch(() => useStore.getState().showToast('Some settings could not be applied'))
   }, [login, menuBarIcon, automaticUpdateCheck])
 
+  // §3/§9: the boot splash is a loaded main window too — a Cmd+Q while
+  // ensure-backend is still installing shows the quit overlay and its outcome
+  // rather than running natively with no feedback.
   if (connected === null || connected === false) {
-    return <BootSplash waiting={connected === false} />
+    return <><BootSplash waiting={connected === false} /><QuitFlow /></>
   }
 
   // §13: the panel renders its own Toast — a failed tray execute is never silent
@@ -307,9 +314,10 @@ export default function App() {
             stay DOM-clickable; must never hold children. */}
         {platformOs !== 'linux' && <div className="ad-drag" style={{ position: 'sticky', top: 0, height: 40, zIndex: 101, pointerEvents: 'none' }} />}
         {/* §9: a render failure is contained to the page — the rail, toasts and
-            the rest of the shell survive it. Keyed by surface+page so leaving a
-            broken page mounts a fresh boundary instead of a latched one. */}
-        <ErrorBoundary key={surface === 'create' ? 'create' : page}>
+            the rest of the shell survive it. Keyed by surface+page+record so
+            leaving a broken page, or moving to another record of the same
+            page kind, mounts a fresh boundary instead of a latched one. */}
+        <ErrorBoundary key={surface === 'create' ? 'create' : page + (automationId ?? '') + (executionId ?? '')}>
           {surface === 'create' ? <CreateFlow /> : <Content />}
         </ErrorBoundary>
       </ScrollArea>

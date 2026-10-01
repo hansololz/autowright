@@ -41,8 +41,11 @@ ensure-backend step runs via `python -m autowright.service` (§3). Dependency di
 one-way: the CLI calls the backend API and the service module; **the UI and the backend never
 invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
 
-- **References:** automations resolve by id, unique id prefix, exact name (case-insensitive),
-  or unique name substring; executions and snapshots by id prefix. Every short id the CLI
+- **References:** automations resolve by id, then **exact name (case-insensitive)**, then
+  unique id prefix, then unique name substring (2026-09-30 order: an exact name outranks a
+  prefix match, so an automation named `feed` or `1` is never shadowed — or deleted in its
+  place — by another automation whose id happens to start with those characters; names are
+  unique at write time, so an exact-name match is never ambiguous); executions and snapshots by id prefix. Every short id the CLI
   prints (the 8-character `[abcd1234]` forms in list/create/ambiguity output) must therefore
   resolve when passed back. Ambiguity or no match exits with the candidate list.
 - **`--json`** on every read verb (`status`, `instructions`, `automation list|show|diff`,
@@ -73,7 +76,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   wire parameter names — while reference resolution still reads the uncapped list (§19;
   the bare no-reference form of `execution show|tail|cancel|retry|skip|result` means "the
   newest" and reads `limit=1`), `settings set` lists its keys with
-  each one's value form (and, after setting one of the shell-owned keys `login` or
+  each one's value form (`dataPath=` is made absolute against the current directory before
+  it travels, like `marketplace add`'s path — the backend refuses a relative path with 422,
+  since it would resolve against the backend's own cwd) (and, after setting one of the shell-owned keys `login` or
   `menuBarIcon`, prints one extra line "takes effect when the app next syncs, within a
   minute" — the OS side of those two is the Electron main process's §3 poll, not the
   backend's, and headless there is no app to apply it at all), and `param set` lists the per-kind value forms. Every `<automation>`
@@ -179,7 +184,11 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   that legitimately take long — package install (the §6.2 ensure runs pip), import (the
   URL fetch, the file upload, *and* the confirm that lands the archive — a large archive
   landing on a slow volume must never report "backend isn't reachable" while it succeeds),
-  and automation delete (§19 waits for cancelled engine threads) — which get 660 s: 60 s
+  automation delete (§19 waits for cancelled engine threads), and the three memory
+  operations `memory clear`, `snapshot create`, and `snapshot restore` (each copies the
+  whole memory directory, which can be gigabytes — a 30 s timeout would report "backend
+  isn't reachable … restart it" while the copy is still running, and following that advice
+  restarts the backend mid-copy) — which get 660 s: 60 s
   of headroom over the backend's own 600 s download/install deadlines, so a slow server is
   reported by the backend's plain-word timeout ("the download timed out after 10 minutes")
   and never as "backend isn't reachable" from the client's socket giving up first.
@@ -198,7 +207,15 @@ into a directory (dir defaults to the automation's name); `automation push <ref>
 (content unchanged)`, and a `--note` given then is reported as needing a content change);
 `automation create <dir> [--name]
 [--agent] [--grant-agent NAME]… [--grant-secret NAME]…` validates and creates v1 — push and
-create take the workdir as a required positional; only pull's is optional. Files:
+create take the workdir as a required positional; only pull's is optional. **Neither
+destroys in-app draft work silently** (2026-09-30): `push` first reads the automation and,
+when it holds an unsaved §4.4 draft, exits 1 with `'<name>' has an unsaved draft in the app
+- pass --discard-draft to replace it` and writes nothing; with `--discard-draft` the §19
+save settles that draft exactly as a UI save would (its live test and sync job die, the
+thread gets the "Draft saved as vN." marker). `create` never touches the app's pending
+create-mode draft: it sends the §19 `settlePending: false` flag, so the pending slot, its
+chat, and any building job stay where they are — a CLI-made automation is unrelated to
+whatever the user is drafting in the app. Files:
 
 - `spec.md` — the spec as markdown (§4.1 blocks ↔ markdown via `specmd`).
 - `manifest.yaml` — the §8 call-2 manifest shape verbatim, plus the identity fields the §8

@@ -6,7 +6,7 @@ import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import type { Agent } from '../types'
-import { BackLink, BtnPrimary, ConfirmModal, EmptyNotice, Eyebrow, HeaderActions, LoadingRow, ManualInstallLine, MenuRow, MiniBadge, P, PageTitle, PopMenu, ProgressBar, RadioRing, StatusLine, usePopover } from '../ui'
+import { BackLink, BtnPrimary, ConfirmModal, EmptyNotice, Eyebrow, HeaderActions, LoadingRow, ManualInstallLine, MenuRow, MiniBadge, P, PageTitle, PopMenu, ProgressBar, RadioRing, Spinner, StatusLine, usePopover } from '../ui'
 
 type HarnessId = 'claude' | 'gemini' | 'codex' | 'opencode'
 
@@ -113,6 +113,9 @@ export default function AgentNewPage() {
   // §12 edit-mode overflow menu (moved off the agent card): check / make default / remove.
   const [menuOpen, setMenuOpen, menuRef] = usePopover()
   const [delOpen, setDelOpen] = useState(false)
+  // §9 busy rule: Add agent / Save changes disable and show busy feedback while
+  // the request is in flight — a double-click never adds the agent twice.
+  const [saving, setSaving] = useState(false)
   const [st, setSt] = useState<{ ready: boolean; models: string[] } | null>(null)
   const [pulling, setPulling] = useState<string | null>(null)
   const [pullText, setPullText] = useState('')
@@ -386,6 +389,7 @@ export default function AgentNewPage() {
   }
 
   const addAgent = async () => {
+    if (saving) return
     if (!canAdd) {
       const needsName = harness && mode && !name.trim()
       const missingOllama = needsOllama && !ready
@@ -404,6 +408,7 @@ export default function AgentNewPage() {
       name: name.trim(),
       description: description.trim(),
     }
+    setSaving(true)
     try {
       if (editAgent) {
         await api.patchAgent(editAgent.id, payload)
@@ -421,6 +426,8 @@ export default function AgentNewPage() {
       // check (a race with another writer can slip past the client-side test).
       if (/already exists/.test((e as Error).message)) flagNameErr('taken')
       else showToast((e as Error).message)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -813,8 +820,10 @@ export default function AgentNewPage() {
         <button
           className={`ad-btn-primary${canAdd ? '' : ' looks-disabled'}`}
           onClick={() => { void addAgent() }}
+          disabled={saving}
         >
-          {editAgent ? 'Save changes' : 'Add agent'}
+          {saving && <Spinner size={10} color="currentColor" style={{ marginRight: 5, verticalAlign: '-1px' }} />}
+          {saving ? (editAgent ? 'Saving…' : 'Adding…') : editAgent ? 'Save changes' : 'Add agent'}
         </button>
         <button
           className="ad-btn-text dim"

@@ -598,7 +598,7 @@ class Handler:
         """Raise HarnessError before the spawn for a condition the call could
         never recover from (only Gemini needs one — see there)."""
 
-    def command(self, prompt: str, pipe_prompt: bool, writing: bool) -> list[str]:
+    def command(self, writing: bool) -> list[str]:
         raise NotImplementedError
 
     def env(self, env: dict) -> dict:
@@ -625,13 +625,13 @@ class ClaudeCodeHandler(Handler):
         self._deltas: list[str] = []
         self._final: str | None = None
 
-    def command(self, prompt: str, pipe_prompt: bool, writing: bool) -> list[str]:
-        prompt_argv = [] if pipe_prompt else ["--", prompt]
+    def command(self, writing: bool) -> list[str]:
+        # §8: `-p` with no positional prompt reads the piped stdin.
         return ["claude", "-p", *self.model_args(),
                 "--tools", "WebFetch,WebSearch" if self.web else "",
                 "--strict-mcp-config",
                 "--no-session-persistence", "--output-format", "stream-json",
-                "--include-partial-messages", "--verbose", *prompt_argv]
+                "--include-partial-messages", "--verbose"]
 
     def env(self, env: dict) -> dict:
         if self.local:
@@ -669,8 +669,7 @@ class CodexHandler(Handler):
         super().__init__(agent, web)
         self._messages: list[str] = []
 
-    def command(self, prompt: str, pipe_prompt: bool, writing: bool) -> list[str]:
-        prompt_argv = [] if pipe_prompt else ["--", prompt]
+    def command(self, writing: bool) -> list[str]:
         codex_local_args = ["--oss", "--local-provider", "ollama"] if self.local else []
         # --json: JSONL events on stdout (the §8 progress stream; verified
         # against codex-cli 0.144.6). --ephemeral keeps the one-shot call off
@@ -679,10 +678,11 @@ class CodexHandler(Handler):
         # workspace-write, confined to the per-call scratch cwd (§6/§8);
         # every other call keeps read-only. --search must precede `exec`
         # (exec rejects it) — same placement rule as the local-model flags.
+        # `exec` with no prompt argument reads the piped stdin (§8).
         return ["codex", *(["--search"] if self.web else []), *codex_local_args,
                 "exec", "--json", "--ephemeral", *self.model_args(),
                 "--sandbox", "workspace-write" if writing else "read-only",
-                "--skip-git-repo-check", *prompt_argv]
+                "--skip-git-repo-check"]
 
     def line(self, line: str, sink: ProgressSink) -> None:
         try:
@@ -729,15 +729,14 @@ class GeminiHandler(Handler):
                 "Gemini CLI is not signed in — sign in from the Agents page, "
                 "then try again")
 
-    def command(self, prompt: str, pipe_prompt: bool, writing: bool) -> list[str]:
-        gemini_prompt_argv = [] if pipe_prompt else ["-p", prompt]
+    def command(self, writing: bool) -> list[str]:
         # §8: a file-writing drafting call needs the file-write tools to
         # auto-approve non-interactively (the default mode blocks on an
         # approval prompt); its tools were already all-on in every mode (§6),
         # so this widens nothing the app relied on. Runtime calls stay bare.
+        # No `-p`: piped stdin runs the CLI non-interactively (§8).
         approval_args = ["--approval-mode", "yolo"] if writing else []
-        return ["gemini", *self.model_args(), *approval_args,
-                *gemini_prompt_argv]
+        return ["gemini", *self.model_args(), *approval_args]
 
     def line(self, line: str, sink: ProgressSink) -> None:
         # Plain text mode (§8): the reply is raw stdout, and progress comes
@@ -765,12 +764,11 @@ class OpenCodeHandler(Handler):
             return []
         return ["--model", f"ollama/{self.model}" if self.local else self.model]
 
-    def command(self, prompt: str, pipe_prompt: bool, writing: bool) -> list[str]:
-        prompt_argv = [] if pipe_prompt else ["--", prompt]
+    def command(self, writing: bool) -> list[str]:
         # --format json: JSONL events on stdout (the §8 progress stream;
         # verified against opencode 1.18.4 — file writes need no extra flag).
-        return ["opencode", "run", "--format", "json", *self.model_args(),
-                *prompt_argv]
+        # `run` with no message reads the piped stdin (§8).
+        return ["opencode", "run", "--format", "json", *self.model_args()]
 
     def line(self, line: str, sink: ProgressSink) -> None:
         try:
@@ -826,9 +824,17 @@ class _ScratchWatcher:
     content), and keeps first-seen order for the recombined envelope. A final
     `stop()` sweep catches a document written in the last poll interval."""
 
-    def __init__(self, scratch: Path, sink: ProgressSink):
+    def __init__(self, scratch: Path, sink: ProgressSink, harness: str = "",
+                 on_overflow=None):
         self._scratch = scratch
         self._sink = sink
+        # §8 stream cap: a document whose size passes STDOUT_CAP_CHARS fails
+        # the call the way an oversized stdout does. The poll runs on its own
+        # thread, so it records the error and calls `on_overflow` (the kill);
+        # the invoking thread raises `overflow` once the read loop ends.
+        self._harness = harness
+        self._on_overflow = on_overflow
+        self.overflow: HarnessError | None = None
         self._order: list[str] = []
         # (size, mtime_ns) — size alone would miss a same-length rewrite.
         self._stamps: dict[str, tuple[int, int]] = {}
@@ -901,6 +907,17 @@ class _ScratchWatcher:
             if self._stamps.get(entry.name) == stamp:
                 continue
             self._stamps[entry.name] = stamp
+            if st.st_size > STDOUT_CAP_CHARS:
+                # §8: checked on the stat, before any re-read — the watcher
+                # re-reads a growing document on every poll, so an oversized
+                # one is never pulled into backend memory.
+                if self.overflow is None:
+                    self.overflow = HarnessError(
+                        f"{self._harness} produced over "
+                        f"{STDOUT_CAP_CHARS // 1_000_000} MB of output — aborting")
+                    if self._on_overflow is not None:
+                        self._on_overflow()
+                return
             if entry.name not in self._order:
                 self._order.append(entry.name)
             if self._dead:
@@ -913,6 +930,8 @@ class _ScratchWatcher:
 
     def documents(self) -> list[tuple[str, str]]:
         """(name, content) in first-seen order — call after stop()."""
+        if self.overflow is not None:
+            raise self.overflow
         return [(name, self._read(name)) for name in self._order
                 if (self._scratch / name).is_file()]
 
@@ -1012,16 +1031,13 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
     # that can't stream text deltas — runtime agent.ask never writes files
     # and Codex stays in its read-only sandbox there.
     writing = web and handler.writes_files
-    # §8 prompt delivery is per-OS. POSIX: the prompt rides as the command's
-    # last argv element (behind `--`, so an LLM-written prompt starting with
-    # "-" never parses as a flag; Gemini's rides `-p`). Windows: the whole
-    # command line is capped at 32,767 characters — smaller than any real
-    # drafting prompt (a minimal build prompt already measures ~38 K), so
-    # every spawn would die with `[WinError 206]`. There the handler omits
-    # the argv prompt and pipes it to the child's stdin instead (every §8
-    # CLI has a non-interactive piped-stdin mode).
-    pipe_prompt = paths.current_os() == "windows"
-    cmd = handler.command(prompt, pipe_prompt, writing)
+    # §8 prompt delivery is stdin on every OS: the prompt never rides argv.
+    # Linux caps one argv string at 128 KiB and macOS argv plus environment
+    # at 1 MiB (a repair-round prompt crosses the Linux cap, and the E2BIG
+    # spawn failure is an OSError, not a HarnessError); Windows caps the
+    # whole command line at 32,767 characters, smaller than any real drafting
+    # prompt. Every §8 CLI has a non-interactive piped-stdin mode.
+    cmd = handler.command(writing)
     binpath = resolve_bin(cmd[0])
     if binpath is None:
         raise HarnessError(f"{cmd[0]} is not installed on this {paths.machine_noun()}")
@@ -1038,10 +1054,9 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
     # (read loop never sees EOF, the §8 idle window silently never fires).
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                # §8 per-OS prompt delivery: a pipe on Windows
-                                # (the prompt goes down it), /dev/null everywhere
-                                # else (the prompt is already in argv).
-                                stdin=subprocess.PIPE if pipe_prompt else subprocess.DEVNULL,
+                                # §8 prompt delivery: the prompt goes down
+                                # this pipe on every OS.
+                                stdin=subprocess.PIPE,
                                 # §2 pipe-encoding contract: never the locale
                                 # codec. The stdin text write below inherits it.
                                 encoding="utf-8", errors="replace",
@@ -1074,26 +1089,25 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         except (OSError, ValueError):
             pass
 
-    if pipe_prompt:
-        # §8: a DEDICATED writer thread, started right after the spawn — never
-        # the stdout read loop's thread. A ~40 K prompt overflows the stdin
-        # pipe buffer, so the write blocks until the child drains it; a child
-        # that fills its own stdout pipe first would then deadlock against a
-        # reader that is busy writing.
-        def _write_prompt() -> None:
-            try:
-                proc.stdin.write(prompt)  # type: ignore[union-attr]
-                proc.stdin.flush()  # type: ignore[union-attr]
-            except (OSError, ValueError):
-                # BrokenPipeError (the child exited or was killed before it
-                # read the prompt) and ValueError (the kill path closed the
-                # pipe underneath us) are both normal ends, not failures —
-                # the exit code and stderr carry the real story.
-                pass
-            finally:
-                _close_stdin()  # EOF: every §8 CLI waits for it
+    # §8: a DEDICATED writer thread, started right after the spawn — never
+    # the stdout read loop's thread. A ~40 K prompt overflows the stdin pipe
+    # buffer, so the write blocks until the child drains it; a child that
+    # fills its own stdout pipe first would then deadlock against a reader
+    # that is busy writing.
+    def _write_prompt() -> None:
+        try:
+            proc.stdin.write(prompt)  # type: ignore[union-attr]
+            proc.stdin.flush()  # type: ignore[union-attr]
+        except (OSError, ValueError):
+            # BrokenPipeError (the child exited or was killed before it read
+            # the prompt) and ValueError (the kill path closed the pipe
+            # underneath us) are both normal ends, not failures — the exit
+            # code and stderr carry the real story.
+            pass
+        finally:
+            _close_stdin()  # EOF: every §8 CLI waits for it
 
-        threading.Thread(target=_write_prompt, daemon=True).start()
+    threading.Thread(target=_write_prompt, daemon=True).start()
     # Cancel/spawn race: a cancel that landed after the caller's own check but
     # before this Popen existed killed nothing — re-check now that the proc is
     # visible, so no harness call can outlive a cancel by its full timeout.
@@ -1104,6 +1118,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
     # then sees EOF), and stderr drains on its own thread so a chatty child
     # can't deadlock on a full pipe.
     timed_out = threading.Event()
+    overflowed = threading.Event()
     # §2 pipe-release contract: both pipes are read through releasable
     # readers, so the kill below ends a blocked read from the watchdog thread
     # without waiting for an EOF an escaped child may never deliver.
@@ -1122,7 +1137,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         # keeps alive, and it holds that pipe's buffer lock while it does —
         # the cleanup below would then wedge on its own close().
         err_reader.defuse()
-        # §8 Windows delivery: a writer thread blocked on a prompt the dead
+        # §8 stdin delivery: a writer thread blocked on a prompt the dead
         # child will never drain unblocks on the closed pipe (and swallows
         # the resulting error), so the kill leaks no thread and no handle.
         _close_stdin()
@@ -1191,10 +1206,23 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
     # progress channel for a harness whose stdout stays silent mid-call.
     sink = ProgressSink(on_chunk=on_chunk, on_tool=on_tool, on_file=on_file,
                         on_activity=_reset_idle)
+    def _kill_on_overflow() -> None:
+        # §8 scratch-document cap: the same kill as the watchdog's, without
+        # marking the call timed out — the watcher's HarnessError is raised
+        # by this thread once the read loop sees EOF.
+        overflowed.set()
+        if proc.returncode is not None:
+            return  # already reaped (the final sweep): nothing left to kill
+        kill_group(proc)
+        out_reader.defuse()
+        err_reader.defuse()
+        _close_stdin()
+
     scratch_watcher: _ScratchWatcher | None = None
     try:
         if scratch is not None:
-            scratch_watcher = _ScratchWatcher(scratch, sink)
+            scratch_watcher = _ScratchWatcher(scratch, sink, harness or "",
+                                              on_overflow=_kill_on_overflow)
             scratch_watcher.start()
         try:
             out_total = 0
@@ -1222,7 +1250,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
                     handler.line(line, sink)
             except ValueError:
                 # The timeout kill closed our read end — anything else is real.
-                if not timed_out.is_set():
+                if not timed_out.is_set() and not overflowed.is_set():
                     raise
             # §8: EOF on stdout disarms the idle window, BEFORE the reap. The
             # reply is complete at this point, and a CLI that closes stdout
@@ -1257,6 +1285,8 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
                 # interval still reaches the feed and the recombined reply.
                 scratch_watcher.stop()
         drain.join(timeout=5)
+        if scratch_watcher is not None and scratch_watcher.overflow is not None:
+            raise scratch_watcher.overflow
         if timed_out.is_set() and proc.returncode != 0:
             # returncode guard: a watchdog firing in the instant after a
             # successful exit must not discard a complete valid reply.

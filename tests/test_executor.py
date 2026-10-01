@@ -368,9 +368,9 @@ def test_line_writer_overflow_flushes_without_newline(ctrl):
     w = _LineWriter("out")
     w.write("x" * w.MAX_LINE)  # exactly at the cap: still buffered
     assert ctrl() == []
-    w.write("x")  # over the cap: the whole buffer flushes as one line
+    w.write("x")  # over the cap: the buffer flushes in ≤ MAX_LINE pieces
     events = ctrl()
-    assert [e["text"] for e in events] == ["x" * (w.MAX_LINE + 1)]
+    assert [e["text"] for e in events] == ["x" * w.MAX_LINE, "x"]
     assert w.buf == ""
 
 

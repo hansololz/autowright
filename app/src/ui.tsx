@@ -636,7 +636,7 @@ export function BtnGhost({ children, onClick, danger, disabled, title, style }: 
   )
 }
 
-/** Popover that closes on outside mousedown (§9). Render children absolutely inside. */
+/** Popover that closes on outside mousedown or Escape (§9, §14). Render children absolutely inside. */
 export function usePopover(): [boolean, (v: boolean) => void, React.RefObject<HTMLDivElement | null>] {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -645,8 +645,21 @@ export function usePopover(): [boolean, (v: boolean) => void, React.RefObject<HT
     const onDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
+    // §14: Escape closes an open menu, and only the menu — the capture-phase
+    // listener runs ahead of the Modal's own keydown handler and stops the key
+    // there, so a modal behind the menu stays open. The §9.3 developer-log
+    // overlay owns Escape while it is open, as it does over a Modal.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || devlogOverlayOpen()) return
+      e.stopPropagation()
+      setOpen(false)
+    }
     document.addEventListener('mousedown', onDown, true)
-    return () => document.removeEventListener('mousedown', onDown, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
   }, [open])
   return [open, setOpen, ref]
 }

@@ -4,7 +4,7 @@
 // §7 filter modal — statuses, automations, a started-time range — and the
 // pager bring deeper history in via GET /executions. Every filter is one
 // predicate applied server-side and to the window's rows alike.
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { byCanonicalOrder, useStore } from '../store'
 import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageLoading, PageTitle, PULSE, waitedLabel } from '../ui'
@@ -16,12 +16,28 @@ import type { ExecutionFilters } from './FilterModal'
 
 const GRID = '2fr 1.1fr .8fr .6fr 1fr'
 
-function Row({ e, onOpen, queued }: { e: Execution; onOpen: () => void; queued?: boolean }) {
+type Go = (page: 'execution', ids: { executionId: string }) => void
+
+// §7: the QUEUED FOR cell counts up once a second. The tick lives here, in the
+// cell alone — a page-level timer would re-render the whole list (and an open
+// filter modal) every second for one changing label.
+function QueuedFor({ since }: { since: number }) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+  return <>{waitedLabel(Date.now() - since)}</>
+}
+
+// Memoized: `go` is the store's stable action, so a row re-renders only when
+// its own record (or section) changes.
+const Row = memo(function Row({ e, go, queued }: { e: Execution; go: Go; queued?: boolean }) {
   return (
     <button
       className="ad-btn-bare ad-hover-row ad-focus-inset"
       data-testid="execution-row"
-      onClick={onOpen}
+      onClick={() => go('execution', { executionId: e.id })}
       style={{
         display: 'grid', gridTemplateColumns: GRID, gap: 10, padding: '9px 18px',
         borderBottom: '1px solid var(--hairline-dim)', alignItems: 'center', cursor: 'pointer',
@@ -57,7 +73,7 @@ function Row({ e, onOpen, queued }: { e: Execution; onOpen: () => void; queued?:
       </span>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-muted)' }}>
         {/* A queued row has no duration — it hasn't started (§7). */}
-        {queued ? waitedLabel(Date.now() - (e.queuedMs || e.startedMs)) : e.duration}
+        {queued ? <QueuedFor since={e.queuedMs || e.startedMs} /> : e.duration}
       </span>
       {/* Admission stamps started_at = queued_at, and promotion re-stamps it —
         * a row still in this section was never promoted, so `started` is
@@ -65,10 +81,10 @@ function Row({ e, onOpen, queued }: { e: Execution; onOpen: () => void; queued?:
       <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{e.started}</span>
     </button>
   )
-}
+})
 
 function Table({ rows, go, queued }: {
-  rows: Execution[]; go: (page: 'execution', ids: { executionId: string }) => void; queued?: boolean
+  rows: Execution[]; go: Go; queued?: boolean
 }) {
   return (
     <div className="ad-card" style={{ overflow: 'hidden' }}>
@@ -83,7 +99,7 @@ function Table({ rows, go, queued }: {
         <Eyebrow>{queued ? 'QUEUED AT' : 'STARTED'}</Eyebrow>
       </div>
       {rows.map((e) => (
-        <Row key={e.id} e={e} queued={queued} onOpen={() => go('execution', { executionId: e.id })} />
+        <Row key={e.id} e={e} queued={queued} go={go} />
       ))}
     </div>
   )
@@ -234,15 +250,8 @@ export default function ExecutionsList() {
     // re-run this one.
   }, [executions]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // §7: the QUEUED FOR column counts up — one timer for the whole section,
-  // running only while something is actually queued.
-  const [, tick] = useState(0)
-  const anyQueued = queued.length > 0
-  useEffect(() => {
-    if (!anyQueued) return
-    const t = setInterval(() => tick((n) => n + 1), 1000)
-    return () => clearInterval(t)
-  }, [anyQueued])
+  // §7: the QUEUED FOR column counts up — each cell ticks itself (QueuedFor),
+  // so the page never re-renders for the clock.
 
   // Labels appear as soon as the page holds more than one section (§7).
   const liveSections = (executing.length > 0 ? 1 : 0) + (queued.length > 0 ? 1 : 0)

@@ -21,12 +21,13 @@ import { ImportSummaryModal } from './AutomationsList'
 /** §22.3 per-catalog actions: one quiet ellipsis button opening a PopMenu of
  * MenuRows - the §9.2 automation actions menu's shape. Each row renders only
  * while its condition holds; picking one closes the menu. */
-function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, onRefresh, onSettings, onRemove }: {
+function CatalogActions({ source, refreshing, anyRefreshing, onEdit, onExport, onRefresh, onSettings, onRemove }: {
   source: MarketplaceSource
   /** this catalog's own Refresh is running (the button glyph spins) */
   refreshing: boolean
-  /** Refresh all is running (the Refresh row is disabled, nothing spins here) */
-  refreshingAll: boolean
+  /** any refresh is running - this catalog's, another catalog's, or Refresh
+   * all - so the Refresh row is disabled (one refresh at a time, §22.3) */
+  anyRefreshing: boolean
   onEdit: () => void; onExport: () => void; onRefresh: () => void
   onSettings: () => void; onRemove: () => void
 }) {
@@ -57,7 +58,7 @@ function CatalogActions({ source, refreshing, refreshingAll, onEdit, onExport, o
           <MenuRow onClick={pick(onExport)}>{icon('fa-file-export')}Export catalog…</MenuRow>
         )}
         {source.location !== null && (
-          <MenuRow onClick={pick(onRefresh)} disabled={refreshing || refreshingAll}>{icon('fa-rotate')}Refresh</MenuRow>
+          <MenuRow onClick={pick(onRefresh)} disabled={anyRefreshing}>{icon('fa-rotate')}Refresh</MenuRow>
         )}
         <MenuRow onClick={pick(onSettings)}>{icon('fa-gear')}Catalog settings…</MenuRow>
         {/* §22.2: the built-in catalog can't be removed, and hiding it is the
@@ -110,6 +111,44 @@ const imageUrls = new Map<string, string>()
 // than repopulating the cache nothing will ever revoke again.
 let imageGeneration = 0
 
+// §22.3: at most 2 image fetches in flight at a time - a queue in card order.
+// The renderer shares six connections per host with every other API call, so
+// an unbounded burst against a slow host would stall Refresh, settings, and
+// navigation. Each job carries its card's AbortSignal: a job aborted while
+// waiting never starts, and one aborted in flight rejects and frees its slot. The page's unmount
+// cleanup empties the queue and bumps the generation, so a request settling
+// after it frees nothing in the next mount's queue.
+const IMAGE_FETCHES_IN_FLIGHT = 2
+interface ImageJob { signal: AbortSignal; run: (signal: AbortSignal) => Promise<void> }
+const imageQueue: { waiting: ImageJob[]; active: number } = { waiting: [], active: 0 }
+
+function pumpImageQueue() {
+  while (imageQueue.active < IMAGE_FETCHES_IN_FLIGHT && imageQueue.waiting.length) {
+    const job = imageQueue.waiting.shift()!
+    if (job.signal.aborted) continue
+    imageQueue.active++
+    const generation = imageGeneration
+    void job.run(job.signal).finally(() => {
+      if (generation !== imageGeneration) return
+      imageQueue.active--
+      pumpImageQueue()
+    })
+  }
+}
+
+// Queued from each card's effect, in card order. The pump waits a microtask
+// so a StrictMode remount's aborted first pass is skipped, never started.
+function enqueueImage(job: ImageJob) {
+  imageQueue.waiting.push(job)
+  queueMicrotask(pumpImageQueue)
+}
+
+// The fetch behind one queue slot, carrying the card's abort signal: an
+// aborted in-flight request rejects at once, freeing its slot.
+function fetchImage(sourceId: string, index: number, signal: AbortSignal): Promise<Blob> {
+  return api.marketplaceImage(sourceId, index, signal)
+}
+
 function EntryImage({ sourceId, index, image, refreshedAt, has, load }: {
   sourceId: string; index: number; image: string | null; refreshedAt: string | null; has: boolean
   /** §22.3: a collapsed catalog's body stays mounted but fetches nothing until it opens */
@@ -123,29 +162,35 @@ function EntryImage({ sourceId, index, image, refreshedAt, has, load }: {
     if (cached) { setUrl(cached); return }
     let gone = false
     const generation = imageGeneration
-    void (async () => {
-      try {
-        const blob = await api.marketplaceImage(sourceId, index)
-        const made = URL.createObjectURL(blob)
-        // The page unmounted while this was in flight - the cache it would
-        // land in is gone, so this URL dies with it.
-        if (generation !== imageGeneration) { URL.revokeObjectURL(made); return }
-        // A remount can have won the race - keep the first URL for the key and
-        // drop this one, so the map never leaks a second URL per image.
-        const first = imageUrls.get(key)
-        if (first) {
-          URL.revokeObjectURL(made)
-          if (!gone) setUrl(first)
-          return
+    // §22.3: aborted when this card goes - its catalog collapsing (`load`
+    // flips) or the page unmounting.
+    const controller = new AbortController()
+    enqueueImage({
+      signal: controller.signal,
+      run: async (signal) => {
+        try {
+          const blob = await fetchImage(sourceId, index, signal)
+          const made = URL.createObjectURL(blob)
+          // The page unmounted while this was in flight - the cache it would
+          // land in is gone, so this URL dies with it.
+          if (generation !== imageGeneration) { URL.revokeObjectURL(made); return }
+          // A remount can have won the race - keep the first URL for the key and
+          // drop this one, so the map never leaks a second URL per image.
+          const first = imageUrls.get(key)
+          if (first) {
+            URL.revokeObjectURL(made)
+            if (!gone) setUrl(first)
+            return
+          }
+          imageUrls.set(key, made)
+          if (!gone) setUrl(made)
+        } catch {
+          // §22.3: a failed fetch keeps the no-image icon.
         }
-        imageUrls.set(key, made)
-        if (!gone) setUrl(made)
-      } catch {
-        // §22.3: a failed fetch keeps the no-image icon.
-      }
-    })()
-    return () => { gone = true }
-  }, [key, has])
+      },
+    })
+    return () => { gone = true; controller.abort() }
+  }, [key, has, load])
   return (
     <div style={{
       width: '100%', aspectRatio: '16 / 9', background: 'var(--bg-inset)',
@@ -426,15 +471,21 @@ export default function MarketplacePage() {
   }, [marketplaceVersion])
 
   // §22.3: every blob URL this page made dies with it, and the generation bump
-  // sends the ones still in flight the same way.
+  // sends the ones still in flight the same way. The image queue empties with
+  // it (each card's own cleanup has aborted its job), so the next mount starts
+  // from two free slots.
   useEffect(() => () => {
     for (const made of imageUrls.values()) URL.revokeObjectURL(made)
     imageUrls.clear()
+    imageQueue.waiting = []
+    imageQueue.active = 0
     imageGeneration++
   }, [])
 
+  // §22.3: one refresh at a time from the page - a single catalog's Refresh
+  // and Refresh all each wait for any other to settle.
   const refreshAll = async () => {
-    if (refreshingAll) return
+    if (refreshingAll || refreshing) return
     setRefreshingAll(true)
     try {
       const r = await api.marketplaceRefreshAll()
@@ -463,7 +514,7 @@ export default function MarketplacePage() {
     } catch (e) { showToast((e as Error).message) }
   }
   const refreshOne = async (id: string) => {
-    if (refreshing) return
+    if (refreshing || refreshingAll) return
     setRefreshing(id)
     try {
       const source = await api.marketplaceRefresh(id)
@@ -524,7 +575,7 @@ export default function MarketplacePage() {
                 className="ad-btn-ghost"
                 data-testid="marketplace-refresh-all"
                 onClick={() => { void refreshAll() }}
-                disabled={refreshingAll}
+                disabled={refreshingAll || refreshing !== null}
               >
                 {refreshingAll ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
@@ -618,7 +669,7 @@ export default function MarketplacePage() {
                 <CatalogActions
                   source={s}
                   refreshing={refreshing === s.id}
-                  refreshingAll={refreshingAll}
+                  anyRefreshing={refreshingAll || refreshing !== null}
                   onEdit={() => setEditing(s)}
                   onExport={() => { void exportCatalog(s.id) }}
                   onRefresh={() => { void refreshOne(s.id) }}

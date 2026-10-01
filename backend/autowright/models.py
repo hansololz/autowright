@@ -25,16 +25,33 @@ class StepIn(BaseModel):
     flags is camelCase (noTimeout, infiniteRetries); disk and the internal
     shape are snake_case only. This model is the one place the client spelling
     is accepted — `plain()` emits snake_case, and nothing past this boundary
-    reads the camel keys. Everything else (file, name, code, timeout, …) rides
-    through as-is; the §8 step validators judge it server-side where required."""
+    reads the camel keys. §19 step field typing: the fields the manifest
+    writer reads are typed here (strings, integers), so a wrong type is a 422,
+    never a 500 or a half-written version folder; everything else rides
+    through as-is, and the §8 step validators judge it server-side where
+    required."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    # Absent is fine; when sent, a strict type. `file` may be null — a step
+    # the store hasn't named yet serializes its file as null (§4.1 step_json).
+    name: StrictStr = None
+    code: StrictStr = None
+    description: StrictStr = None
+    file: StrictStr | None = None
+    timeout: StrictInt = None
+    retries: StrictInt = None
     no_timeout: bool | None = Field(default=None, alias="noTimeout")
     infinite_retries: bool | None = Field(default=None, alias="infiniteRetries")
 
+    _TYPED_KEYS = ("name", "code", "description", "file", "timeout", "retries")
+
     def plain(self) -> dict:
         d = dict(self.model_extra or {})
+        # Key presence is preserved: only the typed fields actually sent.
+        for k in self._TYPED_KEYS:
+            if k in self.model_fields_set:
+                d[k] = getattr(self, k)
         if self.no_timeout:
             d["no_timeout"] = True
         if self.infinite_retries:
@@ -112,6 +129,9 @@ class AutomationCreate(BaseModel):
     allowedSecrets: list[StrictStr] = None
     paramValues: dict[StrictStr, Any] = None  # §4.2 staged values — lenient name+kind match
     concurrency: ConcurrencyIn = None         # §8 staged concurrency — applied like the PATCH
+    # §19: true = the §11 Create button, consuming the pending create-mode
+    # slot; false = the §20 CLI create, which leaves the slot untouched.
+    settlePending: bool = True
 
 
 class VersionSave(BaseModel):

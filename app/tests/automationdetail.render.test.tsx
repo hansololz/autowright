@@ -22,6 +22,8 @@ vi.mock('../src/api', () => ({
     deleteDraft: vi.fn(async () => ({})),
     // §9.2 version diff modal (opened by the version menu's compare icon)
     versionDiff: vi.fn(async () => ({ from: 1, to: 2, files: [] })),
+    // §9.2 Export… modal
+    exportAutomation: vi.fn(async () => new ArrayBuffer(0)),
   },
 }))
 
@@ -580,5 +582,64 @@ describe('§9.2 delete while the page is open', () => {
     fireEvent.click(screen.getByTestId('compare-version-1'))
     await waitFor(() => expect(mockedApi.versionDiff).toHaveBeenCalledWith('a1', 1, 2))
     expect(screen.getByRole('dialog', { name: 'Changes from v1 to v2' })).toBeTruthy()
+  })
+})
+
+// §9 busy rule: Execute now and Export are single-request start actions — they
+// disable and show busy feedback while in flight, so a double-click never
+// fires twice.
+describe('§9 busy start actions on the detail page', () => {
+  it('Execute now sends one POST for a double-click and reads Starting… meanwhile', async () => {
+    let land!: (v: unknown) => void
+    mockedApi.executeNow.mockImplementationOnce(() => new Promise((r) => { land = r }))
+    seed(auto())
+    render(<AutomationDetail />)
+    clickExecuteNow()
+    const busy = screen.getAllByRole('button').find((b) => /Starting…/.test(b.textContent ?? '')) as HTMLButtonElement
+    expect(busy.disabled).toBe(true)
+    fireEvent.click(busy)
+    expect(mockedApi.executeNow).toHaveBeenCalledTimes(1)
+    await act(async () => { land({ executionId: 'e-new', queued: false }) })
+    const again = screen.getAllByRole('button').find((b) => /Execute now/.test(b.textContent ?? '')) as HTMLButtonElement
+    expect(again.disabled).toBe(false)
+  })
+
+  it('Export sends one request for a double-click and reads Exporting… meanwhile', async () => {
+    const exportAutomation = mockedApi.exportAutomation
+    exportAutomation.mockClear()
+    exportAutomation.mockImplementationOnce(() => new Promise(() => {}))
+    seed(auto())
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByRole('button', { name: 'Automation actions' }))
+    fireEvent.click(screen.getByText('Export…'))
+    const dialog = screen.getByRole('dialog', { name: 'Export Job' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Export' }))
+    const busy = within(dialog).getByRole('button', { name: /Exporting…/ }) as HTMLButtonElement
+    expect(busy.disabled).toBe(true)
+    fireEvent.click(busy)
+    expect(exportAutomation).toHaveBeenCalledTimes(1)
+  })
+})
+
+// §9.2: detail → detail keeps the page mounted — the TRIGGERS card is keyed by
+// automation, so an open trigger editor never carries over.
+describe('§9.2 TRIGGERS card keyed by automation', () => {
+  it('an editor open on one automation is gone on the next', async () => {
+    const trig = (id: string): Trigger => ({
+      id, kind: 'cron', expression: '0 9 * * *', enabled: true, label: 'Every day at 9:00', short: 'daily 9:00',
+      source: 'user',
+    } as unknown as Trigger)
+    storeMod.useStore.setState({
+      page: 'automation', automationId: 'a1', toast: null, executions: [],
+      automations: [auto({ triggers: [trig('t1')] }), auto({ id: 'a2', name: 'Other', triggers: [trig('t1')] })],
+    })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit trigger' }))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy()
+    await act(async () => { storeMod.useStore.setState({ automationId: 'a2' }) })
+    expect(screen.getByText('Other')).toBeTruthy()
+    // same trigger id on the next automation — only the key resets the card
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Edit trigger' })).toBeTruthy()
   })
 })

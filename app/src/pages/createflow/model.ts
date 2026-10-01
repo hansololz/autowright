@@ -457,6 +457,21 @@ export function stepsFingerprint(steps: Step[]): string {
   return `${steps.length}:${h.toString(16).padStart(8, '0')}`
 }
 
+/** §11 stale-outcome rule: whether a test outcome no longer describes the
+ * steps whose fingerprint is `fingerprint`. A tracked test (`tracking`)
+ * compares the fingerprint it ran against (`testedFingerprint`); otherwise the
+ * persisted last-test summary's. Unknown (a re-attached test, an old summary
+ * without one) is never stale. Shared by the TEST card and the thread's
+ * Analyze-the-failure pill. */
+export function testOutcomeStale(
+  tracking: boolean, testedFingerprint: string | null,
+  lastTestFingerprint: string | null | undefined, fingerprint: string,
+): boolean {
+  return tracking
+    ? testedFingerprint !== null && testedFingerprint !== fingerprint
+    : !!lastTestFingerprint && lastTestFingerprint !== fingerprint
+}
+
 export function serializeDraft(r: Rev): DraftPayload {
   return {
     name: r.name, description: r.description, note: r.note,

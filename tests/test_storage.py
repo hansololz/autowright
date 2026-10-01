@@ -653,10 +653,15 @@ def test_retention_skips_executing_missing_and_corrupt_rows(store, caplog):
     h_missing = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     h_missing["started_at"] = None
     h_corrupt = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
-    h_corrupt["started_at"] = "not-a-timestamp"
+    # Sorts below every real ISO stamp: `_latest_exec` orders by the raw
+    # string, so a letter-led value would win "latest" and be exempt.
+    h_corrupt["started_at"] = "(not a timestamp)"
     h_old = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     h_old["started_at"] = old_iso
     store.update_execution(h_old)
+    # §5: the automation's latest real execution is exempt whatever its age —
+    # a fresh one takes that role so the old rows are judged on age alone.
+    store.create_execution(a, "version", 1, "manual", [], status="succeeded")
 
     store.settings["days"] = 90
     with caplog.at_level(logging.WARNING, logger="autowright.storage"):
@@ -1316,6 +1321,8 @@ def test_retention_never_deletes_queued(store, monkeypatch):
     done["status"] = "succeeded"
     done["started_at"] = old
     store.update_execution(done)
+    # §5: the latest real execution is exempt — a fresh one takes that role.
+    store.create_execution(a, "version", 1, "manual", steps=[], status="succeeded")
     store.settings["days"] = 7
 
     deleted = store.retention_cleanup()
@@ -1956,9 +1963,24 @@ def test_clear_memory_repairs_a_half_finished_swap_first(store, home):
     assert not aside.exists()  # the clear is explicit; nothing lingers to surprise a restore
 
 
+def _settled_memory_stats(store, a, timeout=5.0):
+    """§19: memory_stats answers at once and walks in the background — poll
+    until the walk for the current memo generation has landed."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        stats = store.memory_stats(a)
+        if stats["size"] != store.MEMORY_STATS_COMPUTING and not a.get("_memory_stats_walking"):
+            return stats
+        _time.sleep(0.01)
+    raise AssertionError("the memory_stats walk never landed")
+
+
 def test_memory_stats_memo_skips_the_walk_and_clear_invalidates(store, home, monkeypatch):
-    # §19 /state cost: the tree walk is memoized per automation with a short
-    # TTL, and every wholesale replacement of the dir drops the memo.
+    # §19 /state cost: the tree walk runs in the background, memoized per
+    # automation with a short TTL, and every wholesale replacement of the dir
+    # drops the memo.
     from autowright import storage as storage_mod
 
     a = store.create_automation(make_version(), "Memoized", None)
@@ -1972,17 +1994,26 @@ def test_memory_stats_memo_skips_the_walk_and_clear_invalidates(store, home, mon
         return real(d)
 
     monkeypatch.setattr(storage_mod, "iter_file_stats", counting)
-    first = store.memory_stats(a)
+    # The first call answers the placeholder at once and schedules the walk.
+    assert store.memory_stats(a)["size"] == store.MEMORY_STATS_COMPUTING
+    first = _settled_memory_stats(store, a)
     assert len(walks) == 1 and first["size"] == "5 B"
     assert store.memory_stats(a) == first
     assert len(walks) == 1  # memo hit — no second walk
 
     store.clear_memory(a)
-    assert store.memory_stats(a)["size"] == "empty"
+    # Invalidated: the last known stats answer until the fresh walk lands.
+    import time
+
+    assert store.memory_stats(a)["size"] in ("5 B", "empty")
+    deadline = time.monotonic() + 5
+    while store.memory_stats(a)["size"] != "empty" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _settled_memory_stats(store, a)["size"] == "empty"
     assert len(walks) == 2
 
     store.invalidate_memory_stats(a)
-    store.memory_stats(a)
+    _settled_memory_stats(store, a)
     assert len(walks) == 3
 
 

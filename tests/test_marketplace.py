@@ -1,6 +1,7 @@
 """Marketplace (§22): catalog validation, the two reference forms, the catalog
 table's locations/refresh/settings, images read on demand, and the §22.4 routes
 with the network stubbed."""
+import contextlib
 import io
 import os
 import threading
@@ -1090,9 +1091,9 @@ def test_the_copy_is_parsed_once_while_it_is_unchanged(market, tmp_path, monkeyp
     parses: list = []
     real = marketplace.parse_catalog
 
-    def counted(text, *, location=None):
+    def counted(text, *, location=None, lenient_entries=False):
         parses.append(location)
-        return real(text, location=location)
+        return real(text, location=location, lenient_entries=lenient_entries)
 
     monkeypatch.setattr(marketplace, "parse_catalog", counted)
     assert market._entry(source["id"], 0)["title"] == "One"
@@ -1123,11 +1124,12 @@ def test_entry_archive_rereads_the_copy_at_fetch_time(market, tmp_path):
     with pytest.raises(KeyError):
         market.entry_archive("nope", 0)
     # the copy is re-read on every fetch, so a relative reference edited into
-    # it since the refresh is still rejected
+    # it since the refresh is never fetched - the saved-copy read drops that
+    # entry (§21.4 2026-09-30), so it is not found at all
     market.catalog_file(source["id"]).write_text(
         catalog_text([{"title": "Manga", "path": "../escape.autowright"}]),
         encoding="utf-8")
-    with pytest.raises(MarketplaceError):
+    with pytest.raises(KeyError):
         market.entry_archive(source["id"], 0)
 
 
@@ -2143,24 +2145,51 @@ def test_a_failed_save_unlinks_the_archives_it_wrote(market, tmp_path, monkeypat
     assert [f.name for f in folder.iterdir()] == [marketplace.CATALOG_FILENAME]
 
 
-def test_a_failed_reread_after_the_save_is_the_rows_error(market, tmp_path,
-                                                          monkeypatch):
-    """§22.7 step 6: the catalog file is on disk, so a re-read that fails is
-    the row's `error` - the save itself answers with the row."""
+@contextlib.contextmanager
+def all_read_slots_taken():
+    """Every §22.1 concurrency slot held, as a page of slow image reads would
+    hold them, for the length of the block."""
+    for _ in range(marketplace.MAX_CONCURRENT_READS):
+        assert marketplace._read_slots.acquire(timeout=5)
+    try:
+        yield
+    finally:
+        for _ in range(marketplace.MAX_CONCURRENT_READS):
+            marketplace._read_slots.release()
+
+
+def test_a_save_stamps_the_copy_without_rereading_under_the_lock(market, tmp_path,
+                                                                 monkeypatch):
+    """§22.2: a §22.7 editor save stamps the catalog copy from the text it just
+    wrote, never by re-reading the location - a re-read would wait for a
+    §22.1 slot with the table lock held, behind a page of slow image reads."""
     folder, source = _shelf(market, tmp_path)
+    reads: list = []
+    real = marketplace._read_reference
 
-    def unreadable(reference, *, cap, what):
-        raise MarketplaceError(f"couldn't read the {what} - Permission denied")
+    def counting(reference, **kwargs):
+        reads.append(reference)
+        return real(reference, **kwargs)
 
-    monkeypatch.setattr(marketplace, "_read_reference", unreadable)
-    saved = market.save_catalog(source["id"], {
-        "name": "Shelf", "description": "",
-        "entries": [{"title": "One", "description": "",
-                     "path": str(tmp_path / "one.autowright")}]}, _exporter({}))
-    assert saved["error"] == "couldn't read the catalog file - Permission denied"
-    assert saved["refreshedAt"] == source["refreshedAt"]   # last *successful* read
-    written = yaml.safe_load((folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
-    assert written["entries"][0]["title"] == "One"
+    monkeypatch.setattr(marketplace, "_read_reference", counting)
+    saved: list = []
+    body = {"name": "Shelf", "description": "",
+            "entries": [{"title": "One", "description": "",
+                         "path": str(tmp_path / "one.autowright")}]}
+    with all_read_slots_taken():
+        worker = threading.Thread(
+            target=lambda: saved.append(market.save_catalog(source["id"], body,
+                                                            _exporter({}))),
+            daemon=True)
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive(), "the save waited for a read slot"
+    assert reads == []
+    assert saved[0]["error"] is None
+    assert [e["title"] for e in saved[0]["entries"]] == ["One"]
+    assert saved[0]["refreshedAt"] is not None
+    assert (market.catalog_file(source["id"]).read_text(encoding="utf-8")
+            == (folder / marketplace.CATALOG_FILENAME).read_text(encoding="utf-8"))
 
 
 def test_a_save_is_bounded_before_any_export(market, tmp_path):
@@ -2735,3 +2764,289 @@ def test_refresh_all_leaves_the_rows_past_the_deadline_untouched(market, tmp_pat
     assert [s["id"] for s in sources] == [first["id"], second["id"]]
     assert sources[1]["error"] is None  # left as it was, not failed
     assert [e["title"] for e in sources[1]["entries"]] == ["Second"]
+
+
+# ---------- §21.4 2026-09-30: the v0.11.4 `sources.yaml` table ----------
+
+V0_11_4_URL_ID = "55555555-5555-4555-8555-555555555555"
+V0_11_4_FILE_ID = "66666666-6666-4666-8666-666666666666"
+V0_11_4_RELATIVE_ID = "77777777-7777-4777-8777-777777777777"
+
+
+def test_v0_11_4_sources_yaml_migrates_to_marketplaces_yaml(home, tmp_path, caplog):
+    """§21.4 old-shape fixture (2026-09-30): v0.11.4 wrote the table as
+    `marketplaces/sources.yaml` - `{id, kind, origin, added_at, refreshed_at,
+    error}` - with each copy at `<id>/marketplace-catalog.yaml` (the then-
+    optional catalog `url` key, a relative image, an `images/` cache beside
+    it). With no `marketplaces.yaml`, each readable row maps to a table row,
+    the table is saved under the new name, the built-in row is seeded, the
+    copies survive the orphan sweep, and `sources.yaml` stays as it was."""
+    shelf = write_catalog(tmp_path, [{"title": "Local",
+                                      "path": str(tmp_path / "local.autowright")}],
+                          filename="shelf.yaml")
+    root = paths.marketplace_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    legacy = root / "sources.yaml"
+    legacy.write_text(
+        "sources:\n"
+        f"- id: {V0_11_4_URL_ID}\n"
+        "  kind: url\n"
+        f"  origin: {CATALOG_URL}\n"
+        "  added_at: '2026-09-11T00:00:00.000000+00:00'\n"
+        "  refreshed_at: '2026-09-11T00:10:00.000000+00:00'\n"
+        "  error: null\n"
+        f"- id: {V0_11_4_FILE_ID}\n"
+        "  kind: file\n"
+        f"  origin: {shelf}\n"
+        "  added_at: '2026-09-11T00:00:00.000000+00:00'\n"
+        "  refreshed_at: null\n"
+        "  error: the host answered 500\n"
+        "- id: not-a-uuid\n"
+        "  kind: url\n"
+        "  origin: https://x.test/other.yaml\n"
+        f"- id: {V0_11_4_RELATIVE_ID}\n"
+        "  kind: file\n"
+        "  origin: shelves/mine.yaml\n",
+        encoding="utf-8")
+    written = legacy.read_bytes()
+    copy_dir = root / V0_11_4_URL_ID
+    (copy_dir / "images").mkdir(parents=True)
+    (copy_dir / "images" / "0.png").write_bytes(PNG)
+    (copy_dir / marketplace.CATALOG_FILENAME).write_text(catalog_text(
+        [{"title": "Remote", "path": "https://x.test/shelf/remote.autowright",
+          "image": "images/cover.png"}],
+        name="Shelf", url=CATALOG_URL), encoding="utf-8")
+
+    store = MarketplaceStore()
+    with caplog.at_level("WARNING"):
+        store.load()
+
+    assert not store._unreadable   # a migration skip is not a corrupt table
+    rows = added(store)
+    assert [s["id"] for s in rows] == [V0_11_4_URL_ID, V0_11_4_FILE_ID]
+    assert {k: rows[0][k] for k in marketplace.COLUMNS} == {
+        "id": V0_11_4_URL_ID, "location": CATALOG_URL, "expanded": True,
+        "auto_refresh": False, "builtin": False,
+        "added_at": "2026-09-11T00:00:00.000000+00:00",
+        "refreshed_at": "2026-09-11T00:10:00.000000+00:00", "error": None}
+    assert rows[1]["location"] == str(shelf)
+    assert rows[1]["error"] == "the host answered 500"
+    assert builtin_row(store)["location"] == BUILTIN_URL
+    # the copy survived the sweep and still lists; its relative image reads as none
+    assert (copy_dir / marketplace.CATALOG_FILENAME).is_file()
+    with store.lock:
+        served = store.serialize(store._find(V0_11_4_URL_ID))
+    assert served["cached"] is True and served["name"] == "Shelf"
+    assert served["entries"][0]["title"] == "Remote"
+    assert served["entries"][0]["image"] is None
+    # the table was saved under the new name; the old file is left as it was
+    stored = yaml.safe_load((root / "marketplaces.yaml").read_text(encoding="utf-8"))
+    assert [s["id"] for s in added(stored["sources"])] == [V0_11_4_URL_ID, V0_11_4_FILE_ID]
+    assert stored["sources"][1]["location"] == CATALOG_URL
+    assert legacy.read_bytes() == written
+    # a second load reads marketplaces.yaml, not the migration again
+    again = MarketplaceStore()
+    again.load()
+    assert [s["id"] for s in added(again)] == [V0_11_4_URL_ID, V0_11_4_FILE_ID]
+
+
+def test_an_unparsable_v0_11_4_table_migrates_nothing_and_sweeps_nothing(home):
+    """§21.4 (2026-09-30): a `sources.yaml` that can't be parsed at all
+    migrates nothing - the table loads fresh and writable, the built-in row
+    seeded as usual - and the orphan sweep is skipped this session, so the
+    copies it names survive; the file itself is left as it was."""
+    root = paths.marketplace_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sources.yaml").write_text("sources: [oops\n", encoding="utf-8")
+    (root / V0_11_4_URL_ID).mkdir()
+    store = MarketplaceStore()
+    store.load()
+    assert not store._unreadable
+    assert added(store) == [] and builtin_row(store)["location"] == BUILTIN_URL
+    assert (root / "marketplaces.yaml").is_file()
+    assert (root / V0_11_4_URL_ID).is_dir()
+    assert (root / "sources.yaml").read_text(encoding="utf-8") == "sources: [oops\n"
+
+
+# ---------- §22.2: a refresh never lands on a row that moved ----------
+
+def test_a_refresh_of_a_row_whose_location_changed_meanwhile_writes_nothing(
+        market, tmp_path, monkeypatch):
+    """§22.2: a row whose `location` changed while its download was in flight
+    (the settings modal saved during the download) is dropped - the old
+    place's catalog never lands as the new place's copy with a fresh
+    `refreshed_at`."""
+    old = write_catalog(tmp_path, [{"title": "Old",
+                                    "path": str(tmp_path / "old.autowright")}],
+                        filename="old.yaml")
+    new = write_catalog(tmp_path, [{"title": "New",
+                                    "path": str(tmp_path / "new.autowright")}],
+                        filename="new.yaml")
+    source = market.add(path=str(old))
+    old.write_text(catalog_text([{"title": "Old again",
+                                  "path": str(tmp_path / "old.autowright")}]),
+                   encoding="utf-8")
+    copy_before = market.catalog_file(source["id"]).read_bytes()
+    started, release = _blocking_read(monkeypatch, only=str(old))
+    refreshed: list = []
+    worker = threading.Thread(target=lambda: refreshed.append(market.refresh(source["id"])))
+    worker.start()
+    try:
+        assert started.wait(5)
+        market.update_settings(source["id"], location=str(new))
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert market.catalog_file(source["id"]).read_bytes() == copy_before
+    row = added(market)[0]
+    assert row["location"] == str(new)
+    assert row["refreshed_at"] is None and row["error"] is None
+    assert [e["title"] for e in refreshed[0]["entries"]] == ["Old"]
+    # refresh-all drops a moved row the same way
+    started, release = _blocking_read(monkeypatch, only=str(new))
+    serve(monkeypatch, {})   # the seeded built-in row is refreshed too
+    worker = threading.Thread(target=market.refresh_all)
+    worker.start()
+    try:
+        assert started.wait(5)
+        market.update_settings(source["id"], location=str(old))
+    finally:
+        release.set()
+        worker.join(5)
+    assert market.catalog_file(source["id"]).read_bytes() == copy_before
+    assert added(market)[0]["refreshed_at"] is None
+
+
+def test_a_changed_location_clears_refreshed_at_and_error(market, tmp_path):
+    """§22.2 settings: the new place has never been read - `refreshed_at` and
+    `error` are cleared, but only when the location actually changed."""
+    first = write_catalog(tmp_path, [{"title": "One",
+                                      "path": str(tmp_path / "one.autowright")}],
+                          filename="first.yaml")
+    second = write_catalog(tmp_path, [{"title": "Two",
+                                       "path": str(tmp_path / "two.autowright")}],
+                           filename="second.yaml")
+    source = market.add(path=str(first))
+    assert source["refreshedAt"] is not None
+    with market.lock:
+        market._find(source["id"])["error"] = "the host answered 500"
+    same = market.update_settings(source["id"], location=str(first))
+    assert same["refreshedAt"] == source["refreshedAt"]
+    assert same["error"] == "the host answered 500"
+    moved = market.update_settings(source["id"], location=str(second))
+    assert moved["refreshedAt"] is None and moved["error"] is None
+    stored = yaml.safe_load((paths.marketplace_dir() / "marketplaces.yaml").read_text())
+    row = next(s for s in stored["sources"] if s["id"] == source["id"])
+    assert row["refreshed_at"] is None and row["error"] is None
+
+
+# ---------- §22.1 concurrency slots on every reference read ----------
+
+def test_an_https_archive_read_takes_a_read_slot(market, tmp_path, monkeypatch):
+    """§22.4: the https branch of the archive fetch takes a §22.1 concurrency
+    slot exactly like the local-path branch."""
+    f = write_catalog(tmp_path, [{"title": "Web", "path": "https://x.test/w.autowright"}])
+    source = market.add(path=str(f))
+    fetched: list = []
+    monkeypatch.setattr(transfer, "fetch_archive",
+                        lambda url: (fetched.append(url) or b"zip-bytes", url))
+    got: list = []
+    with all_read_slots_taken():
+        worker = threading.Thread(
+            target=lambda: got.append(market.entry_archive(source["id"], 0)), daemon=True)
+        worker.start()
+        worker.join(0.5)
+        assert worker.is_alive() and fetched == [], "the download ran without a slot"
+    worker.join(5)
+    assert got == [(b"zip-bytes", "https://x.test/w.autowright")]
+
+
+def test_the_image_route_answers_503_when_no_read_slot_comes_free(client, tmp_path,
+                                                                  monkeypatch):
+    """§22.3/§22.4: the image route's wait for a §22.1 slot is bounded - past
+    it the route answers 503 (the no-image icon) rather than pinning a request
+    worker behind a page of slow reads."""
+    (tmp_path / "cover.png").write_bytes(PNG)
+    f = write_catalog(tmp_path, [{"title": "One",
+                                  "path": str(tmp_path / "one.autowright"),
+                                  "image": str(tmp_path / "cover.png")}])
+    source = client.post("/marketplace/sources", json={"path": str(f)}).json()
+    monkeypatch.setattr(marketplace, "IMAGE_SLOT_WAIT_S", 0.1)
+    with all_read_slots_taken():
+        r = client.get(f"/marketplace/sources/{source['id']}/entries/0/image")
+    assert r.status_code == 503
+    assert r.json()["detail"] == marketplace.BUSY
+    r = client.get(f"/marketplace/sources/{source['id']}/entries/0/image")
+    assert r.status_code == 200 and r.content == PNG
+
+
+# ---------- §22.2 unreadable-copy message by location ----------
+
+def test_an_unreadable_copy_names_the_way_back_by_location(market, tmp_path):
+    """§22.2: an entry read from an unreadable copy says to refresh when the
+    row has a location, and to remove and add again when it has none."""
+    kept = market.create_catalog(None)
+    market.catalog_file(kept["id"]).write_text("format_version: 9\n", encoding="utf-8")
+    with pytest.raises(MarketplaceError) as e:
+        market.image_bytes(kept["id"], 0)
+    assert str(e.value) == marketplace.COPY_UNREADABLE_REMOVE
+    f = write_catalog(tmp_path, [{"title": "One",
+                                  "path": str(tmp_path / "one.autowright")}])
+    source = market.add(path=str(f))
+    market.catalog_file(source["id"]).write_text("format_version: 9\n", encoding="utf-8")
+    with pytest.raises(MarketplaceError) as e:
+        market.entry_archive(source["id"], 0)
+    assert str(e.value) == marketplace.COPY_UNREADABLE_REFRESH
+
+
+# ---------- §22.1 redirects refused before they are followed ----------
+
+def test_a_catalog_redirect_off_https_is_refused_before_it_is_followed(monkeypatch):
+    """§22.1: a `302` to an `http://` or LAN address never makes the plaintext
+    request - the redirect handler refuses it before urllib follows it."""
+    import email.message
+    import urllib.request
+    import urllib.response
+
+    opened_http: list = []
+
+    def https_open(self, req):
+        headers = email.message.Message()
+        headers["Location"] = "http://192.168.1.1/marketplace-catalog.yaml"
+        response = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url,
+                                              code=302)
+        response.msg = "Found"
+        return response
+
+    def http_open(self, req):
+        opened_http.append(req.full_url)
+        raise AssertionError("a plaintext request was made")
+
+    monkeypatch.setattr(urllib.request.HTTPSHandler, "https_open", https_open)
+    monkeypatch.setattr(urllib.request.HTTPHandler, "http_open", http_open)
+    with pytest.raises(MarketplaceError, match="redirected off https"):
+        marketplace._fetch_url(CATALOG_URL, cap=marketplace.MAX_CATALOG_BYTES)
+    assert opened_http == []
+
+
+def test_a_saved_copy_drops_an_entry_whose_path_is_malformed(market, tmp_path):
+    """§21.4 (2026-09-30): reading the app's copy, an entry whose `path` is
+    malformed (a v0.11.4 relative reference) is dropped rather than making the
+    whole copy unreadable; the others keep their positions. Add and refresh
+    stay strict."""
+    good = write_catalog(tmp_path, [{"title": "One",
+                                     "path": str(tmp_path / "one.autowright")}])
+    source = market.add(path=str(good))
+    market.catalog_file(source["id"]).write_text(catalog_text(
+        [{"title": "Relative", "path": "shelf/relative.autowright"},
+         {"title": "Kept", "path": str(tmp_path / "kept.autowright")}]),
+        encoding="utf-8")
+    with market.lock:
+        served = market.serialize(market._find(source["id"]))
+    assert served["cached"] is True and served["error"] is None
+    assert [(e["index"], e["title"]) for e in served["entries"]] == [(1, "Kept")]
+    with pytest.raises(MarketplaceError, match="must be an https link or an absolute path"):
+        marketplace.parse_catalog(catalog_text(
+            [{"title": "Relative", "path": "shelf/relative.autowright"}]),
+            location=str(good))

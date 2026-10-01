@@ -83,10 +83,11 @@ resolve); executions and snapshots by id prefix.
      params:                      # each with a default; kinds: toggle|list|kv|number|text
        - { name: sources, kind: list, label: Manga URLs, help: One URL per line,
            validate: true, default: [] }
-     packages: []                 # beyond-curated pip packages: {pip, import} — see below
+     packages: []                 # beyond-curated pip packages: {pip, import, why} — see below
      steps:                       # files NN-name.py, two-digit, gapless order
        - { file: 01-fetch.py, name: Fetch pages, description: Download each source,
-           timeout: 60 }          # secrets: [{ id: <secret uuid>, why: one line }] when used
+           timeout: 60 }          # secrets: [{ id: <secret uuid>, why: one line }] when used;
+                                  # packages: [{ import: <module>, why: one line }] likewise
        - { file: 02-report.py, name: Write report, description: Diff against memory, timeout: 60 }
      ```
    - `NN-name.py` — one file per step. Steps small and single-purpose; deterministic code
@@ -96,10 +97,16 @@ resolve); executions and snapshots by id prefix.
      addresses a specific declared entry. Step manifests and code reference agents and
      secrets by their uuids — the grant FLAGS still take names.
    - **Dependencies:** any PyPI package beyond the curated list is fine — declare it under
-     `packages` as `{ pip: <bare distribution name>, import: <module> }` (no versions; the app
-     manages them). Autowright installs declared packages automatically on `create`/`push`
-     (per-package status prints; a `warning:` line means the install failed — relay it to the
-     user, the save still stands) and self-heals before every execution. Wheels only: a
+     the manifest's `packages` as `{ pip: <bare distribution name>, import: <module>, why:
+     <one line on what the steps use it for> }` — `why` is required; no versions (the app
+     manages them); declaring a stdlib or curated module is an error. Each step that uses one
+     lists it in its own `packages: [{ import: <module>, why: <one line on what this step
+     uses it for> }]` — the `import` must be one the manifest declares, and `why` is
+     required there too. Every manifest and step key is checked: an unknown one (a
+     misspelling like `trigger:` or `timeout_seconds:`) fails validation. Autowright
+     installs declared packages automatically on `create`/`push` (per-package status
+     prints; a `warning:` line means the install failed — relay it to the user, the save
+     still stands) and self-heals before every execution. Wheels only: a
      source-only distribution won't install. Never write pip/install code in steps.
    - Build rules are the app's (`autowright instructions --json` prints them under `build`);
      a rule this automation needs changed goes into `spec.md` in plain words (a
@@ -119,6 +126,8 @@ autowright automation pull <name> [dir]        # materialize current version int
 # … edit spec.md / manifest.yaml / steps …
 autowright automation push <name> <dir> --note "what changed"   # validate, save as vN+1
 # push keeps the stored grants; new agents/secrets need explicit --grant-agent/--grant-secret
+# push refuses while the automation has an unsaved draft in the app; --discard-draft
+# replaces that draft — ask the user before passing it
 autowright automation execute <name> -f
 ```
 

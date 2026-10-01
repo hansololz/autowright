@@ -103,10 +103,16 @@ entries:                             # required list, may be empty, max 200 entr
   or oversized image simply shows the no-image icon - never a refresh failure, never
   stored.
 - Caps (untrusted input): a catalog is at most 1 MB; an image at most 5 MB; the archive
-  itself is capped by §5.1 (64 MB) at install time. Link fetches use the §5.2 headers
+  itself is capped by §5.1 (64 MB) at install time, and the §22.4 archive route serves at
+  most **16 MB of text in total** per archive (members past the running total are served
+  with `text` null, like a non-UTF-8 member — the §5.1 guards alone would allow 1,000
+  one-MB members, a quarter-gigabyte JSON answer for one Audit click). Link fetches use the §5.2 headers
   (`User-Agent: autowright/<version>`), a 30-second per-read timeout, and a 60-second
   whole-download deadline for catalogs and images (they are small; the §5.2 10-minute
-  deadline is for archives), HTTPS only with redirects re-checked to stay on https. At most
+  deadline is for archives), HTTPS only with redirects **refused before they are followed**
+  (a redirect handler rejects any non-https hop, so a `302` to an `http://` or LAN address
+  never makes a plaintext request — checking the final URL after urllib followed it would
+  already have sent the request). At most
   4 reference reads (downloads or local files) run at once process-wide — a page of 200
   images against a slow host must not hold every request worker — and a local reference
   must be a regular file (a FIFO or device answers the unreadable 502 without being opened).
@@ -239,8 +245,14 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   happened) so a refresh-all never stops at the first bad row. A refresh runs on the
   threadpool and the **download runs outside the table lock**: the location is read and
   validated first, then the lock is taken only to swap the copy and stamp the row (a row
-  removed while its download was in flight is dropped, nothing written), so a slow host
-  never blocks `GET /marketplace`, settings, or the editor.
+  removed while its download was in flight is dropped, nothing written; a row whose
+  `location` changed meanwhile — the settings modal saved during the download — is
+  dropped the same way, so the old place's catalog never lands as the new place's copy
+  with a fresh `refreshed_at`), so a slow host
+  never blocks `GET /marketplace`, settings, or the editor. Nothing else reads a
+  reference under the table lock either: a §22.7 editor save stamps the catalog copy from
+  the text it just wrote, never by re-reading the location (a re-read would wait for a
+  §22.1 concurrency slot with the lock held, behind a page of slow image reads).
 - **Auto refresh: once a day.** A row with `auto_refresh` true and a location is
   refreshed on its own **at most once every 24 hours**: it is **due** when its
   `refreshed_at` is `null` or at least 24 hours in the past (an unparseable stamp counts
@@ -257,8 +269,10 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   regardless of the flag.
 - **Settings** (`PATCH`, §22.4): `location`, `expanded`, and `auto_refresh` may be changed
   after the fact. A changed `location` is validated for form only (absolute path, https
-  link, or empty for `null`), the 409 duplicate rule applies, and the copy is untouched
-  until the next Refresh reads from the new place; setting it to `null` keeps the copy and
+  link, or empty for `null`), the 409 duplicate rule applies, the copy is untouched
+  until the next Refresh reads from the new place, and `refreshed_at` and `error` are
+  cleared (the new place has never been read — the header shows "added", and with
+  `auto_refresh` on the row is due at the next hourly check rather than a day later); setting it to `null` keeps the copy and
   turns `auto_refresh` off; leaving `null` for a path or link makes the row refreshable
   again. A `null` location can only be set on a row whose copy is readable (otherwise
   there would be nothing left). The built-in row's `location` can't be changed at all
@@ -347,7 +361,8 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   "Exported to <path>.", a cancelled dialog does nothing, a failed fetch toasts the
   reason. This is how a catalog created in the app leaves the app: the user puts the file
   wherever they share from), **Refresh** (`fa-rotate`; rendered only when the catalog has
-  a location; disabled while this catalog or Refresh all is running), **Catalog
+  a location; disabled while **any** refresh — this catalog, another catalog, or Refresh
+  all — is running, since one refresh runs at a time from the page), **Catalog
   settings…** (`fa-gear`; always) and, last, **Remove…** (`fa-trash`, the `MenuRow` danger
   tone; every catalog but the built-in one, whose menu ends at Catalog settings… - it
   can't be removed (§22.2), and collapsing it is the header caret, never a menu row or
@@ -380,7 +395,12 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
 - Images load **by reference, on demand**, through the authenticated §19 image route (the
   renderer talks to the backend with a bearer header, so a plain `<img src>` can't carry
   it, and a local path can't be loaded from the page at all): for an entry whose `image`
-  is set, the page fetches the bytes and shows a blob URL, cached in memory per (catalog
+  is set, the page fetches the bytes and shows a blob URL — **at most 2 image fetches in
+  flight at a time** (a queue in card order; the renderer shares six connections per host
+  with every other API call, so an unbounded burst against a slow host would stall
+  Refresh, settings, and navigation), every in-flight image fetch **aborted** when the
+  page unmounts or its catalog collapses, and the backend's wait for a §22.1 slot bounded
+  (30 s, then 503 — the no-image icon, never a pinned request worker) — cached in memory per (catalog
   id, index, `image` reference, `refreshedAt`) for the session — the reference is part of
   the key so an edit that points an entry at another picture (a catalog kept by Autowright
   never stamps `refreshedAt`) shows the new one — and revoked when the page unmounts (a
@@ -547,8 +567,11 @@ still cached).
   concurrency slots), opened as a zip under the §5.1 zip-bomb guards (member count, member
   size, decompressed total), and every file member is served as text: `path` the member's
   path inside the archive, `text` its content decoded as UTF-8, or `null` when the member
-  isn't UTF-8 text or is over 1 MB (`transfer.list_archive_text`). Directory members are
-  skipped. Served order, whatever order the zip holds them in: `manifest.yaml`; then the
+  isn't UTF-8 text, is over 1 MB, or lands past the §22.1 16 MB total-text cap
+  (`transfer.list_archive_text`). Directory members are
+  skipped. The https branch takes a §22.1 concurrency slot exactly like the local-path
+  branch (repeated Audit clicks on link entries are bounded, not unbounded 10-minute
+  downloads in parallel). Served order, whatever order the zip holds them in: `manifest.yaml`; then the
   `automation/` members - `automation.yaml`, `spec.md`, `notes.md`, then the rest of that
   folder sorted by name (so step scripts follow their `NN-` numbers); then `agents.yaml`,
   `secrets.yaml`; then anything else sorted by path. The archive is **not** validated as
@@ -612,7 +635,8 @@ autowright marketplace catalog remove <source> <n>            drop entry n; its 
 
 `<source>` resolves like every other §20 reference: an id, an unambiguous id prefix, an
 exact name (case-insensitive), or a unique part of its name; ambiguity and no-match are the standard §20 errors. A file
-path given to `add` is made absolute against the current directory before it travels.
+path given to `add`, or as `set location=`, is made absolute against the current directory
+before it travels (the same path must work with both verbs).
 `list` prints one block per catalog - `<name> [<id8>]  <location>` (`(kept by Autowright)`
 for `null`), with ` built-in`, ` collapsed` and/or ` auto-refresh` appended to that line, in
 that order, when set; then
@@ -629,7 +653,10 @@ detail, and `remove` on it exits 1 with the 409 detail (collapse it with `expand
 `'<name>' has no location to refresh from`; otherwise `refresh` prints one `refreshed
 <name> - <count> automation(s)`, `couldn't refresh <name>: <error>`, or (refresh-all only)
 `skipped <name> - no location to refresh from` line per catalog (exit 1 when any failed; a
-skip is not a failure); `remove` prints `removed <name>`. `install` checks `<n>` against
+skip is not a failure). The refresh-all form walks the table itself and refreshes the rows
+**one at a time through the single-row route**, each under its own 660 s timeout, so the
+§22.4 refresh-all route's 120 s deadline can never leave a slow third catalog unreached
+but printed as refreshed; `remove` prints `removed <name>`. `install` checks `<n>` against
 the catalog's entry count first (`entry numbers start at 1 - see \`autowright marketplace
 list\`` / `'<name>' lists <count> automation(s) - there is no entry <n>`, exit 1), then
 previews the entry, confirms immediately (the typed command is the user's go-ahead, §20

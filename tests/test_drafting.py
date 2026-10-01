@@ -3303,6 +3303,67 @@ def test_manifest_validation_error_table(manifest, expected):
     assert any(e.startswith(expected) for e in errors), errors
 
 
+@pytest.mark.parametrize("manifest, expected", [
+    ("steps: 5\n", ["steps must be a list of step entries"]),
+    ("params: 3\n" + _TWO_STEPS, ["params must be a list of param entries"]),
+    ("params:\n  - { name: p, kind: [a], default: 1 }\n" + _TWO_STEPS,
+     ["param p: `kind` must be a string"]),
+    ("steps:\n  - { file: 1, name: A, description: d }\n"
+     "  - { file: 02-b.py, name: B, description: d }\n",
+     ["step 1: `file` must be a string naming its NN-name.py file"]),
+    ("steps:\n  - { file: [a], name: A, description: d }\n"
+     "  - { file: 02-b.py, name: B, description: d }\n",
+     ["step 1: `file` must be a string naming its NN-name.py file"]),
+    # a blank `file:` (None) among string files — sorting the mixed list
+    # used to raise TypeError
+    ("steps:\n  - { file: 01-a.py, name: A, description: d }\n"
+     "  - { file: , name: B, description: d }\n",
+     ["step 2: `file` must be a string naming its NN-name.py file"]),
+])
+def test_validate_steps_type_guards_answer_with_errors(manifest, expected):
+    # §8 type rule: a wrong-typed manifest shape is a plain-word validation
+    # error (one per problem) for the repair round, never a TypeError.
+    _, errors = validate_steps({"manifest.yaml": manifest, **_ERROR_TABLE_STEP_FILES})
+    assert errors == expected
+    # a non-mapping step entry is its own error (the file checks follow it)
+    _, errors = validate_steps({"manifest.yaml": "steps:\n  - 5\n  - [a]\n",
+                                **_ERROR_TABLE_STEP_FILES})
+    assert "steps entry must be a mapping with file/name/description — got 5" in errors
+    assert "steps entry must be a mapping with file/name/description — got ['a']" in errors
+
+
+def test_unknown_manifest_and_step_keys_are_validation_errors():
+    # §8 key rule: a misspelled manifest or step key fails validation, one
+    # line per key — `trigger:` must not save as "no triggers" and
+    # `timeout_seconds` must not save as the default timeout without a word.
+    manifest = ("trigger:\n  - { cron: '0 9 * * *' }\n"
+                "steps:\n"
+                "  - { file: 01-a.py, name: A, description: d }\n"
+                "  - { file: 02-b.py, name: B, description: d, timeout_seconds: 30 }\n")
+    _, errors = validate_steps({"manifest.yaml": manifest, **_ERROR_TABLE_STEP_FILES})
+    assert errors == ["unknown manifest key: trigger",
+                      "step 2: unknown key timeout_seconds"]
+
+
+def test_every_known_manifest_and_step_key_validates():
+    # §8 key rule: the known sets cover the §20 workdir identity fields pull
+    # writes (name, description) and every per-step key; an unknown param key
+    # still drops silently instead of erroring.
+    manifest = ("name: N\ndescription: D\nnote: n\n"
+                "params:\n  - { name: p, kind: text, default: '', stray: 1 }\n"
+                "test_values: { p: x }\n"
+                "packages:\n  - { pip: requests-toolbelt, import: requests_toolbelt, why: w }\n"
+                "triggers:\n  - { cron: '0 9 * * *' }\n"
+                "steps:\n"
+                "  - { file: 01-a.py, name: A, description: d, timeout: 30, retries: 2,\n"
+                "      packages: [{ import: requests_toolbelt, why: w }] }\n"
+                "  - { file: 02-b.py, name: B, description: d, agent: true, why: w,\n"
+                "      no_timeout: true, infinite_retries: true, secrets: [] }\n")
+    draft, errors = validate_steps({"manifest.yaml": manifest, **_ERROR_TABLE_STEP_FILES})
+    assert errors == []
+    assert draft["params"] == [{"name": "p", "kind": "text", "default": ""}]
+
+
 def test_pipeline_crash_settles_the_job_failed(monkeypatch):
     # §8/§19: a pipeline that raises anything at all still ends the job: a
     # thread dying here would leave it building forever and the UI spinning.
@@ -3392,3 +3453,33 @@ def test_draft_jobs_get_unknown_and_terminal_tail_trim(monkeypatch):
                      owner_id="auto-new")
     assert [k for k in jobs.jobs if k != jid] == [f"t{i}" for i in range(5, 25)]
     assert jobs.get(jid)["status"] == "building"
+
+
+def test_concurrent_starts_for_one_owner_leave_exactly_one_building_job(monkeypatch):
+    # §19 one-building-job-per-owner invariant: the scan, the cancel mark, and
+    # the insert are one lock hold, so two starts racing for one owner can
+    # never both survive building.
+    import threading
+
+    release = threading.Event()
+    monkeypatch.setattr(DraftJobs, "_run", lambda self, *a, **kw: release.wait(10))
+    try:
+        for _ in range(50):
+            jobs = DraftJobs()
+            barrier = threading.Barrier(2)
+
+            def start():
+                barrier.wait()
+                jobs.start("sync", {"harness": "Claude Code"}, None, None, GRANTS,
+                           owner_id="owner-1")
+
+            threads = [threading.Thread(target=start) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+            building = [j for j in jobs.jobs.values()
+                        if j["status"] == "building" and j["_owner"] == "owner-1"]
+            assert len(building) == 1
+    finally:
+        release.set()

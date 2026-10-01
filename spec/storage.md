@@ -473,19 +473,40 @@ Rules:
   process crash loses nothing, a power loss can drop the newest index rows, which the startup
   scan below rebuilds from the yaml; and a top-level `automation.yaml` write that fails
   (disk full, read-only volume) rolls the in-memory record back to its pre-write fields
-  before the error propagates — memory never runs ahead of disk), then the in-memory state
+  before the error propagates — memory never runs ahead of disk; the three top-level
+  stores follow the same rule: a route that changes `settings.yaml`, `agents.yaml`, or
+  `secrets.yaml` builds the new content, writes it, and only then replaces the in-memory
+  list or dict, so a failed `PATCH /settings` can never leave a retention `days` in memory
+  that disk never held, a failed agent delete never re-points automations at nothing, and
+  a failed secret create never leaves a Keychain value behind a row that exists only in
+  memory), then the in-memory state
   updates. A crash between the two self-heals at the next startup, since startup rebuilds
   everything from disk: after loading the DB index, startup scans `executions/` for
   directories the index doesn't know (crash between the yaml write and the DB upsert, or a
   DB schema wipe) and restores their header rows from `execution.yaml` — the yaml stays
-  authoritative. Nothing exists only in memory.
+  authoritative. The same scan re-reads `execution.yaml` for indexed rows whose file is
+  newer than the index database (one `stat` per row; a power loss under
+  `synchronous=NORMAL` can also drop the newest *updates* to rows that already existed —
+  a retry's `failed` → `succeeded`), so the list and `lastStatus` never disagree with the
+  detail page after a crash. Nothing exists only in memory.
 - Retention cleanup (§4.9 `days`) deletes execution directories and DB rows, then their
   in-memory records. `days` is read leniently like every other numeric setting — a
   non-numeric hand-edited value falls back to the 90-day default rather than silently
   disabling the sweep for the session. Records still `executing` or waiting in the §6 queue (`queued`) are
-  exempt — deleting a queued record would silently drop a firing that never ran.
-- Changing the data location (§4.9) closes the DB connection first, updates `dataPath`, then
-  reloads everything from the new directory. Nothing is moved — execution state is wholly
+  exempt — deleting a queued record would silently drop a firing that never ran. Each
+  automation's **latest real execution** (the newest record in the §4.1 `lastStatus`
+  population — `skipped`, `queued`, and test records excluded) is exempt too, whatever its
+  age: it is the §4.1 overdue baseline and the §4.3 interval anchor, and deleting it would
+  reset both to `created_at` — a monthly cron under 30-day retention would then be reported
+  overdue every month, and an interval would snap back to the creation grid.
+- Changing the data location (§4.9) is disk-first like every write: `settings.yaml` is
+  written with the new `dataPath` first (a failed write answers 500 and nothing else
+  changes — the old index stays open, the old path stays in memory), then the DB connection
+  is closed, `dataPath` updates in memory, and everything reloads from the new directory; a
+  reload that raises restores the old path and reopens the old index, so a half-switched
+  store (no index, a path that was never loaded) can never survive the request. The path
+  must be absolute (422 otherwise — a relative path would resolve against the backend's
+  cwd, which is `/` under launchd). Nothing is moved — execution state is wholly
   contained in the executions dir, so there is no migration step.
 - Logs stream as append-only NDJSON — nothing else written on the execution hot path; CLI can
   tail/grep them directly. **Line cap:** a per-attempt log file stops appending at 10,000

@@ -15,13 +15,14 @@ import { useStore } from '../store'
 import type { Agent, ChatEntry } from '../types'
 import {
   BackLink, BtnPrimary, ConfirmModal, HeaderActions, MenuItemRow, Notice, PageLoading, PageTitle,
-  PopMenu, ScrollArea, usePopover,
+  PopMenu, ScrollArea, Spinner, usePopover,
 } from '../ui'
 import { nextTriggerShort, useTriggerPreview } from '../triggers'
 import {
   type Rev, amendSpec, analyzeTestMessage, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
   jobStageTitle, loadVersionInto,
   newEntry, persistChat, secretRefsOf, seedEmpty, seedFromAuto, seedFromPayload, serializeDraft,
+  stepsFingerprint, testOutcomeStale,
 } from './createflow/model'
 import { VersionDiffModal } from '../versiondiff'
 import { useDraftJob } from './createflow/useDraftJob'
@@ -226,6 +227,15 @@ export default function CreateFlow() {
   // write it with a debounced PUT ~1 s after the last change — quitting the app
   // mid-edit loses nothing. The unmount save above stays the final flush;
   // settling (discard / save / create / start over) stops this writer.
+  // The debounce keys on the persisted fields alone (the serialized draft +
+  // the drafting agent): a job's poll rewrites `rev` every tick (genStage,
+  // genEvents) and must neither reset the timer nor write, and a PUT
+  // identical to the last one written is skipped.
+  const persistKey = useMemo(
+    () => (rev ? JSON.stringify([serializeDraft(rev), agentId]) : null),
+    [rev, agentId],
+  )
+  const lastPersistKey = useRef<string | null>(null)
   useEffect(() => {
     if (!rev || draftSettled.current) return
     const worthKeeping = isEdit
@@ -237,18 +247,22 @@ export default function CreateFlow() {
       const r = revRef.current
       const a = autoRef.current
       if (!r) return
+      const key = JSON.stringify([serializeDraft(r), agentIdRef.current])
+      if (key === lastPersistKey.current) return // the same bytes are already written
       if (isEdit) {
         if (a && holdsDraftEdits(r, a)) {
-          putInFlight.current = api.putDraft(a.id, serializeDraft(r)).catch(() => { /* backend restarting */ })
+          lastPersistKey.current = key
+          putInFlight.current = api.putDraft(a.id, serializeDraft(r)).catch(() => { lastPersistKey.current = null })
         }
         return
       }
       if (r.spec.length || r.steps.length) {
-        putInFlight.current = api.putDraft('pending', serializeDraft(r), agentIdRef.current).catch(() => { /* backend restarting */ })
+        lastPersistKey.current = key
+        putInFlight.current = api.putDraft('pending', serializeDraft(r), agentIdRef.current).catch(() => { lastPersistKey.current = null })
       }
     }, 1000)
     return () => clearTimeout(t) // each change resets the timer (debounce) and unmount cancels it
-  }, [rev]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [persistKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // §11: create mode mounts straight on the empty editor (empty thread,
   // placeholder cards). §4.4: while the pending slot holds a draft it resumes
@@ -429,6 +443,10 @@ export default function CreateFlow() {
     if (reconciledRef.current || !rev || !chatReady) return
     if (isEdit && !seededRef.current) return // wait for the stored-automation seed
     reconciledRef.current = true
+    // A job this editor started (or is starting) before the thread merged is
+    // already live - there is nothing to re-attach, and its pending user
+    // entry is no orphaned turn.
+    if (jobs.busyNow() || rev.chatBusy || rev.syncBusy) return
     const owner = isEdit ? automationId : 'pending'
     if (!owner) return
     const jobRef = useStore.getState().draftJobs.find((j) => j.owner === owner)
@@ -448,7 +466,12 @@ export default function CreateFlow() {
   // sends the canned message exactly like the card's button — null while the
   // tracked test didn't settle failed, hiding the pill.
   const [testRunSignal, setTestRunSignal] = useState(0)
-  const analyzeFailure = test && testExec?.status === 'failed'
+  // §11 stale-outcome rule: the fingerprint of the steps the tracked test ran
+  // against (null for a re-attached test — unknown, so never stale). Owned
+  // here so the pill and the TEST card read one value.
+  const [testedFp, setTestedFp] = useState<string | null>(null)
+  const stepsFp = useMemo(() => (rev ? stepsFingerprint(rev.steps) : ''), [rev?.steps]) // eslint-disable-line react-hooks/exhaustive-deps
+  const analyzeFailure = test && testExec?.status === 'failed' && !testOutcomeStale(true, testedFp, null, stepsFp)
     ? () => {
         if (anyJobBusy || testLive || viewingOld) return
         guardManualEdit(() => void jobs.sendChat(analyzeTestMessage(copy.machine, testExec?.error?.step), test.executionId))
@@ -458,6 +481,9 @@ export default function CreateFlow() {
   // ---- guards + edit-mode seeding ----
   useEffect(() => {
     if (agents.length === 0) {
+      // §7 Fix with AI: the redirect leaves the editor, so the pending
+      // failure never seeds a later, unrelated editor session.
+      useStore.setState({ fixExec: null })
       setSurface('app')
       go('agents')
       showToast('No agent yet — add one here first. Creating and editing automations needs an AI.', 3600)
@@ -529,6 +555,12 @@ export default function CreateFlow() {
   }
 
   const resetCreate = async () => {
+    // §11: the fresh draft's first request - the first user entry after the
+    // newest boundary marker - returns to the input. Derived from the thread
+    // so a question-reply turn or a resumed draft returns the right text.
+    const firstRequest = revRef.current
+      ? chatSinceBoundary(revRef.current.chat).find((e) => e.kind === 'user')?.text ?? ''
+      : ''
     jobs.cancelJob()
     // §4.4: settle BEFORE the awaits, exactly like the edit branch's Discard
     // draft — the 1 s debounce timers check the flag at fire time, and a PUT
@@ -556,7 +588,8 @@ export default function CreateFlow() {
     // §4.4: the fresh empty draft is a live session again — the writers re-arm
     // over the settled one they were muted for.
     draftSettled.current = false
-    composer.set((cur) => cur || jobs.firstRequestRef.current)
+    lastPersistKey.current = null
+    composer.set((cur) => cur || firstRequest)
   }
 
   // §11 title rename — hidden while any job runs and, in edit mode, while
@@ -601,8 +634,12 @@ export default function CreateFlow() {
     const description = (descEdit ?? '').trim()
     setDescEdit(null)
     if (!rev || description === rev.description) return
+    const prev = rev.description
     up({ description })
-    if (isEdit && auto) void api.patchAutomation(auto.id, { description }).catch((e) => showToast((e as Error).message))
+    if (isEdit && auto) void api.patchAutomation(auto.id, { description }).catch((e) => {
+      up({ description: prev })
+      showToast((e as Error).message)
+    })
   }
   // §11 chat input send: every message is one §8 chat job — a fresh draft's
   // first message included (the §8 new-automation rule: the agent writes the
@@ -791,6 +828,9 @@ export default function CreateFlow() {
     fixConsumed.current = true
     useStore.setState({ fixExec: null })
     const ex = useStore.getState().executionFull[fx] ?? executions.find((e) => e.id === fx)
+    // Only this automation's own execution seeds this editor — a stale one
+    // left over from another automation is dropped.
+    if (!ex || ex.automationId !== automationId) return
     const failure = ex?.error
       ? `Execution failed at step ${ex.error.step ?? '?'} — ${ex.error.message}`
       : 'The execution failed.'
@@ -889,9 +929,13 @@ export default function CreateFlow() {
     await flushChat()
     if (isEdit && auto) {
       if (rev && holdsDraftEdits(rev, auto)) {
-        try { await api.putDraft(auto.id, serializeDraft(rev)) } catch { /* backend restarting */ }
-        draftSettled.current = true
-        showToast('Draft kept — resume it from this automation anytime.', 3400)
+        // Settled (and announced kept) only once the write landed - a failed
+        // PUT toasts its reason and leaves the unmount flush armed to retry.
+        try {
+          await api.putDraft(auto.id, serializeDraft(rev))
+          draftSettled.current = true
+          showToast('Draft kept — resume it from this automation anytime.', 3400)
+        } catch (e) { showToast((e as Error).message) }
       }
       setSurface('app')
       go('automation')
@@ -899,18 +943,33 @@ export default function CreateFlow() {
     }
     // §4.4: leaving create mode after a draft landed keeps the pending slot.
     if (!isEdit && rev && (rev.spec.length || rev.steps.length)) {
-      try { await api.putDraft('pending', serializeDraft(rev), agentId) } catch { /* backend restarting */ }
-      draftSettled.current = true
-      showToast('Draft kept — Resume draft picks it up anytime.', 3400)
+      try {
+        await api.putDraft('pending', serializeDraft(rev), agentId)
+        draftSettled.current = true
+        showToast('Draft kept — Resume draft picks it up anytime.', 3400)
+      } catch (e) { showToast((e as Error).message) }
     }
     setSurface('app')
     go('automations')
   }
 
+  // §11/§9 busy rule: Create, Save, Start over, and Discard draft each
+  // disable (with busy feedback) from the click until their request settles —
+  // a double-click never sends a second POST /automations or races a second
+  // settle. The ref gates the handlers synchronously; the state drives the
+  // buttons. A settle that navigates away never clears it (the editor
+  // unmounts); a failure or an in-editor reset does.
+  const savingRef = useRef(false)
+  const [saving, setSaving] = useState<'save' | 'discard' | null>(null)
+  const beginSaving = (kind: 'save' | 'discard') => { savingRef.current = true; setSaving(kind) }
+  const endSaving = () => { savingRef.current = false; setSaving(null) }
+
   const startOver = async () => {
+    if (savingRef.current) return
     // an automation that vanished mid-edit has nothing to discard — and must
     // never fall through to the create branch's reset
     if (isEdit && !auto) return
+    beginSaving('discard')
     if (isEdit && auto) {
       // Discard draft → back to detail. Settle BEFORE the awaits — the 1 s
       // debounce timers check the flag at fire time, and a PUT landing after
@@ -933,14 +992,15 @@ export default function CreateFlow() {
       showToast(`Changes discarded — back to v${auto.version} as saved.`, 3200)
       return
     }
-    await resetCreate()
+    try { await resetCreate() } finally { endSaving() }
   }
 
   const doSave = async () => {
-    if (!rev || saveBlocked) return
+    if (!rev || saveBlocked || savingRef.current) return
     // an automation that vanished mid-edit has nothing to save as a new
     // version — and must never fall through to the create branch
     if (isEdit && !auto) return
+    beginSaving('save')
     try {
       draftSettled.current = true
       // §4.4 thread lifetime: every entry lands before the boundary marker
@@ -991,6 +1051,7 @@ export default function CreateFlow() {
       }
     } catch (e) {
       draftSettled.current = false
+      endSaving()
       showToast((e as Error).message)
     }
   }
@@ -1073,16 +1134,24 @@ export default function CreateFlow() {
                         : 'Sync and review the steps before saving'}
                     </span>
                   )}
-                  <button className="ad-btn-text dim" disabled={busyRewrite} onClick={() => void startOver()}>
-                    {isEdit ? 'Discard draft' : 'Start over'}
+                  <button className="ad-btn-text dim" disabled={busyRewrite || saving !== null} onClick={() => void startOver()}>
+                    {saving === 'discard' ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <Spinner size={13} /> {isEdit ? 'Discarding…' : 'Starting over…'}
+                      </span>
+                    ) : isEdit ? 'Discard draft' : 'Start over'}
                   </button>
                   {isEdit && (rev.touched || !!auto?.draft) && (
-                    <button className="ad-btn-ghost" onClick={() => void close()}>
+                    <button className="ad-btn-ghost" disabled={saving !== null} onClick={() => void close()}>
                       Keep draft
                     </button>
                   )}
-                  <BtnPrimary onClick={() => void doSave()} disabled={saveBlocked}>
-                    {isEdit && auto
+                  <BtnPrimary onClick={() => void doSave()} disabled={saveBlocked || saving !== null}>
+                    {saving === 'save' ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <Spinner size={13} /> {isEdit && auto ? (viewingOld ? 'Restoring…' : 'Saving…') : 'Creating…'}
+                      </span>
+                    ) : isEdit && auto
                       ? (viewingOld ? `Restore v${rev.viewing} as v${auto.version + 1}` : `Save as v${auto.version + 1}`)
                       : 'Create automation'}
                   </BtnPrimary>
@@ -1321,6 +1390,8 @@ export default function CreateFlow() {
                     guardManualEdit(() => void jobs.sendChat(text, executionId))}
                   runTestSignal={testRunSignal}
                   isCreateEmpty={isCreateEmpty}
+                  testedFp={testedFp}
+                  setTestedFp={setTestedFp}
                 />
                 <RightCards
                   rev={rev}

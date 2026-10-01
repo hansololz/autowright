@@ -345,8 +345,6 @@ def test_store_collection_walks_run_under_the_lock(client, monkeypatch):
 def test_url_import_times_out_on_a_trickling_server(client, monkeypatch):
     """§5.2: the per-read timeout can't catch a server sending one byte at a
     time — the whole-download deadline can, and it lands as a 422."""
-    import urllib.request
-
     from autowright import transfer
 
     class _Trickle:
@@ -363,7 +361,8 @@ def test_url_import_times_out_on_a_trickling_server(client, monkeypatch):
             return b"x"
 
     monkeypatch.setattr(transfer, "resolve_url", lambda url: "https://example.test/pack.autowright")
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _Trickle())
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, timeout, refuse: _Trickle())
     monkeypatch.setattr(transfer, "FETCH_DEADLINE_S", 0)  # the deadline is already past
     r = client.post("/automations/import/url",
                     json={"url": "https://example.test/pack.autowright"})

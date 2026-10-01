@@ -314,6 +314,7 @@ _MAX_MEMBER_BYTES = 32 * 1024 * 1024        # one member, decompressed
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024        # whole archive, decompressed
 _MAX_ENTRIES = 1000                         # members in the archive
 MAX_AUDIT_TEXT_BYTES = 1 * 1024 * 1024      # §22.4: one member served as text
+ARCHIVE_TEXT_TOTAL_CAP = 16 * 1024 * 1024   # §22.1/§22.4: all members served as text
 
 
 def _check_sizes(z: zipfile.ZipFile) -> None:
@@ -742,16 +743,20 @@ def validate_archive(data: bytes) -> None:
 def list_archive_text(data: bytes) -> list[dict]:
     """§22.4 archive viewer: every file member as text, in the served order -
     no §5.1 validation, nothing written. `text` is None for a member that
-    isn't UTF-8 or is over the cap; a layout the import would refuse still
-    lists, because the point is to see what is inside."""
+    isn't UTF-8, is over the per-member cap, or lands past the §22.1 16 MB
+    total-text cap (the §5.1 guards alone would allow a quarter-gigabyte
+    answer); a layout the import would refuse still lists, because the point
+    is to see what is inside."""
     with _open_archive(data) as z:
         _check_sizes(z)
         files = []
+        served = 0
         for info in z.infolist():
             if info.is_dir():
                 continue
-            if info.file_size > MAX_AUDIT_TEXT_BYTES:
-                # Over the cap the member is named but never read into memory.
+            if (info.file_size > MAX_AUDIT_TEXT_BYTES
+                    or served + info.file_size > ARCHIVE_TEXT_TOTAL_CAP):
+                # Over a cap the member is named but never read into memory.
                 files.append({"path": info.filename, "text": None})
                 continue
             raw = _read_member(z, info.filename)
@@ -759,6 +764,8 @@ def list_archive_text(data: bytes) -> list[dict]:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
                 text = None
+            if text is not None:
+                served += len(raw)
             files.append({"path": info.filename, "text": text})
     files.sort(key=lambda f: _audit_order(f["path"]))
     return files
@@ -1187,6 +1194,7 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
 FETCH_TIMEOUT = 30                          # seconds, connect + read
 FETCH_DEADLINE_S = 600                      # §5.2 whole-download wall clock
 _FETCH_CHUNK = 256 * 1024
+REDIRECTED_OFF_HTTPS = "the download redirected off https"
 
 _GH_REPO_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?(?:/releases/latest)?$")
 _GH_TAG_RE = re.compile(r"^/([^/]+)/([^/]+)/releases/tag/([^/]+)$")
@@ -1196,6 +1204,30 @@ _GH_FILE_RE = re.compile(r"^/([^/]+)/([^/]+)/(?:blob|raw)/([^/]+)/(.+)$")
 
 def _headers() -> dict:
     return {"User-Agent": f"autowright/{__version__}"}
+
+
+class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """§5.2/§22.1 HTTPS only, redirects refused before they are followed: a
+    hop to anything but https raises `refuse()` here, so a `302` to an
+    `http://` or LAN address never makes a plaintext request - checking the
+    final URL after urllib followed it would already have sent one."""
+
+    def __init__(self, refuse) -> None:
+        super().__init__()
+        self._refuse = refuse
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != "https":
+            raise self._refuse()
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_https_only(request: urllib.request.Request, *, timeout: float, refuse):
+    """`urllib.request.urlopen` with the redirect handler above: `refuse()`
+    builds the error raised for a hop off https (TransferError here,
+    MarketplaceError for §22.1 reads)."""
+    opener = urllib.request.build_opener(HttpsOnlyRedirectHandler(refuse))
+    return opener.open(request, timeout=timeout)
 
 
 def _github_api(path: str):
@@ -1288,11 +1320,12 @@ def fetch_archive(url: str) -> tuple[bytes, str]:
     resolved = resolve_url(url)
     req = urllib.request.Request(resolved, headers=_headers())
     try:
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
-            # urllib follows redirects — a hop off https would sidestep the
-            # §5.2 HTTPS-only rule, so re-check the landing URL.
+        with open_https_only(req, timeout=FETCH_TIMEOUT,
+                             refuse=lambda: TransferError(REDIRECTED_OFF_HTTPS)) as r:
+            # The redirect handler refuses a hop off https before it is
+            # followed; the landing URL is re-checked as a belt.
             if urlsplit(r.geturl()).scheme != "https":
-                raise TransferError("the download redirected off https")
+                raise TransferError(REDIRECTED_OFF_HTTPS)
             # §5.2: the per-read timeout can't catch a server trickling bytes
             # forever — only a whole-download deadline can, and this runs on a
             # threadpool worker the backend needs back.

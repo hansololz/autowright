@@ -19,8 +19,24 @@ vi.mock('../src/api', () => ({
     listExecutions: vi.fn(async () => ({ executions: [], total: 0 })),
     getExecution: vi.fn(() => Promise.reject(new Error('offline'))),
     getExecutionLogs: vi.fn(() => Promise.reject(new Error('offline'))),
+    executeNow: vi.fn(async () => ({ executionId: 'e-new', queued: false })),
+    retryExecution: vi.fn(async () => ({ executionId: 'e1' })),
   },
 }))
+
+// §7 tick isolation: counts FilterModal renders — the page re-rendering
+// re-renders the open modal with it, so this one counter covers both.
+const filterModalRenders = vi.hoisted(() => ({ count: 0 }))
+vi.mock('../src/pages/FilterModal', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../src/pages/FilterModal')>()
+  return {
+    ...mod,
+    default: (props: Parameters<typeof mod.default>[0]) => {
+      filterModalRenders.count += 1
+      return mod.default(props)
+    },
+  }
+})
 
 let storeMod: typeof import('../src/store')
 let mockedApi: Record<string, ReturnType<typeof vi.fn>>
@@ -127,6 +143,25 @@ describe('executions list sections (§7)', () => {
     // DURATION / STARTED belong to the other tables, and neither is rendered here
     expect(screen.queryByText('DURATION')).toBeNull()
     expect(screen.queryByText('STARTED')).toBeNull()
+  })
+
+  it('the QUEUED FOR clock ticks in its cell alone — the page and the open filter modal never re-render for it', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      seed([ex('e-wait', { status: 'queued', duration: '', endedMs: 0, queuedMs: NOW - 10_000 })])
+      render(<ExecutionsList />)
+      openModal()
+      expect(screen.getByText('10s')).toBeTruthy()
+      const settled = filterModalRenders.count
+      vi.mocked(Date.now).mockReturnValue(NOW + 3_000)
+      act(() => { vi.advanceTimersByTime(3_000) })
+      // the cell moved…
+      expect(screen.getByText('13s')).toBeTruthy()
+      // …and nothing above it rendered again
+      expect(filterModalRenders.count).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('orders Queued oldest-first — the §6 drain order, so the next to run reads top', () => {
@@ -760,6 +795,25 @@ describe('executions filter modal (§7)', () => {
     expect((within(dlg).getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('shows the year on a custom-range chip only outside the current year', () => {
+    seedBoth([ex('e-done')], [auto()])
+    render(<ExecutionsList />)
+
+    // NOW falls in 2023: a From in 1965 carries its year on the chip
+    let dlg = openModal()
+    fireEvent.click(within(dlg).getByRole('radio', { name: 'Custom range' }))
+    fireEvent.change(within(dlg).getByLabelText('From'), { target: { value: '1965-06-01T10:00' } })
+    apply(dlg)
+    expect(filterLine().textContent).toMatch(/From .*1965/)
+
+    // a From inside the current year reads month and day only
+    dlg = openModal()
+    fireEvent.change(within(dlg).getByLabelText('From'), { target: { value: '2023-06-01T10:00' } })
+    apply(dlg)
+    expect(filterLine().textContent).toMatch(/From /)
+    expect(filterLine().textContent).not.toMatch(/2023/)
+  })
+
   it('carries the modal filters on the pager\'s keyset fetch', async () => {
     const rows = (n: number, from = 0) =>
       Array.from({ length: n }, (_, i) =>
@@ -1370,6 +1424,101 @@ describe('execution page retention-purged deep link (§7)', () => {
   })
 })
 
+// §7: the header is in hand (the window row) but the first GET failed with a
+// non-404 — the RESULT and LOGS bodies are the couldn't-load notice, never a
+// spinner nothing will resolve.
+describe('execution page with a header and a failed first GET (§7)', () => {
+  it('shows the couldn’t-load notice in place of the bodies, and Try again refetches', async () => {
+    mockedApi.getExecution.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e-hdr', executions: [ex('e-hdr')], executionFull: {}, execLogs: {},
+    })
+    const { container } = render(<ExecutionPage />)
+    expect(await screen.findByText('Couldn’t load this execution')).toBeTruthy()
+    // the header still renders above it
+    expect(screen.getByText('e-hdr')).toBeTruthy()
+    expect(screen.queryByText('Loading…')).toBeNull()
+    expect(container.querySelector('[data-testid="execution-log"]')).toBeNull()
+
+    const full: Execution = { ...ex('e-hdr'), steps: [], result: null }
+    mockedApi.getExecution.mockClear()
+    mockedApi.getExecution.mockResolvedValue(full)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })) })
+    expect(mockedApi.getExecution).toHaveBeenCalledWith('e-hdr')
+    expect(screen.queryByText('Couldn’t load this execution')).toBeNull()
+    expect(screen.getByText('No result')).toBeTruthy()
+  })
+})
+
+// §9 busy rule: Execute again and Retry start runs — a double-click must never
+// fire two POSTs. §7 capacity: Execute again's no-free-slot 409 reads the same
+// busy toast as the detail page's Execute now.
+describe('execution page start actions (§9/§7)', () => {
+  const automation = (over: Partial<Automation> = {}) =>
+    ({ id: 'a1', name: 'Automation', live: [], maxParallel: 1, maxQueued: 10, params: [], ...over }) as unknown as Automation
+  const seedFinished = (over: Partial<Execution>, auto = automation()) => {
+    const row = ex('e1', over)
+    storeMod.useStore.setState({
+      page: 'execution', executionId: 'e1', executions: [row], execLogs: {}, automations: [auto],
+      executionFull: { e1: { ...row, steps: [], result: null } },
+    })
+  }
+  beforeEach(() => {
+    mockedApi.executeNow.mockReset()
+    mockedApi.retryExecution.mockReset()
+  })
+
+  it('Execute again sends one POST for a double-click and shows it is starting', async () => {
+    mockedApi.executeNow.mockReturnValue(new Promise(() => {}))
+    seedFinished({ status: 'succeeded' })
+    render(<ExecutionPage />)
+    const again = screen.getByRole('button', { name: 'Execute again' })
+    fireEvent.click(again)
+    fireEvent.click(again)
+    expect(mockedApi.executeNow).toHaveBeenCalledTimes(1)
+    const busy = screen.getByRole('button', { name: /Starting…/ }) as HTMLButtonElement
+    expect(busy.disabled).toBe(true)
+  })
+
+  it('Retry sends one POST for a double-click', async () => {
+    mockedApi.retryExecution.mockReturnValue(new Promise(() => {}))
+    seedFinished({ status: 'failed', error: null })
+    render(<ExecutionPage />)
+    const retry = screen.getByRole('button', { name: 'Retry' })
+    fireEvent.click(retry)
+    fireEvent.click(retry)
+    expect(mockedApi.retryExecution).toHaveBeenCalledTimes(1)
+    expect((screen.getByRole('button', { name: /Retrying…/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('Execute again comes back when its request settles', async () => {
+    mockedApi.executeNow.mockRejectedValue(new Error('nope'))
+    seedFinished({ status: 'succeeded' })
+    render(<ExecutionPage />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Execute again' })) })
+    expect((screen.getByRole('button', { name: 'Execute again' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(storeMod.useStore.getState().toast).toBe('nope')
+  })
+
+  it('a capacity 409 on Execute again reads the §7 busy toast off the automation row', async () => {
+    mockedApi.executeNow.mockRejectedValue(
+      Object.assign(new Error('no free slot'), { status: 409, reason: 'capacity' }))
+    seedFinished({ status: 'succeeded' }, automation({ maxParallel: 2, maxQueued: 0 }))
+    render(<ExecutionPage />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Execute again' })) })
+    expect(storeMod.useStore.getState().toast).toBe('All 2 slots are busy. A trigger firing now would be skipped.')
+  })
+
+  it('any other 409 keeps the backend\u2019s own detail', async () => {
+    mockedApi.executeNow.mockRejectedValue(
+      Object.assign(new Error('The automation is being deleted.'), { status: 409 }))
+    seedFinished({ status: 'succeeded' })
+    render(<ExecutionPage />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Execute again' })) })
+    expect(storeMod.useStore.getState().toast).toBe('The automation is being deleted.')
+  })
+})
+
 // §7 "No result" card: the reason line reads off the record's own status, so
 // the empty outcome is never unexplained.
 describe('execution page no-result reasons (§7)', () => {
@@ -1645,5 +1794,18 @@ describe('execution page header action gating (§7)', () => {
     render(<ExecutionPage />)
     const meta = screen.getByText('e1').parentElement as HTMLElement
     expect(meta.textContent).toContain('e1 · Manual · v3 · started')
+  })
+})
+
+// §7/§19 range bounds: `startedFromMs` is never negative — a preset resolved
+// against a clock near the epoch, or a custom From before 1970, clamps to 0.
+describe('filter range resolution (§7)', () => {
+  it('clamps a negative From to 0, for presets and custom ranges alike', async () => {
+    const { resolveRange } = await import('../src/pages/FilterModal')
+    expect(resolveRange({ preset: 'week', from: '', to: '' }, 1_000)).toEqual({ from: 0 })
+    const custom = resolveRange({ preset: 'custom', from: '1965-03-01T08:00', to: '' }, NOW)
+    expect(custom).toEqual({ from: 0 })
+    // an ordinary range is untouched
+    expect(resolveRange({ preset: 'hour', from: '', to: '' }, NOW)).toEqual({ from: NOW - 3_600_000 })
   })
 })

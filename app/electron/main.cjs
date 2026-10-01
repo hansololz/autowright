@@ -723,13 +723,7 @@ function applyShellSettings(s, { trusted = false } = {}) {
         // tray is gone — and a merely hidden window still suppresses
         // window-all-closed, so the close rule below would never fire again.
         // Destroy it; the next tray click builds a fresh one lazily.
-        if (panel && !panel.isDestroyed()) panel.destroy()
-        panel = null
-        // §13: a destroyed panel forgets its measured height and anchor — the
-        // next one opens at the 420 px default and re-anchors on its first
-        // measurement, never at the dead panel's grown height.
-        panelHeight = 420
-        panelAnchor = null
+        destroyPanel()
         // §9 close rule, re-evaluated here: on a platform with no dock the
         // tray was the only thing keeping a windowless app reachable. With
         // both gone there is nothing left to click, so quit rather than sit
@@ -794,6 +788,18 @@ let panelHiddenAt = 0
 // taskbar as it grows; a top-anchored one (macOS) lands on the same pixels.
 let panelAnchor = null
 let panelHeight = 420
+
+// §13: the panel is deliberately non-closable (Cmd+W must be a no-op for it),
+// so every path that needs it gone destroys it outright. A destroyed panel
+// forgets its measured height and anchor — the next one opens at the 420 px
+// default and re-anchors on its first measurement, never at the dead panel's
+// grown height. Idempotent: a dead or missing panel is left alone.
+function destroyPanel() {
+  if (panel && !panel.isDestroyed()) panel.destroy()
+  panel = null
+  panelHeight = 420
+  panelAnchor = null
+}
 
 function repositionPanel() {
   if (!panel || !panelAnchor) return
@@ -1192,7 +1198,7 @@ let generic = null
 
 // §3: the updater's error stream — the message a refused install carries. The
 // NSIS/AppImage classes report a failed installer spawn (or nothing staged)
-// through `error` and then answer `quitAndInstall` with false, so the last
+// through `error` and return nothing from `quitAndInstall`, so the last
 // error is what the §9.4 card gets to render instead of a silent no-op.
 let lastUpdaterError = null
 
@@ -1359,22 +1365,27 @@ ipcMain.handle('update-install', async () => {
   // user's Quit and stop the backend under the swap. Cleared again on every
   // refusal: a later Cmd+Q must still read as the user's.
   uiQuit = true
-  let started
+  // §3/§13: Squirrel's quitAndInstall closes every window before it emits
+  // before-quit, and the non-closable panel would veto that close walk —
+  // leaving the app resident with no window, no restart, and uiQuit latched.
+  // Destroy it here, not only in before-quit.
+  destroyPanel()
   try {
-    started = genericUpdater().quitAndInstall()
+    genericUpdater().quitAndInstall()
   } catch (err) {
     uiQuit = false
     appLog(`update: install failed: ${String(err?.message || err)}`)
     return { error: String(err?.message || err) }
   }
-  // §3: a quitAndInstall that returns without quitting (the NSIS/AppImage
-  // classes answer false when nothing is staged or the installer spawn fails)
-  // answers { error } with the updater's own message — the §9.4 card renders
-  // it, and a silent no-op is never an acceptable outcome. MacUpdater returns
-  // nothing and quits through Squirrel, so only an explicit false counts.
-  if (!quitting && started === false) {
+  // §3: a quitAndInstall that returns without quitting answers { error } with
+  // the updater's own message — the §9.4 card renders it, and a silent no-op
+  // is never an acceptable outcome. The NSIS/AppImage classes report a
+  // refusal (nothing staged, the installer spawn failed) on the error stream
+  // and return nothing, never false, so an error emitted during the call with
+  // no quit underway is the refusal.
+  if (!quitting && lastUpdaterError !== null) {
     uiQuit = false
-    const error = lastUpdaterError || 'the updater could not install this update'
+    const error = lastUpdaterError
     appLog(`update: install refused: ${error}`)
     return { error }
   }
@@ -1437,6 +1448,15 @@ const QUIT_ASK_RENDERER_MS = 1500
 // time: the IPC and the native OS path share it.
 let quitFlight = null
 let quitAskTimer = null
+// §3: the flight covers the native busy dialog too — held for the whole of
+// quitNatively (the showMessageBox await included), so a second Cmd+Q, the
+// dock's Quit, a second SIGINT or a late quit-all is a no-op rather than a
+// second stacked dialog or the renderer's force modal beside the native one.
+let nativeQuitPending = false
+// §3: true while a reset (§4.9 RESET card) is in flight — it ends the process
+// itself with app.exit(0), and a second `service stop` racing its
+// deleteAllData would let the app exit half-erased, so an OS quit is ignored.
+let resetInFlight = false
 
 function stopAndQuit(force, label) {
   if (quitFlight) return quitFlight
@@ -1473,6 +1493,9 @@ function stopAndQuit(force, label) {
 }
 
 ipcMain.handle('quit-all', async (_e, opts) => {
+  if (resetInFlight) return { error: 'a reset is in flight' }
+  // §3: the native busy dialog is up — this flight is already asking.
+  if (nativeQuitPending) return { error: 'a quit is already in progress' }
   // The renderer took an OS quit over (§3): the native fallback stands down.
   if (quitAskTimer) { clearTimeout(quitAskTimer); quitAskTimer = null }
   return stopAndQuit(!!opts?.force, 'quit-all')
@@ -1485,7 +1508,13 @@ ipcMain.handle('quit-all', async (_e, opts) => {
 // overlay is seen. No loaded window, or a renderer that never answers, and the
 // shell runs the flow natively.
 function quitForGood() {
-  if (quitFlight || quitAskTimer) return // already underway — a repeated Cmd+Q
+  if (resetInFlight) {
+    appLog('quit: ignored — a reset is in flight')
+    return
+  }
+  // Already underway — a repeated Cmd+Q, or one while the native busy
+  // dialog is up.
+  if (quitFlight || quitAskTimer || nativeQuitPending) return
   appLog('quit: requested — stopping the backend first')
   if (win && !win.isDestroyed() && winLoaded) {
     if (win.isMinimized()) win.restore()
@@ -1503,6 +1532,16 @@ function quitForGood() {
 }
 
 async function quitNatively() {
+  if (nativeQuitPending) return
+  nativeQuitPending = true
+  try {
+    await quitNativelyHeld()
+  } finally {
+    nativeQuitPending = false
+  }
+}
+
+async function quitNativelyHeld() {
   let r = await stopAndQuit(false, 'quit')
   if (r.busy) {
     let response = 1
@@ -1642,39 +1681,51 @@ async function deleteAllData(dataPath, label) {
 ipcMain.handle('reset-all', async () => {
   // §3 step 1: the same live-execution gate as quit-all/update-install; an
   // unreachable backend counts as idle.
-  if (await executionsLive()) return { busy: true }
-  const dataPath = await captureDataPath()
-  // §3: each destructive step announces itself as it starts — fire-and-forget
-  // stage tokens for the §4.9 reset progress overlay.
-  const stage = (s) => win?.webContents.send('reset-progress', s)
-  stage('secrets')
-  await deleteSecrets('reset')
-  stage('service')
-  const err = await runServiceVerb('stop', 'reset')
-  if (err) {
-    // §3 step 4: a stop failure aborts the reset — the app stays up and
-    // nothing has been deleted beyond step 3's secrets.
-    quittingAll = false
-    return { error: err }
+  // §3: an OS quit arriving from here on is ignored. A successful reset ends
+  // in app.exit(0); every other way out — the busy/error answers and any
+  // throw — clears the flag, so a reset that failed never leaves the app
+  // unquittable.
+  resetInFlight = true
+  if (await executionsLive()) {
+    resetInFlight = false
+    return { busy: true }
   }
-  stage('data')
-  // Announced *before* the deletion: appLog re-creates the logs root, so a
-  // line written after it left a fresh logs dir behind on every reset.
-  // Nothing may log past this point — deleteAllData's own failure lines are
-  // the one exception, since a delete that failed left files there anyway.
-  appLog('reset: erasing data, then quitting')
-  // Past this line the writer is a no-op for everyone else, and the 60 s poll
-  // that would otherwise re-create the logs root behind the deletion stops.
-  resetting = true
-  stopShellPoll()
-  stopUpdateTimer()
-  await deleteAllData(dataPath, 'reset')
-  // §3 step 6: the app quits and stays quit. The next launch finds no
-  // backend.json and an empty data root: ensure-backend re-registers and §10
-  // onboarding runs as on a fresh install.
-  stage('quit')
-  app.exit(0)
-  return { ok: true }
+  try {
+    const dataPath = await captureDataPath()
+    // §3: each destructive step announces itself as it starts — fire-and-forget
+    // stage tokens for the §4.9 reset progress overlay.
+    const stage = (s) => win?.webContents.send('reset-progress', s)
+    stage('secrets')
+    await deleteSecrets('reset')
+    stage('service')
+    const err = await runServiceVerb('stop', 'reset')
+    if (err) {
+      // §3 step 4: a stop failure aborts the reset — the app stays up and
+      // nothing has been deleted beyond step 3's secrets.
+      quittingAll = false
+      return { error: err }
+    }
+    stage('data')
+    // Announced *before* the deletion: appLog re-creates the logs root, so a
+    // line written after it left a fresh logs dir behind on every reset.
+    // Nothing may log past this point — deleteAllData's own failure lines are
+    // the one exception, since a delete that failed left files there anyway.
+    appLog('reset: erasing data, then quitting')
+    // Past this line the writer is a no-op for everyone else, and the 60 s poll
+    // that would otherwise re-create the logs root behind the deletion stops.
+    resetting = true
+    stopShellPoll()
+    stopUpdateTimer()
+    await deleteAllData(dataPath, 'reset')
+    // §3 step 6: the app quits and stays quit. The next launch finds no
+    // backend.json and an empty data root: ensure-backend re-registers and §10
+    // onboarding runs as on a fresh install.
+    stage('quit')
+    app.exit(0)
+    return { ok: true }
+  } finally {
+    resetInFlight = false
+  }
 })
 
 app.whenReady().then(() => {
@@ -1785,8 +1836,5 @@ app.on('before-quit', (e) => {
   // vetoed every quit: Cmd+Q, the dock's Quit and quit-all all stopped right
   // here, with the polls already gone and the app still resident. Destroy it
   // (the tray-off transition's move) before Electron walks the windows.
-  if (panel && !panel.isDestroyed()) panel.destroy()
-  panel = null
-  panelHeight = 420
-  panelAnchor = null
+  destroyPanel()
 })

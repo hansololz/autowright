@@ -51,6 +51,12 @@ class Scheduler:
         self._warned_rewind: set[tuple[str, str]] = set()
         self._stop = threading.Event()
         self._last_retention = clock()
+        # §6: the previous tick's clock readings (the scheduler's start before
+        # the first tick) — a first-seen trigger's baseline, so a one-shot
+        # saved seconds ahead whose moment passes before the next tick fires
+        # instead of being consumed unfired.
+        self._prev_tick = self._last_retention
+        self._prev_tick_utc = self._utc_clock()
         # §6: the live retention worker, single-flight — the tick never starts
         # a second sweep while one is still deleting.
         self._retention_thread: threading.Thread | None = None
@@ -132,6 +138,7 @@ class Scheduler:
                 self._overdue_sweep(autos, now)
             except Exception:  # noqa: BLE001
                 log.exception("overdue sweep failed")
+        self._prev_tick, self._prev_tick_utc = now, now_utc
 
     def _tick_automation(self, a: dict, now: datetime, now_utc: datetime,
                          drain: bool = True) -> None:
@@ -146,10 +153,22 @@ class Scheduler:
         # §4.3 interval anchor: the automation's run baseline, read once per
         # tick (the same baseline §4.1 overdue uses) — never stored.
         run_baseline = self.store.run_baseline(a)
+        # §4.3: interval math runs on instants — the naive local run baseline
+        # read back as the instant it was (fold resolved against now_utc).
+        run_baseline_utc = (triggerlib.local_instant(run_baseline, now_utc)
+                            if run_baseline is not None else None)
         for t in list(a["triggers"]):  # consume_trigger below mutates the list
             key = (a["id"], t["id"])
+            since = triggerlib.enabled_since(t)
+            since_utc = triggerlib.enabled_instant(t)
             if key not in self._baseline:
-                self._set_baseline(key, now, now_utc)
+                # §6: a first-seen trigger counts from the previous tick (or
+                # its own enable stamp, if later) — never from `now`, which
+                # would swallow an occurrence that landed between the ticks.
+                if since is not None and since_utc is not None and since > self._prev_tick:
+                    self._set_baseline(key, since, since_utc)
+                else:
+                    self._set_baseline(key, self._prev_tick, self._prev_tick_utc)
             base = self._baseline[key]
             if base > now and now_utc < self._baseline_utc[key]:
                 # A backward clock step (NTP) must not silence every
@@ -184,17 +203,36 @@ class Scheduler:
                     self.store.consume_trigger(a, t["id"])
                     self._publish_changed(a)
                 continue
-            occ = triggerlib.trigger_next(t, after=base, run_baseline=run_baseline)
-            if occ and occ <= now:
+            if since is not None and since_utc is not None and base < since:
+                # §4.3: an enabled trigger never counts moments before its
+                # enable stamp — a baseline older than it (the last tick saw
+                # the trigger off) is clamped up to it.
+                base = since
+                self._set_baseline(key, since, since_utc)
+
+            def occurrence(after: datetime, after_utc: datetime,
+                           t: dict = t) -> tuple[datetime | None, bool]:
+                """(next occurrence as local naive, due by now). An interval
+                is compared as the instant it is against now_utc (§4.3) —
+                a naive local rendering inside the fall-back fold would read
+                an hour early."""
+                if t["kind"] == "interval":
+                    instant = triggerlib.interval_instant(t, after_utc, run_baseline_utc)
+                    return instant.astimezone().replace(tzinfo=None), instant <= now_utc
+                nxt = triggerlib.trigger_next(t, after=after, run_baseline=run_baseline)
+                return nxt, nxt is not None and nxt <= now
+
+            occ, occ_due = occurrence(base, self._baseline_utc[key])
+            if occ and occ_due:
                 # §6: at most one catch-up per wake — swallow every older occurrence.
                 self._set_baseline(key, now, now_utc)
                 if not triggerlib.run_if_missed(t):
                     # §6 opt-out: fire only when an occurrence landed within
                     # the grace window; anything older was slept through and
                     # is dropped, never fired late.
-                    fresh = triggerlib.trigger_next(t, after=now - timedelta(seconds=GRACE_S),
-                                                    run_baseline=run_baseline)
-                    if fresh is None or fresh > now:
+                    fresh, fresh_due = occurrence(now - timedelta(seconds=GRACE_S),
+                                                  now_utc - timedelta(seconds=GRACE_S))
+                    if fresh is None or not fresh_due:
                         dropped.append(t)
                         if t["kind"] == "time":
                             # §4.3 spent rule: a dropped one-shot is consumed unfired.
@@ -327,4 +365,7 @@ class Scheduler:
             if self.store.autos.get(a["id"]) is not a:
                 return
             payload = self.store.auto_json(a, full=False)
-        hub.publish("automation.changed", automationId=a["id"], automation=payload)
+            # §19: published inside the hold that serialized the row (the
+            # publish only schedules the send, never blocks) — two writers'
+            # rows reach clients in serialization order.
+            hub.publish("automation.changed", automationId=a["id"], automation=payload)

@@ -50,7 +50,17 @@ remain plain dicts (§2).
 - `GET /state` → boot snapshot: automations (full — the §4.1 memory card's size/updated
   stats are memoized per automation for 5 s, cleared by clear/restore and by every execution
   finish of the automation, so a reconnect burst
-  never re-walks a gigabyte `memory/` under the store lock; the latest-result memo keys off
+  never re-walks a gigabyte `memory/` under the store lock — and the walk itself **never
+  runs under the store lock or on the request**: an expired or cleared memo answers the
+  last known stats at once (a first-ever read answers `size` "computing…" with an empty
+  `updated`) and starts one background walk per automation — and an invalidation (clear,
+  restore, execution finish) itself starts that fresh walk whenever the record's stats
+  were ever read, so a client whose finish-triggered refetch races the invalidation still
+  gets the landing rather than waiting for its next refetch; when the walk lands with
+  stats that differ from what was last served, the backend publishes the single-row
+  `automation.changed` for that automation so an open detail page refetches and the
+  MEMORY card catches up without a manual refresh (a walk that lands unchanged publishes
+  nothing); the latest-result memo keys off
   one linear pass over the headers, never a sort), executions (the §7 window, not the full
   list: every `queued`/`executing` header plus the 50 newest finished headers - exactly one
   §7 page - in the §7
@@ -187,9 +197,13 @@ remain plain dicts (§2).
   show the Automation consent prompt if the user has never answered it (and may launch
   Messages.app); the result updates the remembered `automation` state above. Called by the §9
   checklist's Grant button; blocks until the user answers the prompt
-- `POST /automations` `{ draft, name?, agentId?, stepAgents?, allowedSecrets?, paramValues?, concurrency? }` → the new
+- `POST /automations` `{ draft, name?, agentId?, stepAgents?, allowedSecrets?, paramValues?, concurrency?, settlePending? }` → the new
   automation's bare §4 automation JSON — create v1 from the sent draft (the §11 Create
-  button). The draft must hold steps (422 otherwise); its `triggers` list is validated and
+  button). `settlePending` (default `true`) is the §11 Create button's behavior described
+  at the end of this entry — consuming the pending create-mode slot; `false` (the §20 CLI
+  `create`, which is unrelated to whatever the user is drafting in the app) leaves the
+  pending slot, its chat, its building job, and its draft test untouched and migrates
+  nothing. The draft must hold steps (422 otherwise); its `triggers` list is validated and
   normalized exactly like the PATCH (422 aborts, nothing written), and the §8 step validators
   run server-side (rule below). `paramValues` (the §4.2 chat-staged map) applies after v1
   lands: entries matched by name **and kind** against v1's definitions land as stored
@@ -206,7 +220,8 @@ remain plain dicts (§2).
   an explicit empty list lands empty. Success consumes the §4.4
   pending create-mode slot (`<root>/draft/` is emptied on success), first migrating the
   slot's `chat.jsonl` into the new automation's container and appending the §4.4
-  "Created as v1." boundary marker there (thread-lifetime rules, §4.4)
+  "Created as v1." boundary marker there (thread-lifetime rules, §4.4) — all of it only
+  with `settlePending` true
 - `POST /automations/{id}/versions` `{ draft, name?, agentId?, stepAgents?, allowedSecrets?, paramValues?, concurrency? }`
   — save edit as vN+1; the optional identity/grant fields, when sent, are applied to the
   automation as a patch after the version lands — a sent `name` validates like the PATCH's
@@ -226,6 +241,13 @@ remain plain dicts (§2).
   draft (the container is deleted) and appends the §4.4 boundary marker to the
   automation's thread — "Draft saved as vN." when a version was minted, "Changes saved —
   no new version." on the operational-only save
+- **Step field typing** — the request models type every step field (`name`, `code`,
+  `description`, `file` strings; `timeout`, `retries` integers; `params`, `steps` lists;
+  each step a mapping), so a wrongly typed value is a 422, never a `KeyError`/`TypeError`
+  500 from the manifest writer or a half-written version folder; the on-disk readers
+  (`step_json`, the manifest entry builder, the version diff, restore) read those fields
+  leniently, so a hand-edited stored version with `timeout: abc` degrades to the default
+  instead of a 500.
 - **Server-side step validation** — `POST /automations` and `POST /automations/{id}/versions`
   run the §8 step validators (`ast.parse`, the §6.2 import allowlist, manifest schema and
   step-file ordering, the timeout/retry rules, the §8 rule-6/7 id checks — step `agents:` /
@@ -799,7 +821,9 @@ already neutralize. The provider config and
   clamped ≥ 1, `notifications` must be `attention | all` — 422 otherwise, so a bad value can never
   persist and silently break the retention sweep; flipping `keepAwake` starts/stops the §3
   permanent power assertion immediately) · `POST /settings/data-path` `{ path }` (sets the
-  execution-data location; creates the dir, reloads from it, moves nothing; answers 409 while
+  execution-data location — an absolute path, 422 otherwise; disk-first per §5: the settings
+  file is written before the index is closed and the store reloaded, and a failed reload
+  restores the old location; creates the dir, reloads from it, moves nothing; answers 409 while
   an execution is in progress — it still writes into the old location — **or while a §6
   firing-queue entry is waiting**: the in-memory queue would not survive the reload, so the
   entry would neither execute nor finish `skipped`, and its sender would never be told.
@@ -880,9 +904,22 @@ already neutralize. The provider config and
   mid-edit, and collapses the page height so the scroll position jumps to the top. A bare
   `automation.changed` (no `automationId`) means "many may have changed" (data-path switch,
   startup repair): clients fall back to re-`GET /state`, applying its list rows with the
-  same merge. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
+  same merge. The single-row event is published from **inside the same lock hold that
+  serialized the row** (`hub.publish` only schedules the send on the event loop, it never
+  blocks), so two writers — a PATCH and a scheduler firing — can never deliver their rows
+  out of order and leave the client patched with the older one; the bulk events and the
+  execution events keep publishing outside the lock. Clients apply automation refetches
+  **ordered per id**: the newest `GET /automations/{id}` issued for an id wins, and an
+  older response resolving later (a finish-triggered refetch slowed by the memory walk,
+  overtaken by a PATCH's refetch) is dropped rather than regressing `paramValues`,
+  triggers, or versions. Every renderer request carries a **client timeout** (30 s;
+  660 s for the install/import/delete routes, like the §20 CLI) — a wedged-but-listening
+  backend fails requests instead of hanging every surface and pinning the coalesced
+  refresh. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
   successful open), re-reading `backend.json` before each attempt, and re-`GET /state` on
-  reconnect (a client page holding a *full* automation record — the §9.2 detail page, the
+  reconnect (a client page holding a *full* automation record — one the client fetched
+  through `GET /automations/{id}` itself, tracked as a set of ids and never inferred from
+  the row's fields, since `/state` rows carry the full fields too — the §9.2 detail page, the
   §11 editor — also re-`GET`s that record on reconnect: the snapshot's list rows carry no
   steps/spec/versions, and an `automation.changed` missed while the socket was down would
   otherwise leave the page showing a new version number over old bodies until navigation), and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for

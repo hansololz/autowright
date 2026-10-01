@@ -94,6 +94,11 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
 
   if (!auto.memory) return null
 
+  // §9.2: the backend answers a snapshot, a clear and a restore with the same
+  // 409 while an execution is live — each control says so up front instead of
+  // a no-op click (a raced 409 still toasts through runAction).
+  const liveBlock = executing ? 'Blocked while an execution is live' : undefined
+
   return (
     <div style={{ marginBottom: 26 }}>
       <Eyebrow style={{ marginBottom: 10 }}>MEMORY</Eyebrow>
@@ -115,7 +120,7 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
                   ? 'Next execution starts fresh, like the first time. Current memory is snapshotted first.'
                   : "Next execution starts fresh, like the first time. Automatic snapshots are off — this can't be undone."}
               </span>
-              <button className="ad-btn-danger-ghost" onClick={doClearMemory}>
+              <button className="ad-btn-danger-ghost" onClick={doClearMemory} disabled={executing} title={liveBlock}>
                 Clear
               </button>
               <button className="ad-btn-soft" onClick={() => setConfirmClear(false)}>
@@ -133,7 +138,7 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
                 autoFocus
                 style={{ width: 220 }}
               />
-              <button className="ad-btn-accent-ghost" onClick={doSnapshot}>
+              <button className="ad-btn-accent-ghost" onClick={doSnapshot} disabled={executing} title={liveBlock}>
                 Save
               </button>
               <button className="ad-btn-soft" onClick={() => { setSnapAsk(false); setSnapName('') }}>
@@ -150,11 +155,11 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
                   Snapshot
                 </button>
               ) : (
-                <button className="ad-btn-soft" onClick={() => setSnapAsk(true)}>
+                <button className="ad-btn-soft" onClick={() => setSnapAsk(true)} disabled={executing} title={liveBlock}>
                   Snapshot
                 </button>
               )}
-              <button className="ad-btn-text danger" onClick={() => setConfirmClear(true)}>
+              <button className="ad-btn-text danger" onClick={() => setConfirmClear(true)} disabled={executing} title={liveBlock}>
                 Clear memory
               </button>
             </>

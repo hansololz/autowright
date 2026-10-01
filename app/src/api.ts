@@ -86,18 +86,53 @@ async function apiError(r: Response): Promise<Error & { status: number; reason?:
   )
 }
 
+// §19 client timeout: every renderer request gives up after 30 s — a
+// wedged-but-listening backend fails requests instead of hanging every
+// surface and pinning the coalesced refresh. The routes that legitimately
+// take long get 660 s, like the §20 CLI: 60 s of headroom over the backend's
+// own 600 s download/install deadlines, so a slow server is reported in the
+// backend's plain words and never as the client giving up first.
+export const REQUEST_TIMEOUT_MS = 30_000
+export const LONG_REQUEST_TIMEOUT_MS = 660_000
+
+// The long routes (§20's list): package install and update (pip), every
+// import leg (file upload, URL fetch, confirm, and the §22.3 marketplace
+// entry preview that downloads the archive), automation delete (waits for
+// cancelled engine threads), and the memory operations that copy the whole
+// memory directory (clear, snapshot create, snapshot restore).
+export function requestTimeoutMs(method: string, path: string): number {
+  const route = path.split('?')[0]
+  const long = (method === 'POST' && (
+    route === '/packages/install' || route === '/packages/update'
+    || route.startsWith('/automations/import')
+    || /^\/marketplace\/sources\/[^/]+\/entries\/[^/]+\/preview$/.test(route)
+    || /^\/automations\/[^/]+\/memory\/clear$/.test(route)
+    || /^\/automations\/[^/]+\/memory\/snapshots$/.test(route)
+    || /^\/automations\/[^/]+\/memory\/snapshots\/[^/]+\/restore$/.test(route)))
+    || (method === 'DELETE' && /^\/automations\/[^/]+$/.test(route))
+  return long ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS
+}
+
+// The request's abort signal: the route's timeout, merged with the caller's
+// own signal when one is given (either one aborts the request).
+function requestSignal(method: string, path: string, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(requestTimeoutMs(method, path))
+  return signal ? AbortSignal.any([timeout, signal]) : timeout
+}
+
 // §5.1/§5.2 archives ride as raw zip bytes (§19: no multipart)
-async function rawPost<T>(path: string, data: Uint8Array): Promise<T> {
+async function rawPost<T>(path: string, data: Uint8Array, signal?: AbortSignal): Promise<T> {
   const r = await fetch(base + path, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
     body: data as unknown as BodyInit,
+    signal: requestSignal('POST', path, signal),
   })
   if (!r.ok) throw await apiError(r)
   return r.json()
 }
 
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const r = await fetch(base + path, {
     method,
     headers: {
@@ -105,6 +140,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: requestSignal(method, path, signal),
   })
   if (!r.ok) throw await apiError(r)
   return r.json()
@@ -115,7 +151,7 @@ export const api = {
   // `os` token and the §2 capability flags every OS-coupled surface gates on
   // (§9). Sent without the bearer header, exactly as the route is defined.
   health: async (): Promise<Health> => {
-    const r = await fetch(base + '/health')
+    const r = await fetch(base + '/health', { signal: requestSignal('GET', '/health') })
     if (!r.ok) throw new Error(r.statusText)
     return r.json() as Promise<Health>
   },
@@ -270,8 +306,10 @@ export const api = {
   setDataPath: (path: string) => req<import('./types').Settings>('POST', '/settings/data-path', { path }),
   // §5.1 transfer archives — raw zip bytes both ways (§19: no multipart)
   exportAutomation: async (automationId: string, values: boolean): Promise<ArrayBuffer> => {
-    const r = await fetch(`${base}/automations/${automationId}/export?values=${values ? 1 : 0}`, {
+    const path = `/automations/${automationId}/export?values=${values ? 1 : 0}`
+    const r = await fetch(base + path, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: requestSignal('GET', path),
     })
     // §19 error convention (same as req/rawPost): surface the API's `detail`,
     // so the §9.2 export toast says WHY — e.g. the §5.1 422 naming the step
@@ -333,23 +371,31 @@ export const api = {
   // §22.4 file route - the copy's bytes for the §22.3 Export (same error
   // convention as exportAutomation: the API's `detail` reaches the toast).
   marketplaceCatalogFile: async (id: string): Promise<ArrayBuffer> => {
-    const r = await fetch(`${base}/marketplace/sources/${id}/file`, {
+    const path = `/marketplace/sources/${id}/file`
+    const r = await fetch(base + path, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: requestSignal('GET', path),
     })
     if (!r.ok) throw await apiError(r)
     return r.arrayBuffer()
   },
-  marketplaceImage: async (id: string, index: number): Promise<Blob> => {
-    const r = await fetch(`${base}/marketplace/sources/${id}/entries/${index}/image`, {
+  // §22.3: `signal` is the page's per-card abort (collapse, unmount), merged
+  // with the route timeout.
+  marketplaceImage: async (id: string, index: number, signal?: AbortSignal): Promise<Blob> => {
+    const path = `/marketplace/sources/${id}/entries/${index}/image`
+    const r = await fetch(base + path, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: requestSignal('GET', path, signal),
     })
     if (!r.ok) throw new Error(r.statusText)
     return r.blob()
   },
   // Raw result-dir file (§4.5) — Response, not JSON: callers .text() or .blob() it.
   resultFile: async (executionId: string, name: string): Promise<Response> => {
-    const r = await fetch(`${base}/executions/${executionId}/result/${encodeURIComponent(name)}`, {
+    const path = `/executions/${executionId}/result/${encodeURIComponent(name)}`
+    const r = await fetch(base + path, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: requestSignal('GET', path),
     })
     if (!r.ok) throw new Error(r.statusText)
     return r

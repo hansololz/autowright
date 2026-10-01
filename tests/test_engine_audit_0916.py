@@ -31,7 +31,8 @@ def test_kill_all_live_keeps_going_after_a_failing_kill(store):
     engine.kill_all_live()
 
     assert killed == ["second"]
-    assert engine._live["first"]["cancel"] and engine._live["second"]["cancel"]
+    # §7: a shutdown is not a cancel — every live record gets the shutdown flag.
+    assert engine._live["first"]["shutdown"] and engine._live["second"]["shutdown"]
 
 
 # ---------- §4.5: the agentPgids snapshot never races the read loop ----------

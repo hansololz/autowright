@@ -18,7 +18,7 @@ from typing import Any
 
 from . import harness, keychain, listeners, notify, packages as pkglib, paths, platform, timefmt
 from .events import hub
-from .executor import CTRL, _LineWriter
+from .executor import CTRL, _LineWriter, substantive_probe
 from .firing import finish_queued
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
                       clamp_max_parallel, exec_version_label, is_test, new_id,
@@ -63,6 +63,12 @@ def step_timeout_for(s: dict) -> float | None:
 
 
 MAX_ATTEMPTS = 20  # §4.5: attempts retained per step — older ones prune with their log files
+
+# §7 kill semantics: once a step's executor has exited, the log pipe gets this
+# long for its trailing lines before the group is killed and the read end
+# defused — a background child the step left behind must not hold the step
+# "executing" until the watchdog.
+STEP_DRAIN_GRACE_S = 2.0
 
 # §7: the executor's own per-line cap, reused so a child writing to the inherited
 # fd (which never passes through _LineWriter) gets the same bound.
@@ -142,9 +148,10 @@ def _step_sha(s: dict) -> str:
 
 def build_redactions(values_by_id: dict[str, str],
                      names_by_id: dict[str, str]) -> dict[str, str]:
-    """value → secret name, plus each non-blank line of a multi-line value
+    """value → secret name, plus each substantive line of a multi-line value
     (§4.8: log lines are redacted one at a time, so a partial paste of a
-    multi-line key must match too). Shared by executions and §11 tests.
+    multi-line key must match too — but a lone `{` or `-----` line would
+    redact every log line containing it). Shared by executions and §11 tests.
 
     Both maps are keyed by secret ID, never by name: two stored secrets may
     carry the SAME name, and a name-keyed input collapses them so one of the
@@ -153,7 +160,7 @@ def build_redactions(values_by_id: dict[str, str],
     for i, v in values_by_id.items():
         if "\n" in v:
             for part in v.splitlines():
-                if part.strip():
+                if substantive_probe(part):
                     redactions.setdefault(part, names_by_id.get(i, i))
     return redactions
 
@@ -292,7 +299,14 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
     # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
     timed_out = threading.Event()
     pipe_closed = threading.Event()
+    # §7: set by this thread once the read loop is over; the exit watcher
+    # below only defuses the read end while it is not — and under the lock,
+    # so it can never dup2 over an fd the teardown already closed and the
+    # process reused.
+    read_done = threading.Event()
+    read_lock = threading.Lock()
     watchdog = None
+    exit_watcher = None
     # Everything past the spawn runs inside the try: the §3 on_spawn persist (a
     # disk error) or the watchdog start (thread exhaustion) raising out here
     # would leave the step group alive with its handle dropped and nothing left
@@ -333,6 +347,33 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
 
         state["hard_kill"] = _hard_kill
 
+        def _watch_exit() -> None:
+            """§7 step-end group kill: the read loop ends on EOF *or* on the
+            executor's exit plus the drain grace, never on EOF alone. Once the
+            executor has exited, the pipe gets STEP_DRAIN_GRACE_S for its
+            trailing lines; then the group is killed regardless — a background
+            child left behind (an `&` job, a spawned server, a grandchild that
+            traps the cancel's SIGTERM) neither holds the step "executing"
+            until the watchdog nor survives as an orphan — and the read end is
+            defused if the loop is still blocked on it."""
+            try:
+                proc.wait()
+            except Exception:  # noqa: BLE001 — the teardown reaps it either way
+                return
+            read_done.wait(STEP_DRAIN_GRACE_S)
+            try:
+                kill_step_group(proc)
+            except Exception:  # noqa: BLE001 — an already-empty group is fine
+                pass
+            with read_lock:
+                if not read_done.is_set():
+                    pipe_closed.set()
+                    harness.defuse_read_end(reader)
+
+        exit_watcher = threading.Thread(target=_watch_exit, daemon=True,
+                                        name=f"ad-step-exit-{proc.pid}")
+        exit_watcher.start()
+
         # Cancel/skip racing the spawn (mirrors harness._invoke): one that landed
         # after the caller's loop-top check but before this Popen existed killed
         # nothing — with no_timeout the freshly spawned step would then run
@@ -340,7 +381,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         # proc is visible. Index-compared like every other skip check: a stale
         # flag armed in the previous step's teardown window (after its pop,
         # before `_cur` cleared) must not kill THIS step and report it failed.
-        if state.get("cancel") or (state.get("skip") is not None and state.get("skip") == step_i):
+        if (state.get("cancel") or state.get("shutdown")
+                or (state.get("skip") is not None and state.get("skip") == step_i)):
             _hard_kill()
 
         def _on_timeout() -> None:
@@ -449,6 +491,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             # after its kill — the loop is done; anything else is a real error.
             if not timed_out.is_set() and not pipe_closed.is_set():
                 raise
+        with read_lock:
+            read_done.set()
         # §7: the reap is bounded too. EOF on our read end does not mean the
         # executor exited — a grandchild that inherited the pipe can close it
         # while the executor lingers, and an unbounded wait here would hang
@@ -460,15 +504,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             kill_step_group(proc)
             proc.wait()
     finally:
-        # Always cancel the timers and drop the proc handle — even if the read
-        # loop raises — so neither can later kill an unrelated process. §7: a
-        # cancel/skip grace timer outliving the step it was armed for would
-        # hard-kill the NEXT step's agent group in the middle of its call.
-        if watchdog is not None:
-            watchdog.cancel()
-        grace = state.pop("grace_timer", None)
-        if grace is not None:
-            grace.cancel()
+        with read_lock:
+            read_done.set()
         if proc.poll() is None:
             # The read loop died mid-stream (e.g. a disk-full error while
             # persisting a log line) — never leave the group alive with no
@@ -479,6 +516,25 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                 proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
                 pass
+        # §7: the step-end group kill runs before any escalation timer is
+        # cancelled — the exit watcher kills the group once the executor has
+        # exited (at once now that the read loop is over), so a grandchild
+        # trapping a cancel's SIGTERM can never survive the defused grace
+        # timer below.
+        if exit_watcher is not None:
+            exit_watcher.join(Engine.KILL_GRACE)
+            if exit_watcher.is_alive():
+                # The executor never exited: kill the group from here.
+                kill_step_group(proc)
+        # Always cancel the timers and drop the proc handle — even if the read
+        # loop raises — so neither can later kill an unrelated process. §7: a
+        # cancel/skip grace timer outliving the step it was armed for would
+        # hard-kill the NEXT step's agent group in the middle of its call.
+        if watchdog is not None:
+            watchdog.cancel()
+        grace = state.pop("grace_timer", None)
+        if grace is not None:
+            grace.cancel()
         # Both pipes close on EVERY path, not just the still-alive one: a normal
         # EOF exit used to leave the read end open until the garbage collector
         # got to it, leaking an fd per step on a long-lived backend.
@@ -513,6 +569,12 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                            "reason": f"The step hit its {int(timeout_s)} s time limit."}
         return proc.returncode or 1
     return proc.returncode or 0
+
+
+def _stopped(state: dict) -> bool:
+    """§7: nothing further runs once the user cancelled or the §3 shutdown
+    sweep killed the step — the two differ only in how the record lands."""
+    return bool(state["cancel"] or state.get("shutdown"))
 
 
 # §5 `_log` sentinel: read the execution's current attempt at call time. A
@@ -683,6 +745,11 @@ class Engine:
             # rule as `start`, and a retry launches its own engine thread.
             if self._stopping:
                 raise RuntimeError("the backend is shutting down")
+            # §19 delete: the same DELETE-window refusal as `start` — a retry
+            # admitted while the automation's live executions are cancelled
+            # and awaited would escape the delete's wait set.
+            if auto.get("_deleting"):
+                raise RuntimeError("this automation is being deleted")
             # Re-read under the lock: the caller's header may be the stale
             # object a first retry already replaced in store.execs — checking
             # its status would let two concurrent retries both pass and launch
@@ -870,12 +937,14 @@ class Engine:
         return True
 
     def kill_all_live(self) -> None:
-        """§3 backend shutdown: hard-kill every live step group. The records
-        get marked interrupted by the next startup's recovery either way — but
-        their step processes must die with this backend, or an orphan keeps
-        writing `memory/` while the successor starts a second copy. The sweep
-        also flips the engine stopping: a firing already inside `fire_trigger`
-        must not start a group after the pass that would have killed it."""
+        """§3 backend shutdown: hard-kill every live step group — their step
+        processes must die with this backend, or an orphan keeps writing
+        `memory/` while the successor starts a second copy. §7: a shutdown is
+        not a cancel — the live records get the shutdown flag, and the engine
+        thread that observes the EOF finalizes them `interrupted` (never
+        `cancelled`, never "cancelled by you"). The sweep also flips the
+        engine stopping: a firing already inside `fire_trigger` must not start
+        a group after the pass that would have killed it."""
         # Under store.lock — the same lock `start`/`retry` check the flag
         # beneath, so an admission already inside that block either lands
         # before this sweep (and gets killed by it) or sees the flag.
@@ -884,7 +953,7 @@ class Engine:
             with self._lock:
                 states = list(self._live.values())
         for state in states:
-            state["cancel"] = True
+            state["shutdown"] = True
             proc = state.get("proc")
             hard = state.get("hard_kill")
             try:
@@ -914,7 +983,9 @@ class Engine:
         return base / "draft" / "memory" if kind == "draft" else base / "memory"
 
     def _redact(self, h: dict, text: str, redactions: dict[str, str]) -> str:
-        for val, name in redactions.items():
+        # §4.8: longer values first — a value that is a prefix of another
+        # secret's value must not replace the head and leave the tail behind.
+        for val, name in sorted(redactions.items(), key=lambda kv: -len(kv[0])):
             if val and val in text:
                 text = text.replace(val, "•••")
                 if name not in h["redacted_secrets"]:
@@ -992,7 +1063,7 @@ class Engine:
             return
         end = time.time() + _retry_pause_s()
         while time.time() < end:
-            if state["cancel"] or state.get("skip") == i:
+            if state["cancel"] or state.get("shutdown") or state.get("skip") == i:
                 return
             time.sleep(0.05)
 
@@ -1038,7 +1109,7 @@ class Engine:
             # landed (§7): a multi-gigabyte copy must never run for an
             # execution nobody wants. The step loop below then marks every
             # step cancelled exactly as it does today.
-            if not state["cancel"]:
+            if not _stopped(state):
                 self._take_pre_version(auto, h)
             # §6: a missing secret stops the execution before any step —
             # declared (`secrets` entry ids in the manifest) and the
@@ -1100,8 +1171,8 @@ class Engine:
                 msg = ensure_declared_packages(
                     ver.get("packages") or [],
                     lambda k, text: self._log(h, k, text, redactions),
-                    should_stop=lambda: state["cancel"])
-                if msg and not state["cancel"]:
+                    should_stop=lambda: _stopped(state))
+                if msg and not _stopped(state):
                     self._log(h, "err", f"package install failed — {msg}", redactions)
                     h["error"] = {"step": None, "message": self._redact(h, msg, redactions),
                                   "reason": "A required package couldn't be installed — check "
@@ -1117,7 +1188,7 @@ class Engine:
 
             # §7: skipped too when the cancel flag is already set — the seed
             # is the same gigabyte-scale copy the snapshot above is.
-            if h["kind"] == "draft" and not failed and not state["cancel"]:
+            if h["kind"] == "draft" and not failed and not _stopped(state):
                 if self._seed_draft_memory(auto):
                     self._log(h, "sys", "draft memory created — copied from the automation's memory", redactions)
 
@@ -1129,8 +1200,11 @@ class Engine:
                 step = h["steps"][i]
                 if step["status"] in ("succeeded", "skipped"):
                     continue  # §7 retry: terminal steps from an earlier pass never re-execute
-                if failed or state["cancel"]:
-                    step["status"] = "cancelled" if state["cancel"] else "queued"
+                if failed or _stopped(state):
+                    # §7: a shutdown is not a cancel — its untouched steps
+                    # land interrupted, like the record.
+                    step["status"] = ("interrupted" if state.get("shutdown")
+                                      else "cancelled" if state["cancel"] else "queued")
                     self._step_event(h, i)
                     continue
                 forever = step_retries_forever(s)
@@ -1182,7 +1256,11 @@ class Engine:
                     step["duration_ms"] = dur
                     attempt["duration_ms"] = dur
                     skip = state.pop("skip", None)
-                    if state["cancel"]:
+                    if state.get("shutdown") and rc != 0:
+                        # §7: the shutdown sweep killed the step — the user
+                        # pressed nothing, so no "cancelled by you" line.
+                        status = "interrupted"
+                    elif state["cancel"]:
                         status = "cancelled"
                         self._log(h, "sys", "execution cancelled by you — nothing else will happen", redactions)
                     elif rc == 0:
@@ -1213,6 +1291,13 @@ class Engine:
                             pass_tries += 1
                             self._await_retry(state, i, forever)
                             skip = state.pop("skip", None)
+                            if state.get("shutdown"):
+                                # §7: a shutdown during the retry wait — the
+                                # step and its latest attempt land interrupted.
+                                step["status"] = "interrupted"
+                                attempt["status"] = "interrupted"
+                                self._step_event(h, i)
+                                break
                             if state["cancel"]:
                                 # §7: cancel wins over the pending retry exactly
                                 # as over a running attempt — the step lands
@@ -1261,9 +1346,22 @@ class Engine:
             # non-terminal. A cancel landing after the last step already
             # succeeded changes nothing: the status reports what happened to
             # the steps, not that a button was pressed too late.
-            cancelled = state["cancel"] and any(
+            # §7: a backend shutdown is not a cancel — the same reached-a-step
+            # rule, but the record lands `interrupted` with the shutdown line.
+            interrupted = bool(state.get("shutdown")) and any(
+                s["status"] in ("interrupted", "queued", "executing") for s in h["steps"])
+            cancelled = not interrupted and state["cancel"] and any(
                 s["status"] in ("cancelled", "queued", "executing") for s in h["steps"])
-            if cancelled:
+            if interrupted:
+                h["status"] = "interrupted"
+                for s in h["steps"]:
+                    if s["status"] in ("queued", "executing"):
+                        s["status"] = "interrupted"
+                        attempts = s.get("attempts") or []
+                        if attempts and attempts[-1]["status"] == "executing":
+                            attempts[-1]["status"] = "interrupted"
+                self._log(h, "sys", "backend stopped mid-execution", redactions)
+            elif cancelled:
                 h["status"] = "cancelled"
             elif failed:
                 h["status"] = "failed"
@@ -1273,7 +1371,7 @@ class Engine:
             h["finished_at"] = timefmt.now_iso()
             h["pgid"] = None  # §3: no live step group to recover anymore
             h["agent_pgids"] = []
-            if result_touched and not cancelled:
+            if result_touched and not cancelled and not interrupted:
                 # The chip is optional (§4.5): it lives on the execution header,
                 # tinted by the execution's result status. It is persisted and
                 # published, so it gets the same redaction a log line gets (§5:
@@ -1287,7 +1385,8 @@ class Engine:
             # No OS notification for a cancelled execution (the user did it
             # themselves, seconds ago) or a §11 draft test (editor-scoped —
             # its outcome shows on the Test card).
-            if h["status"] != "cancelled" and h.get("kind") != "test" and not h.get("_test"):
+            if (h["status"] not in ("cancelled", "interrupted")
+                    and h.get("kind") != "test" and not h.get("_test")):
                 # §6.1: the notification body leaves the app's storage (osascript
                 # argv is world-readable, the text persists in Notification
                 # Center) — redact it like a log line.

@@ -23,6 +23,13 @@ from .yamlio import atomic_write_text, save_yaml
 LOG_TAIL = 40      # lines per step handed to the §8 RECENT EXECUTIONS section
 EXECUTIONS_CAP = 5  # §8: newest settled executions included, across all §4.5 kinds
 RESULT_EXCERPT = 2000  # chars of result.md shown for a detailed successful execution
+# §8 RECENT EXECUTIONS bounds: a log-tail line is clipped to LOG_LINE_CLIP
+# characters and the whole section to SECTION_CAP — a step that logs one JSON
+# document per line (§6 lines run to 2 MB) must never push the prompt past
+# the §8 clip budget.
+LOG_LINE_CLIP = 2000
+LOG_LINE_CLIP_MARKER = "… [clipped]"
+SECTION_CAP = 64 * 1024
 
 
 def start(engine: Engine, draft: dict, auto: dict | None,
@@ -215,7 +222,13 @@ def _log_tail(h: dict, idx: int) -> list[str]:
     # §5: tailed by the reader — parsing a whole multi-megabyte step log to
     # keep its last LOG_TAIL lines is the cost this argument exists to avoid.
     lines = store.read_log(h["id"], idx, attempt, tail=LOG_TAIL)
-    return [l.get("text", "") for l in lines]
+    out = []
+    for l in lines:
+        text = l.get("text", "")
+        if len(text) > LOG_LINE_CLIP:
+            text = text[:LOG_LINE_CLIP] + LOG_LINE_CLIP_MARKER
+        out.append(text)
+    return out
 
 
 def executions_context(auto: dict | None, current_steps: list[dict],
@@ -251,6 +264,10 @@ def executions_context(auto: dict | None, current_steps: list[dict],
         full = store.exec_full(h["id"]) or h
         detail = i == 0 or (execution_id is not None and h["id"] == execution_id)
         blocks.append(_execution_block(full, cur_shas, detail))
+    # §8: past SECTION_CAP the runs are dropped oldest-first; the newest run
+    # (block 0, with its detail) is always kept.
+    while len(blocks) > 1 and len("\n\n".join(blocks)) > SECTION_CAP:
+        blocks.pop()
     return "\n\n".join(blocks)
 
 

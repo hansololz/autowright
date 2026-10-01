@@ -2114,7 +2114,14 @@ def test_kill_all_live_kills_a_running_step(store):
     engine.kill_all_live()
     wait_done(engine, h["id"])
     assert time.time() - t0 < 30, "the kill must not wait out the step's sleep"
-    assert h["status"] == "cancelled"  # the cancel flag went up with the kill
+    # §7: a shutdown is not a cancel — the record and its step land
+    # interrupted, with the shutdown line and never "cancelled by you".
+    assert h["status"] == "interrupted"
+    assert h["steps"][0]["status"] == "interrupted"
+    texts = [l["text"] for l in read_all_logs(store, h["id"])]
+    assert "backend stopped mid-execution" in texts
+    assert not any("cancelled by you" in t for t in texts)
+    assert h.get("pgid") is None
     assert not engine.is_live(h["id"])
 
 
@@ -2135,7 +2142,9 @@ def test_kill_all_live_without_hard_kill_kills_the_group(store):
             engine._live["fake-exec"] = state
         engine.kill_all_live()
         proc.wait(timeout=10)  # SIGKILLed — never waits out the sleep
-        assert state["cancel"] is True
+        # §7: a shutdown is not a cancel — the record gets the shutdown flag.
+        assert state["shutdown"] is True
+        assert state["cancel"] is False
     finally:
         with engine._lock:
             engine._live.pop("fake-exec", None)
@@ -2428,13 +2437,15 @@ def test_step_teardown_kills_an_agent_group_left_in_flight(monkeypatch, tmp_path
 
 def test_a_huge_log_line_is_clipped_before_it_is_stored(store):
     """§7: one log line is clipped at 128 KB before redaction, storage and the
-    live event — a newline-free flood must not land in the log file whole."""
+    live event — a newline-free flood on the inherited fd (which never passes
+    through the executor's _LineWriter slicing) must not land in the log file
+    whole."""
     from autowright.engine import MAX_LOG_LINE_CHARS, Engine
 
     engine = Engine(store)
     ver = make_version()
     ver["steps"] = [{"file": "01-flood.py", "name": "Flood", "description": "",
-                     "code": "import sys\nsys.stdout.write('x' * 300_000)\n"}]
+                     "code": "import os\nos.write(1, b'x' * 300_000 + b'\\n')\n"}]
     a = store.create_automation(ver, "Flooder", None)
     h = engine.start(a, "manual")
     wait_done(engine, h["id"])
@@ -2615,19 +2626,32 @@ def test_test_execution_finish_publishes_no_automation_row(store, monkeypatch):
 
 
 def test_execution_finish_drops_the_memory_stats_memo(store):
-    """§19: the MEMORY card's stats memo is cleared when an execution of the
-    automation finishes — a detail-page fetch right after a step wrote
-    memory/ must never answer the pre-execution size."""
+    """§19: the MEMORY card's stats memo is expired when an execution of the
+    automation finishes — the next read starts a fresh background walk
+    instead of serving the pre-execution size as fresh."""
     from autowright.engine import Engine
+
+    def settled():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            stats = store.memory_stats(a)
+            if stats["size"] != store.MEMORY_STATS_COMPUTING and not a.get("_memory_stats_walking"):
+                return stats
+            time.sleep(0.01)
+        raise AssertionError("the memory_stats walk never landed")
 
     engine = Engine(store)
     a = store.create_automation(make_version(), "Memo Drop", None)
-    assert store.memory_stats(a)["size"] == "empty"
-    assert "_memory_stats" in a
+    assert settled()["size"] == "empty"
+    generation = a.get("_memory_stats_generation", 0)
+    before = time.monotonic()
     h = engine.start(a, "manual")
     wait_done(engine, h["id"])
     assert h["status"] == "succeeded"
-    assert "_memory_stats" not in a
+    assert a["_memory_stats_generation"] > generation
+    # Expired (last known kept), or already re-walked by the walk the
+    # invalidation itself started — never the pre-execution memo.
+    assert a["_memory_stats"][0] == float("-inf") or a["_memory_stats"][0] > before
 
 
 def test_started_event_and_live_row_carry_the_pass_clock(store):

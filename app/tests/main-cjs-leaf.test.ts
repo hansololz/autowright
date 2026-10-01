@@ -110,7 +110,7 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
       expect(src).toContain(site)
     }
     // The updater quits by itself — flagged before the call, cleared on refusal.
-    expect(src).toMatch(/uiQuit = true\n  let started\n  try \{\n    started = genericUpdater\(\)\.quitAndInstall\(\)/)
+    expect(src).toMatch(/uiQuit = true\n[\s\S]{0,400}destroyPanel\(\)\n  try \{\n    genericUpdater\(\)\.quitAndInstall\(\)/)
   })
 
   it('never executes the CLI — autowright.cli appears only inside the shim file text', () => {
@@ -321,12 +321,15 @@ interface UpdaterRecord {
   check: unknown
   checkError: Error | null
   downloadError: Error | null
-  // §3 install: what quitAndInstall answers (the NSIS/AppImage classes return
-  // false when they refuse), the error it dispatches on its way out, and the
-  // throw a broken installer produces instead.
+  // §3 install: what quitAndInstall answers (the NSIS/AppImage classes
+  // return nothing, refusal included), the error it dispatches on its way
+  // out, and the throw a broken installer produces instead.
   installResult: unknown
   installError: Error | null
   installThrows: Error | null
+  // Called first thing inside quitAndInstall — lets a test read state at the
+  // moment of the call (§3: the panel is gone before it).
+  onInstall: (() => void) | null
   listeners: Map<string, (arg: unknown) => void>
 }
 
@@ -411,6 +414,9 @@ interface LoadOptions {
   // §9.4: make every external hand-off the OS is asked for reject.
   openExternalRejects?: boolean
   execFile?: ServiceChildStub
+  // §3 native busy confirm: answer showMessageBox from the test (a promise the
+  // test resolves), so a quit can be held while the dialog is up.
+  showMessageBox?: () => Promise<{ response: number }>
   // Patch individual `fs` functions main.cjs sees (the §9.3 log-rotation race
   // is otherwise unreachable from a single-threaded test).
   fs?: Record<string, unknown>
@@ -445,7 +451,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
     checks: 0, downloads: 0, installs: 0,
     check: { updateInfo: { version: '9.9.9' } },
     checkError: null, downloadError: null, listeners: new Map(),
-    installResult: undefined, installError: null, installThrows: null,
+    installResult: undefined, installError: null, installThrows: null, onInstall: null,
   }
 
   class FakeUpdater {
@@ -477,9 +483,10 @@ function loadMain(options: LoadOptions = {}): MainStub {
     }
 
     quitAndInstall() {
+      updater.onInstall?.()
       updater.installs += 1
       // The real BaseUpdater dispatches the failure on its error stream and
-      // only then answers false.
+      // returns nothing — never false.
       if (updater.installError) updater.listeners.get('error')?.(updater.installError)
       if (updater.installThrows) throw updater.installThrows
       return updater.installResult
@@ -582,6 +589,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       // §3 native busy confirm on a windowless OS quit.
       showMessageBox: async (opts: Record<string, unknown>) => {
         dialogs.push(['message', opts])
+        if (options.showMessageBox) return options.showMessageBox()
         return { response: dialogAnswer.response }
       },
     },
@@ -1266,7 +1274,7 @@ describe.skipIf(!HAS_UPDATER)('main.cjs electron-updater path (§3)', () => {
     expect(m.updater.installs).toBe(1)
     // The gate itself is one shared code path for every platform: the busy
     // check runs before either updater is asked to quit.
-    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,800}quitAndInstall\(\)/)
+    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,1200}quitAndInstall\(\)/)
   })
 })
 
@@ -1524,6 +1532,38 @@ describe('main.cjs bounded service children (§3)', () => {
     }
   })
 
+  it('the native busy dialog is inside the one flight: a second quit opens no second dialog (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const stops: string[][] = []
+    let answer: (r: { response: number }) => void = () => {}
+    const m = loadMain({
+      execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') },
+      showMessageBox: () => new Promise((resolve) => { answer = resolve }),
+    })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    // Up but answering 500: the gate reads busy.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, status: 500 } as Response)
+    try {
+      expect(m.emit('before-quit')).toBe(true)
+      await vi.waitFor(() => expect(m.dialogs).toHaveLength(1))
+      // While the dialog is up: a second Cmd+Q / SIGINT is a no-op, and a late
+      // quit-all from the renderer answers without a stop or a force modal.
+      expect(m.emit('before-quit')).toBe(true)
+      expect(await m.invoke('quit-all', {})).toEqual({ error: 'a quit is already in progress' })
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(m.dialogs).toHaveLength(1)
+      expect(stops).toEqual([])
+      // Shut down and quit: the one forced stop runs, the app quits.
+      answer({ response: 0 })
+      await vi.waitFor(() => expect(m.quits).toBe(1))
+      expect(stops).toEqual([['-m', 'autowright.service', 'stop']])
+      expect(m.dialogs).toHaveLength(1)
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
   it('with no backend to stop (dev, no discovery file) quit-all quits the UI instead of refusing (§3)', async () => {
     nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
     const stops: string[][] = []
@@ -1749,29 +1789,58 @@ describe('main.cjs ready chain (§9)', () => {
 
 describe('main.cjs update-install refusals (§3)', () => {
   afterEach(() => {
+    restoreResourcesPath()
     if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
     else process.env.AUTOWRIGHT_HOME = savedHome
   })
 
-  it('a quitAndInstall that answers false reports the updater\'s own error', async () => {
+  it('a quitAndInstall that refuses on the error stream reports the updater\'s own error', async () => {
     if (!HAS_UPDATER) return // no feed here — the no-updates line is covered above
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
     const m = loadMain()
     // The NSIS/AppImage shape: the failure goes out on the error stream and
-    // quitAndInstall then answers false.
+    // quitAndInstall returns nothing — never false.
     m.updater.installError = new Error('spawn Autowright Setup.exe ENOENT')
-    m.updater.installResult = false
+    m.updater.installResult = undefined
     expect(await m.invoke('update-install'))
       .toEqual({ error: 'spawn Autowright Setup.exe ENOENT' })
     expect(m.quits).toBe(0)
     expect(m.log()).toContain('update: install refused: spawn Autowright Setup.exe ENOENT')
+    // uiQuit was cleared on the refusal: a later Cmd+Q is the user's Quit
+    // again, held and run through quit-entirely.
+    expect(m.emit('before-quit')).toBe(true)
   })
 
-  it('a refusal with nothing on the error stream still answers an error', async () => {
+  it('an install with nothing on the error stream is a quit underway, not a refusal', async () => {
     if (!HAS_UPDATER) return
     const m = loadMain()
-    m.updater.installResult = false
-    expect(await m.invoke('update-install'))
-      .toEqual({ error: 'the updater could not install this update' })
+    expect(await m.invoke('update-install')).toEqual({ ok: true })
+    // uiQuit stays set: the updater's own quit passes through before-quit.
+    expect(m.emit('before-quit')).toBe(false)
+  })
+
+  it('update-install destroys the panel before quitAndInstall (§3/§13)', async () => {
+    if (!HAS_UPDATER || !caps.trayPanel) return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    try {
+      const m = loadMain()
+      m.invoke('apply-settings', { menuBarIcon: true })
+      m.clickTray()
+      expect(m.wins).toHaveLength(1)
+      const panel = m.wins[0]
+      // Squirrel walks the windows closed before before-quit ever runs, so
+      // the non-closable panel must already be gone when the call is made.
+      let destroysAtInstall = -1
+      m.updater.onInstall = () => { destroysAtInstall = panel.destroys }
+      expect(await m.invoke('update-install')).toEqual({ ok: true })
+      expect(m.updater.installs).toBe(1)
+      expect(destroysAtInstall).toBe(1)
+      // The next panel starts fresh — the tray click builds a new window.
+      m.clickTray()
+      expect(m.wins).toHaveLength(2)
+    } finally {
+      restoreResourcesPath()
+    }
   })
 
   it('a throwing install is answered, never left to reject the IPC', async () => {
@@ -2074,6 +2143,79 @@ describe('main.cjs quit and reset quiet the shell (§3)', () => {
     } finally {
       fetchSpy.mockRestore()
       rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  it('an OS quit during a reset is ignored and quit-all answers an error (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('offline in tests'))
+    const stops: ((err: ServiceChildError | null, stdout: string, stderr: string) => void)[] = []
+    try {
+      // The reset's own `service stop` is held until the test releases it.
+      const m = loadMain({ execFile: (_py, _a, _o, cb) => { stops.push(cb) } })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+      const reset = m.invoke('reset-all') as Promise<unknown>
+      await vi.waitFor(() => expect(stops).toHaveLength(1))
+      // Cmd+Q mid-reset: held (never a UI-only quit) but nothing runs — no
+      // second stop racing the erase, no ask to the renderer.
+      expect(m.emit('before-quit')).toBe(true)
+      expect(m.log()).toContain('quit: ignored — a reset is in flight')
+      expect(await m.invoke('quit-all', {})).toEqual({ error: 'a reset is in flight' })
+      expect(stops).toHaveLength(1)
+      expect(m.sent.filter(([channel]) => channel === 'quit-requested')).toEqual([])
+      // A stop failure aborts the reset — and releases the guard.
+      stops[0](Object.assign(new Error('exit 1'), { code: 1 }), 'stop failed', '')
+      expect(await reset).toEqual({ error: 'stop failed' })
+      const quit = m.invoke('quit-all', { force: true }) as Promise<unknown>
+      await vi.waitFor(() => expect(stops).toHaveLength(2))
+      stops[1](null, 'stopped', '')
+      expect(await quit).toEqual({ ok: true })
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('a reset that throws releases the guard: the next OS quit runs (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    // The backend answers /settings with an executions dir (so deleteAllData
+    // walks it) and is otherwise unreachable (idle gate, secrets best-effort).
+    const dataPath = mkdtempSync(join(tmpdir(), 'aw-data-'))
+    mkdirSync(join(dataPath, 'run-1'))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('/settings')) {
+        return { ok: true, status: 200, json: async () => ({ dataPath }) } as Response
+      }
+      throw new Error('offline in tests')
+    })
+    const stops: string[][] = []
+    try {
+      const m = loadMain({
+        execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') },
+        // deleteAllData's execution-dir probe throws (an unguarded fs failure).
+        fs: {
+          existsSync: (p: string) => {
+            if (String(p).endsWith('execution.yaml')) throw new Error('EIO: i/o error')
+            return (realRequire('fs') as typeof import('node:fs')).existsSync(p)
+          },
+        },
+      })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+      await expect(m.invoke('reset-all') as Promise<unknown>).rejects.toThrow('EIO: i/o error')
+      expect(m.exits).toEqual([])
+      expect(stops).toHaveLength(1)
+      // Cmd+Q is no longer ignored: the quit-entirely flow runs its own stop
+      // and the app quits.
+      expect(m.emit('before-quit')).toBe(true)
+      await vi.waitFor(() => expect(m.quits).toBe(1))
+      expect(stops).toHaveLength(2)
+      // …and quit-all is no longer refused with the reset line.
+      expect(await m.invoke('quit-all', { force: true })).not.toEqual({ error: 'a reset is in flight' })
+    } finally {
+      fetchSpy.mockRestore()
+      rmSync(dataPath, { recursive: true, force: true })
     }
   })
 

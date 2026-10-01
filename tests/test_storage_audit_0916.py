@@ -132,6 +132,9 @@ def test_the_retention_sweep_moves_on_past_a_record_it_cannot_remove(store, monk
     other = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     for h in (stuck, other):
         h["started_at"] = "2020-01-01T00:00:00"  # well past any retention window
+    # §5: the latest real execution is exempt whatever its age — a newer run
+    # makes both expired records sweepable.
+    store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     store.settings["days"] = 1
     _rename_denied(monkeypatch, stuck["id"])
 

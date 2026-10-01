@@ -17,6 +17,10 @@ let storeMod: typeof import('../src/store')
 let App: typeof import('../src/App').default
 
 const backendStatus = vi.fn<() => Promise<{ state: string; detail: string }>>()
+// §3 quit-entirely on the splash: main's `quit-requested` push and the
+// quit-all IPC the shared flow answers it with.
+let quitRequested: (() => void) | null = null
+const quitAll = vi.fn<(force?: boolean) => Promise<unknown>>()
 
 beforeAll(async () => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -24,6 +28,8 @@ beforeAll(async () => {
     trayAlert: () => Promise.resolve(),
     applySettings: () => Promise.resolve(),
     backendStatus,
+    quitAll,
+    onQuitRequested: (cb: () => void) => { quitRequested = cb; return () => {} },
   }
   const ls = new Map<string, string>()
   Object.defineProperty(globalThis, 'localStorage', {
@@ -41,7 +47,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
   backendStatus.mockReset()
-  storeMod.useStore.setState({ connected: false, surface: 'app' })
+  quitAll.mockReset()
+  quitRequested = null
+  storeMod.useStore.setState({ connected: false, surface: 'app', quitStage: null })
 })
 afterEach(() => { cleanup(); storeMod.useStore.getState().disconnect() })
 
@@ -64,4 +72,22 @@ describe('§9 boot splash backend-status poll', () => {
     await waitFor(() => expect(screen.getByText('the backend could not be installed')).toBeTruthy(),
       { timeout: 5000 })
   }, 10_000)
+})
+
+describe('§3 quit-entirely on the boot splash', () => {
+  // The splash is a loaded main window too: a Cmd+Q while ensure-backend is
+  // still installing shows the quit overlay rather than running natively.
+  for (const connected of [false, null] as const) {
+    it(`a quit-requested push mounts the quit overlay (connected ${String(connected)})`, async () => {
+      backendStatus.mockResolvedValue({ state: 'installing', detail: '' })
+      quitAll.mockReturnValue(new Promise(() => {})) // in flight — the app is exiting
+      render(<App />)
+      // boot() may flip connected to false on its own; pin the branch under test.
+      act(() => { storeMod.useStore.setState({ connected }) })
+      await waitFor(() => expect(quitRequested).toBeTypeOf('function'))
+      act(() => { quitRequested!() })
+      expect(await screen.findByRole('alertdialog', { name: 'Quitting Autowright' })).toBeTruthy()
+      expect(quitAll).toHaveBeenCalledWith(false)
+    })
+  }
 })

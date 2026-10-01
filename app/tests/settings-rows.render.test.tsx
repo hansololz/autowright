@@ -123,3 +123,37 @@ describe('Settings rows (§4.9)', () => {
     expect(setDataPath).not.toHaveBeenCalled()
   })
 })
+
+// §9: a user action never fails silently — a refused reveal toasts, and a
+// refused retention PATCH puts the stored value back in the field.
+describe('Settings failure paths (§4.9)', () => {
+  it('a refused reveal toasts for both path rows', async () => {
+    const revealPath = vi.fn(() => Promise.reject(new Error('nope')))
+    setup({ appPath: '/app' } as Partial<Settings>)
+    ;(window as unknown as Record<string, unknown>).autowright = { cliStatus, pickFolder, platformInfo, revealPath }
+    render(<SettingsPage />)
+    await screen.findByText('GENERAL')
+    const reveals = screen.getAllByRole('button', { name: 'Show in Finder' })
+    expect(reveals.length).toBe(2)
+    for (const button of reveals) {
+      useStore.setState({ toast: null })
+      fireEvent.click(button)
+      await waitFor(() => expect(useStore.getState().toast).toBe('Couldn’t open Finder.'))
+    }
+    expect(revealPath).toHaveBeenCalledWith('/app')
+    expect(revealPath).toHaveBeenCalledWith('/tmp')
+  })
+
+  it('a refused retention PATCH restores the stored days and toasts why', async () => {
+    patchSettings.mockRejectedValueOnce(new Error('days must be at most 3650'))
+    setup()
+    render(<SettingsPage />)
+    await screen.findByText('GENERAL')
+    const input = screen.getByDisplayValue('30') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '9999' } })
+    fireEvent.blur(input)
+    expect(patchSettings).toHaveBeenCalledWith({ days: 9999 })
+    await waitFor(() => expect(input.value).toBe('30'))
+    expect(useStore.getState().toast).toBe('days must be at most 3650')
+  })
+})

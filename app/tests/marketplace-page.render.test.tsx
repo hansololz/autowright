@@ -11,7 +11,7 @@
 // renders for real (happy-dom) with the api module mocked, `settings-gating`
 // style.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type {
   Automation, ImportPreview, MarketplaceCatalog, MarketplaceSource, Settings,
 } from '../src/types'
@@ -29,11 +29,14 @@ let servedSettings: Settings = SETTINGS
 const marketplaceList = vi.fn<() => Promise<{ sources: MarketplaceSource[] }>>()
 const marketplaceAdd = vi.fn()
 const marketplaceSettings = vi.fn()
+// §22.3: one refresh at a time from the page - the Refresh rows disable while any runs.
+const marketplaceRefresh = vi.fn<(id: string) => Promise<MarketplaceSource>>()
+const marketplaceRefreshAll = vi.fn<() => Promise<{ sources: MarketplaceSource[] }>>()
 const marketplaceEntryPreview = vi.fn()
 // §22.3 archive viewer: the entry's files, fetched only on an Audit click.
 const marketplaceEntryArchive =
   vi.fn<(id: string, index: number) => Promise<{ reference: string; files: { path: string; text: string | null }[] }>>()
-const marketplaceImage = vi.fn<() => Promise<Blob>>(() => Promise.reject(new Error('no image')))
+const marketplaceImage = vi.fn<(id?: string, index?: number, signal?: AbortSignal) => Promise<Blob>>(() => Promise.reject(new Error('no image')))
 // §22.3 Export: the app's copy of the catalog, handed to the save dialog.
 const marketplaceCatalogFile = vi.fn<(id: string) => Promise<ArrayBuffer>>()
 // §22.7 authoring
@@ -56,12 +59,12 @@ vi.mock('../src/api', () => ({
     marketplaceList: () => marketplaceList(),
     marketplaceAdd: (body: { url?: string; path?: string }) => marketplaceAdd(body),
     marketplaceSettings: (id: string, body: unknown) => marketplaceSettings(id, body),
-    marketplaceRefresh: vi.fn(),
-    marketplaceRefreshAll: vi.fn(),
+    marketplaceRefresh: (id: string) => marketplaceRefresh(id),
+    marketplaceRefreshAll: () => marketplaceRefreshAll(),
     marketplaceRemove: vi.fn(),
     marketplaceEntryPreview: (id: string, index: number) => marketplaceEntryPreview(id, index),
     marketplaceEntryArchive: (id: string, index: number) => marketplaceEntryArchive(id, index),
-    marketplaceImage: () => marketplaceImage(),
+    marketplaceImage: (id: string, index: number, signal?: AbortSignal) => marketplaceImage(id, index, signal),
     marketplaceCatalogFile: (id: string) => marketplaceCatalogFile(id),
     marketplaceCatalogCreate: (body: unknown) => marketplaceCatalogCreate(body),
     marketplaceCatalogRead: (id: string) => marketplaceCatalogRead(id),
@@ -224,6 +227,8 @@ beforeEach(() => {
   marketplaceAdd.mockReset()
   marketplaceSettings.mockReset()
   marketplaceSettings.mockResolvedValue(source())
+  marketplaceRefresh.mockReset()
+  marketplaceRefreshAll.mockReset()
   marketplaceEntryPreview.mockReset()
   marketplaceEntryArchive.mockReset()
   marketplaceImage.mockReset()
@@ -345,6 +350,16 @@ describe('§22.3 Marketplace page', () => {
     expect(await screen.findByTestId('catalog-settings')).toBeTruthy()
   })
 
+  it('Escape closes the row actions menu (§14)', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    render(<MarketplacePage />)
+    expect(await screen.findByTestId('marketplace-source')).toBeTruthy()
+    await openActions()
+    expect(screen.getByTestId('marketplace-actions').getAttribute('aria-expanded')).toBe('true')
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.getByTestId('marketplace-actions').getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('a file catalog names its file and refreshes like a link', async () => {
     marketplaceList.mockResolvedValue({ sources: [fileSource()] })
     render(<MarketplacePage />)
@@ -371,6 +386,28 @@ describe('§22.3 Marketplace page', () => {
     expect(screen.getByText(/^Added Today, /)).toBeTruthy()
     expect(screen.queryByText(/^Refreshed /)).toBeNull()
     expect(menuRow('Remove…')).toBeTruthy()
+  })
+
+  it('every Refresh row and Refresh all disable while any refresh runs', async () => {
+    let land: (s: MarketplaceSource) => void = () => {}
+    marketplaceRefresh.mockImplementation(() => new Promise((res) => { land = res }))
+    marketplaceList.mockResolvedValue({ sources: [source(), otherSource()] })
+    render(<MarketplacePage />)
+    expect(await screen.findAllByTestId('marketplace-source')).toHaveLength(2)
+    await openActions(0)
+    fireEvent.click(menuRow('Refresh'))
+    await waitFor(() => expect(marketplaceRefresh).toHaveBeenCalledWith('s1'))
+    // §22.3: another catalog's Refresh waits for this one, and so does Refresh all.
+    await openActions(1)
+    // the second catalog's own menu - the first one's rows may still be mounted
+    const otherRefresh = () => within(screen.getAllByTestId('marketplace-source')[1])
+      .getByRole('button', { name: 'Refresh' }) as HTMLButtonElement
+    expect(otherRefresh().disabled).toBe(true)
+    expect((screen.getByTestId('marketplace-refresh-all') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => { land(source()) })
+    await waitFor(() => expect((screen.getByTestId('marketplace-refresh-all') as HTMLButtonElement).disabled).toBe(false))
+    expect(otherRefresh().disabled).toBe(false)
+    expect(marketplaceRefresh).toHaveBeenCalledTimes(1)
   })
 
   it('a collapsed catalog shows its header row only', async () => {
@@ -599,6 +636,96 @@ describe('§22.3 preview images', () => {
     await waitFor(() => expect(marketplaceImage.mock.calls.length).toBeGreaterThan(before))
     created.mockRestore()
     revoked.mockRestore()
+  })
+
+  // §22.3: a catalog listing `count` imaged entries, so the queue has cards to order.
+  const manyImages = (count: number, over: Partial<MarketplaceSource> = {}): MarketplaceSource => keptSource({
+    entries: Array.from({ length: count }, (_, index) => ({
+      index, title: `Entry ${index}`, description: '',
+      archive: `/Users/x/shelf/automations/${index}.autowright`, image: `/Users/x/shelf/images/${index}.png`,
+    })),
+    ...over,
+  })
+  // Every image request held open until the test lands it; `inFlight` counts
+  // the ones started and not yet settled, `peak` the most at once.
+  const holdImages = () => {
+    const held: ((b: Blob) => void)[] = []
+    const counts = { inFlight: 0, peak: 0 }
+    marketplaceImage.mockImplementation(() => new Promise<Blob>((res) => {
+      counts.inFlight++
+      counts.peak = Math.max(counts.peak, counts.inFlight)
+      held.push((b) => { counts.inFlight--; res(b) })
+    }))
+    return { held, counts }
+  }
+
+  it('a catalog collapsed at mount loads its images once it expands', async () => {
+    marketplaceImage.mockResolvedValue(new Blob(['one']))
+    marketplaceList.mockResolvedValue({
+      sources: [{ ...imaged('/Users/x/shelf/images/manga.png'), expanded: false }],
+    })
+    marketplaceSettings.mockResolvedValue(imaged('/Users/x/shelf/images/manga.png'))
+    render(<MarketplacePage />)
+    const section = await screen.findByTestId('marketplace-source')
+    expect(section.getAttribute('data-collapsed')).toBe('true')
+    await act(async () => { await Promise.resolve() })
+    expect(marketplaceImage).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('marketplace-collapse'))
+    await waitFor(() => expect(section.getAttribute('data-collapsed')).toBeNull())
+    // §22.3: the body opened, so its images load now.
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalled())
+  })
+
+  it('never more than 2 image fetches are in flight, the rest wait their turn in card order', async () => {
+    const { held, counts } = holdImages()
+    marketplaceList.mockResolvedValue({ sources: [manyImages(5)] })
+    render(<MarketplacePage />)
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalledTimes(2))
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    expect(marketplaceImage).toHaveBeenCalledTimes(2)
+    // each landing frees a slot for the next card
+    for (let landed = 0; landed < 5; landed++) {
+      await act(async () => { held[landed](new Blob([String(landed)])) })
+      await waitFor(() => expect(marketplaceImage).toHaveBeenCalledTimes(Math.min(5, landed + 3)))
+    }
+    expect(counts.peak).toBe(2)
+  })
+
+  it('unmounting the page aborts the image queue - the waiting fetches never start', async () => {
+    const { held } = holdImages()
+    marketplaceList.mockResolvedValue({ sources: [manyImages(5)] })
+    render(<MarketplacePage />)
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalledTimes(2))
+    cleanup()
+    await act(async () => { held[0](new Blob(['a'])); held[1](new Blob(['b'])) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    // §22.3: nothing past the two in flight was ever asked for.
+    expect(marketplaceImage).toHaveBeenCalledTimes(2)
+  })
+
+  it("unmounting the page aborts every in-flight image fetch's signal", async () => {
+    holdImages()
+    marketplaceList.mockResolvedValue({ sources: [manyImages(5)] })
+    render(<MarketplacePage />)
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalledTimes(2))
+    const signals = marketplaceImage.mock.calls.map((c) => c[2] as AbortSignal)
+    expect(signals.every((sig) => sig instanceof AbortSignal && !sig.aborted)).toBe(true)
+    cleanup()
+    expect(signals.every((sig) => sig.aborted)).toBe(true)
+  })
+
+  it("collapsing a catalog aborts its waiting image fetches", async () => {
+    const { held } = holdImages()
+    marketplaceList.mockResolvedValue({ sources: [manyImages(5)] })
+    marketplaceSettings.mockResolvedValue(manyImages(5, { expanded: false }))
+    render(<MarketplacePage />)
+    const section = await screen.findByTestId('marketplace-source')
+    await waitFor(() => expect(marketplaceImage).toHaveBeenCalledTimes(2))
+    fireEvent.click(screen.getByTestId('marketplace-collapse'))
+    await waitFor(() => expect(section.getAttribute('data-collapsed')).toBe('true'))
+    await act(async () => { held[0](new Blob(['a'])); held[1](new Blob(['b'])) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    expect(marketplaceImage).toHaveBeenCalledTimes(2)
   })
 
   it('a slow list answer never lands over a newer one', async () => {
@@ -1184,6 +1311,25 @@ describe('§22.3 archive viewer', () => {
     // §22.3: a member the route couldn't decode has no rows at all.
     fireEvent.click(screen.getAllByTestId('archive-file')[7])
     expect(screen.getByText("This file can't be shown as text.")).toBeTruthy()
+  })
+
+  it('the frame is sized once per fetched list - a navigator flip never re-reads every file', async () => {
+    // A file never viewed whose text only the frame's line count reads -
+    // counting reads of it counts the frame computations.
+    let reads = 0
+    const counted = { path: 'automation/99-last.py', get text() { reads++; return 'print(1)\n' } }
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceEntryArchive.mockResolvedValue({ ...ARCHIVE, files: [...ARCHIVE.files.slice(0, 2), counted] })
+    render(<MarketplacePage />)
+    await audit()
+    await waitFor(() => expect(screen.getAllByTestId('archive-file')).toHaveLength(3))
+    const settled = reads
+    expect(settled).toBeGreaterThan(0)
+    fireEvent.click(screen.getAllByTestId('archive-file')[1])
+    expect(screen.getByText('FILE 2 OF 3')).toBeTruthy()
+    fireEvent.click(screen.getAllByTestId('archive-file')[0])
+    expect(screen.getByText('FILE 1 OF 3')).toBeTruthy()
+    expect(reads).toBe(settled)
   })
 
   it('a failed fetch shows the reason in the pane and leaves the viewer open', async () => {

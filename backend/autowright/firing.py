@@ -99,7 +99,7 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
                                            trigger_payload=payload)
                 # §6: admission is visible immediately — the §7 Waiting section
                 # and the §9.2 "N waiting" line update off this, and promotion
-                # publishes the ordinary exec.started for the same record.
+                # publishes the ordinary execution.started for the same record.
                 hub.publish("execution.queued", executionId=h["id"], automationId=a["id"],
                             execution=store.exec_json(h),
                             automation=store.auto_json(a, full=False))

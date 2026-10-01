@@ -120,6 +120,41 @@ describe('§9.2 MEMORY card restore confirm', () => {
   })
 })
 
+// §9.2: Snapshot and Clear memory get the same live block as Restore — the
+// backend answers both with the same 409 while an execution is live.
+describe('§9.2 MEMORY card live block', () => {
+  it('disables Snapshot and Clear memory with the live tooltip while an execution is live', () => {
+    const { unmount } = render(<MemoryCard auto={auto(settings())} executing />)
+    for (const label of ['Snapshot', 'Clear memory']) {
+      const blocked = screen.getByRole('button', { name: label }) as HTMLButtonElement
+      expect(blocked.disabled).toBe(true)
+      expect(blocked.title).toBe('Blocked while an execution is live')
+      fireEvent.click(blocked)
+    }
+    // no inline swap opened, nothing sent
+    expect(screen.queryByPlaceholderText('Name — optional')).toBeNull()
+    expect(mockedApi.createSnapshot).not.toHaveBeenCalled()
+    expect(mockedApi.clearMemory).not.toHaveBeenCalled()
+
+    unmount()
+    render(<MemoryCard auto={auto(settings())} executing={false} />)
+    for (const label of ['Snapshot', 'Clear memory']) {
+      const free = screen.getByRole('button', { name: label }) as HTMLButtonElement
+      expect(free.disabled).toBe(false)
+      expect(free.title).toBe('')
+    }
+  })
+
+  it('a clear confirm opened before the run started cannot commit once it is live', () => {
+    const { rerender } = render(<MemoryCard auto={auto(settings())} executing={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear memory' }))
+    rerender(<MemoryCard auto={auto(settings())} executing />)
+    const clear = screen.getByRole('button', { name: 'Clear' }) as HTMLButtonElement
+    expect(clear.disabled).toBe(true)
+    expect(clear.title).toBe('Blocked while an execution is live')
+  })
+})
+
 describe('§6.3 snapshot rows', () => {
   it('renaming to an empty field clears the name rather than storing one', async () => {
     render(<MemoryCard auto={auto(settings(), [snapshot()])} executing={false} />)

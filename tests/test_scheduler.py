@@ -1,7 +1,25 @@
 """§6 scheduler policy: tick/firing rules (no automatic execution-level retry —
 §7 step retry is the engine's job) and the firing queue — admission, depth cap,
 drain, staleness, and cancel."""
+import pytest
 from conftest import make_version
+
+
+@pytest.fixture(autouse=True)
+def _enable_stamps_before_the_fake_clocks(monkeypatch):
+    """§4.3: the scheduler never counts moments before a trigger's enable
+    stamp. These tests drive fake clocks set in July/November 2026, so a
+    trigger created here gets its stamp pinned to the start of 2026 (unless a
+    caller passes one) — a real-time stamp would lie after the fake `now` and
+    silence every trigger."""
+    from autowright import triggers as triggerlib
+
+    real = triggerlib.stamp_enabled
+
+    def stamp(new, old=None, now_iso=None):
+        return real(new, old, now_iso or "2026-01-01T00:00:00")
+
+    monkeypatch.setattr(triggerlib, "stamp_enabled", stamp)
 
 
 def _mk(store):
@@ -54,8 +72,13 @@ def _mk_clocked(store, clock):
     from autowright.engine import Engine
     from autowright.scheduler import Scheduler
 
+    from datetime import timezone
+
     engine = Engine(store)
-    sched = Scheduler(store, engine, clock=clock)  # loop never started
+    # The UTC reading follows the fake local clock — §4.3 interval math
+    # compares instants against it, so it must share the fake timeline.
+    sched = Scheduler(store, engine, clock=clock,
+                      utc_clock=lambda: clock().astimezone(timezone.utc))  # loop never started
     return engine, sched
 
 
@@ -674,6 +697,9 @@ def test_retention_sweep_runs_hourly_and_publishes(store, monkeypatch):
     h_old = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     h_old["started_at"] = (datetime(2026, 7, 10) - timedelta(days=120)).isoformat(timespec="seconds")
     store.update_execution(h_old)
+    # §5: the automation's latest real execution is exempt whatever its age —
+    # a newer run makes the expired one sweepable.
+    store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     store.settings["days"] = 90
     events = []
     monkeypatch.setattr(sched_mod.hub, "publish",
@@ -1501,3 +1527,48 @@ def test_the_overdue_sweep_says_nothing_about_an_automation_a_delete_took(store,
     sched._overdue_sweep([a], datetime(2026, 7, 10, 11, 2))  # would notify
     assert posted == []
     assert a["id"] not in sched._overdue_notified
+
+
+def test_cron_due_at_capacity_is_skipped_never_started_late(store, monkeypatch):
+    """§6 capacity: an every-minute cron whose occurrence is due while a manual
+    run holds the only slot leaves exactly one skipped record, and neither the
+    next tick after the slot frees nor the finish-time drain starts that
+    occurrence late (a late cron occurrence is worse than none). The trigger
+    is added mid-run, so its baseline is first-seen (§6 seeding)."""
+    from datetime import datetime
+
+    from autowright.firing import drain_queue
+    from conftest import make_version
+
+    clock = _Clock(datetime(2026, 7, 10, 12, 19, 41))
+    engine, sched = _mk_clocked(store, clock)
+    starts = []
+    monkeypatch.setattr(engine, "start",
+                        lambda a, trigger, **kw: starts.append((a["id"], trigger)) or {})
+    a = store.create_automation(make_version(), "Every minute", None)
+    a["_live"] = {"manual-run"}  # the manual run holds the only slot (maxParallel 1)
+    sched._tick()  # 12:19:41, before the trigger exists
+    a["triggers"].append({"id": "t1", "kind": "cron", "enabled": True,
+                          "expression": "* * * * *"})
+    clock.now = datetime(2026, 7, 10, 12, 19, 56)
+    sched._tick()  # first sight: seeded at the previous tick, nothing due yet
+    assert _drop_records(store, a["id"]) == [] and starts == []
+    clock.now = datetime(2026, 7, 10, 12, 20, 11)  # 12:20:00 due, still at capacity
+    sched._tick()
+    skips = _drop_records(store, a["id"])
+    assert len(skips) == 1
+    assert skips[0]["note"] == "previous execution still in progress"
+    assert skips[0]["trigger"] == "cron"
+    assert starts == []
+
+    a["_live"] = set()  # the manual run released the slot
+    drain_queue(store, engine, a["id"])  # the finish-time drain
+    clock.now = datetime(2026, 7, 10, 12, 20, 26)
+    sched._tick()
+    clock.now = datetime(2026, 7, 10, 12, 20, 41)
+    sched._tick()
+    assert starts == []  # the 12:20:00 occurrence never starts late
+    assert len(_drop_records(store, a["id"])) == 1
+    clock.now = datetime(2026, 7, 10, 12, 21, 11)  # 12:21:00 is a new occurrence
+    sched._tick()
+    assert starts == [(a["id"], "cron")]

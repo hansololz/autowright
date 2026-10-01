@@ -427,6 +427,16 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
     ? (at ? [{ kind, at, ...(timezone ? { timezone } : {}) }] : [])
     : []
   const [pv] = useTriggerPreview(previewEntry)
+  // §9.2: the verdict belongs to the entry it was fetched for. While the
+  // fields differ from that entry (a keystroke inside the preview debounce)
+  // the verdict is stale, and Add/Save waits for the fresh one — a valid
+  // verdict for the old text never submits the new text.
+  const previewKey = JSON.stringify(previewEntry)
+  const [verdictKey, setVerdictKey] = useState(previewKey)
+  // a landed response is always for the entry current at landing (the hook
+  // drops superseded ones), so each new result stamps the key it answers
+  useEffect(() => { setVerdictKey(previewKey) }, [pv]) // eslint-disable-line react-hooks/exhaustive-deps
+  const verdictStale = verdictKey !== previewKey
   const exprOk = kind === 'cron' && !!expression.trim() && !!pv?.valid
   const exprBad = kind === 'cron' && !!expression.trim() && !!pv && !pv.valid
   const everyOk = kind === 'interval' && !!every && !!pv?.valid
@@ -445,7 +455,9 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
   const fromOk = from.includes('@')
     ? !!from.trim() && !/\s/.test(from.trim())
     : /^\+[0-9]{3,15}$/.test(fromNorm)
-  const canAdd = kind === 'cron' ? exprOk : kind === 'interval' ? everyOk : kind === 'time' ? atOk
+  const canAdd = kind === 'cron' ? exprOk && !verdictStale
+    : kind === 'interval' ? everyOk && !verdictStale
+    : kind === 'time' ? atOk && !verdictStale
     : kind === 'discord' ? channelOk && !!secret && authorOk
     : kind === 'imessage' ? fromOk : true
   const preview = kind === 'cron'
@@ -704,7 +716,11 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
   )
 }
 
-export function AddTrigger({ hasAppStart, onAdd }: { hasAppStart: boolean; onAdd: (t: TriggerDraft) => void }) {
+// §9.2: `onAdd` resolves true once the trigger is saved — the editor closes
+// only then, so a rejected save (a 422) keeps the typed entry open.
+export function AddTrigger({ hasAppStart, onAdd }: {
+  hasAppStart: boolean; onAdd: (t: TriggerDraft) => Promise<boolean>
+}) {
   const [open, setOpen] = useState(false)
   if (!open) {
     return (
@@ -717,7 +733,7 @@ export function AddTrigger({ hasAppStart, onAdd }: { hasAppStart: boolean; onAdd
     <div className="ad-anim-item" style={{ marginTop: 10 }}>
       <TriggerEditor
         hasAppStart={hasAppStart}
-        onSave={(t) => { onAdd(t); setOpen(false) }}
+        onSave={(t) => { void onAdd(t).then((ok) => { if (ok) setOpen(false) }) }}
         onCancel={() => setOpen(false)}
       />
     </div>

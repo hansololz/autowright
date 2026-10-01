@@ -7,6 +7,7 @@
 // payload assertions read the exact POST /drafts bodies.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { ComponentProps } from 'react'
 import type { Agent, Automation, ChatEntry, SecretMeta } from '../src/types'
 // §11 stale-outcome rule: the card's own hash, so the assertions never restate it
 import { stepsFingerprint } from '../src/pages/createflow/model'
@@ -448,6 +449,35 @@ describe('CreateFlow BUILD and TEST cards (§11)', () => {
     expect(within(modal).getByTestId('test-setup')).toBeTruthy()
     expect(within(modal).queryByText('Run again')).toBeNull()
     expect(within(modal).queryByText('View execution')).toBeNull()
+  })
+
+  it("a stale outcome hides the thread's Analyze-the-failure pill too (§11 stale-outcome rule)", async () => {
+    armPendingPoll()
+    render(<CreateFlow />)
+    const card = () => screen.getByTestId('test-card')
+    fireEvent.click(within(card()).getByText('Test draft'))
+    fireEvent.click(within(screen.getByTestId('test-modal')).getByText('Run test'))
+    await waitFor(() => expect(mockedApi.postTest).toHaveBeenCalledTimes(1))
+    fireEvent.click(within(screen.getByTestId('test-modal')).getByLabelText('Close'))
+    await waitFor(() => expect(screen.queryByTestId('test-modal')).toBeNull())
+    // the run executes, then settles failed - its thread entry anchors the turn row
+    act(() => seedSettled({ status: 'executing', endedMs: 0 }))
+    act(() => seedSettled({
+      status: 'failed', endedMs: 3, error: { step: 'Fetch pages', message: 'boom', reason: null },
+    }))
+    await waitFor(() => expect(screen.getByTestId('chat-analyze-failure')).toBeTruthy())
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'j1', status: 'done', stage: null, detail: null, error: null, mode: 'sync',
+      draft: {
+        steps: [{ file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("b")' }],
+        params: [], packages: [],
+      },
+    })
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(screen.getByText('Steps synced with the spec.')).toBeTruthy(), { timeout: 3000 })
+    // the turn row is back (Test draft), without the stale outcome's repair pill
+    await waitFor(() => expect(screen.getByTestId('chat-turn-actions')).toBeTruthy())
+    expect(screen.queryByTestId('chat-analyze-failure')).toBeNull()
   })
 
   // §11 state 5: a resumed draft's persisted last-test summary (test.yaml)
@@ -1476,6 +1506,9 @@ describe('CreateFlow chat staged actions (§8 param_values / triggers ops)', () 
     render(<CreateFlow />)
     send('add an 8am schedule')
     await waitFor(() => expect(screen.getByText('That trigger already exists.')).toBeTruthy(), { timeout: 3000 })
+    // §4.4: nothing persisted changed, so the debounced writer has nothing to
+    // write - leaving flushes the (touched) draft, and its list is untouched.
+    cleanup()
     const d = await lastDraftPut()
     expect(d.triggers.map((t) => t.id)).toEqual(['t1', 't2'])
   })
@@ -2949,7 +2982,7 @@ describe('§11 chat thread auto-scroll', () => {
   // §11 composer text: the pane owns the input's value behind this handle —
   // an inert one here, since these tests drive the thread, not the composer.
   const composer = { get: () => '', set: noop, subscribe: () => noop }
-  const panel = (chat: ChatEntry[]) => (
+  const panel = (chat: ChatEntry[], over: Partial<ComponentProps<typeof ChatPanel>> = {}) => (
     <ChatPanel
       rev={{ ...seedEmpty(AGENTS, [MAIL_ID]), chat }}
       agents={AGENTS} selAgent={AGENTS[0]} isEdit isCreateEmpty={false}
@@ -2959,6 +2992,7 @@ describe('§11 chat thread auto-scroll', () => {
       undoDraft={noop} runSync={noop} runDraftTest={noop} analyzeFailure={null}
       patchEntry={noop} applyBlockersEntry={noop} clearChat={noop} cancelChat={noop}
       cancelSync={noop} setAgentId={noop} up={noop} showToast={noop}
+      {...over}
     />
   )
   // happy-dom measures nothing — hand the thread a real scrolled-up geometry.
@@ -2967,6 +3001,7 @@ describe('§11 chat thread auto-scroll', () => {
     Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true })
     Object.defineProperty(el, 'clientHeight', { value: 300, configurable: true })
     el.scrollTop = 100
+    fireEvent.scroll(el)
     return el
   }
 
@@ -2984,5 +3019,344 @@ describe('§11 chat thread auto-scroll', () => {
     const el = scrolledUp()
     rerender(panel([...chat, entry('c2', 'user', 'and again')]))
     expect(el.scrollTop).toBe(1000)
+  })
+
+  it('a tall landing entry keeps a thread pinned at the bottom', () => {
+    const chat = [entry('c1', 'user', 'do it')]
+    const { rerender } = render(panel(chat))
+    const el = screen.getByTestId('chat-thread')
+    Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(el, 'clientHeight', { value: 300, configurable: true })
+    // the user sits at the bottom
+    el.scrollTop = 700
+    fireEvent.scroll(el)
+    // an entry far taller than 60 px lands - measured after the growth, the
+    // distance would read 1000 px and unpin the thread
+    Object.defineProperty(el, 'scrollHeight', { value: 2000, configurable: true })
+    rerender(panel([...chat, entry('c2', 'activity', 'A very tall block')]))
+    expect(el.scrollTop).toBe(2000)
+  })
+
+  it('Enter inside an IME composition never sends', () => {
+    const sendMessage = vi.fn()
+    render(panel([], { sendMessage }))
+    const input = document.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(sendMessage).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('CreateFlow settle guards, cancel races, and persistence (§4.4/§11)', () => {
+  beforeEach(() => {
+    armPendingPoll()
+    storeMod.useStore.setState({ draftJobs: [] })
+  })
+  const STOPPED = 'Edit stopped — the spec is unchanged.'
+  const composerInput = () =>
+    screen.getByPlaceholderText('Change something, or ask a question…') as HTMLTextAreaElement
+  const send = (text: string) => {
+    fireEvent.change(composerInput(), { target: { value: text } })
+    fireEvent.click(screen.getByText('Send'))
+  }
+  const toast = () => storeMod.useStore.getState().toast
+  const building = (over: Record<string, unknown> = {}) => ({
+    id: 'j1', status: 'building', stage: 'Working on the request', detail: null, error: null,
+    mode: 'chat', events: [], ...over,
+  })
+  const doneChat = (draft: Record<string, unknown>, id = 'j1') => ({
+    id, status: 'done', stage: 'Working on the request', detail: null, error: null,
+    mode: 'chat', events: [], draft,
+  })
+  // §4.4: a pending-slot draft that resumes in create mode - steps in sync, so
+  // Create automation is live.
+  const resumeCreate = () => {
+    storeMod.useStore.setState({ createFrom: 'app' as never, automationId: null })
+    ;(mockedApi.getDraft as ReturnType<typeof vi.fn>).mockResolvedValue({
+      draft: { spec: [{ kind: 'h1', text: 'Kept' }, { kind: 'p', text: 'Body.' }], steps: AUTO.steps },
+      agentId: null,
+    })
+  }
+  const thread = () => screen.getByTestId('chat-thread')
+
+  it('a double click on Create automation sends one POST /automations, busy until it settles', async () => {
+    resumeCreate()
+    let land: (v: { id: string }) => void = () => {}
+    ;(mockedApi.createAutomation as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { land = resolve }))
+    render(<CreateFlow />)
+    await screen.findAllByText('Kept')
+    const create = screen.getByText('Create automation').closest('button') as HTMLButtonElement
+    await waitFor(() => expect(create.disabled).toBe(false))
+    fireEvent.click(create)
+    fireEvent.click(create)
+    await waitFor(() => expect(mockedApi.createAutomation).toHaveBeenCalledTimes(1))
+    // §9 busy feedback: the label swaps, and Start over disables with it
+    expect(screen.getByText('Creating…')).toBeTruthy()
+    expect((document.querySelector('.ad-btn-primary') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByText('Start over').closest('button') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(document.querySelector('.ad-btn-primary') as HTMLButtonElement)
+    await act(async () => { land({ id: 'a2' }) })
+    expect(mockedApi.createAutomation).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed Create clears the busy state so it can be tried again', async () => {
+    resumeCreate()
+    ;(mockedApi.createAutomation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('disk full'))
+    render(<CreateFlow />)
+    await screen.findAllByText('Kept')
+    const create = () => screen.getByText('Create automation').closest('button') as HTMLButtonElement
+    await waitFor(() => expect(create().disabled).toBe(false))
+    fireEvent.click(create())
+    await waitFor(() => expect(toast()).toBe('disk full'))
+    await waitFor(() => expect(create().disabled).toBe(false))
+  })
+
+  it('a Cancel that loses the race changes nothing — the held outcome lands and is acked', async () => {
+    let settled = false
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+      (settled ? doneChat({ spec: null, answer: 'All set.' }) : building()))
+    // §19: the job had already settled - DELETE answers ok: false
+    ;(mockedApi.cancelDraftJob as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      settled = true
+      return { ok: false }
+    })
+    render(<CreateFlow />)
+    send('Do a thing')
+    await waitFor(() => expect(mockedApi.getDraftJob).toHaveBeenCalled(), { timeout: 3000 })
+    fireEvent.click(screen.getByText('Cancel'))
+    await waitFor(() => expect(mockedApi.cancelDraftJob).toHaveBeenCalledWith('j1'))
+    // the poll kept running: the outcome lands exactly as if Cancel was never pressed
+    await waitFor(() => expect(screen.getByText('All set.')).toBeTruthy(), { timeout: 3000 })
+    await waitFor(() => expect(mockedApi.ackDraftJob).toHaveBeenCalledWith('j1'))
+    expect(toast()).not.toBe(STOPPED)
+    expect(within(thread()).queryByText(STOPPED)).toBeNull()
+    expect(within(thread()).getByText('Do a thing')).toBeTruthy()
+    expect(composerInput().value).toBe('')
+  })
+
+  it('a won Cancel with nothing landed removes the pending user entry and returns the text', async () => {
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async () => building())
+    render(<CreateFlow />)
+    send('Do a thing')
+    await waitFor(() => expect(mockedApi.getDraftJob).toHaveBeenCalled(), { timeout: 3000 })
+    fireEvent.click(screen.getByText('Cancel'))
+    await waitFor(() => expect(toast()).toBe(STOPPED))
+    expect(mockedApi.cancelDraftJob).toHaveBeenCalledWith('j1')
+    expect(within(thread()).queryByText('Do a thing')).toBeNull()
+    expect(within(thread()).queryByText(STOPPED)).toBeNull()
+    expect(composerInput().value).toBe('Do a thing')
+  })
+
+  it('a won Cancel after the plan landed keeps the user entry and chips after the plan', async () => {
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async () =>
+      building({ plan: 'First I will read the page.' }))
+    render(<CreateFlow />)
+    send('Do a thing')
+    const plan = await screen.findByText('First I will read the page.', undefined, { timeout: 3000 })
+    fireEvent.click(screen.getByText('Cancel'))
+    await waitFor(() => expect(toast()).toBe(STOPPED))
+    // a shown bubble never vanishes, and the plan is never orphaned
+    expect(within(thread()).getByText('Do a thing')).toBeTruthy()
+    const chip = within(thread()).getByText(STOPPED)
+    expect(plan.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(composerInput().value).toBe('Do a thing')
+  })
+
+  it('poll-only changes never write the draft; a PUT identical to the last one is skipped', async () => {
+    resumeCreate()
+    // the feed moves for three ticks, then holds still
+    let tick = 0
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      tick += 1
+      return building({ events: [{ text: `Reading ${Math.min(tick, 3)}`, stage: 'Working on the request' }] })
+    })
+    render(<CreateFlow />)
+    await screen.findAllByText('Kept')
+    // the resumed draft's own write
+    await waitFor(() => expect(mockedApi.putDraft).toHaveBeenCalled(), { timeout: 3000 })
+    ;(mockedApi.putDraft as ReturnType<typeof vi.fn>).mockClear()
+    send('Also on weekends')
+    await waitFor(() => expect(tick).toBeGreaterThanOrEqual(4), { timeout: 5000 })
+    // past the debounce after the feed stopped moving: nothing persisted changed
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(mockedApi.putDraft).not.toHaveBeenCalled()
+  }, 15000)
+
+  it('a spec change writes the draft; typing in the editor alone does not', async () => {
+    resumeCreate()
+    render(<CreateFlow />)
+    await screen.findAllByText('Kept')
+    await waitFor(() => expect(mockedApi.putDraft).toHaveBeenCalled(), { timeout: 3000 })
+    ;(mockedApi.putDraft as ReturnType<typeof vi.fn>).mockClear()
+    fireEvent.click(screen.getByTestId('spec-edit'))
+    fireEvent.change(screen.getByTestId('spec-editor'), { target: { value: '# Kept\nA new line.' } })
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(mockedApi.putDraft).not.toHaveBeenCalled()
+    fireEvent.click(within(screen.getByTestId('doc-editor')).getByText('Save'))
+    await waitFor(() => expect(mockedApi.putDraft).toHaveBeenCalledTimes(1), { timeout: 3000 })
+    const body = (mockedApi.putDraft as ReturnType<typeof vi.fn>).mock.calls[0][1] as { spec: Array<{ text: string }> }
+    expect(body.spec.map((b) => b.text)).toEqual(['Kept', 'A new line.'])
+  })
+
+  it('a job started before the thread merged is live, never reconciled as an orphaned turn', async () => {
+    storeMod.useStore.setState({ createFrom: 'app' as never, automationId: null })
+    let landChat: (v: { chat: ChatEntry[] }) => void = () => {}
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((resolve) => { landChat = resolve }))
+    render(<CreateFlow />)
+    fireEvent.change(screen.getByPlaceholderText('Describe the job — one sentence is enough.'),
+      { target: { value: 'watch a price' } })
+    fireEvent.click(screen.getByText('Send'))
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1))
+    await act(async () => { landChat({ chat: [] }) })
+    await waitFor(() => expect(mockedApi.getDraftJob).toHaveBeenCalledWith('j1'), { timeout: 3000 })
+    expect(screen.queryByText(STOPPED)).toBeNull()
+    expect(screen.getByText('Cancel')).toBeTruthy()
+    expect(mockedApi.getDraftJob).not.toHaveBeenCalledWith('jx')
+  })
+
+  it('a failed keep toasts the reason, never "Draft kept", and leaves the unmount flush armed', async () => {
+    resumeCreate()
+    render(<CreateFlow />)
+    await screen.findAllByText('Kept')
+    ;(mockedApi.putDraft as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('409 — the draft slot is unreadable'))
+    // leaving create mode after a draft landed takes the §4.4 keep path
+    fireEvent.click(screen.getAllByText('Automations').find((el) => el.closest('button'))!)
+    await waitFor(() => expect(toast()).toBe('409 — the draft slot is unreadable'))
+    expect((mockedApi.putDraft as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]).toBe('pending')
+    // never settled: the editor's unmount flush writes the draft again
+    const before = (mockedApi.putDraft as ReturnType<typeof vi.fn>).mock.calls.length
+    cleanup()
+    expect((mockedApi.putDraft as ReturnType<typeof vi.fn>).mock.calls.length).toBe(before + 1)
+  })
+
+  it('a re-attached sync seeds no settled stages — an earlier same-titled sync block never swallows its own', async () => {
+    storeMod.useStore.setState({ draftJobs: [{ owner: 'a1', jobId: 'j9', status: 'done', mode: 'sync' }] })
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [
+      { id: 'u1', at: '2026-08-20T08:00:00', kind: 'user', text: 'sync it' },
+      // an earlier sync pass in the same turn
+      { id: 'x1', at: '2026-08-20T08:00:05', kind: 'activity', title: 'Syncing the workflow…', text: 'Earlier pass', outcome: 'blocked' },
+    ] })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'j9', status: 'done', stage: 'Syncing the workflow', detail: null, error: null, mode: 'sync',
+      events: [{ time: 100, text: 'Wrote step 1', stage: 'Syncing the workflow' }],
+      stageTimes: [{ stage: 'Syncing the workflow', time: 99 }], endedTime: 104,
+      draft: { steps: [{ file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("b")' }], params: [] },
+    })
+    render(<CreateFlow />)
+    await waitFor(() => expect(screen.getByText('Steps synced with the spec.')).toBeTruthy(), { timeout: 5000 })
+    // the sync's own stage settled from its §8 stamps - its bullet carries a duration
+    const bullet = screen.getByText('• Wrote step 1')
+    const last = bullet.parentElement!.lastElementChild as HTMLElement
+    expect(last).not.toBe(bullet)
+  })
+
+  it("a rejected identity PATCH from a chat response reverts the name", async () => {
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue(doneChat({
+      answer: 'Renaming it.', actions: { name: 'Renamed' },
+    }))
+    ;(mockedApi.patchAutomation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('the backend said no'))
+    render(<CreateFlow />)
+    send('rename it')
+    await waitFor(() => expect(screen.getByText('Renamed to “Renamed”.')).toBeTruthy(), { timeout: 4000 })
+    await waitFor(() => expect(toast()).toBe('the backend said no'))
+    expect(document.querySelector('h1.ad-h1')!.textContent).toBe('My auto')
+  })
+
+  it('a rejected description PATCH from the pencil reverts the lede', async () => {
+    ;(mockedApi.patchAutomation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('no lede for you'))
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByTitle('Edit the description'))
+    const field = screen.getByPlaceholderText('What this automation does — one line')
+    fireEvent.change(field, { target: { value: 'A new lede' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    await waitFor(() => expect(toast()).toBe('no lede for you'))
+    expect(screen.queryByText('A new lede')).toBeNull()
+    expect(screen.getByText('No description yet — press the pencil to add one.')).toBeTruthy()
+  })
+
+  it('Start over returns the first request of the session, not a later question reply', async () => {
+    storeMod.useStore.setState({ createFrom: 'app' as never, automationId: null })
+    ;(mockedApi.postDraftJob as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ jobId: 'j1' })
+      .mockResolvedValueOnce({ jobId: 'j2' })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => (id === 'j1'
+      ? doneChat({ spec: null, answer: 'Which shop?', answerKind: 'question' }, 'j1')
+      : doneChat({ spec: null, answer: 'Got it.' }, 'j2')))
+    render(<CreateFlow />)
+    fireEvent.change(screen.getByPlaceholderText('Describe the job — one sentence is enough.'),
+      { target: { value: 'watch a price' } })
+    fireEvent.click(screen.getByText('Send'))
+    await screen.findByText('Which shop?', undefined, { timeout: 3000 })
+    const reply = screen.getByPlaceholderText('Answer here…') as HTMLTextAreaElement
+    fireEvent.change(reply, { target: { value: 'the Amazon one' } })
+    fireEvent.click(screen.getByText('Send'))
+    await screen.findByText('Got it.', undefined, { timeout: 3000 })
+    fireEvent.click(screen.getByText('Start over'))
+    await waitFor(() => expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending'))
+    await waitFor(() => expect((document.querySelector('textarea.ad-input') as HTMLTextAreaElement).value).toBe('watch a price'))
+  })
+
+  it('Start over on a resumed draft returns the session’s first request', async () => {
+    resumeCreate()
+    ;(mockedApi.getChat as ReturnType<typeof vi.fn>).mockResolvedValue({ chat: [
+      { id: 'o1', at: '2026-08-19T08:00:00', kind: 'user', text: 'an older session' },
+      { id: 'b1', at: '2026-08-19T09:00:00', kind: 'system', text: 'Draft discarded.', boundary: true },
+      { id: 'u1', at: '2026-08-20T08:00:00', kind: 'user', text: 'watch a price' },
+      { id: 'r1', at: '2026-08-20T08:01:00', kind: 'answer', text: 'Done.' },
+    ] })
+    render(<CreateFlow />)
+    await screen.findByText('Done.')
+    fireEvent.click(screen.getByText('Start over'))
+    await waitFor(() => expect(mockedApi.deleteDraft).toHaveBeenCalledWith('pending'))
+    await waitFor(() => expect((document.querySelector('textarea.ad-input') as HTMLTextAreaElement).value).toBe('watch a price'))
+  })
+
+  const failedRun = (automationId: string) => ({
+    id: 'e7', automationId, automationName: 'Other', automationDeleted: false, versionLabel: 'v1',
+    status: 'failed', trigger: 'Manual', triggerSender: null, test: false, steps: [],
+    duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
+    error: { step: 'Fetch pages', message: 'boom', reason: null },
+  })
+
+  it('the no-agents redirect clears a pending Fix with AI', async () => {
+    storeMod.useStore.setState({ agents: [], fixExec: 'e7' })
+    render(<CreateFlow />)
+    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('agents'))
+    expect(storeMod.useStore.getState().fixExec).toBeNull()
+  })
+
+  it('a Fix with AI for another automation’s execution seeds nothing and sends nothing', async () => {
+    const run = failedRun('other')
+    storeMod.useStore.setState({ fixExec: 'e7', executions: [run] as never, executionFull: { e7: run } as never })
+    render(<CreateFlow />)
+    await waitFor(() => expect(storeMod.useStore.getState().fixExec).toBeNull())
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(screen.queryByText(/Execution failed at step Fetch pages/)).toBeNull()
+    expect(mockedApi.postDraftJob).not.toHaveBeenCalled()
+  })
+
+  it('a failed sync lands its message as the red error entry and toasts "The sync failed"', async () => {
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'j1', status: 'failed', stage: 'Syncing the workflow', detail: null, error: 'The harness crashed.',
+      mode: 'sync', draft: null, events: [],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(within(thread()).getByText('The harness crashed.')).toBeTruthy(), { timeout: 3000 })
+    expect(within(thread()).getByText('Something went wrong')).toBeTruthy()
+    expect(toast()).toBe('The sync failed — The harness crashed.')
+  })
+
+  it('a sync poll that gives up after three failures says the job was lost', async () => {
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw new Error('backend gone')
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(within(thread()).getByText('The sync job was lost — backend gone')).toBeTruthy(), { timeout: 8000 })
+    expect(toast()).toBe('The sync failed — the job was lost (backend gone)')
   })
 })

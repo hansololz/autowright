@@ -18,7 +18,9 @@ import {
 
 interface PollHandlers {
   onDone: (d: DraftPayload) => void
-  onFail: (msg: string, detail?: string[]) => void
+  // `lost`: the poll gave up after three consecutive failures - the job's
+  // fate is unknown, so the handler says the job was lost (§11 Failures).
+  onFail: (msg: string, detail?: string[], lost?: boolean) => void
   onCancelled?: () => void
   // §8: `notes` is the blocker response's optional notes.md — applied by every
   // handler like a chat notes rewrite, so a blocked build keeps what it learned.
@@ -69,9 +71,6 @@ export function useDraftJob(d: DraftJobDeps) {
   // building (nothing cancels it) and re-entering re-attaches, so arming a
   // poll here would leave an interval ticking for an editor that is gone.
   const deadRef = useRef(false)
-  // §11: the request that started the fresh draft's first chat turn — Start
-  // over returns it to the input.
-  const firstRequestRef = useRef('')
   const chatReqRef = useRef<{ text: string; entryId: string } | null>(null)
   const dirtyBeforeSync = useRef(false)
   // §11 workflow chip group (hold-and-flush): a chat response arming a sync
@@ -297,7 +296,7 @@ export function useDraftJob(d: DraftJobDeps) {
           if (++pollFails < 3) return // transient - the next tick retries
           jobIdRef.current = null
           stopPoll()
-          onFail((e as Error).message)
+          onFail((e as Error).message, undefined, true)
         } finally {
           pollInFlightRef.current = false
         }
@@ -380,8 +379,12 @@ export function useDraftJob(d: DraftJobDeps) {
       const nameSkipped = !!actions.name && useStore.getState().automations.some((a) =>
         a.id !== (isEdit && auto ? auto.id : null)
         && a.name.trim().toLowerCase() === actions.name!.trim().toLowerCase())
+      // §4.1: the identity before this response - a rejected edit-mode PATCH
+      // below reverts to it, like the pencil rename.
+      let identityBefore: { name: string; description: string } | null = null
       setRev((r) => {
         if (!r) return r
+        identityBefore = { name: r.name, description: r.description }
         let next: Rev = { ...r, chatBusy: false }
         const chat = [...r.chat]
         // §11 answer header: stamped at creation — a reply arriving with
@@ -541,10 +544,26 @@ export function useDraftJob(d: DraftJobDeps) {
       // immediately via PATCH, exactly like the pencil edits. A skipped
       // rename never rides the PATCH (its 422 would drop the description too).
       if (isEdit && auto && ((actions.name && !nameSkipped) || actions.description)) {
+        const sentName = actions.name && !nameSkipped ? actions.name : null
+        const sentDescription = actions.description ?? null
         void api.patchAutomation(auto.id, {
-          ...(actions.name && !nameSkipped ? { name: actions.name } : {}),
-          ...(actions.description ? { description: actions.description } : {}),
-        }).catch((e) => showToast((e as Error).message))
+          ...(sentName ? { name: sentName } : {}),
+          ...(sentDescription ? { description: sentDescription } : {}),
+        }).catch((e) => {
+          // §4.1: a rejected PATCH reverts what it sent, like commitTitleRename.
+          // Read inside the updater: updaters apply in order, so the apply
+          // updater above has recorded the prior identity by then.
+          setRev((r) => {
+            const before = identityBefore as { name: string; description: string } | null
+            if (!r || !before) return r
+            return {
+              ...r,
+              ...(sentName ? { name: before.name } : {}),
+              ...(sentDescription ? { description: before.description } : {}),
+            }
+          })
+          showToast((e as Error).message)
+        })
       }
       if (dft.spec && !actions.sync && !actions.test) {
         showToast('Spec updated — the workflow is out of sync. Sync the steps before saving.', 5800)
@@ -589,11 +608,6 @@ export function useDraftJob(d: DraftJobDeps) {
     const request = (textArg ?? composer.get()).trim()
     if (!request) return
     if (textArg === undefined) composer.set('')
-    // §11: a fresh draft's first message is the automation's description —
-    // Start over returns it to the input (the §8 new-automation rule; the
-    // job itself is an ordinary chat job).
-    const freshDraft = !isEdit && rev.spec.length === 0 && rev.steps.length === 0
-    if (freshDraft) firstRequestRef.current = request
     const entry = newEntry({ kind: 'user', text: request })
     chatReqRef.current = { text: request, entryId: entry.id }
     // §8 undo action: inputs lock while the job runs, so the snapshot at send
@@ -693,12 +707,21 @@ export function useDraftJob(d: DraftJobDeps) {
       })
       showToast('Steps synced with the spec — review them, then save.', 3600)
     },
-    onFail: (msg) => {
+    onFail: (msg, _detail, lost) => {
       // §11 hold-and-flush: any outcome flushes the held workflow chips —
       // the staging happened, a failed sync never swallows the receipts.
       const held = takeHeldChips()
-      setRev((r) => r && ({ ...r, syncBusy: false, ...(held.length ? { chat: [...r.chat, ...held] } : {}) }))
-      showToast(`The draft didn’t validate — try again or rephrase.${msg ? ' ' + msg : ''}`, 4500)
+      // §11 Failures: a failed sync surfaces like a failed chat job - the §8
+      // failure message lands as the thread's red error entry. A poll that
+      // gave up after three failures says the job was lost.
+      const text = lost
+        ? `The sync job was lost — ${msg || 'no answer from the backend'}`
+        : msg || 'The sync failed — try again.'
+      setRev((r) => r && ({
+        ...r, syncBusy: false,
+        chat: [...r.chat, ...held, newEntry({ kind: 'error', text })],
+      }))
+      showToast(`The sync failed — ${lost ? `the job was lost (${msg || 'no answer from the backend'})` : msg || 'try again.'}`, 4500)
     },
     onCancelled: () => {
       const held = takeHeldChips()
@@ -773,8 +796,6 @@ export function useDraftJob(d: DraftJobDeps) {
       const userEntry = lastUserIdx >= 0 ? turn[lastUserIdx] : null
       const request = userEntry?.text ?? ''
       if (userEntry) chatReqRef.current = { text: request, entryId: userEntry.id }
-      // §11: a fresh draft's first message — Start over returns it to the input
-      if (!isEdit && rev.spec.length === 0 && rev.steps.length === 0) firstRequestRef.current = request
       const planEntry = [...afterUser].reverse()
         .find((e) => e.kind === 'answer' && e.title === 'The plan')
       setRev((r) => r && ({ ...r, chatBusy: true, genStage: null, genDetail: null, genEvents: [], genStageStartedAt: null }))
@@ -783,23 +804,68 @@ export function useDraftJob(d: DraftJobDeps) {
     } else {
       dirtyBeforeSync.current = rev.dirty
       setRev((r) => r && ({ ...r, syncBusy: true, genStage: null, genDetail: null, genEvents: [], genStageStartedAt: null }))
-      startPoll(ref.jobId, makeSyncHandlers(), { preSettled })
+      // §11: the turn's settled activity entries belong to the chat job that
+      // armed this sync - none of them is a stage of the sync itself, so
+      // nothing seeds as settled (a same-titled earlier sync block would
+      // otherwise swallow this sync's own).
+      startPoll(ref.jobId, makeSyncHandlers(), { preSettled: [] })
     }
   }
 
-  // §11: Cancel on the footer action block — kill the running job. A chat
-  // cancel drops the pending user entry and returns the text to the input.
+  // §11 composer cancel racing completion: true while a DELETE /drafts/{id}
+  // is out, so a second Cancel click (or Esc) sends nothing more.
+  const cancellingRef = useRef(false)
+  // The composer cancel of a job the poll tracks. `DELETE /drafts/{id}`
+  // answers `ok: false` when the job already settled and holds its outcome -
+  // the cancel lost the race and changes nothing: the poll keeps running, and
+  // the outcome lands and is acked exactly as if Cancel had never been
+  // pressed (§11, like a §7 cancel landing after the last step). Resolves
+  // true when the cancel won (or the backend couldn't be asked - the old
+  // stop-regardless behavior), after stopping the poll.
+  const cancelTracked = async (jobId: string): Promise<boolean> => {
+    cancellingRef.current = true
+    let won = true
+    try {
+      const answer = await api.cancelDraftJob(jobId) as { ok?: boolean } | null | undefined
+      won = answer?.ok !== false
+    } catch { /* unreachable backend - stop the UI regardless */ } finally {
+      cancellingRef.current = false
+    }
+    if (!won || deadRef.current) return false
+    if (jobIdRef.current === jobId) {
+      stopPoll()
+      cancelGenRef.current++
+      jobIdRef.current = null
+    }
+    return true
+  }
+
+  // §11: Cancel on the footer action block — kill the running job. The typed
+  // request returns to the input. The pending user entry is removed only
+  // when nothing landed beneath it; once the turn has entries after it (the
+  // plan landed at the flip), it stays and the "Edit stopped" chip follows
+  // the last of them — a shown bubble never vanishes.
   const cancelChat = () => {
-    if (!rev?.chatBusy) return
-    cancelJob()
-    const req = chatReqRef.current
-    chatReqRef.current = null
-    setRev((r) => r && ({
-      ...r, chatBusy: false,
-      chat: req ? r.chat.filter((e) => e.id !== req.entryId) : r.chat,
-    }))
-    if (req) composer.set((cur) => cur || req.text)
-    showToast('Edit stopped — the spec is unchanged.', 4200)
+    if (!rev?.chatBusy || cancellingRef.current) return
+    const stopped = () => {
+      const req = chatReqRef.current
+      chatReqRef.current = null
+      const chip = newEntry({ kind: 'system', icon: 'fa-ban', text: 'Edit stopped — the spec is unchanged.' })
+      setRev((r) => {
+        if (!r) return r
+        const at = req ? r.chat.findIndex((e) => e.id === req.entryId) : -1
+        if (at < 0) return { ...r, chatBusy: false }
+        if (at === r.chat.length - 1) return { ...r, chatBusy: false, chat: r.chat.filter((e) => e.id !== req!.entryId) }
+        return { ...r, chatBusy: false, chat: [...r.chat, chip] }
+      })
+      if (req) composer.set((cur) => cur || req.text)
+      showToast('Edit stopped — the spec is unchanged.', 4200)
+    }
+    const jobId = jobIdRef.current
+    // No job id yet (the POST is in flight): the gen-guard cancels the job
+    // the POST creates, so this cancel always wins.
+    if (!jobId) { cancelJob(); stopped(); return }
+    void cancelTracked(jobId).then((won) => { if (won) stopped() })
   }
 
   // §11: sync Cancel (footer action block) — kill the job, keep the steps
@@ -807,23 +873,28 @@ export function useDraftJob(d: DraftJobDeps) {
   // §11 hold-and-flush: cancelJob() stops the poll, so onCancelled never
   // fires for a user cancel — the held workflow chips flush here instead
   // (the staging already happened; a cancelled sync never swallows a receipt).
+  // A cancel that loses the race to completion changes nothing (cancelTracked).
   const cancelSync = () => {
-    if (!rev?.syncBusy) return
-    cancelJob()
-    const wasDirty = dirtyBeforeSync.current
-    const held = takeHeldChips()
-    setRev((r) => r && ({
-      ...r, syncBusy: false, dirty: wasDirty,
-      ...(held.length ? { chat: [...r.chat, ...held] } : {}),
-    }))
-    showToast(wasDirty
-      ? 'Sync stopped — the workflow is still out of sync.'
-      : 'Sync stopped — nothing changed.', 4200)
+    if (!rev?.syncBusy || cancellingRef.current) return
+    const stopped = () => {
+      const wasDirty = dirtyBeforeSync.current
+      const held = takeHeldChips()
+      setRev((r) => r && ({
+        ...r, syncBusy: false, dirty: wasDirty,
+        ...(held.length ? { chat: [...r.chat, ...held] } : {}),
+      }))
+      showToast(wasDirty
+        ? 'Sync stopped — the workflow is still out of sync.'
+        : 'Sync stopped — nothing changed.', 4200)
+    }
+    const jobId = jobIdRef.current
+    if (!jobId) { cancelJob(); stopped(); return }
+    void cancelTracked(jobId).then((won) => { if (won) stopped() })
   }
 
   return {
     sendChat, runSync, attachJob, flushHeldChips, takeHeldChips,
     cancelChat, cancelSync, cancelJob,
-    stopPoll, jobIdRef, firstRequestRef, busyNow,
+    stopPoll, jobIdRef, busyNow,
   }
 }

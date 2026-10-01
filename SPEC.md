@@ -189,7 +189,11 @@ explicit `encoding="utf-8", errors="replace"` — never the locale default, whic
 Windows and cannot even encode the §6.1 executor's own log text; the executor and the
 `python -m autowright.service` entry (whose result lines carry `·`/`—` and are captured by
 the Electron ensure-backend step) likewise reconfigure their real stdout/stderr to UTF-8 at
-boot, so both ends agree regardless of the OS locale (macOS-only helpers like
+boot — and so does the `autowright` CLI entry point (`cli.main`: stdout/stderr with
+`errors="replace"` and stdin too, since its lines carry `→` and automation names, a piped
+or redirected stdout would otherwise be cp1252 on Windows and crash the exit-code
+contract after a successful run, and `secret set --stdin` must decode a non-ASCII value
+correctly) — so both ends agree regardless of the OS locale (macOS-only helpers like
 osascript/launchctl may keep the platform default, which is UTF-8 there). The shell
 half mirrors this: `win32.cjs` carries the Windows-correct values (flat `python\python.exe`
 bundled-interpreter layout, the §3 `.cmd` shim, PATH read from the process environment —

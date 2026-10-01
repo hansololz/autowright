@@ -413,4 +413,21 @@ describe('§9.1 execute from the card', () => {
     await waitFor(() =>
       expect(storeMod.useStore.getState().toast).toBe('backend is restarting'))
   })
+
+  // §9 busy rule: the start request in flight disables the play button
+  it('a double-click sends one POST — the button is busy while the start is in flight', async () => {
+    let land!: (v: unknown) => void
+    mockedApi.executeNow.mockClear()
+    mockedApi.executeNow.mockImplementationOnce(() => new Promise((r) => { land = r }))
+    seed([auto()])
+    render(<AutomationsList />)
+
+    clickExecute()
+    const busy = screen.getByRole('button', { name: 'Starting…' }) as HTMLButtonElement
+    expect(busy.disabled).toBe(true)
+    fireEvent.click(busy)
+    expect(mockedApi.executeNow).toHaveBeenCalledTimes(1)
+    await act(async () => { land({ executionId: 'e-new', queued: false }) })
+    expect((screen.getByRole('button', { name: 'Execute now' }) as HTMLButtonElement).disabled).toBe(false)
+  })
 })

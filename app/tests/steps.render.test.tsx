@@ -4,8 +4,10 @@
 // package/timeout tags, the step-script modal a row opens, and the five §4.2
 // param value kinds with each variant's cosmetic contract.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { highlightPythonLines } from '../src/ui'
+import { useFind } from '../src/find'
+import type { ReactNode } from 'react'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from '../src/types'
 import { ParamValueEditor, StepList, findInLines, stepAgentPrompts, stepChange, stepFacts, stepFiles, stepHosts, stepMemory, stepModalFrame, stepPackageTags, stepParams, stepSecretTags } from '../src/steps'
 
@@ -473,6 +475,24 @@ describe('find in script (§9.2)', () => {
   }
   const marks = () => Array.from(document.querySelectorAll('mark')).map((m) => `${m.textContent}:${m.getAttribute('data-match')}`)
   const counter = () => screen.getByTestId('find-counter').textContent
+
+  it('the counter never reads past the matches when the lines shrink under the current one', () => {
+    const many: ReactNode[][] = Array.from({ length: 7 }, () => ['send it'])
+    const scroller = { current: null }
+    const { result, rerender } = renderHook(
+      ({ lines }: { lines: ReactNode[][] }) => useFind(lines, scroller, 'step-1'),
+      { initialProps: { lines: many } },
+    )
+    act(() => result.current.setQuery('send'))
+    for (let i = 0; i < 6; i++) act(() => result.current.step(1))
+    expect(result.current.counter).toBe('7 of 7')
+    // a streamed pane re-renders with fewer matching lines, same query and key
+    rerender({ lines: many.slice(0, 3) })
+    expect(result.current.counter).toBe('3 of 3')
+    // a new query starts at the first match
+    act(() => result.current.setQuery('sen'))
+    expect(result.current.counter).toBe('1 of 3')
+  })
 
   it('findInLines: case-insensitive substring hits in document order, none for an empty query', () => {
     const lines = highlightPythonLines(CODE)

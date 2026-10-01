@@ -650,6 +650,10 @@ job and no separate drafting state — while the first turn runs:
   entry with the §8 failure message — the user resends or rephrases from the composer. A
   failed chained sync leaves the landed spec with the workflow out of sync — the BUILD card's
   Sync now rebuilds the steps (an empty-steps draft can always rebuild; never a dead end).
+  A failed sync surfaces like a failed chat job: the §8 failure message lands in the
+  thread as the red error entry (the toast, when shown, reads "The sync failed — <message>";
+  never "The draft didn't validate", which is the `blocked` outcome's vocabulary, and a
+  poll that gave up after three failures says the job was lost).
   The editor's job poll tolerates transient fetch errors: it keeps the job tracked
   and gives up (with the failure entry) only after three consecutive poll failures.
 - **Saving** — blocked while any §8 job is in flight (Dirty gating below); a create draft
@@ -734,7 +738,11 @@ touched or a stored draft exists — leaves the editor on the §4.4 draft-keep p
 "Save as vN+1" in edit mode, and "Restore vX as vN+1" while viewing an old version. Save
 and Create send the chat-staged `param_values` map and the staged `concurrency` object
 beside the draft (§19) so staged values
-land with the version; a save whose versioned content is unchanged (only staged
+land with the version; Create, Save, Start over, and Discard draft each disable (with the
+§9 busy feedback) from the click until their request settles — a double-click on "Create
+automation" must never send two `POST /automations` (the backend dedupes names rather than
+422ing, so it would create two automations), and a second Save must never race the first
+one's thread flush against the "Draft saved as vN." marker; a save whose versioned content is unchanged (only staged
 values/triggers/concurrency/grants moved) still goes through the same button and endpoint — the
 backend applies the operational state without minting a version (§4.4), announced by
 the toast "Changes saved — triggers and values updated, no new version needed."
@@ -840,7 +848,17 @@ editors enter with
   the chat job is in flight the Save hint shows its live §8 stage title ("Working on the
   request…" / "Updating the documents…"), and cancelling it
   from the composer's Cancel button leaves the draft untouched (toast "Edit stopped — the
-  spec is unchanged."). On failure the §8 error renders as a thread error entry; a `blocked`
+  spec is unchanged."). A cancel that **loses the race to completion** — the backend's
+  `DELETE /drafts/{id}` answers `ok: false` because the job already settled and its
+  outcome is held — changes nothing, like a §7 cancel landing after the last step: the
+  editor shows no "Edit stopped", keeps polling, and the outcome lands and is
+  acknowledged exactly as if Cancel had never been pressed (never a held outcome the UI
+  called stopped, re-applied on the next open). The pending user entry is **removed** from
+  the thread only when nothing has landed beneath it; once the turn has entries after it
+  (the plan landed at the flip), the entry stays and the `fa-ban` "Edit stopped — the spec
+  is unchanged." chip is appended after the last of them (a shown bubble never vanishes,
+  and a plan is never orphaned under the previous turn); the typed text returns to the
+  composer either way. On failure the §8 error renders as a thread error entry; a `blocked`
   outcome renders a thread blockers entry (source: chat) — either way the draft is
   untouched, except a blocked payload's `draft.notes` (§8 blocker notes), applied like
   any notes rewrite (Blockers above). Manual spec/notes edits are mutually exclusive (one edit at a time), and

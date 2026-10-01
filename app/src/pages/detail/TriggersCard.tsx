@@ -20,11 +20,16 @@ export function TriggersCard({ auto, statusText }: { auto: Automation; statusTex
   // §4.3 trigger edits are user-owned operational state: whole-list PATCH, no
   // version, no AI. A function toast reads the saved automation — the §4.3
   // display strings live on the serialized triggers, never in the renderer.
-  const putTriggers = (next: Array<Trigger | DraftTrigger>, toastMsg: string | ((saved: Automation) => string)) =>
-    runAction(auto.id, async () => {
-      const saved = await api.patchAutomation(auto.id, { triggers: next })
-      return typeof toastMsg === 'string' ? toastMsg : toastMsg(saved)
-    })
+  // Resolves true once the PATCH landed, false when it failed (the toast is
+  // already up) — an editor closes only on true, so a rejected save (a 422)
+  // keeps what the user typed.
+  const putTriggers = (next: Array<Trigger | DraftTrigger>, toastMsg: string | ((saved: Automation) => string)) => {
+    let saved = true
+    return runAction(auto.id, async () => {
+      const result = await api.patchAutomation(auto.id, { triggers: next })
+      return typeof toastMsg === 'string' ? toastMsg : toastMsg(result)
+    }, { onError: () => { saved = false } }).then(() => saved)
+  }
   const toggleTrigger = (t: Trigger) => {
     putTriggers(
       trigs.map((x) => (x.id === t.id ? { ...x, enabled: !x.enabled } : x)),
@@ -49,11 +54,10 @@ export function TriggersCard({ auto, statusText }: { auto: Automation; statusTex
                 hasAppStart={trigs.some((x) => x.kind === 'app_start' && x.id !== t.id)}
                 initial={t}
                 onSave={(nt) => {
-                  setEditTrig(null)
-                  putTriggers(
+                  void putTriggers(
                     trigs.map((x) => (x.id === t.id ? { ...nt, id: t.id, enabled: t.enabled } : x)),
                     (saved) => `Trigger updated — ${saved.triggers.find((x) => x.id === t.id)?.short ?? ''}.`,
-                  )
+                  ).then((ok) => { if (ok) setEditTrig(null) })
                 }}
                 onCancel={() => setEditTrig(null)}
               />

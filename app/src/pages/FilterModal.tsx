@@ -43,12 +43,14 @@ export function resolveRange(time: ExecutionFilters['time'], now: number): { fro
   if (time.preset === 'any') return {}
   if (time.preset !== 'custom') {
     const preset = TIME_PRESETS.find((p) => p.id === time.preset)!
-    return { from: now - preset.ms }
+    // §19 startedFromMs is never negative — a clock near the epoch (or a
+    // custom From before 1970) clamps to 0.
+    return { from: Math.max(0, now - preset.ms) }
   }
   const from = localMs(time.from)
   const to = localMs(time.to)
   return {
-    ...(Number.isFinite(from) ? { from } : {}),
+    ...(Number.isFinite(from) ? { from: Math.max(0, from) } : {}),
     ...(Number.isFinite(to) ? { to: to + 59_999 } : {}),
   }
 }
@@ -62,8 +64,12 @@ export const rangeInverted = (time: ExecutionFilters['time']) => {
   return Number.isFinite(from) && Number.isFinite(to) && from > to
 }
 
-const shortStamp = (value: string) =>
-  new Date(value).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+// §7: the year shows only when the stamp falls outside the current year.
+const shortStamp = (value: string) => {
+  const at = new Date(value)
+  const year = at.getFullYear() !== new Date(Date.now()).getFullYear() ? { year: 'numeric' as const } : {}
+  return at.toLocaleString(undefined, { month: 'short', day: 'numeric', ...year, hour: 'numeric', minute: '2-digit' })
+}
 
 /** §7 filter-line label for the time filter, null when it is off. */
 export function timeLabel(time: ExecutionFilters['time']): string | null {
