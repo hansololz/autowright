@@ -1714,3 +1714,79 @@ def test_gemini_preflight_refuses_a_signed_out_cli(monkeypatch, home):
         assert ei.value.retryable is False
     assert spawned == []
     assert not paths.harness_scratch("gemini").exists()
+
+
+# ---------- §2 pipe-release contract: the stdin prompt write ----------
+
+def test_a_multi_megabyte_prompt_reaches_the_cli_whole(monkeypatch, tmp_path, home):
+    # §8 stdin delivery through the releasable writer: a prompt far past the
+    # pipe buffer, with multi-byte characters straddling the chunk seams,
+    # arrives byte for byte and the CLI sees EOF.
+    import hashlib
+
+    from autowright import harness
+
+    script = fake_cli(tmp_path,
+                      "import hashlib, json, sys\n"
+                      "data = sys.stdin.buffer.read()\n"
+                      "print(json.dumps({'type': 'result', 'result':\n"
+                      "                  f'{len(data)} {hashlib.sha256(data).hexdigest()}'}))\n")
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    prompt = "question: " + "héllo → wörld\n" * 150_000
+    sent = prompt.encode("utf-8")
+
+    out = harness.invoke({"harness": "Claude Code"}, prompt, timeout=30)
+
+    assert out == f"{len(sent)} {hashlib.sha256(sent).hexdigest()}"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions")
+@pytest.mark.parametrize("tail", ["import time\ntime.sleep(120)\n", "sys.exit(7)\n"],
+                         ids=["cli-hangs", "cli-exits"])
+def test_invoke_returns_when_an_escaped_child_holds_stdin(monkeypatch, tmp_path, home, tail):
+    # §2 pipe-release contract, write side: a grandchild in its own session
+    # survives the group kill and keeps the inherited stdin read end open, so
+    # a prompt larger than the pipe buffer never gets its broken-pipe error.
+    # The blocked write used to hold the buffer lock, and the cleanup's
+    # ordinary close() wedged `_invoke` on it for the escapee's whole life.
+    from conftest import _reap
+
+    from autowright import harness
+
+    pidfile = tmp_path / "grandchild.pid"
+    script = fake_cli(tmp_path,
+                      "import subprocess, sys\n"
+                      "child = subprocess.Popen(\n"
+                      "    [sys.executable, '-c', 'import time; time.sleep(120)'],\n"
+                      "    start_new_session=True)\n"
+                      f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+                      + tail)
+    monkeypatch.setattr(harness, "resolve_bin", lambda name: str(script))
+    before = set(threading.enumerate())
+    done = threading.Event()
+    errors = []
+
+    def run() -> None:
+        try:
+            harness.invoke({"harness": "Claude Code"},
+                           "question: " + "x" * 2_000_000, timeout=1)
+        except harness.HarnessError as e:
+            errors.append(e)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert done.wait(20), "_invoke wedged on the undelivered stdin prompt"
+    finally:
+        _reap(pidfile)
+    worker.join(timeout=5)
+    assert errors and errors[0].retryable is True
+    # The released writer thread ends too: no thread and no handle leaks.
+    leftover = set(threading.enumerate()) - before - {worker}
+    deadline = time.monotonic() + 5
+    while leftover and time.monotonic() < deadline:
+        time.sleep(0.05)
+        leftover = set(threading.enumerate()) - before - {worker}
+    assert not leftover

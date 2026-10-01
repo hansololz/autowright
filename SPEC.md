@@ -183,6 +183,16 @@ size-capped stack Popen builds, so read semantics don't change. Windows (pipes c
 polled): the plain blocking read, with the read end redirected to the null device on
 kill. The child's fd stays owned by the Popen pipe object — the reader never closes it
 behind the process handle.
+The same contract covers the one pipe the backend streams *into* a child, the §8 harness
+prompt on stdin (`harness.PipeWriter`): an escapee that inherited the read end keeps the
+pipe open after the kill, so a prompt larger than the pipe buffer never gets its
+broken-pipe error, the blocked write holds the buffer lock, and a cross-thread `close()`
+wedges on it exactly as on the read side. POSIX: the writer thread writes the encoded
+prompt to the raw fd in non-blocking chunks, waiting on the pipe alongside an in-process
+wakeup pipe, so `defuse()` (a one-byte write, never a lock) abandons the rest of the
+prompt at once; the writer thread closes stdin when it finishes or is released, and
+`close()` defuses, waits for that thread, then closes, so it is safe from any thread.
+Windows: the plain blocking text write, with a cross-thread close on kill.
 Pipe-encoding contract, all platforms: every text-mode subprocess pipe on a cross-OS code
 path (executor, harness invocation and probes, pip, installer streaming) is opened with
 explicit `encoding="utf-8", errors="replace"` — never the locale default, which is cp1252 on

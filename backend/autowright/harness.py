@@ -263,6 +263,131 @@ class PipeReader:
             pass
 
 
+class PipeWriter:
+    """§2 pipe-release contract, write side: delivers one text payload down a
+    child's stdin pipe from its own thread, and a kill path can release that
+    write from ANY thread.
+
+    A killed group can leave an escapee behind still holding the pipe's read
+    end, so a payload larger than the pipe buffer never gets its broken-pipe
+    error: a plain blocking write then holds the buffer lock for that
+    process's whole life, and a cross-thread `close()` wedges on the same
+    lock. POSIX: the encoded payload goes to the raw fd in non-blocking
+    chunks, each wait covering the pipe and an in-process wakeup pipe, so
+    `defuse()` (a one-byte write, never a lock) abandons the rest at once.
+    The writer thread closes the pipe when it finishes or is released (EOF:
+    every §8 CLI waits for it). Where the pipe can't be polled (Windows, and
+    the suites' in-memory stand-ins) it is the pipe object's own blocking
+    text write, and `defuse()` closes the pipe cross-thread."""
+
+    def __init__(self, f):
+        self._f = f
+        self._fd: int | None = None
+        self._wake_r = self._wake_w = -1
+        # Guards the wakeup fds against a kill path's late `defuse()` landing
+        # after `close()`. Held only around non-blocking steps.
+        self._wake_lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._released = threading.Event()
+        self._thread: threading.Thread | None = None
+        if f is None:
+            return
+        try:
+            fd = f.fileno()
+        except (OSError, ValueError, AttributeError):
+            return  # an in-memory stand-in: its own writes
+        if not hasattr(select, "poll"):
+            return  # Windows: pipes can't be polled
+        self._fd = fd
+        self._wake_r, self._wake_w = os.pipe()
+
+    def start(self, text: str) -> None:
+        """Write `text` and close the pipe, on a dedicated daemon thread."""
+        self._thread = threading.Thread(target=self._run, args=(text,), daemon=True)
+        self._thread.start()
+
+    def _run(self, text: str) -> None:
+        try:
+            if self._fd is None:
+                self._f.write(text)
+                self._f.flush()
+            else:
+                self._write_released(text)
+        except (OSError, ValueError, AttributeError):
+            # BrokenPipeError (the child exited or was killed before it read
+            # the payload) and ValueError (a kill path closed the pipe
+            # underneath us) are both normal ends, not failures: the exit
+            # code and stderr carry the real story.
+            pass
+        finally:
+            self._close_pipe()
+
+    def _write_released(self, text: str) -> None:
+        # The same codec the Popen text layer would apply (§2 pipe-encoding
+        # contract). Nothing ever goes through that layer, so its buffer
+        # stays empty and the later close takes no contended lock.
+        data = memoryview(text.encode(getattr(self._f, "encoding", None) or "utf-8",
+                                      getattr(self._f, "errors", None) or "replace"))
+        # Only our end's open file description turns non-blocking; the
+        # child's read end is a separate one.
+        os.set_blocking(self._fd, False)
+        poll = select.poll()
+        poll.register(self._fd, select.POLLOUT)
+        poll.register(self._wake_r, select.POLLIN)
+        while data and not self._released.is_set():
+            for fd, _events in poll.poll():
+                if fd != self._fd or self._released.is_set():
+                    continue
+                # POLLHUP/POLLERR arrive unrequested: the write then raises
+                # BrokenPipeError, exactly as a plain blocking write would.
+                try:
+                    n = os.write(self._fd, data[:65536])
+                except BlockingIOError:
+                    continue
+                data = data[n:]
+
+    def _close_pipe(self) -> None:
+        with self._close_lock:
+            try:
+                if self._f is not None:
+                    self._f.close()
+            except (OSError, ValueError):
+                pass
+
+    def defuse(self) -> None:
+        """Release a write blocked on another thread. Never blocks on POSIX;
+        the writer thread then closes the pipe itself."""
+        self._released.set()
+        if self._fd is None:
+            self._close_pipe()
+            return
+        with self._wake_lock:
+            if self._wake_w < 0:
+                return  # already closed: nothing is blocked on us any more
+            try:
+                os.write(self._wake_w, b"x")
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        """Idempotent and safe from any thread: defuses first, so the wait
+        for the writer thread is only ever for a released write."""
+        self.defuse()
+        thread = self._thread
+        if (self._fd is not None and thread is not None
+                and thread is not threading.current_thread()):
+            thread.join()
+        self._close_pipe()
+        with self._wake_lock:
+            fds, self._wake_r, self._wake_w = (self._wake_r, self._wake_w), -1, -1
+        for fd in fds:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
 # A backend launched from the Finder/Dock gets a minimal PATH without
 # /opt/homebrew/bin or ~/.local/bin, so `shutil.which` alone misses
 # normally-installed CLIs (claude installs to ~/.local/bin by default).
@@ -1080,34 +1205,16 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         except Exception:  # noqa: BLE001 — a reporting failure must not kill the call
             log.exception("on_spawn callback failed")
 
-    def _close_stdin() -> None:
-        """Idempotent; safe from any thread (a close racing the writer's own
-        close, or the kill path, must never raise)."""
-        try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-        except (OSError, ValueError):
-            pass
-
     # §8: a DEDICATED writer thread, started right after the spawn — never
     # the stdout read loop's thread. A ~40 K prompt overflows the stdin pipe
     # buffer, so the write blocks until the child drains it; a child that
     # fills its own stdout pipe first would then deadlock against a reader
-    # that is busy writing.
-    def _write_prompt() -> None:
-        try:
-            proc.stdin.write(prompt)  # type: ignore[union-attr]
-            proc.stdin.flush()  # type: ignore[union-attr]
-        except (OSError, ValueError):
-            # BrokenPipeError (the child exited or was killed before it read
-            # the prompt) and ValueError (the kill path closed the pipe
-            # underneath us) are both normal ends, not failures — the exit
-            # code and stderr carry the real story.
-            pass
-        finally:
-            _close_stdin()  # EOF: every §8 CLI waits for it
-
-    threading.Thread(target=_write_prompt, daemon=True).start()
+    # that is busy writing. §2 pipe-release contract: the write is releasable,
+    # so a kill abandons an undelivered prompt even when an escaped child
+    # still holds the pipe's read end. The writer closes stdin when it ends
+    # (EOF: every §8 CLI waits for it).
+    stdin_writer = PipeWriter(proc.stdin)
+    stdin_writer.start(prompt)
     # Cancel/spawn race: a cancel that landed after the caller's own check but
     # before this Popen existed killed nothing — re-check now that the proc is
     # visible, so no harness call can outlive a cancel by its full timeout.
@@ -1138,9 +1245,9 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         # the cleanup below would then wedge on its own close().
         err_reader.defuse()
         # §8 stdin delivery: a writer thread blocked on a prompt the dead
-        # child will never drain unblocks on the closed pipe (and swallows
-        # the resulting error), so the kill leaks no thread and no handle.
-        _close_stdin()
+        # child will never drain is released the same way, so the kill leaks
+        # no thread and no handle.
+        stdin_writer.defuse()
 
     # §8: `timeout` is an idle window — every stdout line pushes the deadline
     # out, so a call still streaming keeps running (a harness that buffers its
@@ -1216,7 +1323,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         kill_group(proc)
         out_reader.defuse()
         err_reader.defuse()
-        _close_stdin()
+        stdin_writer.defuse()
 
     scratch_watcher: _ScratchWatcher | None = None
     try:
@@ -1279,7 +1386,7 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
             # the call is idempotent), so no handle is left open on a
             # long-lived backend — mirrors the engine's step-process pipe
             # hygiene.
-            _close_stdin()
+            stdin_writer.close()
             if scratch_watcher is not None:
                 # §8: the final sweep — a document written in the last poll
                 # interval still reaches the feed and the recombined reply.

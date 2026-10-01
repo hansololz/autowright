@@ -33,7 +33,10 @@ line at 32,767 characters — smaller than any real drafting prompt (a minimal
 build prompt already measures ~38 K). So the adapter omits the argv prompt everywhere and pipes it to
 the child's **stdin** (UTF-8 per the §2 pipe-encoding contract, written from a
 dedicated writer thread that closes stdin at EOF — writing from the stdout read loop's
-thread could deadlock against a child that fills its stdout pipe first). Every §8 CLI has a
+thread could deadlock against a child that fills its stdout pipe first; the write is
+releasable per the §2 pipe-release contract, so a kill abandons an undelivered prompt even
+when an escaped grandchild still holds the pipe's read end, and neither the kill nor the
+call's cleanup can wedge on it). Every §8 CLI has a
 non-interactive piped-stdin mode; the Windows forms: Claude Code — same `claude -p …` flags
 with no positional prompt (verified against the real CLI at ~40 K chars); Gemini CLI — drop
 `-p <prompt>`, piped stdin runs it non-interactively; Codex — `codex exec` with no prompt

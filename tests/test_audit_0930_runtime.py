@@ -63,6 +63,37 @@ def test_background_child_holding_the_pipe_never_holds_the_step(store, tmp_path)
     assert _gone(_wait_pid(pidfile)), "the background sleep must die with the step group"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions")
+def test_escaped_child_holding_the_pipe_never_holds_the_step(store, tmp_path):
+    """§7 + §2 pipe-release contract: a child that started its own session is
+    out of the step group's reach and keeps the log pipe open, so EOF never
+    comes. The step-end kill releases the engine's own read: the step is
+    recorded succeeded within the drain grace, with its output intact."""
+    from conftest import _reap
+
+    from autowright.engine import Engine
+
+    pidfile = tmp_path / "escapee.pid"
+    engine = Engine(store)
+    ver = make_version()
+    ver["steps"] = [{"file": "01-escape.py", "name": "Escapes", "description": "",
+                     "code": "import subprocess\n"
+                             "p = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
+                             f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+                             "print('still here')\n"}]
+    a = store.create_automation(ver, "Leaves an escapee", None)
+    t0 = time.time()
+    h = engine.start(a, "manual")
+    try:
+        wait_done(engine, h["id"], timeout=15)
+        assert time.time() - t0 < 10, "the step must end on exit + grace, not on EOF"
+        assert h["status"] == "succeeded"
+        assert h["steps"][0]["status"] == "succeeded"
+        assert any(ln.get("text") == "still here" for ln in read_all_logs(store, h["id"]))
+    finally:
+        _reap(pidfile)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 def test_cancel_kills_a_grandchild_that_traps_sigterm(store, tmp_path):
     """§7: a cancel's SIGTERM takes the executor down at once; a grandchild
