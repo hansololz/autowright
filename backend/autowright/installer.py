@@ -371,10 +371,32 @@ def _require(binname: str) -> None:
                            f"on this {paths.machine_noun()}")
 
 
+def _run_installer_script(url: str, shell: str, emit, provider_id: str,
+                          env_extra: dict | None = None) -> None:
+    """§19: a vendor `curl … | sh` installer runs from a FILE — downloaded
+    first, curl's own exit code and error line deciding (offline, 404, TLS, a
+    stream cut off mid-way all fail the install), then executed by `shell`.
+    A pipe would run an empty or partial script, exit 0, and report success."""
+    fd, script = tempfile.mkstemp(prefix=f"autowright-{provider_id}-", suffix=".sh")
+    os.close(fd)
+    try:
+        try:
+            _stream_shell(["/bin/bash", "-c",
+                           f"curl -fsSL -o {shlex.quote(script)} {shlex.quote(url)}"],
+                          emit, provider_id)
+        except RuntimeError as e:
+            raise RuntimeError(f"couldn't download the installer: {e}") from e
+        _stream_shell([shell, script], emit, provider_id, env_extra=env_extra)
+    finally:
+        try:
+            os.unlink(script)
+        except OSError:
+            pass
+
+
 def _install_claude(emit) -> None:
     emit(line="Downloading the Claude Code installer…")
-    _stream_shell(["/bin/bash", "-c", f"curl -fsSL {CLAUDE_INSTALLER} | bash"], emit,
-                  "claude")
+    _run_installer_script(CLAUDE_INSTALLER, "/bin/bash", emit, "claude")
     _require("claude")
     # The vendor script lands the bin in ~/.local/bin but only prints PATH
     # instructions — invisible from a background install (§19).
@@ -386,8 +408,7 @@ def _install_opencode(emit) -> None:
     # fallback bin-dir list); its documented OPENCODE_INSTALL_DIR is ignored
     # by the live script, so nothing is passed.
     emit(line="Downloading the OpenCode installer…")
-    _stream_shell(["/bin/bash", "-c", f"curl -fsSL {OPENCODE_INSTALLER} | bash"], emit,
-                  "opencode")
+    _run_installer_script(OPENCODE_INSTALLER, "/bin/bash", emit, "opencode")
     _require("opencode")
 
 
@@ -409,8 +430,8 @@ def _install_gemini(emit) -> None:
 def _install_codex(emit) -> None:
     emit(line="Downloading the Codex installer…")
     # CODEX_NON_INTERACTIVE: the backend has no TTY to answer its prompts.
-    _stream_shell(["/bin/bash", "-c", f"curl -fsSL {CODEX_INSTALLER} | sh"], emit,
-                  "codex", env_extra={"CODEX_NON_INTERACTIVE": "1"})
+    _run_installer_script(CODEX_INSTALLER, "/bin/sh", emit, "codex",
+                          env_extra={"CODEX_NON_INTERACTIVE": "1"})
     _require("codex")
     # Same §19 guarantee as claude: the vendor symlink lands in ~/.local/bin.
     _ensure_login_path(emit)

@@ -326,7 +326,13 @@ def _check_sizes(z: zipfile.ZipFile) -> None:
     if len(infos) > _MAX_ENTRIES:
         raise TransferError("the archive holds far more files than any real automation")
     total = 0
+    names = set()
     for info in infos:
+        # §5.2: a name listed twice is refused - zipfile reads a duplicate by
+        # its last entry, so a size checked on one entry could gate another.
+        if info.filename in names:
+            raise TransferError("the archive names the same file twice")
+        names.add(info.filename)
         if info.file_size > _MAX_MEMBER_BYTES:
             raise TransferError(f"{info.filename} in the archive is unreasonably large")
         total += info.file_size
@@ -334,17 +340,21 @@ def _check_sizes(z: zipfile.ZipFile) -> None:
         raise TransferError("the archive decompresses far beyond any real automation")
 
 
-def _read_member(z: zipfile.ZipFile, path: str) -> bytes:
-    """One archive member's bytes; every way a hostile or truncated zip can
-    fail the read (CRC mismatch, unknown compression method, encrypted
-    member, a decompressor error) is a §5.1 422, never a 500. KeyError
-    (missing member) stays the caller's to handle."""
+def _read_member(z: zipfile.ZipFile, path: str | zipfile.ZipInfo) -> bytes:
+    """One archive member's bytes, by name or by its own ZipInfo entry (passed
+    through to `z.read`); every way a hostile or truncated zip can fail the
+    read (CRC mismatch, unknown compression method, encrypted member, a
+    decompressor error, a malformed header) is a §5.1 422, never a 500.
+    KeyError (missing member) stays the caller's to handle."""
+    name = path.filename if isinstance(path, zipfile.ZipInfo) else path
     try:
         return z.read(path)
     except KeyError:
         raise
     except (zipfile.BadZipFile, NotImplementedError, RuntimeError, OSError, zlib.error) as e:
-        raise TransferError(f"the archive's {path} can't be read: {e}") from None
+        raise TransferError(f"the archive's {name} can't be read: {e}") from None
+    except (UnicodeDecodeError, ValueError, OverflowError, EOFError, zipfile.LargeZipFile):
+        raise TransferError("not a valid .autowright archive") from None
 
 
 def _yaml_or_reject(z: zipfile.ZipFile, path: str, required: bool = True) -> dict:
@@ -759,7 +769,7 @@ def list_archive_text(data: bytes) -> list[dict]:
                 # Over a cap the member is named but never read into memory.
                 files.append({"path": info.filename, "text": None})
                 continue
-            raw = _read_member(z, info.filename)
+            raw = _read_member(z, info)
             try:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
@@ -794,7 +804,10 @@ def _open_archive(data: bytes) -> zipfile.ZipFile:
         raise TransferError("the archive is larger than the 64 MB import limit")
     try:
         return zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, UnicodeDecodeError, ValueError, OverflowError, EOFError,
+            zipfile.LargeZipFile):
+        # §5.2: an undecodable member name (UTF-8 flag set on bytes that
+        # aren't UTF-8) or a malformed directory field is the same 422.
         raise TransferError("not a valid .autowright archive") from None
 
 
@@ -1218,6 +1231,9 @@ class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urlsplit(newurl).scheme != "https":
+            # The refused hop's response is closed here: the raise skips
+            # urllib's own close, which would leak the socket.
+            fp.close()
             raise self._refuse()
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 

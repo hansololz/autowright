@@ -5,7 +5,7 @@
 // no admin prompt exists, and nothing ever writes to the legacy
 // /usr/local/bin (the pre-08-15 bug was a silent best-effort write there).
 // main.cjs has no importable module structure, so the guard reads the source.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
@@ -381,6 +381,8 @@ interface MainStub {
   powerListeners: Map<string, () => void>
   // §13: fire the tray's own click handler, the only way to the panel.
   clickTray: () => void
+  // §9: a second launch's `second-instance` signal (a relaunching update).
+  secondInstance: () => void
   // §9 watchdog / renderer-death reporting: every dialog.showErrorBox the
   // shell put up, and the app.log lines behind them.
   errors: [string, string][]
@@ -550,7 +552,8 @@ function loadMain(options: LoadOptions = {}): MainStub {
       commandLine: { appendSwitch() {} },
       requestSingleInstanceLock: () => true,
       on(event: string, fn: (e: { preventDefault: () => void }) => void) { appEvents.set(event, fn) },
-      isReady: () => false,
+      // A ready-chain load is a ready app: second-instance only acts on one.
+      isReady: () => Boolean(options.ready),
       quit() { quits += 1 },
       // §3 reset step 6: the app quits and stays quit.
       exit(code: number) { exits.push(code) },
@@ -665,6 +668,11 @@ function loadMain(options: LoadOptions = {}): MainStub {
       if (!fn) throw new Error('no tray click handler')
       fn()
     },
+    secondInstance: () => {
+      const fn = appEvents.get('second-instance')
+      if (!fn) throw new Error('no second-instance listener')
+      fn({ preventDefault: () => {} })
+    },
     opened, externals, revealed, windows, wins, trays, loginItem, aumids, sent, updater,
     home, errors, exits, dialogs, dialogAnswer, powerListeners,
     // AUTOWRIGHT_HOME points app.log at this test's own home (§15).
@@ -683,8 +691,35 @@ describe('main.cjs IPC argument validation', () => {
 
   it('reveal-path shows a path inside the app-support home', async () => {
     const m = loadMain()
-    await m.invoke('reveal-path', join(m.home, 'automations', 'demo'))
-    expect(m.revealed).toEqual([join(m.home, 'automations', 'demo')])
+    const target = join(m.home, 'automations', 'demo')
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, 'x')
+    await m.invoke('reveal-path', target)
+    // §9: the reveal acts on the real path (the temp root itself may sit
+    // behind a symlink, macOS /var -> /private/var).
+    expect(m.revealed).toEqual([realpathSync(target)])
+  })
+
+  it('reveal-path refuses a symlink inside the executions dir that points outside the roots', async () => {
+    if (process.platform === 'win32') return // symlinks need elevation there
+    const m = loadMain()
+    const outside = mkdtempSync(join(tmpdir(), 'aw-outside-'))
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'x')
+      // A step script can plant a link inside the executions dir (§9).
+      const link = join(m.home, 'executions', 'run-1', 'escape')
+      mkdirSync(dirname(link), { recursive: true })
+      symlinkSync(outside, link)
+      await m.invoke('reveal-path', link)
+      await m.invoke('reveal-path', join(link, 'secret.txt'))
+      expect(m.revealed).toEqual([])
+      expect(m.opened).toEqual([])
+      // A path that does not resolve at all is a no-op too.
+      await m.invoke('reveal-path', join(m.home, 'not-there'))
+      expect(m.revealed).toEqual([])
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 
   it('reveal-path ignores a path outside the known roots', async () => {
@@ -764,6 +799,7 @@ describe('main.cjs IPC argument validation', () => {
     const m = loadMain()
     const elsewhere = mkdtempSync(join(tmpdir(), 'aw-data-'))
     const target = join(elsewhere, 'e-1')
+    writeFileSync(target, 'x')
     try {
       // The renderer claiming the executions dir moved would otherwise let it
       // pick the reveal roots for itself.
@@ -778,7 +814,7 @@ describe('main.cjs IPC argument validation', () => {
       } as Response)
       try {
         await m.invoke('reveal-path', target)
-        expect(m.revealed).toEqual([target])
+        expect(m.revealed).toEqual([realpathSync(target)])
       } finally {
         fetchSpy.mockRestore()
       }
@@ -1756,6 +1792,26 @@ describe('main.cjs CLI shim writes (§3)', () => {
     // Windows has no executable bit to keep.
     if (process.platform !== 'win32') expect(statSync(shim).mode & 0o777).toBe(0o755)
   })
+
+  it('cli-status heals a current but non-executable shim of ours in place', async () => {
+    if (process.platform === 'win32') return // no executable bit there
+    const { m, shim } = loadWithShim()
+    writeFileSync(shim, platMod.shimText('/usr/bin/python3'), { mode: 0o644 })
+    chmodSync(shim, 0o644)
+    expect(await m.invoke('cli-status')).toMatchObject({ state: 'installed', path: shim })
+    expect(statSync(shim).mode & 0o777).toBe(0o755)
+  })
+
+  it('cli-install makes an existing non-executable shim of ours executable', async () => {
+    if (process.platform === 'win32') return // no executable bit there
+    const { m, shim } = loadWithShim()
+    // Ours and current, but 0644: a write over an existing file keeps its old
+    // mode, so the install sets 0755 after every write (§3).
+    writeFileSync(shim, platMod.shimText('/usr/bin/python3'), { mode: 0o644 })
+    chmodSync(shim, 0o644)
+    expect(await m.invoke('cli-install')).toEqual({ ok: true })
+    expect(statSync(shim).mode & 0o777).toBe(0o755)
+  })
 })
 
 // ---- §9 ready chain --------------------------------------------------------
@@ -1848,6 +1904,74 @@ describe('main.cjs update-install refusals (§3)', () => {
     const m = loadMain()
     m.updater.installThrows = new Error('ShipIt is missing')
     expect(await m.invoke('update-install')).toEqual({ error: 'ShipIt is missing' })
+  })
+
+  it('an ok install with no quit within 10 s clears uiQuit and logs the stall', async () => {
+    if (!HAS_UPDATER) return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.useFakeTimers()
+    try {
+      const m = loadMain()
+      // MacUpdater with nothing staged: registers a listener and returns, so
+      // the answer is ok but no quit ever begins.
+      expect(await m.invoke('update-install')).toEqual({ ok: true })
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(m.log()).not.toContain('update-install: no quit began within 10 s')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(m.log()).toContain('update-install: no quit began within 10 s')
+      // uiQuit is cleared: the next Cmd+Q is the user's quit-entirely again.
+      expect(m.emit('before-quit')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an ok install whose quit began leaves uiQuit alone at the 10 s check', async () => {
+    if (!HAS_UPDATER) return
+    vi.useFakeTimers()
+    try {
+      const m = loadMain()
+      expect(await m.invoke('update-install')).toEqual({ ok: true })
+      // The updater's own quit passes through before-quit.
+      expect(m.emit('before-quit')).toBe(false)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(m.log()).not.toContain('update-install: no quit began within 10 s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ---- §3 a second macOS download ----------------------------------------------
+// electron-updater's squirrelDownloadedUpdate flag never resets, so a second
+// download for a newer version would "stage" on it and install the older
+// bundle Squirrel already holds.
+
+describe('main.cjs second macOS download (§3)', () => {
+  const savedCaskroom = process.env.AUTOWRIGHT_CASKROOM
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+    if (savedCaskroom === undefined) delete process.env.AUTOWRIGHT_CASKROOM
+    else process.env.AUTOWRIGHT_CASKROOM = savedCaskroom
+  })
+
+  it('a download for a different version than the staged one asks for a restart', async () => {
+    if (platMod.UPDATER !== 'mac') return // only Squirrel.Mac stages
+    const m = loadMain()
+    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
+    m.updater.check = { updateInfo: { version: '0.14.0' } }
+    expect(await m.invoke('update-download')).toEqual({ ok: true })
+    // The same version again still resolves on the staged bundle.
+    expect(await m.invoke('update-download')).toEqual({ ok: true })
+    // A newer release lands after 0.14.0 was staged.
+    m.updater.check = { updateInfo: { version: '0.14.1' } }
+    expect(await m.invoke('update-check')).toEqual({ state: 'available', version: '0.14.1' })
+    const downloadsBefore = m.updater.downloads
+    expect(await m.invoke('update-download'))
+      .toEqual({ error: 'Restart to finish the update you already downloaded.' })
+    expect(m.updater.downloads).toBe(downloadsBefore)
   })
 })
 
@@ -2065,6 +2189,68 @@ describe('main.cjs §13 panel placement and lifetime', () => {
     await m.invoke('apply-settings', { menuBarIcon: true })
     m.clickTray()
     expect(place.mock.calls.at(-1)?.[2]).toBe(420)
+  })
+
+  it('a panel whose renderer dies is destroyed, and the next click builds a fresh one', async () => {
+    if (!caps.trayPanel) return // §13: Linux ships no tray surface at all
+    const m = loadMain()
+    await m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    expect(m.wins).toHaveLength(1)
+    m.wins[0].fire('render-process-gone', { reason: 'crashed' })
+    expect(m.wins[0].destroys).toBe(1)
+    expect(m.log()).toContain('panel: renderer process gone (crashed)')
+    m.clickTray()
+    expect(m.wins).toHaveLength(2)
+  })
+
+  it("an old panel's late closed leaves the new panel's reference intact", async () => {
+    if (!caps.trayPanel) return // §13: Linux ships no tray surface at all
+    const m = loadMain()
+    await m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    const old = m.wins[0]
+    // Destroy-then-recreate: tray off and on, then a click builds panel two.
+    await m.invoke('apply-settings', { menuBarIcon: false })
+    await m.invoke('apply-settings', { menuBarIcon: true })
+    m.clickTray()
+    expect(m.wins).toHaveLength(2)
+    // The old window's `closed` lands late; it must not wipe panel two.
+    old.close()
+    m.clickTray()
+    expect(m.wins).toHaveLength(2)
+    expect(m.wins[1].shows).toBe(2)
+  })
+})
+
+// ---- §9 no window once a quit has begun -------------------------------------
+
+describe('main.cjs no window or panel once a quit has begun (§9)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('second-instance, activate and a tray click create no window while quitting', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ ready: true })
+    await vi.advanceTimersByTimeAsync(0)
+    if (caps.trayPanel) await m.invoke('apply-settings', { menuBarIcon: true })
+    // The window is closed (tray/dock-only), so every path below would
+    // otherwise build a fresh one.
+    m.wins[0].close()
+    const before = m.windows.length
+    // A session end lets the quit through, which sets the quit flag.
+    m.powerListeners.get('shutdown')!()
+    expect(m.emit('before-quit')).toBe(false)
+    m.secondInstance()
+    m.emit('activate')
+    if (caps.trayPanel) m.clickTray()
+    await m.invoke('open-app', '/app?automation=a1')
+    expect(m.windows).toHaveLength(before)
   })
 })
 

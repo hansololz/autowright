@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -571,6 +571,14 @@ class Store:
                     continue
                 if a:
                     self.autos[a["id"]] = a
+            self.reopen_exec_index()
+
+    def reopen_exec_index(self) -> None:
+        """Close and reopen the execution index at the in-memory data path,
+        reconcile it against the yaml, and refill the derived state — the tail
+        of `load_all`, and the §4.9 data-location rollback's way back to the
+        old index when settings.yaml can't be re-read (it names the new path)."""
+        with self.lock:
             self.close_exec_db()
             # Stat'd before the open: opening may touch the file, and the
             # reconcile compares every execution.yaml against the index's last
@@ -821,7 +829,14 @@ class Store:
             for vd in vdir.iterdir():
                 m = re.fullmatch(r"v(\d+)", vd.name)
                 if m and (vd / "automation.yaml").exists():
-                    ver = self._load_version_folder(vd)
+                    try:
+                        ver = self._load_version_folder(vd)
+                    except Exception as e:  # noqa: BLE001
+                        # §5: a version folder that fails to load for any other
+                        # reason is skipped, never the whole automation — the
+                        # same guard as the draft below.
+                        log.warning("version folder %s can't be loaded (%s) — skipping it", vd, e)
+                        continue
                     if ver is not None:
                         a["versions"][int(m.group(1))] = ver
         # §6.3/§4.4: staged memory copies a crash abandoned mid-swap. Nothing is
@@ -950,6 +965,26 @@ class Store:
                 log.warning("dropping malformed trigger %r", t)
         return out
 
+    @staticmethod
+    def _mapping_entries(raw: Any, vd: Path, what: str) -> list[dict]:
+        """§5 lenient version read for nested manifest lists (`packages`, a
+        step's `secrets`/`agents`): entries that aren't mappings are dropped
+        with a warning — a hand-edited `packages: [requests]` would otherwise
+        crash every /state through the §4.1 problems audit."""
+        if not isinstance(raw, list):
+            if raw:
+                log.warning("version folder %s: %s isn't a list — reading it as none (%r)",
+                            vd, what, raw)
+            return []
+        out = []
+        for e in raw:
+            if isinstance(e, dict):
+                out.append(e)
+            else:
+                log.warning("version folder %s: dropping a %s entry that isn't a mapping (%r)",
+                            vd, what, e)
+        return out
+
     def _load_version_folder(self, vd: Path) -> dict | None:
         """None when the folder's manifest can't be read (unparsable, or a root
         that isn't a mapping): §5 says such a version is absent, never an empty
@@ -970,6 +1005,16 @@ class Store:
                 # can't name a script — skipped, never a crash.
                 log.warning("version folder %s: skipping a step entry that isn't a mapping (%r)", vd, s)
                 continue
+            s = dict(s)
+            if s.get("file") is not None and not isinstance(s["file"], str):
+                # §5 lenient load: a non-string `file` reads as no script file
+                # (the automation still loads), never a TypeError at startup.
+                log.warning("version folder %s: step file %r isn't a string — "
+                            "reading it as no script file", vd, s["file"])
+                s["file"] = None
+            for key in ("secrets", "agents"):
+                if key in s:
+                    s[key] = self._mapping_entries(s[key], vd, f"step {key}")
             code = ""
             f = vd / (s.get("file") or "")
             # is_file(): a missing/empty `file` key resolves to the version dir
@@ -994,7 +1039,7 @@ class Store:
             # value keys inside the definitions — strip at the read seam, never
             # rewrite on disk (a frozen old version is never written again).
             "params": strip_param_values(meta.get("params")),
-            "packages": meta.get("packages", []) or [],
+            "packages": self._mapping_entries(meta.get("packages", []) or [], vd, "packages"),
             "steps": steps,
             "spec": md_to_blocks(spec_md),
             # §21.4 (2026-09-07): a folder written by v0.6.0 through v0.11.1 may
@@ -1059,7 +1104,7 @@ class Store:
         # fills every map, instead of re-scanning the whole table once per
         # automation (the per-automation `_latest_exec` stays for the
         # incremental callers, which rescan a single automation).
-        latest_by_automation: dict[str, dict] = {}
+        latest_by_automation: dict[str, tuple[datetime, dict]] = {}
         for h in self.execs.values():
             exec_ids.setdefault(h["automation_id"], set()).add(h["id"])
             # §4.1 `live` is every in-progress execution, not just the newest —
@@ -1068,13 +1113,19 @@ class Store:
                 live.setdefault(h["automation_id"], set()).add(h["id"])
             if self.never_ran(h) or is_test(h):
                 continue
+            # §5: ordered by the PARSED stamp, exactly like `_latest_exec` — a
+            # raw string compare would rank a space-form stamp against a
+            # T-form one by character, not by time. Unparsable is never latest.
+            dt = lenient_local(h["started_at"]) if h["started_at"] else None
+            if dt is None:
+                continue
             best = latest_by_automation.get(h["automation_id"])
             # `>`, not `>=`: `max` keeps the first of equal keys in iteration
             # order, and this pass must order identically.
-            if best is None or (h["started_at"] or "") > (best["started_at"] or ""):
-                latest_by_automation[h["automation_id"]] = h
+            if best is None or dt > best[0]:
+                latest_by_automation[h["automation_id"]] = (dt, h)
         for a in self.autos.values():
-            latest = latest_by_automation.get(a["id"])
+            latest = (latest_by_automation.get(a["id"]) or (None, None))[1]
             a["_latest"] = latest
             a["_last_status"] = latest["status"] if latest else "none"
             a["_last_exec_at"] = latest["started_at"] if latest else None
@@ -1554,7 +1605,9 @@ class Store:
         except (OSError, UnicodeDecodeError):
             return []
         out = []
-        for line in text.splitlines():
+        # §5: split on LF only — splitlines() would also break a record on a
+        # raw U+2028/U+2029/U+0085 that json.dumps(ensure_ascii=False) leaves in.
+        for line in text.split("\n"):
             if not line.strip():
                 continue
             try:
@@ -2068,7 +2121,11 @@ class Store:
             # polls at 1 Hz.
             raw, since_done = self._log_lines(p, tail, since)
             if raw is None:
-                raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                # §5: split on LF only, like the fast paths — splitlines()
+                # would also break a record on a raw U+2028/U+2029/U+0085.
+                raw = p.read_text(encoding="utf-8", errors="replace").split("\n")
+                if raw and raw[-1] == "":
+                    raw.pop()  # the final line's own newline
         except OSError:
             return []
         if since_done:
@@ -2191,43 +2248,59 @@ class Store:
         # live log append for the whole delete. Under the lock the dir is
         # renamed aside — instant, and the record is gone from disk the moment
         # the lock is released, which is all any reader can observe.
-        with self.lock:
-            aside = self.executions_dir() / f"{self.DELETED_PREFIX}{execution_id}"
-            shutil.rmtree(aside, ignore_errors=True)
-            try:
-                self.exec_dir(execution_id).rename(aside)
-            except FileNotFoundError:
-                aside = None  # no directory on disk (a header-only row)
-            except OSError as e:
-                # §19: same rule as the automation delete — the header stays in
-                # the index (and in the DB) when its directory couldn't go.
-                log.warning("deleting %s failed: %s", self.exec_dir(execution_id),
-                            e.strerror or e)
-                raise
-            h = self.execs.pop(execution_id, None)
-            self.execdb.delete(execution_id)
-            # list(): a copy of the keys, so the filter can't trip over a
-            # concurrent insert between the two lock acquisitions.
-            for k in [k for k in list(self._log_counts) if k[0] == execution_id]:
-                self._log_counts.pop(k, None)
-            # Keep `_latest` honest inside the mutator — no caller should have
-            # to remember to recompute after deleting.
-            if h:
-                a = self.autos.get(h["automation_id"])
-                if a is not None:
-                    a.setdefault("_exec_ids", set()).discard(execution_id)
-                if a and (a.get("_latest") or {}).get("id") == execution_id:
-                    latest = self._latest_exec(a["id"])
-                    a["_latest"] = latest
-                    a["_last_status"] = latest["status"] if latest else "none"
-                    a["_last_exec_at"] = latest["started_at"] if latest else None
-                if is_test(h):
-                    # §5 retention: every test-record deletion passes through
-                    # here, and the §11 TEST card must not link to a record
-                    # that is gone.
-                    self._drop_draft_test(self.draft_dir(a), execution_id)
-        if aside is not None:
-            self._reap_later(aside)
+        aside = None
+        try:
+            with self.lock:
+                aside = self.executions_dir() / f"{self.DELETED_PREFIX}{execution_id}"
+                shutil.rmtree(aside, ignore_errors=True)
+                try:
+                    self.exec_dir(execution_id).rename(aside)
+                except FileNotFoundError:
+                    aside = None  # no directory on disk (a header-only row)
+                except OSError as e:
+                    aside = None  # nothing was moved aside
+                    # §19: same rule as the automation delete — the header stays in
+                    # the index (and in the DB) when its directory couldn't go.
+                    log.warning("deleting %s failed: %s", self.exec_dir(execution_id),
+                                e.strerror or e)
+                    raise
+                # §5: the index row goes before the in-memory pop, and the
+                # derived bookkeeping runs in `finally` — a database failure
+                # after the directory moved aside never leaves the session
+                # pointing at a record that is gone.
+                try:
+                    self.execdb.delete(execution_id)
+                finally:
+                    self._forget_execution(execution_id)
+        finally:
+            if aside is not None:
+                self._reap_later(aside)
+
+    def _forget_execution(self, execution_id: str) -> None:
+        """The in-memory half of `delete_execution`: pop the header and keep
+        the derived bookkeeping (`_log_counts`, `_exec_ids`, `_latest`) honest.
+        Caller holds the lock."""
+        h = self.execs.pop(execution_id, None)
+        # list(): a copy of the keys, so the filter can't trip over a
+        # concurrent insert between the two lock acquisitions.
+        for k in [k for k in list(self._log_counts) if k[0] == execution_id]:
+            self._log_counts.pop(k, None)
+        # Keep `_latest` honest inside the mutator — no caller should have
+        # to remember to recompute after deleting.
+        if h:
+            a = self.autos.get(h["automation_id"])
+            if a is not None:
+                a.setdefault("_exec_ids", set()).discard(execution_id)
+            if a and (a.get("_latest") or {}).get("id") == execution_id:
+                latest = self._latest_exec(a["id"])
+                a["_latest"] = latest
+                a["_last_status"] = latest["status"] if latest else "none"
+                a["_last_exec_at"] = latest["started_at"] if latest else None
+            if is_test(h):
+                # §5 retention: every test-record deletion passes through
+                # here, and the §11 TEST card must not link to a record
+                # that is gone.
+                self._drop_draft_test(self.draft_dir(a), execution_id)
 
     def _drop_draft_test(self, container: Path, execution_id: str) -> None:
         """§5: the draft container's `test.yaml` goes with the §11 test
@@ -2293,9 +2366,12 @@ class Store:
             # §5: each automation's latest real execution (the §4.1 lastStatus
             # population — the `_latest_exec` rule) is exempt whatever its
             # age: it is the §4.1 overdue baseline and the §4.3 interval
-            # anchor, and deleting it would reset both to created_at.
+            # anchor, and deleting it would reset both to created_at. Only for
+            # automations still in the store, read off their own `_exec_ids`
+            # index: a deleted automation has no baseline to protect (and no
+            # index — `_latest_exec` would fall back to a full-table scan).
             exempt = set()
-            for automation_id in {h["automation_id"] for h in self.execs.values()}:
+            for automation_id in list(self.autos):
                 latest = self._latest_exec(automation_id)
                 if latest is not None:
                     exempt.add(latest["id"])
@@ -2933,6 +3009,16 @@ class Store:
         base = (lenient_local(a.get("_last_exec_at")) if a.get("_last_exec_at") else None) \
             or lenient_local(a.get("created_at"))
         return base.astimezone().replace(tzinfo=None) if base else None
+
+    def run_baseline_instant(self, a: dict) -> datetime | None:
+        """§4.3 the same run baseline as `run_baseline`, as the aware UTC
+        instant the run really started — the interval anchor reaches the
+        scheduler this way, never as a naive local wall-clock time round-tripped
+        back (which would resolve a run inside a fall-back hour's repeated
+        readings to the later one and push the next occurrence out by an hour)."""
+        base = (lenient_local(a.get("_last_exec_at")) if a.get("_last_exec_at") else None) \
+            or lenient_local(a.get("created_at"))
+        return base.astimezone(UTC) if base else None
 
     def overdue(self, a: dict, now: datetime | None = None) -> bool:
         """§4.1 overdue, shared by problems_json and the §6 scheduler sweep:

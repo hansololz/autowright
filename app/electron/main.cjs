@@ -599,6 +599,10 @@ function showApp(hash) {
   // one flag that knows a load really succeeded (isLoading() reads false
   // between a failed navigation and the 1 s retry, and the deep link used to
   // be sent into that gap and lost).
+  // §9: no window is created once a quit has begun: a relaunching update's
+  // second-instance (or a deep link) mid-quit would leave one the quit then
+  // has to fight.
+  if (quitting) return
   if (!win) createWindow(hash)
   else if (hash) {
     if (winLoaded) win.webContents.send('open-target', hash)
@@ -808,6 +812,8 @@ function repositionPanel() {
 }
 
 function togglePanel() {
+  // §9: no panel is created once a quit has begun (before-quit destroyed it).
+  if (quitting) return
   if (panel && panel.isVisible()) { panel.hide(); return }
   if (Date.now() - panelHiddenAt < 250) return
   if (!panel) {
@@ -838,7 +844,16 @@ function togglePanel() {
     hardenWindow(panel)
     const w = panel
     w.on('blur', () => { panelHiddenAt = Date.now(); if (!w.isDestroyed()) w.hide() })
-    panel.on('closed', () => { panel = null })
+    // §13: only this panel's own close clears the reference; an old panel's
+    // late `closed` after a destroy-then-recreate must not wipe the live one.
+    w.on('closed', () => { if (panel === w) panel = null })
+    // §13: a dead renderer would leave the tray showing a blank panel forever;
+    // destroy it so the next tray click builds a fresh one.
+    w.webContents.on('render-process-gone', (_e, details) => {
+      if (panel !== w) return
+      appLog(`panel: renderer process gone (${details?.reason || 'unknown'})`)
+      destroyPanel()
+    })
   }
   const pt = screen.getCursorScreenPoint()
   panelAnchor = { pt, display: screen.getDisplayNearestPoint(pt) }
@@ -883,6 +898,14 @@ async function cliStatus() {
     return { state: 'missing', path: shim, onPath }
   }
   if (!current.includes(SHIM_MARKER)) return { state: 'foreign', path: shim, onPath }
+  // §3: ours but not executable (a write over an existing file keeps its old
+  // mode): heal in place, the same probe-time heal a stale-interpreter shim
+  // gets. A failed chmod only logs: the next status read retries it.
+  try {
+    if ((fs.statSync(shim).mode & 0o100) === 0) fs.chmodSync(shim, 0o755)
+  } catch (e) {
+    appLog(`cli-status: couldn't heal ${shim}: ${e?.message || e}`)
+  }
   if (!python || current === shimText(python)) return { state: 'installed', path: shim, onPath }
   // Ours but pointing elsewhere: heal in place (§3 — a user-owned file
   // rewrites without a directory write). A failed rewrite only logs: the
@@ -914,6 +937,9 @@ function cliInstall() {
   try {
     fs.mkdirSync(path.dirname(shim), { recursive: true })
     fs.writeFileSync(shim, shimText(python), { mode: 0o755 })
+    // `mode` only applies where writeFileSync creates the file: a write over
+    // an existing shim keeps its old mode, so set it after every write.
+    fs.chmodSync(shim, 0o755)
     appLog(`cli-install: CLI installed at ${shim}`)
     return { ok: true }
   } catch (e) {
@@ -976,7 +1002,11 @@ function revealRoots() {
 
 function insideRevealRoots(abs) {
   return revealRoots().some((root) => {
-    const r = path.resolve(root)
+    // The candidate is a real path (reveal-path resolves symlinks first), so
+    // the roots are compared as real paths too: a root that sits behind a
+    // symlink (macOS /var -> /private/var) must still match its own files.
+    let r = path.resolve(root)
+    try { r = fs.realpathSync(r) } catch { /* a missing root keeps its resolved spelling */ }
     return abs === r || abs.startsWith(r + path.sep)
   })
 }
@@ -985,9 +1015,15 @@ ipcMain.handle('reveal-path', async (_e, p) => {
   if (typeof p !== 'string' || !p) return
   // `..` is collapsed here, so a traversal cannot dress itself up as a path
   // under one of the roots.
-  const abs = path.resolve(p === '~' || p.startsWith('~/')
+  const resolved = path.resolve(p === '~' || p.startsWith('~/')
     ? path.join(os.homedir(), p.slice(1))
     : p)
+  // §9: the root check and the directory/extension decision run on the real
+  // path, so a symlink planted inside the executions dir (a step script could
+  // write one) can't point a reveal outside the roots or at a bundle. A path
+  // that can't be resolved is a no-op.
+  let abs
+  try { abs = fs.realpathSync(resolved) } catch { return }
   if (!insideRevealRoots(abs)) {
     // The data dir moves (§5), so a miss may just mean our cached copy is one
     // poll behind — refresh once, then give up.
@@ -1276,6 +1312,10 @@ async function fetchUpdateState() {
 // of its events (a hand-off it silently drops) — without the give-up timer
 // the §9.4 About page would wait on this promise forever. Resolves null on
 // staged, the error text otherwise.
+// The version Squirrel staged this run: downloadUpdate records it on an ok
+// staging; null until one is staged.
+let stagedVersion = null
+
 function stageWithSquirrel(updater) {
   return new Promise((resolve) => {
     if (updater.squirrelDownloadedUpdate) return resolve(null)
@@ -1311,11 +1351,18 @@ async function downloadUpdate() {
     const result = await updater.checkForUpdates()
     const version = String(result?.updateInfo?.version ?? '')
     if (!isNewerVersion(version, app.getVersion())) return { error: 'no update available' }
+    // §3 (macOS): Squirrel already staged a different version this run, and
+    // electron-updater's squirrelDownloadedUpdate flag never resets, so staging
+    // would "succeed" on that flag and install the older staged bundle.
+    if (plat.UPDATER === 'mac' && stagedVersion !== null && stagedVersion !== version) {
+      return { error: 'Restart to finish the update you already downloaded.' }
+    }
     await updater.downloadUpdate(result?.cancellationToken)
     win?.webContents.send('update-progress', 100)
     if (plat.UPDATER === 'mac') {
       const error = await stageWithSquirrel(updater)
       if (error) return { error }
+      stagedVersion = version
     }
     return { ok: true }
   } catch (err) {
@@ -1389,6 +1436,15 @@ ipcMain.handle('update-install', async () => {
     appLog(`update: install refused: ${error}`)
     return { error }
   }
+  // §3: an ok answer arms a 10 s check. MacUpdater with nothing staged
+  // registers a listener and returns, so no quit may ever begin; clear uiQuit
+  // then, or the next Cmd+Q would be a UI-only quit that leaves the backend
+  // running.
+  setTimeout(() => {
+    if (quitting) return
+    uiQuit = false
+    appLog('update-install: no quit began within 10 s')
+  }, 10_000).unref()
   return { ok: true }
 })
 
@@ -1740,6 +1796,7 @@ app.whenReady().then(() => {
   // §13: a minimized window is restored before it is shown, the same rule the
   // deep-link and second-instance paths follow.
   app.on('activate', () => {
+    if (quitting) return
     if (win === null) createWindow()
     else if (winLoaded) { if (win.isMinimized()) win.restore(); win.show(); win.focus() }
   })

@@ -119,9 +119,14 @@ version that writes the new shape, and the oldest shape still read.
   (not a uuid-shaped directory, never swept). The orphan sweep runs only after the
   migration has named the rows; a `sources.yaml` that exists but can't be parsed migrates
   nothing (warning), loads a fresh writable table (the built-in row seeded as usual), and
-  **skips the orphan sweep for that session** so the old copies survive until the user
-  sorts the file out — never the read-only 409 degradation, which is for a corrupt
-  *current* table. First version writing the new shape: unchanged (the
+  **skips the orphan sweep on every load while that unparseable `sources.yaml` still
+  exists beside the table** — not only the first session: the seeded table is saved, so the
+  next launch takes the ordinary branch, and a one-session skip would have swept the copies
+  on the second launch (2026-10-13 fix). The old copies therefore survive until the user
+  sorts the file out; a `sources.yaml` that becomes readable (or is removed) once the table
+  exists is not re-migrated — re-reading it would resurrect catalogs the user has since
+  removed — so the sweep then resumes. Never the read-only 409 degradation, which is for a
+  corrupt *current* table. First version writing the new shape: unchanged (the
   next release after 2026-09-11); oldest shape still read: v0.11.4 (`sources.yaml`).
   Fixture test: `tests/test_marketplace.py::test_v0_11_4_sources_yaml_migrates_to_marketplaces_yaml`.
 - **2026-09-11 - `marketplaces/` store added (§22).** A new directory under the §5 data

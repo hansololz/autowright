@@ -134,6 +134,9 @@ interface Model {
   loadExecution(executionId: string): Promise<'ok' | 'gone' | 'error'>
   loadExecLogs(executionId: string, step?: number, attempt?: number): Promise<void>
   loadAuto(automationId: string, opts?: { insert?: boolean }): Promise<void>
+  // §19: the page that loaded an id's full record forgets it on unmount, so
+  // the finish- and change-triggered refetches stay bounded to open pages.
+  releaseFull(automationId: string): void
   beginTest(executionId: string): void
   clearTest(): void
 }
@@ -244,8 +247,14 @@ let refreshPending = false
 // §19 full records: ids this client fetched through GET /automations/{id}
 // (loadAuto) — the detail page and the editor. Tracked here, never inferred
 // from a row's fields: /state rows carry the full fields too. A delete drops
-// the id.
+// the id, and so does releaseFull when the page holding it unmounts.
 const fullLoaded = new Set<string>()
+
+// §19 per-id release counter, bumped by releaseFull. A GET /automations/{id}
+// captures it when issued and re-adds the id to fullLoaded only if no release
+// happened while it was on the wire — an in-flight load never undoes a
+// page's unmount.
+const fullReleases = new Map<string, number>()
 
 // §19 per-id ordering: the newest GET /automations/{id} issued for an id wins —
 // an older response resolving later (a finish refetch slowed by the memory
@@ -868,8 +877,10 @@ export const useStore = create<Model>((set, get) => ({
   },
 
   async loadAuto(automationId, opts) {
-    const sequence = (loadAutoSequence.get(automationId) ?? 0) + 1
+    const previous = loadAutoSequence.get(automationId) ?? 0
+    const sequence = previous + 1
     loadAutoSequence.set(automationId, sequence)
+    const releases = fullReleases.get(automationId) ?? 0
     try {
       const a = await api.getAutomation(automationId)
       // §19 per-id ordering: a newer GET for this id was issued while this one
@@ -882,13 +893,25 @@ export const useStore = create<Model>((set, get) => ({
       // back. Only the creator — which knows the row is new — asks for the
       // insert, and it is the one caller the list ordering can't come from.
       if (!held && !opts?.insert) return
-      fullLoaded.add(automationId)
+      // §19: a page that let go of this id while the GET was on the wire
+      // released it; the record still lands, the tracking does not come back.
+      if ((fullReleases.get(automationId) ?? 0) === releases) fullLoaded.add(automationId)
       set({
         automations: held
           ? automations.map((x) => (x.id === automationId ? a : x))
           : [...automations, a],
       })
-    } catch { /* deleted */ }
+    } catch {
+      // Deleted, or the backend did not answer. §19: a failed newest GET
+      // hands its slot back, so an older response still in flight can land
+      // instead of leaving the record stale.
+      if (loadAutoSequence.get(automationId) === sequence) loadAutoSequence.set(automationId, previous)
+    }
+  },
+
+  releaseFull(automationId) {
+    fullLoaded.delete(automationId)
+    fullReleases.set(automationId, (fullReleases.get(automationId) ?? 0) + 1)
   },
 
   beginTest(executionId) {

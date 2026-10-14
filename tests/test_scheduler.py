@@ -88,7 +88,7 @@ def _record_fires(monkeypatch):
 
     fires = []
     monkeypatch.setattr(sched_mod, "fire_trigger",
-                        lambda store, engine, a, t: fires.append((a["id"], t["id"])) or True)
+                        lambda store, engine, a, t, **_: fires.append((a["id"], t["id"])) or True)
     return fires
 
 
@@ -925,7 +925,7 @@ def test_one_automations_firing_failure_never_stops_the_tick(store, monkeypatch)
     engine, sched = _mk_clocked(store, clock)
     fired = []
 
-    def boom(store, engine, a, t):
+    def boom(store, engine, a, t, **_):
         if a["name"] == "Bad":
             raise OSError("disk on fire")
         fired.append(a["name"])
@@ -992,7 +992,7 @@ def test_scheduler_warns_once_on_timezone_rewind(store, monkeypatch, caplog):
     fires = []
     from autowright import scheduler as sched_mod
     monkeypatch.setattr(sched_mod, "fire_trigger",
-                        lambda store, engine, a, t: fires.append(t["id"]) or True)
+                        lambda store, engine, a, t, **_: fires.append(t["id"]) or True)
     store.create_automation(make_version(), "Zoney", None, triggers=[
         {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 13 * * *"},
         # a disabled trigger could never fire — it must not add rewind noise

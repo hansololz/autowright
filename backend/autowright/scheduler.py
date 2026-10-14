@@ -153,10 +153,10 @@ class Scheduler:
         # §4.3 interval anchor: the automation's run baseline, read once per
         # tick (the same baseline §4.1 overdue uses) — never stored.
         run_baseline = self.store.run_baseline(a)
-        # §4.3: interval math runs on instants — the naive local run baseline
-        # read back as the instant it was (fold resolved against now_utc).
-        run_baseline_utc = (triggerlib.local_instant(run_baseline, now_utc)
-                            if run_baseline is not None else None)
+        # §4.3: interval math runs on instants — the baseline reaches the
+        # scheduler as the run's UTC instant, never a naive local time
+        # round-tripped back (a fall-back fold would resolve to the later reading).
+        run_baseline_utc = self.store.run_baseline_instant(a)
         for t in list(a["triggers"]):  # consume_trigger below mutates the list
             key = (a["id"], t["id"])
             since = triggerlib.enabled_since(t)
@@ -253,9 +253,10 @@ class Scheduler:
             # slept through"; the fired execution covers the rest, a coalesced
             # one-shot included.
             due.sort(key=lambda p: p[0])
-            self._fire(a, due[0][1])
+            attempted = self._fire(a, due[0][1])
             consumed = False
-            for _, t in due:
+            # §4.3: a firing the shutting-down engine refused consumes nothing.
+            for _, t in (due if attempted else ()):
                 if t["kind"] == "time":
                     self.store.consume_trigger(a, t["id"])
                     consumed = True
@@ -296,7 +297,10 @@ class Scheduler:
             except Exception:  # noqa: BLE001
                 log.exception("recording a dropped occurrence on %r failed", a.get("name"))
 
-    def _fire(self, a: dict, t: dict) -> None:
+    def _fire(self, a: dict, t: dict) -> bool:
+        """Fire `t` on `a`; False only when the engine refused the firing for
+        shutdown (§4.3: nothing attempted, so no one-shot is consumed). The
+        stale-snapshot returns below keep the consume-as-before answer."""
         # The tick evaluated a snapshot taken outside the lock - a PATCH landing
         # mid-tick may have removed or disabled this trigger, and an occurrence
         # the API already confirmed off must not fire from the stale dict.
@@ -305,14 +309,19 @@ class Scheduler:
             # firing against the stale snapshot would create a spurious record
             # (and the engine would re-create a ghost directory).
             if self.store.autos.get(a["id"]) is not a:
-                return
+                return True
             cur = next((x for x in a["triggers"] if x["id"] == t["id"]), None)
             if cur is None or not cur["enabled"]:
-                return
+                return True
         # §6: a cron/one-shot/app-start firing with no free slot is skipped, never
         # queued — only message firings queue (a due one-shot is still consumed by
         # the caller).
-        fire_trigger(self.store, self.engine, a, t)
+        outcome: dict = {}
+        fire_trigger(self.store, self.engine, a, t, outcome=outcome)
+        # §4.3: a firing the shutting-down engine refused was never attempted
+        # — the caller consumes nothing, so the one-shot fires at the next
+        # start's wake catch-up instead of vanishing with no record.
+        return not outcome.get("shutdown_refused")
 
     def _overdue_sweep(self, autos: list[dict], now: datetime) -> None:
         """§6 overdue sweep: notify an automation observed §4.1 overdue at two

@@ -412,6 +412,9 @@ class _WorkdirClient:
             return [self.auto]
         if method == "GET" and path == f"/automations/{self.auto['id']}":
             return self.auto
+        if method == "GET" and path == f"/draft/{self.auto['id']}":
+            # §19 draft container: push reads it for a building §8 job (§20)
+            return {"draft": self.auto.get("draft"), "job": None}
         if method == "GET" and path == "/agents":
             return [{"id": "ag1", "name": "Fast local", "harness": "OpenCode",
                      "model": "qwen3"}]

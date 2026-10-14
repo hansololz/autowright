@@ -94,7 +94,16 @@ remain plain dicts (§2).
   so a transient write error never leaves an automation silently refusing every firing)
   and `engine.start` refuses admissions for it — a
   scheduler tick, listener dispatch, or app-start firing landing mid-delete would otherwise
-  escape the wait set and re-create the tree after the rmtree (the scheduler's own
+  escape the wait set and re-create the tree after the rmtree. The mid-delete check and a
+  drafting job's registration are one critical section: `POST /drafts` re-checks the flag
+  when it registers the job and cancels it right there if a DELETE landed in the gap (its
+  context build — log reads, RECENT EXECUTIONS — can take seconds), and `POST /tests`
+  answers 409 for an automation being deleted rather than running step code during the
+  delete window. `DELETE /draft/{owner}` likewise bumps the owner's **draft generation**;
+  a `POST /drafts` that read the older generation before building its context is refused
+  at registration (409, "the draft was discarded"), so a discard can never miss a job that
+  was still being registered and later re-attach its outcome to the next draft (the
+  scheduler's own
   one-shot consumption carries the same registered-object guard for the same reason, and
   so does **every store write into an automation directory** — patch, new version, restore,
   draft and chat saves, draft open, memory clear, the §6.3 snapshot operations: a write
@@ -602,7 +611,8 @@ remain plain dicts (§2).
   the call can never be cancelled twice or missed by both) ·
   `POST /executions/{id}/retry` (§7 in-place retry; 409 unless failed and not live) ·
   `POST /executions/{id}/skip-step` `{ index }` (§7 skip; 409 unless that step is executing)
-- `GET/POST /agents` · `PATCH/DELETE /agents/{id}` · POST and a PATCH whose merged result
+- `GET/POST /agents` · `PATCH/DELETE /agents/{id}` (DELETE: §5 per-automation re-point —
+  a failed automation write is logged and skipped, both events still publish) · POST and a PATCH whose merged result
   would change the agent's effective §4.7 grant name both enforce the §4.7 uniqueness rule —
   a case-insensitive collision with another agent's grant name answers 422 ("an agent named X
   already exists - agent names must be unique"); a PATCH that leaves the grant name unchanged
@@ -686,6 +696,10 @@ remain plain dicts (§2).
   Channels, per provider — each
   vendor's own suggested install method, never sudo, never Homebrew (a vendor script adding
   its bin dir to the shell profile is vendor behavior we accept):
+  Every `curl … | sh` channel below runs the script **from a file**: the installer is
+  downloaded first (curl's own exit code and error line decide — offline, 404, TLS, a
+  stream cut off mid-way are all reported as the install's failure carrying curl's line),
+  then executed; a pipe would run an empty or partial script, exit 0, and report success.
   Claude Code — the official installer script (`curl -fsSL https://claude.ai/install.sh |
   bash`), lands in `~/.local/bin/claude` (the script only prints PATH instructions, so the
   terminal-access guarantee closes the install), indeterminate ·
@@ -913,9 +927,18 @@ already neutralize. The provider config and
   older response resolving later (a finish-triggered refetch slowed by the memory walk,
   overtaken by a PATCH's refetch) is dropped rather than regressing `paramValues`,
   triggers, or versions. Every renderer request carries a **client timeout** (30 s;
-  660 s for the install/import/delete routes, like the §20 CLI) — a wedged-but-listening
+  660 s for the install/import/delete routes and for the §22 marketplace routes that read
+  the network or a slow disk — add, per-source refresh, refresh-all, the entry archive,
+  catalog create and save — like the §20 CLI; 90 s for marketplace images, whose backend
+  slot wait plus fetch can reach that) — a wedged-but-listening
   backend fails requests instead of hanging every surface and pinning the coalesced
-  refresh. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
+  refresh. A client timeout or a connection failure surfaces as plain words — "The backend
+  didn't answer in time." / "The backend isn't reachable." — never the browser's "signal
+  timed out" or "Failed to fetch". A newer `GET /automations/{id}` that fails hands its
+  slot back (the per-id sequence rolls back to the last one that landed), so an older
+  response still in flight can land instead of leaving the record stale. The renderer
+  forgets an id's full-record status when the last page holding it unmounts, so the
+  finish-triggered and change-triggered refetches stay bounded to the pages open now. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
   successful open), re-reading `backend.json` before each attempt, and re-`GET /state` on
   reconnect (a client page holding a *full* automation record — one the client fetched
   through `GET /automations/{id}` itself, tracked as a set of ids and never inferred from

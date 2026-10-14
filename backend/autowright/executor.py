@@ -382,6 +382,24 @@ def fetch_page(url: str) -> str:
     raise RuntimeError(f"couldn't fetch {url}: {last_err}")
 
 
+# §7: the automation's secret values (plus each substantive line of a
+# multi-line value, §4.8) a log-piece cut must never split — set in `main()`.
+_cut_guards: list[str] = []
+
+
+def _build_cut_guards(scan: dict[str, str]) -> list[str]:
+    """§7: every value of the scan map, plus each substantive line of a
+    multi-line value — the same probes `scan_outbound` matches."""
+    guards: list[str] = []
+    for value in scan.values():
+        if not value:
+            continue
+        guards.append(value)
+        if "\n" in value:
+            guards.extend(p for p in value.splitlines() if substantive_probe(p))
+    return guards
+
+
 class _LineWriter(io.TextIOBase):
     MAX_LINE = 131_072  # a newline-free stream must not grow the buffer unbounded
 
@@ -393,11 +411,27 @@ class _LineWriter(io.TextIOBase):
         """One logical line as ≤ MAX_LINE pieces — every control line stays
         far under the engine's size-capped readline, so an oversize print is
         streamed in bounded chunks instead of arriving torn (and dropped as
-        unparsable JSON)."""
-        for start in range(0, len(text), self.MAX_LINE):
-            piece = text[start:start + self.MAX_LINE]
+        unparsable JSON). §7: a cut never falls inside an occurrence of a
+        secret value (`_cut_guards`) — the boundary moves back to just before
+        it, so the engine's redaction sees every occurrence whole."""
+        start = 0
+        while start < len(text):
+            end = min(start + self.MAX_LINE, len(text))
+            if end < len(text):
+                cut = end
+                for guard in _cut_guards:
+                    if len(guard) > self.MAX_LINE:
+                        continue
+                    # Any occurrence starting in this window straddles `end`.
+                    found = text.find(guard, max(start, end - len(guard) + 1), end + len(guard) - 1)
+                    if found != -1:
+                        cut = min(cut, found)
+                if cut > start:  # never an empty piece — cut at MAX_LINE then
+                    end = cut
+            piece = text[start:end]
             if piece.strip():
                 emit("log", kind=self.kind, text=piece)
+            start = end
 
     def write(self, s: str) -> int:  # type: ignore[override]
         self.buf += s
@@ -425,6 +459,8 @@ def main() -> int:
     # a wiring mistake that drops it must fail loudly here, not silently
     # narrow the outbound scan to the step's own secrets (fail closed).
     scan_secrets = ctx.pop("scan_secrets")
+    global _cut_guards
+    _cut_guards = _build_cut_guards(scan_secrets)
     # §6.2: declared packages live in the user-writable site-packages dir — the
     # bundled interpreter never has them installed directly.
     if ctx.get("site_packages"):

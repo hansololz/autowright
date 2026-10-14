@@ -382,7 +382,11 @@ its next occurrence. The field covers sleep only: a backend that was not running
 moment passed never catches up whatever the value (§6 - no startup catch-up queue), and a
 past one-shot found on disk at load is consumed unfired either way (only a *parsable* past `at`
 counts as spent — an unreadable `at`, such as an unquoted timestamp YAML loaded as a datetime,
-is dropped with the §5 malformed-trigger warning, never consumed silently). Storage: written to
+is dropped with the §5 malformed-trigger warning, never consumed silently). A due one-shot
+is consumed only when its firing was attempted — an execution started, or a skipped
+record written; a tick that meets the shutting-down engine (§7) consumes nothing, so the
+one-shot fires at the next start's wake catch-up instead of vanishing with no record.
+Storage: written to
 `automation.yaml` only when false - an absent key reads as true, so every trigger stored
 before the field existed keeps today's behavior (§21). The API serializes it explicitly on
 every cron/interval/time trigger (`runIfMissed: true | false`) and accepts it on the same
@@ -433,7 +437,10 @@ latest real execution (the §4.1 `lastStatus` population: `skipped`, `queued`, a
 records excluded; a run in progress counts; the run's trigger doesn't matter — a manual
 start, another trigger's firing, or this trigger's own last firing all reset the cadence),
 falling back to the automation's `created_at` if it never ran; a trigger stored without the
-stamp (hand-edited disk) anchors at the run baseline alone, like the §4.1 overdue rule. Its
+stamp (hand-edited disk) anchors at the run baseline alone, like the §4.1 overdue rule. The
+baseline reaches the scheduler as the run's UTC instant, never as a naive local wall-clock
+time round-tripped back (which would resolve a run inside a fall-back hour's repeated
+readings to the later one and push the next occurrence out by an hour). Its
 occurrences are `anchor + n × every` for `n ≥ 1`; because a firing starts a run, the anchor
 moves to that run's start and the next occurrence is one `every` after it — "every 6 hours
 since the last run". Consequences, all following from the anchor rule: a manual Execute

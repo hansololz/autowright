@@ -402,6 +402,23 @@ describe('applyEvent', () => {
     store.useStore.getState().applyEvent(finished('e3', { test: true }))
     expect(getAutomation).not.toHaveBeenCalled()
   })
+
+  it('releaseFull forgets the id — a later finish no longer refetches the full record (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    const row = { id: 'rel-a1', name: 'Auto', lastStatus: 'none', triggers: [], live: [] } as never
+    const finished = (id: string) =>
+      execEv('execution.finished', ex(id, 1, { status: 'cancelled', automationId: 'rel-a1' }), row)
+    store.useStore.setState({ automations: [row] })
+    getAutomation.mockResolvedValueOnce(row)
+    await store.useStore.getState().loadAuto('rel-a1')
+    getAutomation.mockClear()
+    store.useStore.getState().applyEvent(finished('r1'))
+    expect(getAutomation).toHaveBeenCalledTimes(1)
+    getAutomation.mockClear()
+    store.useStore.getState().releaseFull('rel-a1')
+    store.useStore.getState().applyEvent(finished('r2'))
+    expect(getAutomation).not.toHaveBeenCalled()
+  })
 })
 
 describe('applyEvent — ws.open reconnect counter (§19)', () => {
@@ -539,6 +556,22 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     landOld(auto('seq-a1', { paramValues: { n: 1 } }))
     await older
     expect((store.useStore.getState().automations[0] as { paramValues?: unknown }).paramValues).toEqual({ n: 2 })
+  })
+
+  it('a failed newest loadAuto hands its slot back — the older in-flight GET still lands (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [auto('roll-a1')] })
+    let landOld!: (v: unknown) => void
+    let failNew!: (e: unknown) => void
+    getAutomation.mockImplementationOnce(() => new Promise((r) => { landOld = r }) as never)
+    getAutomation.mockImplementationOnce(() => new Promise((_r, reject) => { failNew = reject }) as never)
+    const older = store.useStore.getState().loadAuto('roll-a1')
+    const newer = store.useStore.getState().loadAuto('roll-a1')
+    failNew(new Error('offline'))
+    await newer
+    landOld(auto('roll-a1', { paramValues: { n: 1 } }))
+    await older
+    expect((store.useStore.getState().automations[0] as { paramValues?: unknown }).paramValues).toEqual({ n: 1 })
   })
 
   it('loadAuto ordering is per id — another id\u2019s newer GET never drops this one', async () => {

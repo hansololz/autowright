@@ -442,8 +442,12 @@ def test_claude_recipe_pipes_official_installer_and_requires_binary(monkeypatch)
     monkeypatch.setattr(installer, "_ensure_login_path",
                         lambda emit: ensured.append(True))
     installer._install_claude(Recorder())
-    assert calls == [["/bin/bash", "-c",
-                      f"curl -fsSL {installer.CLAUDE_INSTALLER} | bash"]]
+    # §19: downloaded to a file first, then run from it — never piped
+    assert len(calls) == 2
+    script = calls[1][1]
+    assert calls[0] == ["/bin/bash", "-c",
+                        f"curl -fsSL -o {script} {installer.CLAUDE_INSTALLER}"]
+    assert calls[1] == ["/bin/bash", script]
     assert required == ["claude"]
     # the vendor script lands in ~/.local/bin but only prints PATH
     # instructions → §19 terminal-access guarantee runs
@@ -679,13 +683,17 @@ def test_opencode_recipe_pipes_installer_with_vendor_defaults(monkeypatch):
     calls = {}
 
     def fake_stream(cmd, emit, provider_id, env_extra=None):
+        calls.setdefault("download", cmd)
         calls["cmd"], calls["env"] = cmd, env_extra
 
     monkeypatch.setattr(installer, "_stream_shell", fake_stream)
     monkeypatch.setattr(installer, "_require", lambda b: calls.setdefault("req", b))
     installer._install_opencode(lambda **k: None)
-    assert calls["cmd"][:2] == ["/bin/bash", "-c"]
-    assert installer.OPENCODE_INSTALLER in calls["cmd"][2]
+    assert calls["download"][:2] == ["/bin/bash", "-c"]
+    assert installer.OPENCODE_INSTALLER in calls["download"][2]
+    # §19: the script runs from the downloaded file
+    assert calls["cmd"][0] == "/bin/bash"
+    assert calls["cmd"][1] in calls["download"][2]
     # §19: the live script ignores OPENCODE_INSTALL_DIR — vendor defaults only
     assert calls["env"] is None
     assert calls["req"] == "opencode"
@@ -695,6 +703,7 @@ def test_codex_recipe_pipes_official_installer_non_interactive(monkeypatch):
     calls = {}
 
     def fake_stream(cmd, emit, provider_id, env_extra=None):
+        calls.setdefault("download", cmd)
         calls["cmd"], calls["env"] = cmd, env_extra
 
     monkeypatch.setattr(installer, "_stream_shell", fake_stream)
@@ -703,8 +712,10 @@ def test_codex_recipe_pipes_official_installer_non_interactive(monkeypatch):
     monkeypatch.setattr(installer, "_ensure_login_path",
                         lambda emit: ensured.append(True))
     installer._install_codex(lambda **k: None)
-    assert calls["cmd"] == ["/bin/bash", "-c",
-                            f"curl -fsSL {installer.CODEX_INSTALLER} | sh"]
+    script = calls["cmd"][1]
+    assert calls["download"] == ["/bin/bash", "-c",
+                                 f"curl -fsSL -o {script} {installer.CODEX_INSTALLER}"]
+    assert calls["cmd"] == ["/bin/sh", script]
     # §19: no TTY on the backend — the script must never wait on a prompt
     assert calls["env"] == {"CODEX_NON_INTERACTIVE": "1"}
     assert calls["req"] == "codex"

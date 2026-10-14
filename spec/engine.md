@@ -520,7 +520,10 @@ directory **and** the declared `import` target present beside it — a `.dist-in
 module files a killed pip never finished copying counts as missing, so ensure can repair
 it instead of reporting installed forever; **any** version — the installed version is never compared against the manifest,
 which carries no version), pip runs only for missing distributions (installing the newest
-compatible wheel at that moment), and one process-wide lock serializes pip runs. An installed
+compatible wheel at that moment), and one process-wide lock serializes pip runs. pip's
+**exit**, not its pipes' EOF, ends the wait: a helper pip left holding the pipes gets a
+short drain after the exit and the real return code decides, so an install can't be
+reported as a timeout ten minutes after it succeeded while holding the pip lock. An installed
 distribution is never touched by ensure — upgrades happen only through the explicit §11 Update
 button — so an unattended automation never changes behavior because a library released
 overnight. Pip alone doesn't honor that with `--target` (it resolves against its own env and

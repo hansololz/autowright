@@ -268,6 +268,21 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
     `on_reply(text)` gets each §6.1 reply() call (None → replies are dropped).
     `state['proc']` holds the live Popen so a caller can cancel. `timeout_s`
     is the resolved §6 step limit (`step_timeout_for`); None = no watchdog."""
+    # Watchdog enforces the per-step timeout even when the step produces no
+    # output at all (a bare read loop would block forever on a silent hang).
+    # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
+    # Built before the spawn, so nothing fallible sits between the Popen and
+    # the try below.
+    timed_out = threading.Event()
+    pipe_closed = threading.Event()
+    # §7: set by this thread once the read loop is over; the exit watcher
+    # below only defuses the read end while it is not — and under the lock,
+    # so it can never dup2 over an fd the teardown already closed and the
+    # process reused.
+    read_done = threading.Event()
+    read_lock = threading.Lock()
+    watchdog = None
+    exit_watcher = None
     proc = subprocess.Popen(
         # §2 console-interpreter rule: never pythonw — with the hidden-console
         # spawn policy below, a step's own console children (tool calls)
@@ -290,28 +305,17 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         **_processes().session_kwargs(),
     )
     state["proc"] = proc
-    # §2 pipe-release contract: the log pipe is read through a releasable
-    # reader, so the kill paths below end a blocked read from their own
-    # threads without waiting for an EOF an escaped grandchild may never send.
-    reader = harness.PipeReader(proc.stdout)
-    # Watchdog enforces the per-step timeout even when the step produces no
-    # output at all (a bare read loop would block forever on a silent hang).
-    # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
-    timed_out = threading.Event()
-    pipe_closed = threading.Event()
-    # §7: set by this thread once the read loop is over; the exit watcher
-    # below only defuses the read end while it is not — and under the lock,
-    # so it can never dup2 over an fd the teardown already closed and the
-    # process reused.
-    read_done = threading.Event()
-    read_lock = threading.Lock()
-    watchdog = None
-    exit_watcher = None
-    # Everything past the spawn runs inside the try: the §3 on_spawn persist (a
-    # disk error) or the watchdog start (thread exhaustion) raising out here
-    # would leave the step group alive with its handle dropped and nothing left
-    # to kill it by — the finally below reaps it on every path.
+    reader = None
+    # Everything past the spawn runs inside the try: the reader construction
+    # (fd exhaustion), the §3 on_spawn persist (a disk error) or the watchdog
+    # start (thread exhaustion) raising out here would leave the step group
+    # alive with its handle dropped and nothing left to kill it by — the
+    # finally below reaps it on every path.
     try:
+        # §2 pipe-release contract: the log pipe is read through a releasable
+        # reader, so the kill paths below end a blocked read from their own
+        # threads without waiting for an EOF an escaped grandchild may never send.
+        reader = harness.PipeReader(proc.stdout)
         # §3 orphan recovery: hand the new group id (own session → pgid == pid)
         # to the engine so it lands on the persisted execution record.
         if state.get("on_spawn"):
@@ -511,7 +515,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             # persisting a log line) — never leave the group alive with no
             # handle to cancel it by.
             kill_step_group(proc)
-            reader.close()
+            if reader is not None:
+                reader.close()
             try:
                 proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
@@ -538,7 +543,10 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         # Both pipes close on EVERY path, not just the still-alive one: a normal
         # EOF exit used to leave the read end open until the garbage collector
         # got to it, leaking an fd per step on a long-lived backend.
-        reader.close()
+        if reader is not None:
+            reader.close()
+        else:  # the reader never got built — close the raw pipe it would own
+            _close_pipe(proc.stdout)
         _close_pipe(proc.stdin)
         state["proc"] = None
         state.pop("hard_kill", None)

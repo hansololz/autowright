@@ -88,6 +88,12 @@ def register_startup(callback) -> None:
     _startup_callbacks.append(callback)
 
 
+# §3 shutdown box (main.SHUTDOWN_GRACE_S, mirrored — api can't import main) and
+# the §7 cap on the lifespan's wait for swept live records to finalize.
+_SHUTDOWN_BOX_S = 5.0
+_SHUTDOWN_FINALIZE_CAP_S = 3.0
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     hub.bind_loop(asyncio.get_running_loop())
@@ -99,6 +105,7 @@ async def _lifespan(_: FastAPI):
         callback()
     hub.publish("automation.changed")
     yield
+    shutdown_started = time.monotonic()
     # §3: quiesce first — the work sources (scheduler, message listeners) stop
     # before anything is killed, so nothing can start an execution the kill
     # sweep below has already passed. Error-tolerant like the shutdown half.
@@ -122,6 +129,18 @@ async def _lifespan(_: FastAPI):
         await run_in_threadpool(engine.kill_all_live)
     except Exception:  # noqa: BLE001
         log.exception("shutdown: killing live step groups failed")
+    # §7: then wait — bounded, inside the §3 shutdown box — for the swept
+    # records' engine threads to finish, so their `interrupted` write lands
+    # before the process exits rather than racing it.
+    try:
+        with engine._lock:
+            live_ids = list(engine._live)
+        if live_ids:
+            remaining = _SHUTDOWN_BOX_S - (time.monotonic() - shutdown_started)
+            await run_in_threadpool(engine.wait_finished, live_ids,
+                                    max(0.0, min(_SHUTDOWN_FINALIZE_CAP_S, remaining)))
+    except Exception:  # noqa: BLE001
+        log.exception("shutdown: waiting for live executions to finish failed")
     # §3: drafting harnesses die with it too — a stopping backend must never
     # leave an agent harness session group running with nobody to collect it.
     try:
@@ -968,6 +987,13 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
     return {"version": n, "automation": _auto_json_locked(a)}
 
 
+# §19 draft generation: per owner (automation id, None = the pending slot),
+# bumped by `DELETE /draft/{owner}` under store.lock. A `POST /drafts` that
+# read an older generation before building its context is refused at
+# registration, so a discard never misses a job still being assembled.
+draft_generations: dict[str | None, int] = {}
+
+
 def _cancel_live_draft_work(container_id: str | None) -> list[str]:
     """§11/§19 draft settle: cancel the container's still-executing test and
     its still-building §8 drafting jobs — a settled draft never leaves a test
@@ -1071,10 +1097,14 @@ def delete_draft_container(owner: str) -> dict:
     a = _draft_owner(owner)
     # A refused settle must be side-effect free: check the 409 condition
     # before the cancels (the in-lock check below stays authoritative).
-    if a is not None:
-        with store.lock:
+    owner_id = a["id"] if a is not None else None
+    with store.lock:
+        if a is not None:
             _reject_live_draft_exec(a)
-    _cancel_live_draft_work(a["id"] if a is not None else None)  # §11/§19: discard settles the draft
+        # §19 draft generation: bumped before the cancels, so a POST /drafts
+        # registering after them sees the bump and cancels itself.
+        draft_generations[owner_id] = draft_generations.get(owner_id, 0) + 1
+    _cancel_live_draft_work(owner_id)  # §11/§19: discard settles the draft
     with store.lock:
         if a is not None:
             _reject_live_draft_exec(a)
@@ -1477,6 +1507,9 @@ def post_test(body: models.TestStart) -> dict:
     # ALL agents/secrets when the arrays are absent, edit mode to the
     # automation's grants.
     with store.lock:  # never walk a store collection unlocked (see _agent_or_404)
+        # §19 delete window: no step code runs for an automation mid-DELETE.
+        if auto is not None and auto.get("_deleting"):
+            raise HTTPException(409, "this automation is being deleted")
         enabled = body.enabledAgents
         if enabled is None:
             enabled = auto["enabled_agents"] if auto else [g["id"] for g in store.agents]
@@ -1692,11 +1725,14 @@ def post_draft(body: models.DraftJobStart) -> dict:
     # stale-automationId 404 on /tests) — never a silent fall-back to the
     # no-automation grant defaults below.
     auto = _auto_or_404(body.automationId) if body.automationId else None
-    if auto is not None:
-        with store.lock:
-            # §19: an automation mid-DELETE is already gone to every caller.
-            if auto.get("_deleting"):
-                raise HTTPException(404, "automation not found")
+    owner_id = auto["id"] if auto else None
+    with store.lock:
+        # §19 draft generation: read before the context build, compared again
+        # at registration below.
+        generation = draft_generations.get(owner_id, 0)
+        # §19: an automation mid-DELETE is already gone to every caller.
+        if auto is not None and auto.get("_deleting"):
+            raise HTTPException(404, "automation not found")
     current = body.current.plain() if body.current is not None else None
     if auto and current is None:
         current = auto["versions"][auto["current_version"]]
@@ -1769,7 +1805,20 @@ def post_draft(body: models.DraftJobStart) -> dict:
     job_id = draft_jobs.start(mode, agent, body.text, current, grants,
                               chat_history=body.chat, executions=executions,
                               pkg_state=pkg_state,
-                              owner_id=auto["id"] if auto else None)
+                              owner_id=owner_id)
+    # §19: the mid-delete check and the job's registration are one critical
+    # section — a DELETE (or a draft discard) landing while the context was
+    # being built cancels the job right here. The cancels run outside the
+    # lock: they kill processes.
+    with store.lock:
+        deleting = auto is not None and bool(auto.get("_deleting"))
+        discarded = draft_generations.get(owner_id, 0) != generation
+    if deleting:
+        draft_jobs.cancel_for(owner_id)
+        raise HTTPException(404, "automation not found")
+    if discarded:
+        draft_jobs.cancel(job_id)
+        raise HTTPException(409, "the draft was discarded")
     return {"jobId": job_id}
 
 
@@ -2070,11 +2119,13 @@ def patch_agent(agent_id: str, patch: models.AgentPatch) -> dict:
             updated["model"] = None
         agents = [updated if g is ag else g for g in store.agents]
         store.save_agents(agents, default_id)
-        ag.clear()
-        ag.update(updated)
+        # §5: replaced, never mutated in place — engine threads read agent
+        # dicts off-lock, and a clear-then-update would let a step observe
+        # an empty agent mid-execution.
+        store.agents = agents
         store.default_agent_id = default_id
     hub.publish("agents.changed")
-    return {**ag, "default": ag["id"] == store.default_agent_id}
+    return {**updated, "default": updated["id"] == store.default_agent_id}
 
 
 @app.delete("/agents/{agent_id}", dependencies=[Depends(auth)])
@@ -2093,16 +2144,27 @@ def delete_agent(agent_id: str) -> dict:
         store.save_agents(agents, default_id)
         store.agents = agents
         store.default_agent_id = default_id
-        for a in store.autos.values():
+        # §5: once agents.yaml has landed the agent is gone — the re-point is
+        # per-automation, so one unwritable automation yaml is logged and
+        # skipped and never strands the rest (or the events below).
+        repointed: list[dict] = []
+        for a in list(store.autos.values()):
             repoint: dict = {}
             if a["agent_id"] == agent_id:
                 repoint["agentId"] = default_id
             if agent_id in a["enabled_agents"]:
                 repoint["stepAgents"] = [x for x in a["enabled_agents"] if x != agent_id]
-            if repoint:
+            if not repoint:
+                continue
+            try:
                 store.patch_automation(a, repoint)
+            except Exception:  # noqa: BLE001 — logged and skipped (§5)
+                log.exception("agent delete: couldn't re-point automation %s", a["id"])
+                continue
+            repointed.append(a)
     hub.publish("agents.changed")
-    hub.publish("automation.changed")
+    for a in repointed:
+        _publish_auto_changed(a)
     return {"ok": True}
 
 
@@ -2934,8 +2996,14 @@ def set_data_path(body: models.DataPath) -> dict:
             store.settings = old_settings
             try:
                 store.save_settings()
-            finally:
-                store.load_all()
+            except BaseException:
+                # §5: the rollback write failed too — settings.yaml still names
+                # the new path, so a disk reload would half-switch. Re-assert
+                # the old path in memory and reopen the old index directly.
+                store.settings = old_settings
+                store.reopen_exec_index()
+                raise
+            store.load_all()
             raise
     # The new location may hold records a crashed backend left "executing" —
     # repair them here too, or the automation would be wedged in 409s. Outside
@@ -3047,8 +3115,10 @@ def _repair_stale_executing() -> None:
             full["agent_pgids"] = []
             full["status"] = "interrupted"
             full["note"] = full["note"] or "backend restarted mid-execution"
+            # §7: the same shape the shutdown path settles — executing and
+            # queued steps both become `interrupted`.
             for s in full["steps"]:
-                if s["status"] == "executing":
+                if s["status"] in ("executing", "queued"):
                     s["status"] = "interrupted"
                     for a in s.get("attempts", []):
                         if a["status"] == "executing":

@@ -1,6 +1,6 @@
 // Automation detail (§4.3/§4.4/§7, prototype "Automation detail" screen).
 // Thin page shell — the section cards live in ./detail/ (§17).
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
@@ -55,6 +55,10 @@ export default function AutomationDetail() {
   // their request is in flight — a double-click never fires twice.
   const [starting, setStarting] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // §7/§9.2 Fix with AI: the failed run may sit outside the §19 /state
+  // window, so its record is loaded before the editor opens; a second click
+  // while that load is in flight does nothing.
+  const fixLoading = useRef(false)
   const [specOpen, setSpecOpen] = useState(true)
   const [, setTick] = useState(0)
 
@@ -65,6 +69,13 @@ export default function AutomationDetail() {
   useEffect(() => {
     if (automationId) void loadAuto(automationId)
   }, [automationId, reconnects])
+  // §19: forget the full-record status for the id this page loaded once it
+  // lets go of it (unmount, or detail → detail), so finish- and
+  // change-triggered refetches stay bounded to the pages open now.
+  useEffect(() => {
+    if (!automationId) return
+    return () => useStore.getState().releaseFull(automationId)
+  }, [automationId])
   // Detail → detail keeps this page mounted, so every popover, confirm and
   // modal that names the automation has to let go of the one it was opened for.
   useEffect(() => {
@@ -423,9 +434,24 @@ export default function AutomationDetail() {
             <FailureNotice
               error={failedExec.error!}
               onView={() => go('execution', { executionId: failedExec.id })}
-              // §7/§9.2 Fix with AI: open the editor seeded with this failure
-              onFix={() => {
-                useStore.setState({ fixExec: failedExec.id })
+              // §7/§9.2 Fix with AI: open the editor seeded with this failure.
+              // The editor reads the run off the store, so a run outside the
+              // §19 /state window is loaded first; a failed load stays here.
+              onFix={async () => {
+                if (fixLoading.current) return
+                const executionId = failedExec.id
+                if (!useStore.getState().executionFull[executionId]) {
+                  fixLoading.current = true
+                  const result = await useStore.getState().loadExecution(executionId)
+                  fixLoading.current = false
+                  if (result !== 'ok') {
+                    showToast(result === 'gone'
+                      ? 'This execution no longer exists.'
+                      : "Couldn't load this execution. Try again.")
+                    return
+                  }
+                }
+                useStore.setState({ fixExec: executionId })
                 setSurface('create', 'edit')
               }}
               style={{ marginBottom: lr ? 10 : 0 }}

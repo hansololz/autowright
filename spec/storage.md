@@ -476,8 +476,13 @@ Rules:
   before the error propagates — memory never runs ahead of disk; the three top-level
   stores follow the same rule: a route that changes `settings.yaml`, `agents.yaml`, or
   `secrets.yaml` builds the new content, writes it, and only then replaces the in-memory
-  list or dict, so a failed `PATCH /settings` can never leave a retention `days` in memory
-  that disk never held, a failed agent delete never re-points automations at nothing, and
+  list or dict (replaced, never mutated in place: engine threads read agent dicts off-lock,
+  and a clear-then-update would let a step observe an empty agent mid-execution), so a failed `PATCH /settings` can never leave a retention `days` in memory
+  that disk never held, a failed agent delete never re-points automations at nothing — and
+  once `agents.yaml` has landed, the re-point of each automation that referenced the agent
+  is per-automation: one whose yaml can't be written is logged and skipped, the rest are
+  still re-pointed, and `agents.changed` plus each `automation.changed` publish regardless,
+  so the UI never keeps showing a deleted agent — and
   a failed secret create never leaves a Keychain value behind a row that exists only in
   memory), then the in-memory state
   updates. A crash between the two self-heals at the next startup, since startup rebuilds
@@ -494,8 +499,11 @@ Rules:
   non-numeric hand-edited value falls back to the 90-day default rather than silently
   disabling the sweep for the session. Records still `executing` or waiting in the §6 queue (`queued`) are
   exempt — deleting a queued record would silently drop a firing that never ran. Each
-  automation's **latest real execution** (the newest record in the §4.1 `lastStatus`
-  population — `skipped`, `queued`, and test records excluded) is exempt too, whatever its
+  **existing** automation's **latest real execution** (the newest record in the §4.1
+  `lastStatus` population — `skipped`, `queued`, and test records excluded; read off the
+  automation's own `_exec_ids` index, never a full-table scan — and only for automations
+  still in the store: a deleted automation has no baseline to protect, so its records age
+  out normally) is exempt too, whatever its
   age: it is the §4.1 overdue baseline and the §4.3 interval anchor, and deleting it would
   reset both to `created_at` — a monthly cron under 30-day retention would then be reported
   overdue every month, and an interval would snap back to the creation grid.
@@ -507,7 +515,35 @@ Rules:
   store (no index, a path that was never loaded) can never survive the request. The path
   must be absolute (422 otherwise — a relative path would resolve against the backend's
   cwd, which is `/` under launchd). Nothing is moved — execution state is wholly
-  contained in the executions dir, so there is no migration step.
+  contained in the executions dir, so there is no migration step. If the rollback write of
+  `settings.yaml` fails too (the disk is usually the root cause), the old path is re-asserted
+  in memory and the old index reopened **without** re-reading settings from disk — the file
+  now names the new path, but memory never half-switches; the request is 500 either way.
+- **Line-delimited files split on LF only.** `chat.jsonl` and the `logs/*.ndjson` files
+  are read by splitting on `"\n"`, never `str.splitlines()`: records are written with
+  `json.dumps(ensure_ascii=False)`, which leaves U+2028, U+2029 and U+0085 raw inside a
+  string, and `splitlines()` breaks on those too — one record would become unparsable
+  pieces the lenient reader drops, so a pasted paragraph separator (Shift-Return in Pages
+  or Notes) would vanish on reload and the next whole-file rewrite (a chat marker append,
+  `PUT /chat`) would lose it from disk for good. The log tail/since fast paths already
+  split on LF; every reader agrees.
+- **Lenient version read covers nested lists.** In a stored version's manifest, `packages`
+  entries, and each step's `secrets` and `agents` entries, that aren't mappings are dropped
+  at load with a warning (a hand-edited `packages: [requests]` would otherwise crash every
+  `/state` through the §4.1 problems audit); a step whose `file` isn't a string reads as
+  having no script file (same as an absent key: the automation still loads, and the step
+  fails at execution like any missing script); and a
+  version folder that fails to load for any other reason is skipped with a warning instead
+  of dropping the whole automation — the draft already had that guard, versions get it too.
+- **Derived execution state agrees across paths.** The boot-time derived pass picks each
+  automation's latest execution by the parsed stamp (`lenient_local`), the same rule as the
+  incremental update at finish, so the overdue baseline and interval anchor never differ
+  between a fresh start and a running session. Deleting an execution deletes the index row
+  before the in-memory pop, and the derived bookkeeping (`_latest`, `_exec_ids`) runs in a
+  `finally`, so a database failure after the directory moved aside never leaves the session
+  pointing at a record that is gone. The header upsert updates **every** column on
+  conflict, so the startup reconcile repairs a hand-edited `automation_id`, `kind`,
+  `version`, `trigger`, or `queued_at` once instead of re-warning on every boot.
 - Logs stream as append-only NDJSON — nothing else written on the execution hot path; CLI can
   tail/grep them directly. **Line cap:** a per-attempt log file stops appending at 10,000
   lines — one final `sys` marker line records the truncation, then nothing more lands in
@@ -789,7 +825,13 @@ only matched records are granted.
   whole-download deadline (a server trickling bytes must not pin a threadpool worker for
   hours), streamed with the §5.1
   64 MB archive cap enforced during the read — an oversized or non-archive download is a 422,
-  and the §5.1 decompression caps still apply after.
+  and the §5.1 decompression caps still apply after (member count, member size, decompressed
+  total, **and no duplicate member names**: a zip may hold several members of one name, and
+  a by-name read serves the last one against the first one's declared size, so every member
+  read goes by its own directory entry and a duplicate name is refused like any other
+  guard). A central directory or member name that can't be decoded is the same 422 as a
+  non-archive, never a 500. A refused redirect (anything off https) closes the 3xx response
+  before raising, never leaving its socket to the garbage collector.
 
 **Preview + confirm.** Import from the UI is two-phase, so the user reviews exactly the bytes
 that will land (no re-download between review and import):

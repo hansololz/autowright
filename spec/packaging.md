@@ -258,7 +258,10 @@ the update bullets below).
     shim path — and `onPath` — whether `~/.local/bin` is on the
     login-shell PATH — so the §4.9 card can name the location and show the PATH hint) and
     `cli-install` (plain unprivileged writes to `~/.local/bin/autowright`: `mkdir -p`, write
-    the shim, `chmod 755`. No dialog, no password). A third IPC, `cli-uninstall`
+    the shim, `chmod 755` — applied after the write every time, since a write over an
+    existing file keeps its old mode; `cli-status` heals an ours-marker shim that isn't
+    executable in place — `chmod 755`, the same probe-time heal a stale-interpreter shim
+    gets — and then reports it `installed`. No dialog, no password). A third IPC, `cli-uninstall`
     (fired by the §4.9 disable confirm), removes the ours-marker shim — same
     rules as `service uninstall` below: marker required, foreign files never touched, and a
     failed delete is reported back as an error message the §4.9 card toasts.
@@ -478,7 +481,11 @@ the update bullets below).
   found" — a dead dev backend must never make the app unquittable.
   The wait for launchd to finish a bootout is bounded
   by a 10 s wall-clock deadline (5 s for the second window after the sweep), never a poll
-  count. `stop` is bootout **plus a stray-process sweep**: after
+  count. `stop` and `uninstall` judge "still registered" **tri-state**: a `launchctl print`
+  that timed out (or was skipped by an exhausted budget) is *unknown*, never "not
+  registered", so they answer `stop failed: launchctl timed out` (exit 1) instead of
+  reporting a stopped job launchd still holds — with `KeepAlive`, one that would respawn
+  the backend right after Quit. `stop` is bootout **plus a stray-process sweep**: after
   launchd deregisters the job (or the 10 s deregistration wait expires), the stop TERM-then-KILLs
   every remaining process whose command line carries an Autowright marker (the §2
   `kill_matching` primitive), always excluding the stop process itself and its own process
@@ -735,7 +742,11 @@ the update bullets below).
     the hand-off itself: it subscribes to Electron's `autoUpdater`
     `update-downloaded`/`error` events, calls its `checkForUpdates()` (Squirrel fetches
     the zip from the proxy, verifies the code signature, stages the bundle), and resolves
-    `{ ok: true }` once Squirrel staged or `{ error }` on the first `error` event; if
+    `{ ok: true }` once Squirrel staged or `{ error }` on the first `error` event (the
+    handler remembers the version Squirrel staged; a later `update-download` for a
+    different version answers `{ error: "Restart to finish the update you already
+    downloaded." }` rather than resolving on electron-updater's never-reset
+    `squirrelDownloadedUpdate` flag and installing the older staged bundle); if
     Squirrel emits neither within 10 minutes the handler settles with a plain-word error
     instead of hanging the §9.4 flow forever. The §9.4 bar holds 100% while Squirrel
     stages. There is no dev fork: `forceDevUpdateConfig` is set unconditionally (a
@@ -764,7 +775,10 @@ the update bullets below).
     the **error stream and return nothing**, never `false`, so the handler treats an error
     emitted during the call with no quit underway as the refusal, clears `uiQuit`, and
     answers `{ error }` — the §9.4
-    card renders it; a silent no-op is never an acceptable outcome.
+    card renders it; a silent no-op is never an acceptable outcome. An `ok` answer arms a
+    10 s check: if no quit has begun by then (MacUpdater with nothing staged registers a
+    listener and returns; a repeated call is a logged no-op inside electron-updater),
+    `uiQuit` is cleared and the stall logged, so the next Cmd+Q is a real quit-entirely.
     ShipIt swaps the bundle at the same path, so the LaunchAgent's absolute interpreter path
     stays valid. On a platform whose §2 module serves no update feed URL, **every** update
     path answers the same plain "Updates are not supported on this platform yet." line up

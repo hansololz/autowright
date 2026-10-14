@@ -165,9 +165,14 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess | _TimedOut:
         return _TimedOut()
 
 
-def _registered() -> bool:
-    """Whether launchd currently knows the job (running or not)."""
-    return _launchctl("print", f"gui/{os.getuid()}/{LABEL}").returncode == 0
+def _registered() -> bool | None:
+    """Whether launchd currently knows the job (running or not). Tri-state
+    (§3): None when the `launchctl print` probe timed out or was skipped by
+    the exhausted budget — unknown, never "not registered"."""
+    r = _launchctl("print", f"gui/{os.getuid()}/{LABEL}")
+    if isinstance(r, _TimedOut):
+        return None
+    return r.returncode == 0
 
 
 def _unload(p: Path) -> None:
@@ -237,6 +242,9 @@ def uninstall() -> str:
         out = "service unloaded and removed"
     else:
         out = "service was not installed"
+    # §3 tri-state: a timed-out probe is unknown, never "not registered".
+    if _registered() is None:
+        out = f"uninstall failed: {_TIMED_OUT}"
     return f"{out} · {shim_note}" if shim_note else out
 
 
@@ -302,7 +310,10 @@ def stop() -> str:
             if time.monotonic() >= deadline or _budget_exhausted():
                 break
             time.sleep(_POLL_INTERVAL_S)
-    if _registered():
+    registered = _registered()
+    if registered is None:
+        return f"stop failed: {_TIMED_OUT}"
+    if registered:
         return "stop failed: launchd still reports the job"
     note = f" · ended {n} lingering process(es)" if n else ""
     return f"stopped — returns at next login or app launch{note}"

@@ -2391,6 +2391,56 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
     expect(chat.some((e) => e.kind === 'system' && /Execution failed at step Fetch pages/.test(e.text ?? ''))).toBe(true)
   })
 
+  it('Fix with AI for a run outside the /state window loads it, then seeds and sends', async () => {
+    const failed = {
+      id: 'e9', automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
+      status: 'failed', trigger: 'Manual', triggerSender: null, test: false, steps: [],
+      duration: '1s', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0, note: null,
+      error: { step: 'Fetch pages', message: 'boom', reason: null },
+    }
+    // Neither the window nor executionFull holds it: only the per-execution GET does.
+    ;(mockedApi.getExecution as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
+      if (id === 'e9') return failed
+      throw new Error('offline')
+    })
+    storeMod.useStore.setState({ fixExec: 'e9', executions: [], executionFull: {} })
+    try {
+      render(<CreateFlow />)
+      await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1), { timeout: 3000 })
+      expect(mockedApi.getExecution).toHaveBeenCalledWith('e9')
+      const body = draftBody(0)
+      expect(body.executionId).toBe('e9')
+      expect(String(body.text)).toMatch(/^This execution failed/)
+      const chat = body.chat as Array<{ kind: string; text?: string }>
+      expect(chat.some((e) => e.kind === 'system' && /Execution failed at step Fetch pages/.test(e.text ?? ''))).toBe(true)
+      expect(storeMod.useStore.getState().fixExec).toBeNull()
+    } finally {
+      ;(mockedApi.getExecution as ReturnType<typeof vi.fn>).mockImplementation(() => Promise.reject(new Error('offline')))
+    }
+  })
+
+  it('leaving the editor while the Fix with AI load is in flight drops the request', async () => {
+    let land!: (v: unknown) => void
+    ;(mockedApi.getExecution as ReturnType<typeof vi.fn>).mockImplementation((id: string) =>
+      id === 'e10' ? new Promise((resolve) => { land = resolve }) : Promise.reject(new Error('offline')))
+    storeMod.useStore.setState({ fixExec: 'e10', executions: [], executionFull: {} })
+    try {
+      const view = render(<CreateFlow />)
+      await waitFor(() => expect(mockedApi.getExecution).toHaveBeenCalledWith('e10'), { timeout: 3000 })
+      expect(storeMod.useStore.getState().fixExec).toBe('e10')
+      view.unmount()
+      expect(storeMod.useStore.getState().fixExec).toBeNull()
+      // the load landing afterwards sends nothing
+      await act(async () => land({
+        id: 'e10', automationId: 'a1', status: 'failed', test: false, steps: [],
+        error: { step: 'Fetch pages', message: 'boom', reason: null },
+      }))
+      expect(mockedApi.postDraftJob).not.toHaveBeenCalled()
+    } finally {
+      ;(mockedApi.getExecution as ReturnType<typeof vi.fn>).mockImplementation(() => Promise.reject(new Error('offline')))
+    }
+  })
+
   it('one transient poll error never fails the job - the next tick recovers it', async () => {
     let calls = 0
     ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockImplementation(async () => {
@@ -3358,5 +3408,36 @@ describe('CreateFlow settle guards, cancel races, and persistence (§4.4/§11)',
     fireEvent.click(screen.getByText('Sync spec'))
     await waitFor(() => expect(within(thread()).getByText('The sync job was lost — backend gone')).toBeTruthy(), { timeout: 8000 })
     expect(toast()).toBe('The sync failed — the job was lost (backend gone)')
+  })
+})
+
+// §19: the editor forgets the full-record status for the id it loaded once it
+// unmounts, so a later finish no longer triggers the full GET.
+describe('CreateFlow full-record release on unmount (§19)', () => {
+  beforeEach(armPendingPoll)
+
+  it('after unmount, execution.finished for the edited automation no longer refetches it', async () => {
+    const finished = (id: string) => ({
+      event: 'execution.finished', executionId: id, automationId: 'a1',
+      execution: {
+        id, automationId: 'a1', automationName: 'My auto', automationDeleted: false, versionLabel: 'v1',
+        status: 'cancelled', trigger: 'Manual', triggerSender: null, test: false, steps: [],
+        duration: '', started: '', startedMs: 1, endedMs: 2, queuedMs: 0, durationMs: null, passStartedMs: 0,
+        note: null, error: null,
+      },
+      automation: AUTO,
+    }) as never
+    const view = render(<CreateFlow />)
+    await waitFor(() => expect(mockedApi.getAutomation).toHaveBeenCalledWith('a1'))
+    // mounted: the finish refetches the full record
+    await waitFor(() => {
+      ;(mockedApi.getAutomation as ReturnType<typeof vi.fn>).mockClear()
+      act(() => storeMod.useStore.getState().applyEvent(finished('f1')))
+      expect(mockedApi.getAutomation).toHaveBeenCalledTimes(1)
+    })
+    view.unmount()
+    ;(mockedApi.getAutomation as ReturnType<typeof vi.fn>).mockClear()
+    act(() => storeMod.useStore.getState().applyEvent(finished('f2')))
+    expect(mockedApi.getAutomation).not.toHaveBeenCalled()
   })
 })

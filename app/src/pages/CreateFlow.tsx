@@ -498,6 +498,13 @@ export default function CreateFlow() {
   useEffect(() => {
     if (isEdit && automationId) void loadAuto(automationId)
   }, [reconnects]) // eslint-disable-line react-hooks/exhaustive-deps
+  // §19: on unmount, forget the full-record status for the id this editor
+  // loaded, so finish- and change-triggered refetches stay bounded to the
+  // pages open now.
+  useEffect(() => {
+    if (!isEdit || !automationId) return
+    return () => useStore.getState().releaseFull(automationId)
+  }, [isEdit, automationId])
 
   // ---- instruction files (§8) — fetched once per app session ----
   const [fw, setFw] = useState<string>(instructionCache.framework ?? '')
@@ -821,10 +828,32 @@ export default function CreateFlow() {
   // the seed lands; the user asks when it settles.
   const fixConsumed = useRef(false)
   const [fixSend, setFixSend] = useState<string | null>(null)
+  // A run outside the §19 /state window is in neither the window nor
+  // executionFull: load it once and re-run when it lands (the body, or the
+  // settled load when it failed - then the early return below drops it).
+  const fixFull = useStore((s) => (s.fixExec ? s.executionFull[s.fixExec] : undefined))
+  const fixLoadStarted = useRef<string | null>(null)
+  const [fixLoadSettled, setFixLoadSettled] = useState(0)
+  // Leaving while that load is still in flight drops the request, so a later
+  // editor on the same automation never picks up a stale fix. (The StrictMode
+  // dev remount never trips this: the load starts only once `rev` exists,
+  // which is after the mount effects.)
+  useEffect(() => () => {
+    const started = fixLoadStarted.current
+    if (started && !fixConsumed.current && useStore.getState().fixExec === started) {
+      useStore.setState({ fixExec: null })
+    }
+  }, [])
   useEffect(() => {
     if (!rev || fixConsumed.current) return
     const fx = useStore.getState().fixExec
     if (!fx) return
+    if (!useStore.getState().executionFull[fx] && !executions.some((e) => e.id === fx)
+      && fixLoadStarted.current !== fx) {
+      fixLoadStarted.current = fx
+      void useStore.getState().loadExecution(fx).then(() => setFixLoadSettled((n) => n + 1))
+      return
+    }
     fixConsumed.current = true
     useStore.setState({ fixExec: null })
     const ex = useStore.getState().executionFull[fx] ?? executions.find((e) => e.id === fx)
@@ -840,7 +869,7 @@ export default function CreateFlow() {
     // the effect below fires it, so the job's §8 CONVERSATION context carries
     // the kept history and the seed entry above instead of a pre-merge thread.
     setFixSend(fx)
-  }, [rev != null]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rev != null, fixFull, fixLoadSettled]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!rev || !chatReady || !fixSend) return
     setFixSend(null)

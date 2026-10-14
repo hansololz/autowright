@@ -15,6 +15,8 @@ vi.mock('../src/api', () => ({
     getAutomation: vi.fn(() => Promise.reject(new Error('offline'))),
     triggersPreview: vi.fn(async () => ({ triggers: [] })),
     listExecutions: vi.fn(async () => ({ executions: [], total: 0 })),
+    // §7/§9.2 Fix with AI loads the failed run before opening the editor
+    getExecution: vi.fn(() => Promise.reject(new Error('offline'))),
     executeNow: vi.fn(async () => ({ executionId: 'e-new', queued: false })),
     // §9.2 PARAMETERS row: the debounced value write
     patchAutomation: vi.fn(async () => ({})),
@@ -271,6 +273,110 @@ describe('flagged-result notice (§9.2)', () => {
     render(<AutomationDetail />)
 
     expect(screen.queryByTestId('flagged-result-notice')).toBeNull()
+  })
+})
+
+// §7/§9.2 Fix with AI: the editor reads the failed run off the store, and the
+// run may sit outside the §19 /state window — the detail page loads it into
+// executionFull before it opens the editor.
+describe('§9.2 Fix with AI', () => {
+  const failedRow: Execution = {
+    id: 'e-old', automationId: 'a1', automationName: 'Job', automationDeleted: false, versionLabel: 'v1',
+    status: 'failed', trigger: 'Manual', triggerSender: null, test: false, duration: '1.0s',
+    started: 'Today, 8:00 AM', startedMs: NOW, endedMs: NOW, queuedMs: 0, durationMs: null, passStartedMs: 0,
+    note: null, error: { step: 'Fetch', message: 'boom', reason: null },
+  }
+  afterEach(() => {
+    mockedApi.getExecution.mockImplementation(() => Promise.reject(new Error('offline')))
+    storeMod.useStore.setState({ surface: 'app', fixExec: null, executionFull: {} })
+  })
+
+  it('loads the run first, then opens the editor seeded with it', async () => {
+    mockedApi.getExecution.mockImplementation(async () => failedRow)
+    seed(auto(), [failedRow])
+    storeMod.useStore.setState({ executionFull: {}, fixExec: null })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByRole('button', { name: /Fix with AI/ }))
+    await waitFor(() => expect(storeMod.useStore.getState().surface).toBe('create'))
+    expect(mockedApi.getExecution).toHaveBeenCalledWith('e-old')
+    expect(storeMod.useStore.getState().executionFull['e-old']).toBeTruthy()
+    expect(storeMod.useStore.getState().fixExec).toBe('e-old')
+  })
+
+  it('a failed load toasts and stays on the page', async () => {
+    mockedApi.getExecution.mockImplementation(() => Promise.reject(Object.assign(new Error('gone'), { status: 404 })))
+    seed(auto(), [failedRow])
+    storeMod.useStore.setState({ executionFull: {}, fixExec: null })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByRole('button', { name: /Fix with AI/ }))
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('This execution no longer exists.'))
+    expect(storeMod.useStore.getState().surface).not.toBe('create')
+    expect(storeMod.useStore.getState().fixExec).toBeNull()
+  })
+})
+
+// §19: the page forgets the full-record status for its id on unmount, so a
+// later finish no longer triggers the full GET.
+describe('§9.2 full-record release on unmount', () => {
+  it('after unmount, execution.finished for this automation no longer refetches it', async () => {
+    seed(auto())
+    mockedApi.getAutomation.mockImplementation(async () => auto())
+    try {
+      const view = render(<AutomationDetail />)
+      await waitFor(() => expect(mockedApi.getAutomation).toHaveBeenCalledWith('a1'))
+      const finished = (id: string) => ({
+        event: 'execution.finished', executionId: id, automationId: 'a1',
+        execution: {
+          id, automationId: 'a1', automationName: 'Job', automationDeleted: false, versionLabel: 'v1',
+          status: 'cancelled', trigger: 'Manual', triggerSender: null, test: false, duration: '',
+          started: '', startedMs: NOW, endedMs: NOW, queuedMs: 0, durationMs: null, passStartedMs: 0,
+          note: null, error: null,
+        },
+        automation: auto(),
+      }) as never
+      // mounted: the finish refetches the full record
+      await waitFor(() => {
+        mockedApi.getAutomation.mockClear()
+        act(() => storeMod.useStore.getState().applyEvent(finished('f1')))
+        expect(mockedApi.getAutomation).toHaveBeenCalledTimes(1)
+      })
+      view.unmount()
+      mockedApi.getAutomation.mockClear()
+      act(() => storeMod.useStore.getState().applyEvent(finished('f2')))
+      expect(mockedApi.getAutomation).not.toHaveBeenCalled()
+    } finally {
+      mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
+    }
+  })
+
+  it('a load still in flight at unmount lands its record but never re-arms the refetch', async () => {
+    seed(auto({ id: 'fl-a1' }))
+    storeMod.useStore.setState({ automationId: 'fl-a1' })
+    const landers: Array<(v: unknown) => void> = []
+    mockedApi.getAutomation.mockImplementation(() => new Promise((resolve) => { landers.push(resolve) }))
+    const finished = (id: string) => ({
+      event: 'execution.finished', executionId: id, automationId: 'fl-a1',
+      execution: {
+        id, automationId: 'fl-a1', automationName: 'Job', automationDeleted: false, versionLabel: 'v1',
+        status: 'cancelled', trigger: 'Manual', triggerSender: null, test: false, duration: '',
+        started: '', startedMs: NOW, endedMs: NOW, queuedMs: 0, durationMs: null, passStartedMs: 0,
+        note: null, error: null,
+      },
+      automation: auto({ id: 'fl-a1' }),
+    }) as never
+    try {
+      const view = render(<AutomationDetail />)
+      await waitFor(() => expect(landers.length).toBeGreaterThan(0))
+      view.unmount()
+      // every mount-time GET lands only after the page let go of the id
+      await act(async () => { for (const land of landers) land(auto({ id: 'fl-a1', name: 'Landed' })) })
+      expect(storeMod.useStore.getState().automations[0].name).toBe('Landed')
+      mockedApi.getAutomation.mockClear()
+      act(() => storeMod.useStore.getState().applyEvent(finished('fl-f1')))
+      expect(mockedApi.getAutomation).not.toHaveBeenCalled()
+    } finally {
+      mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
+    }
   })
 })
 

@@ -500,10 +500,14 @@ and durations, the §4.5 error (message + reason), the failing step's log tail p
 steps' log tails (the cause is often upstream), and on success the result chip plus a
 clipped `result.md` excerpt and the result-file list. Log lines are the already-redacted
 execution output (§6); secret values never travel. The section is bounded: each log-tail
-line is clipped to 2,000 characters (marker `… [clipped]`) and the whole section to
-64 K characters — runs are dropped oldest-first past that, the newest run's detail always
-kept — so a step that logs one JSON document per line (§6 lines run to 2 MB) can never push
-the prompt past the §8 clip budget.
+line is clipped to 2,000 characters (marker `… [clipped]`), each run's block to 24 K
+characters (its per-step tails shrink — fewer lines per step, the last lines kept — until
+it fits), and the whole section to 64 K characters — past that, runs are dropped
+oldest-first, but the **newest run and the run a Fix with AI asked about** (the request's
+`executionId`, re-sorted into its chronological slot, which is often the oldest) are never
+dropped — so a step that logs one JSON document per line (§6 lines run to 2 MB) can never
+push the prompt past the §8 clip budget, and the run the user pointed at always reaches
+the agent.
 
 **actions.yaml** — follow-up actions the editor performs after applying the response's
 rewrites (§11 owns the choreography). Schema — unknown keys are validation errors:
@@ -981,7 +985,12 @@ still holds a pipe can neither keep the call alive past its kill nor wedge the c
 close — EOF is never required to end a killed call. Both kills raise the
 same retryable timeout error; cancelling
 the job (Start over, or an edit that supersedes an in-flight steps call, §11) kills the harness
-process. One pre-flight guards the known interactive trap: a signed-out Gemini CLI does not
+process **and releases its pipes and stdin write** the same way the watchdog kill does (the
+release callable travels with the held process), so a cancel can never leave the call
+alive until its idle window or hard cap through an escapee holding stdout. Everything built
+after the spawn (the readers, the writer, the watchdog and drain threads, the scratch
+watcher) is constructed inside the call's own try: a failure there (fd exhaustion) kills
+the group and releases what was built, never leaving the child running. One pre-flight guards the known interactive trap: a signed-out Gemini CLI does not
 exit with an auth error - it prints a browser sign-in prompt to stdout and blocks on it
 forever (no trailing newline, so even line-reading never sees it) - so the Gemini handler
 checks the §19 signed-in rule before spawning and raises a **non-retryable** "not signed
@@ -1060,7 +1069,9 @@ their absence. Codex's sandbox escalates to
 A poll-based **scratch watcher** (0.3 s) turns each response document that lands into a
 `file` event carrying the file name and its current content, re-fires as the file grows,
 and orders documents by first appearance; a final sweep after the child exits catches a
-document written in the last poll interval. Only §8 response-document names count -
+document written in the last poll interval, and the recombined envelope also lists any
+accepted-name document on disk the watcher never polled, so a stop whose join timed out
+can't lose one. Only §8 response-document names count -
 `spec.md`, `notes.md`, `manifest.yaml`, `actions.yaml`, and
 `NN-name.py` step files - as flat regular files (never directories or symlinks), so
 residue an agent leaves behind (`__pycache__`, helper scripts) is ignored. The call's

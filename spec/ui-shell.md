@@ -98,7 +98,12 @@ Quitting is different from closing: Cmd+Q, the application menu's Quit and the d
 are the §3 quit-entirely flow — the backend stops with the UI (quit means quit for good),
 through the shared §4.9 `QuitFlow` when the main window is up and natively otherwise. No
 window of ours vetoes a quit — the non-closable §13 panel is destroyed in `before-quit` for
-exactly that reason.
+exactly that reason — and no window or panel is created once a quit has begun: `showApp`
+(deep link, second instance), the dock/tray `activate` reopen, and the tray click all
+return early while the quit flag is set, so a relaunching update (the Linux AppImage
+updater spawns the new instance before the old one exits, and the old one receives
+`second-instance`) or a stray click between `before-quit` and exit can't create a fresh
+window the quit then has to fight.
 Turning the tray off is the same rule at another moment: the tray-off transition destroys the
 tray **and its §13 panel window** (a hidden panel is still a window, and would keep
 `window-all-closed` from ever firing) and re-evaluates the rule right then — without a dock,
@@ -316,7 +321,10 @@ animation animates `transform` and would knock the toast off-center while it pla
   confines the resolved path to the app's own roots — the app-support home, the logs dir,
   and the executions data dir — and no-ops on anything else, so renderer state (much of it
   AI-authored, per the boundary rationale above) can never open an arbitrary filesystem
-  location.
+  location. The root check and the directory/extension decision run on the **real** path
+  (`fs.realpathSync`), so a symlink planted inside the executions dir (a step script could
+  write one) can't point a reveal outside the roots or turn the open-folder branch into
+  launching an application bundle.
 - One-click destructive actions (delete, remove trigger, clear) always confirm first —
   `ConfirmModal` or the row's inline confirm swap; never a bare instant delete.
 - Popover menus with unbounded content scroll inside (`ScrollArea`) — rows never render
@@ -540,7 +548,11 @@ Sections top to bottom:
 `error.step` is null), the §4.5 possible reason as plain text when present, the
   error message in mono, a "View execution" link to the execution page, and the §7 quiet
   **"Fix with AI"** button (same behavior: opens the editor, seeds the chat thread, sends
-  the §11 canned analyze chat message). No-executions empty
+  the §11 canned analyze chat message; the run is loaded into the client's full-record
+  cache first when it isn't in the §19 `/state` window — a weekly automation's last failure
+  can be past the window — with an in-flight guard, and a failed load stays on the page
+  and toasts "This execution no longer exists." on a 404 or "Couldn't load this
+  execution. Try again." otherwise). No-executions empty
   state (dashed
   card): "No executions yet / Press Execute now — the first result will appear right here."
 - **TRIGGERS** card — one row per trigger (kind icon — fa-clock for
@@ -1693,7 +1705,11 @@ execute that fails (e.g. the §7 409 no-free-slot) toasts the error message — 
 execute press is never a silent no-op. The panel window is not closable, minimizable, or fullscreenable — the default
 application menu stays active, so Cmd+W/Cmd+M must be no-ops for it (a destroyed or
 minimized panel would otherwise strand the tray toggle on a dead reference). Belt and
-braces: a `closed` handler clears the reference anyway. A non-closable window has one
+braces: a `closed` handler clears the reference anyway — only when it is this panel
+closing (`panel === w`), so a destroy-then-recreate never lets the old window's late
+`closed` wipe the live reference; and a panel whose renderer dies (`render-process-gone`)
+is destroyed, so the next tray click builds a fresh one instead of showing the dead
+window forever. A non-closable window has one
 more consequence: `app.quit()` closes every window and is **cancelled** when one refuses
 (Electron's macOS close path bails on a non-closable window and cancels the quit), so a
 panel that had ever been opened silently vetoed every quit — Cmd+Q, the application

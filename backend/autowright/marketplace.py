@@ -61,6 +61,10 @@ _FETCH_CHUNK = 64 * 1024
 # request worker the backend has.
 MAX_CONCURRENT_READS = 4
 _read_slots = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
+# §22.4: archive downloads (Audit, Install) take one of two slots of their own,
+# never a catalog read slot above.
+MAX_CONCURRENT_ARCHIVE_DOWNLOADS = 2
+_archive_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ARCHIVE_DOWNLOADS)
 # §22.3: how long an image read waits for a slot before the route answers 503
 # (the page shows the no-image icon). Catalog reads keep the blocking wait.
 IMAGE_SLOT_WAIT_S = 30
@@ -586,6 +590,13 @@ class MarketplaceStore:
             ok = True
         else:
             raw, ok = load_yaml_checked(self.file(), {})
+            if self.legacy_file().exists():
+                # §21.4 (2026-10-13): the sweep stays off on every load while
+                # an unparseable `sources.yaml` sits beside the table - the
+                # first load saved the seeded table, so a one-session skip
+                # would sweep the copies it names on the next launch. Nothing
+                # migrates here; a readable legacy file is ignored.
+                _legacy_raw, sweep = self._parse_legacy_table()
         raw = raw or {}
         unreadable = not ok
         renamed = False
@@ -658,6 +669,18 @@ class MarketplaceStore:
         if sweep:
             self._sweep_orphan_dirs()
 
+    def _parse_legacy_table(self) -> tuple[dict, bool]:
+        """§21.4: `sources.yaml` parsed into its `{sources: [...]}` mapping and
+        whether it could be; one that can't warns and answers `({}, False)`.
+        Logs nothing when the file parses, so the every-load probe beside an
+        existing table stays quiet."""
+        raw, ok = load_yaml_checked(self.legacy_file(), {})
+        raw = raw or {}
+        if not ok or not isinstance(raw, dict) or not isinstance(raw.get("sources") or [], list):
+            log.warning("%s couldn't be read - migrating no marketplaces", self.legacy_file())
+            return {}, False
+        return raw, True
+
     def _read_legacy_table(self) -> tuple[dict, bool]:
         """§21.4 (2026-09-30): v0.11.4's `sources.yaml` - `{sources: [{id,
         kind (url | file), origin, added_at, refreshed_at, error}]}` - mapped to
@@ -669,10 +692,8 @@ class MarketplaceStore:
         A file that can't be parsed at all answers no rows and not-ok: the
         caller loads a fresh table and skips the orphan sweep for the session.
         The file itself is never deleted or rewritten."""
-        raw, ok = load_yaml_checked(self.legacy_file(), {})
-        raw = raw or {}
-        if not ok or not isinstance(raw, dict) or not isinstance(raw.get("sources") or [], list):
-            log.warning("%s couldn't be read - migrating no marketplaces", self.legacy_file())
+        raw, ok = self._parse_legacy_table()
+        if not ok:
             return {}, False
         rows = []
         for entry in raw.get("sources") or []:
@@ -717,7 +738,11 @@ class MarketplaceStore:
         if flagged is not None:
             if flagged["location"] == BUILTIN_CATALOG_URL:
                 return False
+            # §22.2: the new place has never been read, so the next hourly
+            # check refreshes it rather than waiting out the day.
             flagged["location"] = BUILTIN_CATALOG_URL
+            flagged["refreshed_at"] = None
+            flagged["error"] = None
             return True
         pasted = next((s for s in sources if s["location"] == BUILTIN_CATALOG_URL), None)
         if pasted is not None:
@@ -1126,7 +1151,12 @@ class MarketplaceStore:
             target = Path(os.path.expanduser(folder.strip()))
             if not target.is_absolute():
                 raise MarketplaceError("give the folder's absolute path")
-            target = target.resolve()
+            try:
+                target = target.resolve()
+            except (OSError, ValueError):
+                # An embedded NUL (ValueError) or a path that can't be
+                # resolved is the same 422 as a missing folder (§22.4).
+                raise MarketplaceError("there's no folder at that path") from None
             if not target.is_dir():
                 raise MarketplaceError("there's no folder at that path")
         location = str(target / CATALOG_FILENAME) if target else None
@@ -1511,10 +1541,11 @@ class MarketplaceStore:
         capped here, and the §5.1 validation of the bytes is the caller's."""
         reference = self._entry(source_id, index)["archive"]
         if kind_of(reference) == "url":
-            # §22.1/§22.4: a link download takes a concurrency slot exactly
-            # like the local-path read below, so repeated Audit or Install
-            # clicks are bounded, not unbounded downloads in parallel.
-            with _read_slots:
+            # §22.4: a link download takes one of the two archive slots, so
+            # repeated Audit or Install clicks are bounded, and never a §22.1
+            # catalog read slot - a ten-minute §5.2 download must not starve
+            # add, refresh, images, or the auto-refresh thread.
+            with _archive_slots:
                 data, _resolved = transfer.fetch_archive(reference)
             return data, reference
         return (_read_reference(reference, cap=transfer.MAX_ARCHIVE_BYTES, what="archive"),

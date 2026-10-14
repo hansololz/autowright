@@ -82,3 +82,23 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   out of the base python package, so `python3.14 -m venv` fails without it). Node lives
   user-local at `~/.local/opt/node-v24.19.0-linux-x64` (symlinked into `~/.local/bin`).
   Audit `scripts/dev.sh`/`build.sh` for GNU-vs-BSD flag drift before first use here.
+
+## Added 2026-10-13 (audit)
+
+- **Windows: a kill can wedge the drafting thread on the stdin writer.** `harness.PipeWriter`
+  has no pollable pipe on Windows, so `defuse()` falls back to a cross-thread
+  `TextIOWrapper.close()`, which waits on the buffer lock a blocked `write` holds. With an
+  escaped grandchild holding the stdin read handle, the watchdog's kill wedges in
+  `defuse()`, the main thread's `close()` then blocks on `_close_lock`, and the job never
+  settles. Plan: cancel the writer thread's synchronous I/O (`CancelSynchronousIo` on the
+  thread handle via ctypes) or close the raw handle instead of the text layer; needs a real
+  Windows host to verify.
+- **Windows: the §7 step-end group kill cannot reach a reaped root.** `_watch_exit` waits
+  for the executor and then runs `taskkill /F /T`, which cannot address an exited pid, so a
+  background child a step left behind survives, and (because the Windows defuse redirects
+  the fd rather than waking the read) can hold the step "executing" until it exits. Plan:
+  run each step in a Job object with kill-on-close.
+- **Linux: the systemd unit's `ExecStart` is `sys.executable`,** which in a packaged
+  AppImage sits under the runtime's `/tmp/.mount_*` FUSE mount that disappears when the app
+  exits. If so, the backend cannot start at login without the app. Verify on a real host;
+  likely remedy is extracting the Python tree to a stable location at install time.

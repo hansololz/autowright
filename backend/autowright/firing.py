@@ -66,7 +66,7 @@ def finish_queued(store: Store, h: dict, note: str) -> bool:
 
 
 def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
-                 payload: dict | None = None) -> bool:
+                 payload: dict | None = None, outcome: dict | None = None) -> bool:
     """Start a trigger-fired execution. With every §6 slot taken, a message
     firing is queued when `maxQueued` allows and skipped otherwise; every other
     kind is always skipped (a late cron occurrence is worse than none).
@@ -74,7 +74,10 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
     since nothing is executing yet. The capacity check and the start (or the
     queued/skipped record) happen under one lock, so a firing can never race a
     concurrent manual start into a slot that isn't there, or lose its record.
-    `payload` is the §4.5 triggerPayload of a message-trigger firing."""
+    `payload` is the §4.5 triggerPayload of a message-trigger firing.
+    `outcome`, when passed, gets `shutdown_refused = True` when the engine
+    refused the start because the backend is shutting down (§7) — no
+    execution started and no record written, so §4.3 consumes no one-shot."""
     from .engine import VersionNotFound  # deferred: engine imports firing
 
     # §4.5: the record stores the trigger's machine kind — §4.3 kinds are the
@@ -150,6 +153,10 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
                         log.exception("recording a failed firing on %r", a.get("name"))
                 elif not isinstance(e, RuntimeError):
                     log.exception("firing %s on %r failed", kind, a.get("name"))
+                elif engine._stopping and outcome is not None:
+                    # §4.3: the flag flips under store.lock (held here), so a
+                    # RuntimeError with it set is the shutdown refusal.
+                    outcome["shutdown_refused"] = True
                 # §4.6: `start` may already have created the record before it
                 # failed — any exception class, not only unexpected ones. Left
                 # `executing` it would hold a §6 slot forever and 409 every

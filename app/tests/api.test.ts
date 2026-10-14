@@ -4,7 +4,7 @@
 // stubbed before connectInfo() is called, which fills the module-level
 // base/token used by every request.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, connectInfo, LONG_REQUEST_TIMEOUT_MS, openWs, REQUEST_TIMEOUT_MS, requestTimeoutMs } from '../src/api'
+import { api, connectInfo, IMAGE_REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS, openWs, REQUEST_TIMEOUT_MS, requestTimeoutMs } from '../src/api'
 
 const setBackendInfo = (info: { port: number; token: string } | null) => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -116,12 +116,36 @@ describe('client request timeout (§19)', () => {
       init.signal!.addEventListener('abort', () => reject(init.signal!.reason))
     })))
     let settled: unknown = 'pending'
-    const pending = api.state().then(() => 'answered', (e: Error) => e.name)
+    const pending = api.state().then(() => 'answered', (e: Error) => e.message)
     void pending.then((v) => { settled = v })
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1)
     expect(settled).toBe('pending')
     await vi.advanceTimersByTimeAsync(1)
-    expect(await pending).toBe('TimeoutError')
+    // §19 plain words, never the browser's "signal timed out"
+    expect(await pending).toBe("The backend didn't answer in time.")
+  })
+
+  it('a connection failure surfaces as plain words, never "Failed to fetch"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
+    await expect(api.state()).rejects.toThrow("The backend isn't reachable.")
+    await expect(api.importPreview(new Uint8Array([1]))).rejects.toThrow("The backend isn't reachable.")
+  })
+
+  it('a timed-out raw upload surfaces as plain words too', async () => {
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+      const controller = new AbortController()
+      controller.abort(new DOMException('signal timed out', 'TimeoutError'))
+      return controller.signal
+    })
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => { throw init.signal!.reason }))
+    await expect(api.importPreview(new Uint8Array([1]))).rejects.toThrow("The backend didn't answer in time.")
+  })
+
+  it('HTTP-detail errors pass through unchanged', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 409, statusText: 'Conflict', json: async () => ({ detail: 'Busy right now.' }),
+    }) as unknown as Response))
+    await expect(api.state()).rejects.toThrow('Busy right now.')
   })
 
   it('every request builds its signal from the route\u2019s timeout — /health included', async () => {
@@ -133,12 +157,15 @@ describe('client request timeout (§19)', () => {
     expect(timeout.mock.calls.map((c) => c[0])).toEqual([REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS])
   })
 
-  it('gives the install/import/delete/memory-copy routes 660 s and everything else 30 s', () => {
+  it('gives the install/import/delete/memory-copy/slow marketplace routes 660 s, images 90 s, and everything else 30 s', () => {
     const long = [
       ['POST', '/packages/install'], ['POST', '/packages/update'],
       ['POST', '/automations/import'], ['POST', '/automations/import/preview'],
       ['POST', '/automations/import/url'], ['POST', '/automations/import/confirm'],
       ['POST', '/marketplace/sources/s1/entries/3/preview'],
+      ['POST', '/marketplace/sources'], ['POST', '/marketplace/sources/s1/refresh'],
+      ['POST', '/marketplace/refresh'], ['GET', '/marketplace/sources/s1/entries/3/archive'],
+      ['POST', '/marketplace/catalogs'], ['PUT', '/marketplace/sources/s1/catalog'],
       ['DELETE', '/automations/a1'],
       ['POST', '/automations/a1/memory/clear'], ['POST', '/automations/a1/memory/snapshots'],
       ['POST', '/automations/a1/memory/snapshots/s1/restore'],
@@ -149,8 +176,13 @@ describe('client request timeout (§19)', () => {
       ['POST', '/automations/a1/execute'], ['POST', '/packages/check'],
       ['DELETE', '/automations/a1/memory/snapshots/s1'], ['DELETE', '/marketplace/sources/s1'],
       ['POST', '/triggers/preview'],
+      ['GET', '/marketplace'], ['GET', '/marketplace/sources/s1/catalog'],
+      ['PATCH', '/marketplace/sources/s1'],
     ]
     for (const [method, path] of short) expect(requestTimeoutMs(method, path)).toBe(REQUEST_TIMEOUT_MS)
+    // §22.3 marketplace images: the backend slot wait plus the fetch
+    expect(requestTimeoutMs('GET', '/marketplace/sources/s1/entries/3/image')).toBe(IMAGE_REQUEST_TIMEOUT_MS)
+    expect(IMAGE_REQUEST_TIMEOUT_MS).toBe(90_000)
   })
 })
 

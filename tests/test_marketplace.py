@@ -2943,21 +2943,26 @@ def test_a_changed_location_clears_refreshed_at_and_error(market, tmp_path):
 
 # ---------- §22.1 concurrency slots on every reference read ----------
 
-def test_an_https_archive_read_takes_a_read_slot(market, tmp_path, monkeypatch):
-    """§22.4: the https branch of the archive fetch takes a §22.1 concurrency
-    slot exactly like the local-path branch."""
+def test_an_https_archive_read_takes_an_archive_slot(market, tmp_path, monkeypatch):
+    """§22.4: the https branch of the archive fetch takes one of the two
+    archive slots of its own (never a §22.1 catalog read slot)."""
     f = write_catalog(tmp_path, [{"title": "Web", "path": "https://x.test/w.autowright"}])
     source = market.add(path=str(f))
     fetched: list = []
     monkeypatch.setattr(transfer, "fetch_archive",
                         lambda url: (fetched.append(url) or b"zip-bytes", url))
     got: list = []
-    with all_read_slots_taken():
+    for _ in range(marketplace.MAX_CONCURRENT_ARCHIVE_DOWNLOADS):
+        assert marketplace._archive_slots.acquire(timeout=5)
+    try:
         worker = threading.Thread(
             target=lambda: got.append(market.entry_archive(source["id"], 0)), daemon=True)
         worker.start()
         worker.join(0.5)
         assert worker.is_alive() and fetched == [], "the download ran without a slot"
+    finally:
+        for _ in range(marketplace.MAX_CONCURRENT_ARCHIVE_DOWNLOADS):
+            marketplace._archive_slots.release()
     worker.join(5)
     assert got == [(b"zip-bytes", "https://x.test/w.autowright")]
 

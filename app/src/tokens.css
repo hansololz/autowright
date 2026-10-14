@@ -409,7 +409,7 @@ textarea:disabled, input:disabled { opacity: .45; }
 /* §9 hover-expanding floating nav rail: 58px icons-only, hover overlays at 212px.
    Inner content stays a fixed 212px so rows never reflow — labels reveal by clip. */
 .ad-rail {
-  width: 58px; overflow: hidden;
+  width: 58px; overflow: clip; /* §14: never `hidden` (a scroll container) */
   border-radius: 0 12px 12px 0;
   background: var(--bg-sidebar);
   border: 1px solid var(--hairline); border-left: none;

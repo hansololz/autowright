@@ -65,7 +65,8 @@ def test_upsert_updates_mutable_fields_and_roundtrips_error(home):
         # started_at IS mutable on conflict — a §6 queue promotion re-stamps it
         # when the record stops waiting and starts executing
         started_at="2026-07-20T09:00:00+00:00",
-        # immutable-on-conflict columns: changed values must NOT stick
+        # §5 (2026-10-13): EVERY column follows the record on conflict, so the
+        # startup reconcile can repair a hand-edited identity field once
         kind="draft", version=9, trigger="cron"))
     h = db.load_all()["e-1"]
     assert h["automation_name"] == "Job Renamed"
@@ -76,9 +77,9 @@ def test_upsert_updates_mutable_fields_and_roundtrips_error(home):
     assert h["chip"] == "2 issues" and h["chip_status"] == "attention"
     # the error dict flattens to columns and reconstructs on load
     assert h["error"] == {"step": "01-say.py", "message": "boom", "reason": "crash"}
-    # ON CONFLICT updates only the mutable columns — identity fields keep row one's values
-    assert h["kind"] == "version" and h["version"] == 1
-    assert h["trigger"] == "manual"
+    # ON CONFLICT updates the identity columns too (§5: yaml stays authoritative)
+    assert h["kind"] == "draft" and h["version"] == 9
+    assert h["trigger"] == "cron"
     # …but started_at follows the record, so a promoted §6 queue entry sorts by
     # when it actually started rather than when it was admitted
     assert h["started_at"] == "2026-07-20T09:00:00+00:00"

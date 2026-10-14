@@ -23,6 +23,9 @@ from . import paths, platform
 PIP_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 INSTALL_TIMEOUT = 600  # seconds per package
+# §6.2: once pip has exited, how long its pipes may stay open (a helper still
+# holding them) before the wait stops reading and the return code decides.
+_EXITED_DRAIN_S = 2.0
 
 # §6.2: one pip run at a time process-wide — pip has no locking of its own,
 # and a draft-stage install may race the engine's pre-execution ensure.
@@ -325,6 +328,21 @@ def _pip_install(name: str, pin_installed: bool = False,
                 out, err = proc.communicate(timeout=0.5)
                 break
             except subprocess.TimeoutExpired:
+                if proc.poll() is not None:
+                    # §6.2: pip's EXIT, not its pipes' EOF, ends the wait — a
+                    # helper left holding the pipes gets a short drain, then
+                    # the real return code decides (the install timeout only
+                    # ever applies while pip itself is alive).
+                    try:
+                        out, err = proc.communicate(timeout=_EXITED_DRAIN_S)
+                    except subprocess.TimeoutExpired:
+                        out, err = "", ""
+                        for pipe in (proc.stdout, proc.stderr):
+                            try:
+                                pipe.close()
+                            except (OSError, ValueError):
+                                pass
+                    break
                 if should_stop and should_stop():
                     _kill()
                     _drain()

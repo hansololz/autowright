@@ -86,10 +86,11 @@ Step file names are `NN-name.py`: two digits, gapless from `01` in step order, a
 then lowercase letters, digits, and hyphens only (`01-fetch-feeds.py`, never
 `1_fetch.py` or `01-Fetch.py`). The response carries every file named in `steps` as its
 own block, and may add one `notes.md` block with the full updated notes document.
-`name` and `description` are never manifest keys: identity changes only through the
-editing session's actions. The validator drops an unknown manifest, step, or param key
-silently, so a misspelled key never errors and its setting never lands; use the keys above
-exactly.
+`name` and `description` may appear in the manifest but never change identity: identity
+changes only through the editing session's actions. The validator **rejects** an unknown
+manifest or step key — a misspelled key fails validation with the key named, so fix the
+spelling rather than inventing keys; only an unknown *param* key is dropped silently. Use
+the keys above exactly.
 
 ## Agents and secrets in the manifest
 

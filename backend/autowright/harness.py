@@ -100,6 +100,15 @@ def kill_group(proc: subprocess.Popen, sig: int | None = None) -> None:
     platform.current().processes.signal_group(proc, sig)
 
 
+def _close_quietly(f) -> None:
+    """Close a bare pipe object nothing else owns (a setup failure in
+    `_invoke` left it unwrapped); a close error is never the real story."""
+    try:
+        f.close()
+    except (OSError, ValueError):
+        pass
+
+
 def defuse_read_end(f) -> None:
     """Cross-thread escape hatch for a pipe read end another thread may be
     blocked reading (a kill whose EOF never arrives because an escaped child
@@ -524,7 +533,9 @@ def invoke(agent: dict, prompt: str, timeout: int | None = None,
     call to file-writing delivery (scratch cwd + watcher; the caller adds
     the matching OUTPUT prompt section) and the reply is the recombined
     envelope.
-    proc_holder, when given, receives {'proc': Popen} so a caller can cancel.
+    proc_holder, when given, receives {'proc': Popen, 'release': callable} so
+    a caller can cancel: kill the group, then call release() to free the
+    call's pipes and stdin write the way the watchdog kill does (§8).
     should_abort, when given, is re-checked right after the spawn lands in
     proc_holder: a cancel racing the spawn (set after the caller's own check,
     before the Popen existed) would otherwise kill nothing and the call would
@@ -1057,7 +1068,30 @@ class _ScratchWatcher:
         """(name, content) in first-seen order — call after stop()."""
         if self.overflow is not None:
             raise self.overflow
-        return [(name, self._read(name)) for name in self._order
+        # §8: also any accepted-name document on disk the watcher never
+        # polled (a stop whose join timed out skipped the final sweep), after
+        # the polled ones in name order — the same allowlist the poll uses.
+        names = list(self._order)
+        try:
+            entries = list(os.scandir(self._scratch))
+        except OSError:
+            entries = []
+        for entry in sorted(entries, key=lambda e: e.name):
+            if entry.name in names or not _is_document_name(entry.name):
+                continue
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                size = entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+            if size > STDOUT_CAP_CHARS:
+                # Same stat-first cap as the poll: never pulled into memory.
+                raise HarnessError(
+                    f"{self._harness} produced over "
+                    f"{STDOUT_CAP_CHARS // 1_000_000} MB of output — aborting")
+            names.append(entry.name)
+        return [(name, self._read(name)) for name in names
                 if (self._scratch / name).is_file()]
 
 
@@ -1193,140 +1227,158 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
         raise
+    # §8: everything built after the spawn lives inside the call's own try
+    # below, so a failure there (fd exhaustion, a thread that can't start)
+    # kills the group and releases what was built instead of leaving the
+    # child running. None until built — every release/close guards it.
+    stdin_writer: PipeWriter | None = None
+    out_reader: PipeReader | None = None
+    err_reader: PipeReader | None = None
+
+    def _release() -> None:
+        # §8 cancel: the pipe half of the watchdog kill, from ANY thread —
+        # both readers and the stdin write are released without waiting for
+        # an EOF an escaped child may never deliver. Never blocks.
+        for pipe in (out_reader, err_reader, stdin_writer):
+            if pipe is not None:
+                pipe.defuse()
+
     if proc_holder is not None:
         proc_holder["proc"] = proc
-    if on_spawn is not None:
-        # §7 kill semantics: a runtime agent.ask caller reports this child's
-        # own-session group to the engine so a step kill can reach it. Called
-        # on the invoking thread, right at spawn — the whole point is that
-        # the group is known while the call is still in flight.
-        try:
-            on_spawn(proc)
-        except Exception:  # noqa: BLE001 — a reporting failure must not kill the call
-            log.exception("on_spawn callback failed")
-
-    # §8: a DEDICATED writer thread, started right after the spawn — never
-    # the stdout read loop's thread. A ~40 K prompt overflows the stdin pipe
-    # buffer, so the write blocks until the child drains it; a child that
-    # fills its own stdout pipe first would then deadlock against a reader
-    # that is busy writing. §2 pipe-release contract: the write is releasable,
-    # so a kill abandons an undelivered prompt even when an escaped child
-    # still holds the pipe's read end. The writer closes stdin when it ends
-    # (EOF: every §8 CLI waits for it).
-    stdin_writer = PipeWriter(proc.stdin)
-    stdin_writer.start(prompt)
-    # Cancel/spawn race: a cancel that landed after the caller's own check but
-    # before this Popen existed killed nothing — re-check now that the proc is
-    # visible, so no harness call can outlive a cancel by its full timeout.
-    if should_abort is not None and should_abort():
-        kill_group(proc)
-    # §8 live progress: read stdout as it streams instead of communicate();
-    # the timeout is enforced by a watchdog that kills the group (readline
-    # then sees EOF), and stderr drains on its own thread so a chatty child
-    # can't deadlock on a full pipe.
-    timed_out = threading.Event()
-    overflowed = threading.Event()
-    # §2 pipe-release contract: both pipes are read through releasable
-    # readers, so the kill below ends a blocked read from the watchdog thread
-    # without waiting for an EOF an escaped child may never deliver.
-    out_reader = PipeReader(proc.stdout)
-    err_reader = PipeReader(proc.stderr)
-
-    def _kill() -> None:
-        timed_out.set()
-        kill_group(proc)
-        # An escaped child could still hold the pipe — release our read end
-        # so the loop sees EOF regardless. Never `.close()` from this thread:
-        # TextIOWrapper.close() takes the buffer lock a blocked readline
-        # holds, which would wedge this watchdog instead of freeing the loop.
-        out_reader.defuse()
-        # Same for stderr: the drain thread blocks in a read an escaped child
-        # keeps alive, and it holds that pipe's buffer lock while it does —
-        # the cleanup below would then wedge on its own close().
-        err_reader.defuse()
-        # §8 stdin delivery: a writer thread blocked on a prompt the dead
-        # child will never drain is released the same way, so the kill leaks
-        # no thread and no handle.
-        stdin_writer.defuse()
-
-    # §8: `timeout` is an idle window — every stdout line pushes the deadline
-    # out, so a call still streaming keeps running (a harness that buffers its
-    # whole output gets no resets and the window degrades to a fixed timeout).
-    # The hard cap bounds total wall clock even when output never stops.
-    hard_cap = agent_hard_cap()
-    start = time.monotonic()
-    idle_deadline = [start + timeout]
-    hard_deadline = start + hard_cap
-    hard_capped = threading.Event()
+        # §8: the release travels with the held process, so a job cancel
+        # (drafting's _kill_harness) frees the pipes the same way the
+        # watchdog kill does.
+        proc_holder["release"] = _release
     done = threading.Event()
-
-    def _watch() -> None:
-        while not done.is_set():
-            now = time.monotonic()
-            if now >= hard_deadline:
-                hard_capped.set()
-                _kill()
-                return
-            if now >= idle_deadline[0]:
-                _kill()
-                return
-            # Sleep to the nearer deadline; a reset moves idle_deadline
-            # forward, so waking at the stale deadline just re-checks and
-            # sleeps again.
-            done.wait(min(idle_deadline[0], hard_deadline) - now)
-
-    watchdog = threading.Thread(target=_watch, daemon=True)
-    watchdog.start()
-    err_parts: list[str] = []
-    # The drain thread appends and pops while this thread reads the tail after
-    # a join that may have timed out — one lock covers both sides.
-    err_lock = threading.Lock()
-
-    def _drain_stderr() -> None:
-        # Bounded, tail-keeping: an unbounded read() holds however much a
-        # chatty child emits in backend memory. The decisive error lines come
-        # LAST (banners first), so overflow drops the oldest chunks.
-        total = 0
-        try:
-            while True:
-                chunk = err_reader.read(65536)
-                if not chunk:
-                    return
-                with err_lock:
-                    err_parts.append(chunk)
-                    total += len(chunk)
-                    while total > STDERR_CAP_CHARS and len(err_parts) > 1:
-                        total -= len(err_parts.pop(0))
-        except (OSError, ValueError):
-            # The cleanup below closed our read end mid-read — normal end.
-            pass
-
-    drain = threading.Thread(target=_drain_stderr, daemon=True)
-    drain.start()
-    raw_parts: list[str] = []
-
-    def _reset_idle() -> None:
-        idle_deadline[0] = time.monotonic() + timeout
-
-    # §8 progress sink: handler events → the caller's callbacks. Every event
-    # resets the idle window — the scratch watcher's file events are the only
-    # progress channel for a harness whose stdout stays silent mid-call.
-    sink = ProgressSink(on_chunk=on_chunk, on_tool=on_tool, on_file=on_file,
-                        on_activity=_reset_idle)
-    def _kill_on_overflow() -> None:
-        # §8 scratch-document cap: the same kill as the watchdog's, without
-        # marking the call timed out — the watcher's HarnessError is raised
-        # by this thread once the read loop sees EOF.
-        overflowed.set()
-        if proc.returncode is not None:
-            return  # already reaped (the final sweep): nothing left to kill
-        kill_group(proc)
-        out_reader.defuse()
-        err_reader.defuse()
-        stdin_writer.defuse()
-
     scratch_watcher: _ScratchWatcher | None = None
     try:
+        if on_spawn is not None:
+            # §7 kill semantics: a runtime agent.ask caller reports this child's
+            # own-session group to the engine so a step kill can reach it. Called
+            # on the invoking thread, right at spawn — the whole point is that
+            # the group is known while the call is still in flight.
+            try:
+                on_spawn(proc)
+            except Exception:  # noqa: BLE001 — a reporting failure must not kill the call
+                log.exception("on_spawn callback failed")
+
+        # §8: a DEDICATED writer thread, started right after the spawn — never
+        # the stdout read loop's thread. A ~40 K prompt overflows the stdin pipe
+        # buffer, so the write blocks until the child drains it; a child that
+        # fills its own stdout pipe first would then deadlock against a reader
+        # that is busy writing. §2 pipe-release contract: the write is releasable,
+        # so a kill abandons an undelivered prompt even when an escaped child
+        # still holds the pipe's read end. The writer closes stdin when it ends
+        # (EOF: every §8 CLI waits for it).
+        stdin_writer = PipeWriter(proc.stdin)
+        stdin_writer.start(prompt)
+        # §2 pipe-release contract: both pipes are read through releasable
+        # readers, so the kill below ends a blocked read from the watchdog thread
+        # without waiting for an EOF an escaped child may never deliver.
+        out_reader = PipeReader(proc.stdout)
+        err_reader = PipeReader(proc.stderr)
+        # Cancel/spawn race: a cancel that landed after the caller's own check but
+        # before this Popen existed killed nothing — re-check now that the proc is
+        # visible, so no harness call can outlive a cancel by its full timeout.
+        # The release frees the stdin write (and the reads) like any kill.
+        if should_abort is not None and should_abort():
+            kill_group(proc)
+            _release()
+        # §8 live progress: read stdout as it streams instead of communicate();
+        # the timeout is enforced by a watchdog that kills the group (readline
+        # then sees EOF), and stderr drains on its own thread so a chatty child
+        # can't deadlock on a full pipe.
+        timed_out = threading.Event()
+        overflowed = threading.Event()
+
+        def _kill() -> None:
+            timed_out.set()
+            kill_group(proc)
+            # An escaped child could still hold the pipe — release our read end
+            # so the loop sees EOF regardless. Never `.close()` from this thread:
+            # TextIOWrapper.close() takes the buffer lock a blocked readline
+            # holds, which would wedge this watchdog instead of freeing the loop.
+            # Same for stderr: the drain thread blocks in a read an escaped child
+            # keeps alive, and it holds that pipe's buffer lock while it does —
+            # the cleanup below would then wedge on its own close().
+            # §8 stdin delivery: a writer thread blocked on a prompt the dead
+            # child will never drain is released the same way, so the kill leaks
+            # no thread and no handle.
+            _release()
+
+        # §8: `timeout` is an idle window — every stdout line pushes the deadline
+        # out, so a call still streaming keeps running (a harness that buffers its
+        # whole output gets no resets and the window degrades to a fixed timeout).
+        # The hard cap bounds total wall clock even when output never stops.
+        hard_cap = agent_hard_cap()
+        start = time.monotonic()
+        idle_deadline = [start + timeout]
+        hard_deadline = start + hard_cap
+        hard_capped = threading.Event()
+
+        def _watch() -> None:
+            while not done.is_set():
+                now = time.monotonic()
+                if now >= hard_deadline:
+                    hard_capped.set()
+                    _kill()
+                    return
+                if now >= idle_deadline[0]:
+                    _kill()
+                    return
+                # Sleep to the nearer deadline; a reset moves idle_deadline
+                # forward, so waking at the stale deadline just re-checks and
+                # sleeps again.
+                done.wait(min(idle_deadline[0], hard_deadline) - now)
+
+        watchdog = threading.Thread(target=_watch, daemon=True)
+        watchdog.start()
+        err_parts: list[str] = []
+        # The drain thread appends and pops while this thread reads the tail after
+        # a join that may have timed out — one lock covers both sides.
+        err_lock = threading.Lock()
+
+        def _drain_stderr() -> None:
+            # Bounded, tail-keeping: an unbounded read() holds however much a
+            # chatty child emits in backend memory. The decisive error lines come
+            # LAST (banners first), so overflow drops the oldest chunks.
+            total = 0
+            try:
+                while True:
+                    chunk = err_reader.read(65536)
+                    if not chunk:
+                        return
+                    with err_lock:
+                        err_parts.append(chunk)
+                        total += len(chunk)
+                        while total > STDERR_CAP_CHARS and len(err_parts) > 1:
+                            total -= len(err_parts.pop(0))
+            except (OSError, ValueError):
+                # The cleanup below closed our read end mid-read — normal end.
+                pass
+
+        drain = threading.Thread(target=_drain_stderr, daemon=True)
+        drain.start()
+        raw_parts: list[str] = []
+
+        def _reset_idle() -> None:
+            idle_deadline[0] = time.monotonic() + timeout
+
+        # §8 progress sink: handler events → the caller's callbacks. Every event
+        # resets the idle window — the scratch watcher's file events are the only
+        # progress channel for a harness whose stdout stays silent mid-call.
+        sink = ProgressSink(on_chunk=on_chunk, on_tool=on_tool, on_file=on_file,
+                            on_activity=_reset_idle)
+        def _kill_on_overflow() -> None:
+            # §8 scratch-document cap: the same kill as the watchdog's, without
+            # marking the call timed out — the watcher's HarnessError is raised
+            # by this thread once the read loop sees EOF.
+            overflowed.set()
+            if proc.returncode is not None:
+                return  # already reaped (the final sweep): nothing left to kill
+            kill_group(proc)
+            _release()
+
         if scratch is not None:
             scratch_watcher = _ScratchWatcher(scratch, sink, harness or "",
                                               on_overflow=_kill_on_overflow)
@@ -1418,6 +1470,18 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
             # canonical text.
             out = _recombine(out, scratch_watcher.documents())
         return out
+    except BaseException:
+        # §8: a failure while building what follows the spawn (fd exhaustion
+        # in a reader or writer, a thread that can't start) never reached the
+        # read loop's own kill-and-reap — take the group down and reap here,
+        # so the child is never left running. A proc the loop already reaped
+        # (returncode set) has nothing left to kill.
+        done.set()
+        if proc.returncode is None:
+            kill_group(proc)
+            _release()
+            proc.wait()
+        raise
     finally:
         # Both pipes close on EVERY path — same hygiene as the engine's step
         # process. The last Popen is retained on the draft job (proc_holder)
@@ -1427,8 +1491,20 @@ def _invoke(harness: str | None, agent: dict, prompt: str, timeout: int,
         # ordinary close() here would wedge THIS thread on it (its join timed
         # out, or an exception skipped the join entirely). The reader's close
         # defuses first: the read sees EOF, lets the lock go, then closes.
-        out_reader.close()
-        err_reader.close()
+        # A setup failure can leave any of them unbuilt: the bare pipe is
+        # closed instead, and the writer (idempotent close) only if it exists.
+        if stdin_writer is not None:
+            stdin_writer.close()
+        elif proc.stdin is not None:
+            _close_quietly(proc.stdin)
+        if out_reader is not None:
+            out_reader.close()
+        elif proc.stdout is not None:
+            _close_quietly(proc.stdout)
+        if err_reader is not None:
+            err_reader.close()
+        elif proc.stderr is not None:
+            _close_quietly(proc.stderr)
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
 

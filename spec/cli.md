@@ -76,8 +76,10 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   wire parameter names — while reference resolution still reads the uncapped list (§19;
   the bare no-reference form of `execution show|tail|cancel|retry|skip|result` means "the
   newest" and reads `limit=1`), `settings set` lists its keys with
-  each one's value form (`dataPath=` is made absolute against the current directory before
-  it travels, like `marketplace add`'s path — the backend refuses a relative path with 422,
+  each one's value form (`dataPath=` is tilde-expanded and then made absolute against the
+  current directory before it travels, like `marketplace add`'s path and `set location=` —
+  zsh doesn't expand `~` after `=` in an ordinary argument, so without the expansion
+  `dataPath=~/Data` would land in a folder literally named `~` under the current directory; the backend refuses a relative path with 422,
   since it would resolve against the backend's own cwd) (and, after setting one of the shell-owned keys `login` or
   `menuBarIcon`, prints one extra line "takes effect when the app next syncs, within a
   minute" — the OS side of those two is the Electron main process's §3 poll, not the
@@ -209,7 +211,10 @@ into a directory (dir defaults to the automation's name); `automation push <ref>
 [--agent] [--grant-agent NAME]… [--grant-secret NAME]…` validates and creates v1 — push and
 create take the workdir as a required positional; only pull's is optional. **Neither
 destroys in-app draft work silently** (2026-09-30): `push` first reads the automation and,
-when it holds an unsaved §4.4 draft, exits 1 with `'<name>' has an unsaved draft in the app
+when it holds an unsaved §4.4 draft **or a §8 drafting job is still building or holding
+an unshown outcome for it** (`GET /draft/{id}` answers a `job` — the first chat message
+of an edit session has no draft yet, and the save would kill that job silently), exits 1 with `'<name>' has an
+unsaved draft in the app
 - pass --discard-draft to replace it` and writes nothing; with `--discard-draft` the §19
 save settles that draft exactly as a UI save would (its live test and sync job die, the
 thread gets the "Draft saved as vN." marker). `create` never touches the app's pending

@@ -63,8 +63,9 @@ class DraftIn(BaseModel):
     """A §4.4 draft payload. Everything the store writes into a version folder
     is typed here — steps (each entry an object, the camelCase flag boundary
     above), the spec blocks, the notes doc, the param and package lists — so a
-    wrong shape answers 422 before any file is written (§19); the rest (name,
-    description, triggers, stepAgents, allowedSecrets, …) passes through
+    wrong shape answers 422 before any file is written (§19), as are the
+    name/description/note strings and the triggers list; the rest
+    (stepAgents, allowedSecrets, …) passes through
     untouched for the handler's semantic checks. `plain()` preserves key
     presence — a handler's `"triggers" in d` still works."""
 
@@ -75,9 +76,16 @@ class DraftIn(BaseModel):
     notes: StrictStr = None       # §4.1 notes.md
     params: list[dict] = None     # §4.2 definitions (+ draft-only values)
     packages: list[dict] = None   # §6.2 declarations — {pip, import, why}
+    # Identity and trigger keys the handlers read — typed so a wrong shape
+    # answers 422, never a 500 deep in the save (§19).
+    name: StrictStr | None = None
+    description: StrictStr | None = None
+    note: StrictStr | None = None
+    triggers: list[dict] | None = None
 
     # The typed keys `plain()` re-emits, presence-preserving like `steps`.
-    _CONTENT_KEYS = ("spec", "notes", "params", "packages")
+    _CONTENT_KEYS = ("spec", "notes", "params", "packages",
+                     "name", "description", "note", "triggers")
 
     def plain(self) -> dict:
         d = dict(self.model_extra or {})

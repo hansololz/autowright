@@ -332,7 +332,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     progress overlay): the same backdrop + card and both-ways motion, but no user dismissal
     path at all — no Escape, no backdrop click, no buttons; it closes only programmatically
     (its `open` prop, which plays the exit before unmount).
-- Layout: sidebar rail 58 px, expanding to 212 px on hover (§9). **Surface anatomy** —
+- Layout: sidebar rail 58 px, expanding to 212 px on hover (§9); the rail clips with
+  `overflow: clip`, never `hidden` — a hidden overflow is still a scroll container, so
+  keyboard focus on a collapsed row scrolls its off-screen label into view and leaves the
+  rail showing no icons at all. **Surface anatomy** —
   one frame, one rhythm, one card, one row family, one field family, app-wide:
   - **Page frame:** gutter `26px 30px 70px`; pages that open with a `BackLink` use top 20
     (the link supplies the rest). Max width 1200 px (Review page 1800 px, forms 720 px,

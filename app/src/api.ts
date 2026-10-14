@@ -99,16 +99,30 @@ export const LONG_REQUEST_TIMEOUT_MS = 660_000
 // import leg (file upload, URL fetch, confirm, and the §22.3 marketplace
 // entry preview that downloads the archive), automation delete (waits for
 // cancelled engine threads), and the memory operations that copy the whole
-// memory directory (clear, snapshot create, snapshot restore).
+// memory directory (clear, snapshot create, snapshot restore), plus the §22
+// marketplace routes that read the network or a slow disk (add, per-source
+// refresh, refresh-all, the entry archive, catalog create and save).
+// Marketplace images get 90 s: the backend's slot wait plus the fetch can
+// reach that.
+export const IMAGE_REQUEST_TIMEOUT_MS = 90_000
+
 export function requestTimeoutMs(method: string, path: string): number {
   const route = path.split('?')[0]
+  if (method === 'GET' && /^\/marketplace\/sources\/[^/]+\/entries\/[^/]+\/image$/.test(route)) {
+    return IMAGE_REQUEST_TIMEOUT_MS
+  }
   const long = (method === 'POST' && (
     route === '/packages/install' || route === '/packages/update'
     || route.startsWith('/automations/import')
     || /^\/marketplace\/sources\/[^/]+\/entries\/[^/]+\/preview$/.test(route)
+    || route === '/marketplace/sources' || route === '/marketplace/refresh'
+    || route === '/marketplace/catalogs'
+    || /^\/marketplace\/sources\/[^/]+\/refresh$/.test(route)
     || /^\/automations\/[^/]+\/memory\/clear$/.test(route)
     || /^\/automations\/[^/]+\/memory\/snapshots$/.test(route)
     || /^\/automations\/[^/]+\/memory\/snapshots\/[^/]+\/restore$/.test(route)))
+    || (method === 'GET' && /^\/marketplace\/sources\/[^/]+\/entries\/[^/]+\/archive$/.test(route))
+    || (method === 'PUT' && /^\/marketplace\/sources\/[^/]+\/catalog$/.test(route))
     || (method === 'DELETE' && /^\/automations\/[^/]+$/.test(route))
   return long ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS
 }
@@ -120,28 +134,45 @@ function requestSignal(method: string, path: string, signal?: AbortSignal): Abor
   return signal ? AbortSignal.any([timeout, signal]) : timeout
 }
 
+// §19 plain words: a client timeout or a connection failure never reaches a
+// surface as the browser's "signal timed out" / "Failed to fetch". The
+// caller's own abort passes through unchanged (it is not a timeout).
+async function timedFetch(method: string, path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+  const timeout = AbortSignal.timeout(requestTimeoutMs(method, path))
+  try {
+    return await fetch(base + path, {
+      ...init,
+      method,
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
+    })
+  } catch (err) {
+    const name = (err as { name?: string } | null)?.name
+    if (timeout.aborted && (name === 'TimeoutError' || name === 'AbortError')) {
+      throw new Error("The backend didn't answer in time.")
+    }
+    if (err instanceof TypeError) throw new Error("The backend isn't reachable.")
+    throw err
+  }
+}
+
 // §5.1/§5.2 archives ride as raw zip bytes (§19: no multipart)
 async function rawPost<T>(path: string, data: Uint8Array, signal?: AbortSignal): Promise<T> {
-  const r = await fetch(base + path, {
-    method: 'POST',
+  const r = await timedFetch('POST', path, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
     body: data as unknown as BodyInit,
-    signal: requestSignal('POST', path, signal),
-  })
+  }, signal)
   if (!r.ok) throw await apiError(r)
   return r.json()
 }
 
 async function req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const r = await fetch(base + path, {
-    method,
+  const r = await timedFetch(method, path, {
     headers: {
       Authorization: `Bearer ${token}`,
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: requestSignal(method, path, signal),
-  })
+  }, signal)
   if (!r.ok) throw await apiError(r)
   return r.json()
 }

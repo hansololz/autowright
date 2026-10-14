@@ -30,6 +30,7 @@ RESULT_EXCERPT = 2000  # chars of result.md shown for a detailed successful exec
 LOG_LINE_CLIP = 2000
 LOG_LINE_CLIP_MARKER = "… [clipped]"
 SECTION_CAP = 64 * 1024
+BLOCK_CAP = 24_000  # §8: one run's block — its log tails shrink until it fits
 
 
 def start(engine: Engine, draft: dict, auto: dict | None,
@@ -140,12 +141,26 @@ def start(engine: Engine, draft: dict, auto: dict | None,
 
         state = {"proc": None, "cancel": False, "on_spawn": _on_spawn,
                  "on_agent_groups": _on_agent_groups}
-        with engine._lock:
-            engine._live[h["id"]] = state
+        # §7: registered under store.lock — the lock `kill_all_live` flips the
+        # stopping flag beneath — and the flag re-checked there, so a test
+        # whose setup straddled the shutdown sweep never spawns a step group
+        # the sweep did not see.
+        with store.lock:
+            stopping = engine._stopping
+            if not stopping:
+                with engine._lock:
+                    engine._live[h["id"]] = state
         # §4.5: test executions never change display state — no automation row.
         hub.publish("execution.started", executionId=h["id"], automationId=container_id,
                     execution=store.exec_json(h), automation=None)
         started_published = True
+        if stopping:
+            # §7: finished the way the shutdown path finishes a live record —
+            # the engine's own shutdown arm marks every step and the record
+            # `interrupted` ("backend stopped mid-execution") and spawns nothing.
+            state["shutdown"] = True
+            _run(engine, shadow, ver, h, state, dbase, scratch)
+            return h["id"]
         t = threading.Thread(target=_run, args=(engine, shadow, ver, h, state, dbase, scratch),
                              daemon=True)
         # §19 delete waits on `engine.wait_finished`, which finds the thread
@@ -260,18 +275,56 @@ def executions_context(auto: dict | None, current_steps: list[dict],
         return None
     cur_shas = [_step_sha(s) for s in current_steps or []]
     blocks = []
+    kept: set[int] = set()  # block indexes the section cap never drops
     for i, h in enumerate(picked):
         full = store.exec_full(h["id"]) or h
         detail = i == 0 or (execution_id is not None and h["id"] == execution_id)
-        blocks.append(_execution_block(full, cur_shas, detail))
-    # §8: past SECTION_CAP the runs are dropped oldest-first; the newest run
-    # (block 0, with its detail) is always kept.
-    while len(blocks) > 1 and len("\n\n".join(blocks)) > SECTION_CAP:
-        blocks.pop()
-    return "\n\n".join(blocks)
+        if detail:
+            kept.add(i)
+        blocks.append(_bounded_execution_block(full, cur_shas, detail))
+    # §8: past SECTION_CAP the runs are dropped oldest-first — but never the
+    # newest run (block 0) nor the request's `executionId` run, wherever it
+    # sorted; with only those left the per-block cap already bounds them.
+    order = list(range(len(blocks)))
+    while len("\n\n".join(blocks[i] for i in order)) > SECTION_CAP:
+        droppable = [i for i in order if i not in kept]
+        if not droppable:
+            break
+        order.remove(droppable[-1])
+    return "\n\n".join(blocks[i] for i in order)
 
 
-def _execution_block(h: dict, cur_shas: list[str], detail: bool) -> str:
+def _bounded_execution_block(h: dict, cur_shas: list[str], detail: bool) -> str:
+    """§8: one run's block bounded to BLOCK_CAP — while it exceeds the cap,
+    the per-step log tails shrink (fewer lines, the last ones kept; the step
+    at fault keeps the most) until it fits or no tail line is left."""
+    tails: dict[int, list[str]] = {}
+    tail_lines = LOG_TAIL
+    while True:
+        block = _execution_block(h, cur_shas, detail, tail_lines, tails)
+        if len(block) <= BLOCK_CAP or tail_lines == 0:
+            return block
+        tail_lines //= 2
+
+
+def _last_lines(lines: list[str], count: int) -> list[str]:
+    return lines[-count:] if count > 0 else []
+
+
+def _execution_block(h: dict, cur_shas: list[str], detail: bool,
+                     tail_lines: int = LOG_TAIL,
+                     tails: dict[int, list[str]] | None = None) -> str:
+    """`tail_lines` bounds each earlier step's log tail; the failing step
+    keeps twice that (up to LOG_TAIL). `tails` caches the read tails across
+    the shrink passes of `_bounded_execution_block`."""
+    if tails is None:
+        tails = {}
+
+    def tail_of(idx: int, count: int) -> list[str]:
+        if idx not in tails:
+            tails[idx] = _log_tail(h, idx)
+        return _last_lines(tails[idx], count)
+
     steps = h.get("steps") or []
     shas = [s.get("sha") for s in steps]
     stale = ("steps match the current draft" if shas == cur_shas
@@ -297,9 +350,9 @@ def _execution_block(h: dict, cur_shas: list[str], detail: bool) -> str:
     if failed_at is not None:
         # The failing step's tail plus the earlier steps' — the cause is often upstream.
         for j in range(failed_at):
-            if tail := _log_tail(h, j):
+            if tail := tail_of(j, tail_lines):
                 lines.append(f"log tail (step {j + 1}):\n" + "\n".join(tail))
-        if tail := _log_tail(h, failed_at):
+        if tail := tail_of(failed_at, min(LOG_TAIL, tail_lines * 2)):
             lines.append("log tail (failing step):\n" + "\n".join(tail))
     if h.get("chip"):
         lines.append(f"result chip: {h['chip']}")

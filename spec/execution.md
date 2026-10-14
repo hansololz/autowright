@@ -59,7 +59,12 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   than its per-line cap: a longer line, or a newline-free overflow buffer, is **sliced** into
   consecutive pieces of at most that size, each a well-formed event, so no line can ever
   exceed the engine's bounded read and be dropped or split into escaped fragments that
-  redaction would miss. Then the execution gets its final status,
+  redaction would miss. A cut never falls inside an occurrence of a secret value (or of a
+  substantive line of a multi-line value, §4.8): the executor holds the automation's scan
+  map (§6.1 `scan_secrets`), and a piece boundary that would split an occurrence moves
+  back to just before it, so the engine redacts every piece whole — slicing at fixed
+  offsets would otherwise hand the engine two halves that match nothing. Then the
+  execution gets its final status,
   duration, result object; automation gets latest/resultChip/lastExecutionLabel "Today"; toast
   summarizes. An execution whose steps include `skipped` ones but no failures finishes
   `succeeded`.
@@ -73,8 +78,15 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   shutdown sweep hard-kills every live step group and marks the live records with a
   shutdown flag, and the engine thread that then observes the EOF finalizes them
   `interrupted` with the sys line "backend stopped mid-execution" — never `cancelled`,
-  never "cancelled by you" (the user pressed nothing). Startup recovery (§3) finds those
-  records already settled; it marks `interrupted` itself only the ones a crash left live.
+  never "cancelled by you" (the user pressed nothing). The lifespan then waits — bounded,
+  inside the §3 shutdown box — for those live records to finish, so the `interrupted`
+  write lands before the process exits rather than racing it. Startup recovery (§3) finds
+  those records already settled; it marks `interrupted` itself only the ones a crash left
+  live, and in the same shape: executing **and queued** steps become `interrupted` (note
+  "backend restarted mid-execution"), so a record settled by either path reads alike. A §11
+  test run registers itself in the engine's live set under the store lock and re-checks the
+  shutdown flag there, so a test started during the sweep spawns nothing and finishes
+  `interrupted` in the same shape, instead of starting a step group the sweep never saw.
 - **Kill semantics:** each step's executor runs in its own process group
   (`start_new_session`), and timeout/cancel/skip signal the whole group — a step's children
   (Playwright browsers, subprocesses) die with it, are never orphaned, and can never hold the
@@ -87,7 +99,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   server it spawned, an `&` shell job) neither holds the step "executing" until the
   watchdog fires nor survives as an orphan — and a cancel's TERM→KILL escalation is never
   cancelled while the group may still have members. The read loop therefore ends on EOF
-  *or* on the executor's exit plus the grace, never on EOF alone.
+  *or* on the executor's exit plus the grace, never on EOF alone. Windows exception
+  (open, `spec/ports.md`): `taskkill /T` can't address an exited root, so the step-end kill
+  there reaches nothing once the executor has been reaped — a background child a step
+  leaves behind survives until a Job-object kill lands.
   A kill also releases the engine's read of that pipe itself (§2 pipe-release contract), so
   a grandchild that escaped the group by starting its own session and still holds the pipe
   cannot hold the step past its kill either.

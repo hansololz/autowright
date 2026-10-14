@@ -201,8 +201,9 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
     this date.
   - **Location pinned.** The built-in row's `location` is the constant, always: a row whose
     `builtin` is true but whose `location` differs (a hand edit, or a release that moved
-    the catalog) is re-pointed at load (saved; its copy stays until the next refresh reads
-    the new place), and `PATCH` with a `location` for it answers 422 "the built-in
+    the catalog) is re-pointed at load (saved with `refreshed_at` and `error` cleared — the
+    new place has never been read, so the next hourly check refreshes it rather than
+    waiting out the day; its copy stays until then), and `PATCH` with a `location` for it answers 422 "the built-in
     catalog's location can't be changed" (§22.4). `expanded` and `auto_refresh` change freely.
   - **Not removable.** `DELETE` answers 409 "the built-in catalog can't be removed -
     collapse it instead" (§22.4); the page's actions menu simply has no Remove… row for
@@ -565,13 +566,16 @@ still cached).
   as the preview route fetches it (`transfer.fetch_archive` for an https reference with the
   §5.2 rules, a plain read capped at the §5.1 64 MB for a local path; the §22.1
   concurrency slots), opened as a zip under the §5.1 zip-bomb guards (member count, member
-  size, decompressed total), and every file member is served as text: `path` the member's
+  size, decompressed total, no duplicate names — each member read by its own entry), and every file member is served as text: `path` the member's
   path inside the archive, `text` its content decoded as UTF-8, or `null` when the member
   isn't UTF-8 text, is over 1 MB, or lands past the §22.1 16 MB total-text cap
   (`transfer.list_archive_text`). Directory members are
-  skipped. The https branch takes a §22.1 concurrency slot exactly like the local-path
-  branch (repeated Audit clicks on link entries are bounded, not unbounded 10-minute
-  downloads in parallel). Served order, whatever order the zip holds them in: `manifest.yaml`; then the
+  skipped. The https branch takes one of **two archive slots** of its own, never a §22.1
+  catalog read slot: a §5.2 download can run ten minutes, and four Audit clicks on slow
+  archives holding the four catalog slots would starve add, refresh, every image, and the
+  auto-refresh thread; the local-path branch is a plain capped file read and keeps using a
+  catalog read slot (repeated Audit clicks on link entries are thereby bounded, never
+  unbounded 10-minute downloads in parallel). Served order, whatever order the zip holds them in: `manifest.yaml`; then the
   `automation/` members - `automation.yaml`, `spec.md`, `notes.md`, then the rest of that
   folder sorted by name (so step scripts follow their `NN-` numbers); then `agents.yaml`,
   `secrets.yaml`; then anything else sorted by path. The archive is **not** validated as
@@ -584,7 +588,7 @@ still cached).
   on the threadpool, outside the table lock.
 - `POST /marketplace/catalogs` `{ folder?, exportFolder?, name, description, entries }` →
   `Source` (§22.7 create). With `folder` (an absolute path to an existing directory, 422
-  otherwise): a folder already holding `marketplace-catalog.yaml` → 409 "that folder
+  otherwise — a path that can't even be resolved, an embedded NUL, is the same 422): a folder already holding `marketplace-catalog.yaml` → 409 "that folder
   already holds a marketplace catalog - add it instead"; a folder whose catalog path is
   already a location → 409 "that marketplace is already added"; the catalog is written
   there and the row's location is that file. Without `folder`: the row's location is
@@ -633,8 +637,11 @@ autowright marketplace catalog add <source> <automation-or-file> [--title T] [--
 autowright marketplace catalog remove <source> <n>            drop entry n; its archive file stays
 ```
 
-`<source>` resolves like every other §20 reference: an id, an unambiguous id prefix, an
-exact name (case-insensitive), or a unique part of its name; ambiguity and no-match are the standard §20 errors. A file
+`<source>` resolves exactly like every other §20 reference, in the §20 order (exact id,
+exact name, unique id prefix, unique name part); ambiguity and no-match are the standard §20 errors.
+The entry number `<n>` is the entry's **position in the listing**, not its catalog index:
+a leniently-read copy (§21) can serve indexes with gaps, so `install`/`audit` send the
+`index` of the n-th listed entry. A file
 path given to `add`, or as `set location=`, is made absolute against the current directory
 before it travels (the same path must work with both verbs).
 `list` prints one block per catalog - `<name> [<id8>]  <location>` (`(kept by Autowright)`

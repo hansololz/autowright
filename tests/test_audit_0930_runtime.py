@@ -224,7 +224,7 @@ def _record_fires(monkeypatch):
 
     fires = []
     monkeypatch.setattr(sched_mod, "fire_trigger",
-                        lambda store, engine, a, t: fires.append(t["id"]) or True)
+                        lambda store, engine, a, t, **_: fires.append(t["id"]) or True)
     return fires
 
 
@@ -312,6 +312,8 @@ def test_interval_across_fall_back_fires_at_the_real_instant(store, monkeypatch)
         a["triggers"][0]["enabledAt"] = "2026-10-31T12:00:00-04:00"
         monkeypatch.setattr(store, "run_baseline",
                             lambda auto: datetime(2026, 11, 1, 0, 30))
+        monkeypatch.setattr(store, "run_baseline_instant",
+                            lambda auto: datetime(2026, 11, 1, 4, 30, tzinfo=timezone.utc))
         sched._tick()  # 00:55 EDT
         assert fires == []
         local.now, utc.now = datetime(2026, 11, 1, 1, 35), \
@@ -326,6 +328,47 @@ def test_interval_across_fall_back_fires_at_the_real_instant(store, monkeypatch)
             datetime(2026, 11, 1, 6, 31, tzinfo=timezone.utc)  # second 01:31 (EST)
         sched._tick()
         assert fires == ["iv"]
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="POSIX-only tzset")
+def test_interval_anchor_inside_the_fall_back_hour_keeps_the_real_instant(store, monkeypatch):
+    """§4.3 (2026-10-13 audit): the baseline reaches the scheduler as the
+    run's UTC instant. America/New_York, last run 05:10Z (01:10 EDT), now
+    06:20Z (01:20 EST), PT2H — the next occurrence is 07:10Z, not the 08:10Z a
+    naive 01:10 round-tripped against now would give (the later reading)."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        local = _Clock(datetime(2026, 11, 1, 1, 20))
+        utc = _Clock(datetime(2026, 11, 1, 6, 20, tzinfo=timezone.utc))
+        from autowright import triggers as triggerlib
+        from autowright.engine import Engine
+        from autowright.scheduler import Scheduler
+
+        sched = Scheduler(store, Engine(store), clock=local, utc_clock=utc)
+        fires = _record_fires(monkeypatch)
+        a = store.create_automation(make_version(), "Two-hourly", None, triggers=[
+            {"id": "iv", "kind": "interval", "enabled": True, "every": "PT2H",
+             "source": "user"}])
+        a["triggers"][0]["enabledAt"] = "2026-10-31T12:00:00-04:00"
+        a["_last_exec_at"] = "2026-11-01T01:10:00-04:00"  # 05:10Z, 01:10 EDT
+        instant = store.run_baseline_instant(a)
+        assert instant == datetime(2026, 11, 1, 5, 10, tzinfo=timezone.utc)
+        assert triggerlib.interval_instant(a["triggers"][0], utc.now, instant) == \
+            datetime(2026, 11, 1, 7, 10, tzinfo=timezone.utc)
+        sched._tick()  # 01:20 EST
+        assert fires == []
+        local.now, utc.now = datetime(2026, 11, 1, 2, 11), \
+            datetime(2026, 11, 1, 7, 11, tzinfo=timezone.utc)
+        sched._tick()
+        assert fires == ["iv"], "07:10Z is the occurrence, not 08:10Z"
     finally:
         if old is None:
             os.environ.pop("TZ", None)

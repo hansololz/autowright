@@ -735,7 +735,10 @@ def cmd_automation_pull(c: Client, args) -> None:
 def cmd_automation_push(c: Client, args) -> None:
     a = find_automation(c, args.automation)
     full = c.req("GET", f"/automations/{a['id']}")
-    if full.get("draft") and not args.discard_draft:
+    # §20: a §8 drafting job still building counts too — an edit session's
+    # first chat message has no draft yet, and the save would kill that job.
+    in_app_work = full.get("draft") or c.req("GET", f"/draft/{a['id']}").get("job")
+    if in_app_work and not args.discard_draft:
         # §20: a push never destroys in-app draft work silently — the §19
         # save would settle that draft (its live test and sync job die).
         sys.exit(f"{full['name']!r} has an unsaved draft in the app - pass "
@@ -1597,7 +1600,7 @@ def cmd_marketplace_add(c: Client, args) -> None:
     else:
         # §22.5: a file path is made absolute against the current directory
         # before it travels - the backend reads the file itself.
-        body = {"path": os.path.abspath(ref)}
+        body = {"path": os.path.abspath(os.path.expanduser(ref))}
     # §20 HTTP timeouts: add fetches the catalog and its images over the
     # network, so it takes the long timeout the import calls take.
     s = c.req("POST", "/marketplace/sources", body, timeout=660)
@@ -1622,7 +1625,7 @@ def cmd_marketplace_set(c: Client, args) -> None:
         elif raw and not raw.startswith(("http://", "https://")):
             # §22.5: a file path is made absolute against the current
             # directory before it travels, exactly as `add` does.
-            patch[k] = os.path.abspath(raw)
+            patch[k] = os.path.abspath(os.path.expanduser(raw))
         else:
             # §22.4: an empty location clears it - the copy stays, there is
             # just nothing to refresh from any more.
@@ -1683,9 +1686,17 @@ def _entry_index(n: int, entries: list, name: str) -> int:
     return n - 1
 
 
+def _listed_entry_index(n: int, source: dict) -> int:
+    """§22.5: `<n>` is the entry's position in the listing, not its catalog
+    index - a leniently-read copy (§21) can serve indexes with gaps, so send
+    the `index` of the n-th listed entry."""
+    entries = source.get("entries") or []
+    return entries[_entry_index(n, entries, source.get("name", "?"))]["index"]
+
+
 def cmd_marketplace_install(c: Client, args) -> None:
     s = find_source(c, args.source)
-    i = _entry_index(args.n, s.get("entries") or [], s.get("name", "?"))
+    i = _listed_entry_index(args.n, s)
     pr = c.req("POST", f"/marketplace/sources/{s['id']}/entries/{i}/preview",
                timeout=660)
     # §20 import rule: the typed command is the user's go-ahead - preview and
@@ -1697,7 +1708,7 @@ def cmd_marketplace_install(c: Client, args) -> None:
 
 def cmd_marketplace_audit(c: Client, args) -> None:
     s = find_source(c, args.source)
-    i = _entry_index(args.n, s.get("entries") or [], s.get("name", "?"))
+    i = _listed_entry_index(args.n, s)
     # §22.5: the same long timeout `install` takes - the archive is fetched
     # over the network before a single line can print. Nothing is installed.
     r = c.req("GET", f"/marketplace/sources/{s['id']}/entries/{i}/archive",
@@ -1871,8 +1882,9 @@ def cmd_settings_set(c: Client, args) -> None:
         if k == "dataPath":
             # §20: made absolute against the current directory before it
             # travels — the backend would resolve a relative path against its
-            # own cwd, so it refuses one with 422.
-            data_path = os.path.abspath(raw)
+            # own cwd, so it refuses one with 422. Tilde-expanded first: zsh
+            # leaves `~` after `=` alone in an ordinary argument.
+            data_path = os.path.abspath(os.path.expanduser(raw))
             continue
         if k not in SETTINGS_KEYS:
             sys.exit(f"unknown setting {k!r} — have: {', '.join(SETTINGS_KEYS)}, dataPath")

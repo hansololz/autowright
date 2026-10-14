@@ -207,9 +207,10 @@ Delivery override for this environment — this changes HOW you return files, no
 - Write each file as soon as it is ready, one after another — do not batch them at the end.
 - If you are blocked, write NO files and print the blocker envelope
   (===BLOCKED=== … ===END===) to stdout exactly as the instructions specify.
-- When asked to resend corrected files, write EVERY file again the same way — the
-  corrected ones and the unchanged ones alike. Each attempt starts with an empty working
-  directory, so only the files you write this time exist; a file you skip is lost."""
+- When asked to resend corrected files, follow the VALIDATION ERRORS note: write only
+  the failed files — the blocks it lists as kept are held by the backend exactly as you
+  wrote them and must not be resent. Each attempt starts with an empty working
+  directory; a kept file you don't write stays kept, a failed file you skip is dropped."""
 # Canonical in harness (the recombiner needs it too; drafting imports
 # harness, never the reverse) — aliased so every drafting reference stays.
 FENCE_OPEN_RE = harness.FENCE_OPEN_RE
@@ -619,7 +620,7 @@ def build_steps_prompt(spec_md: str, current: dict | None,
 
 
 DIAGNOSE_TASK = """=== TASK ===
-Your previous response failed validation twice — the VALIDATION ERRORS above are what the backend rejected. Diagnose why this automation could not be built as specified and respond with exactly one blocker envelope — no file blocks. For each blocker, `reason` names what went wrong in plain words and `fix` is the spec change or clarification that would let the build succeed:
+Your previous response failed validation{attempts} — the VALIDATION ERRORS above are what the backend rejected. Diagnose why this automation could not be built as specified and respond with exactly one blocker envelope — no file blocks. For each blocker, `reason` names what went wrong in plain words and `fix` is the spec change or clarification that would let the build succeed:
 
 ===BLOCKED===
 blockers:
@@ -1644,6 +1645,12 @@ class DraftJobs:
             # The whole session group (§8 "cancelling the job kills the harness
             # process") — CLIs spawn helpers that terminate alone won't reach.
             harness.kill_group(proc, signal.SIGTERM)
+            # §8: and release its pipes and stdin write the way the watchdog
+            # kill does, so an escapee holding stdout can't keep the call
+            # alive until its idle window or hard cap.
+            release = j["_proc"].get("release")
+            if release is not None:
+                release()
 
             def _hard_kill(p=proc):
                 # §8: a CLI that traps SIGTERM must still die - same
@@ -1726,6 +1733,11 @@ class DraftJobs:
             proc = j["_proc"].get("proc")
             if proc and proc.poll() is None:
                 harness.kill_group(proc)
+                # §8/§3: release the pipes too, so a drafting thread is never
+                # left blocked on an escapee's pipe past the shutdown box.
+                release = j["_proc"].get("release")
+                if release is not None:
+                    release()
 
     def _settle(self, job: dict, status: str, **fields) -> bool:
         """The only terminal transition — building → done/blocked/failed under
@@ -2077,7 +2089,7 @@ class DraftJobs:
                          " — analyzing what went wrong…")
         diagnose = (prompt + "\n\n=== YOUR PREVIOUS RESPONSE ===\n" + clip_response(raw)
                     + "\n\n=== VALIDATION ERRORS ===\n- " + "\n- ".join(errors)
-                    + "\n\n" + DIAGNOSE_TASK)
+                    + "\n\n" + DIAGNOSE_TASK.replace("{attempts}", attempts_phrase(attempts)))
         blockers = None
         try:
             # A cancel raises `Cancelled` out of `_invoke` — it is not caught

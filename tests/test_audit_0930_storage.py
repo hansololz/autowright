@@ -267,7 +267,9 @@ def test_memory_file_413_names_the_directory_without_a_walk(client, monkeypatch)
 # ---------- 5. §19 log reads: header under the lock, tail from the end ----------
 
 def _naive_read(p, tail, since):
-    raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    raw = p.read_text(encoding="utf-8", errors="replace").split("\n")
+    if raw and raw[-1] == "":
+        raw.pop()
     if since is not None and since >= 1 and len(raw) >= since:
         try:
             probe = json.loads(raw[since - 1])
@@ -431,7 +433,10 @@ def test_non_mapping_step_entry_is_skipped(store, caplog):
 
 @pytest.mark.parametrize("broken", [
     "steps: [unclosed\n",                                     # unparsable
-    "steps:\n  - file: [1, 2]\n    name: odd\n",              # parses, then crashes the reader
+    # Parses, then crashes the reader (a spec.md that is a directory). A
+    # non-string step `file` no longer crashes it: since the 2026-10-13
+    # audit it reads as no script file (§5 lenient nested lists).
+    "spec-dir",
 ])
 def test_broken_draft_loads_the_automation_with_no_draft(store, broken):
     from autowright.storage import Store
@@ -439,7 +444,12 @@ def test_broken_draft_loads_the_automation_with_no_draft(store, broken):
     a = store.create_automation(make_version(), "Drafty", None)
     dd = store.auto_dir(a) / "draft" / "automation"
     dd.mkdir(parents=True, exist_ok=True)
-    (dd / "automation.yaml").write_text(broken)
+    if broken == "spec-dir":
+        (dd / "automation.yaml").write_text("steps: []\n")
+        (dd / "spec.md").unlink(missing_ok=True)
+        (dd / "spec.md").mkdir()
+    else:
+        (dd / "automation.yaml").write_text(broken)
     fresh = Store()
     fresh.load_all()
     assert a["id"] in fresh.autos

@@ -85,7 +85,13 @@ class ExecDB:
                 " error_step, error_message, error_reason)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(id) DO UPDATE SET"
-                " automation_name=excluded.automation_name, status=excluded.status,"
+                # §5: EVERY column — the startup reconcile repairs a
+                # hand-edited automation_id/kind/version/trigger/queued_at once
+                # instead of re-warning on every boot.
+                " automation_id=excluded.automation_id, automation_name=excluded.automation_name,"
+                " kind=excluded.kind, version=excluded.version, status=excluded.status,"
+                ' "trigger"=excluded."trigger", trigger_sender=excluded.trigger_sender,'
+                " queued_at=excluded.queued_at,"
                 # §6 queue promotion re-stamps started_at (the record stops
                 # measuring the wait and starts measuring the execution), so the
                 # index has to follow or the list sorts on a stale timestamp.
