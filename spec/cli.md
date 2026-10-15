@@ -51,6 +51,10 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   reference (an unset shell variable) is a usage error (exit 1, like every usage error — 2
   stays the follow signal), never a match — a bare
   prefix test would otherwise select the only automation or snapshot and delete it. The
+  same for an execution reference: only an *omitted* reference means "the newest"; an
+  empty one (`execution cancel "$ID"` with `$ID` unset) is the usage error, never the
+  newest record cancelled or retried — and `marketplace refresh ""` is a usage error, not
+  refresh-all. The
   `--grant-agent` / `--grant-secret` names resolve by the same rule: a name two records
   share (duplicates already on disk still load) exits with the candidate list, never the
   first match.
@@ -76,7 +80,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   resolved by the usual reference rules and sent as one §19 `automation` value), and
   `--since` / `--until` take a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (`--until` with a
   bare date means the end of that day) and ride as the inclusive §19
-  `startedFromMs` / `startedToMs` - a value in neither form, or a date before 1970, is a
+  `startedFromMs` / `startedToMs` - a value in neither form, or a date whose local
+  midnight falls before the epoch (a negative stamp — `1970-01-01` east of UTC
+  included), is a
   usage error; `-n` rides to the server as the §19
   `limit`, so only the printed rows cross the wire — `-n` below 1 and a `--since` after its
   `--until` are usage errors named with the flags' own words, never a server 422 quoting

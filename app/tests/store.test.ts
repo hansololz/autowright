@@ -444,6 +444,62 @@ describe('applyEvent', () => {
     expect(getAutomation).toHaveBeenCalledTimes(1)
   })
 
+  describe('mount-load tracking is armed at issue, not granted at land (§19)', () => {
+    const setup = (id: string) => {
+      const getAutomation = vi.mocked(apiMod.api.getAutomation)
+      const row = { id, name: 'Auto', lastStatus: 'none', triggers: [], live: [] } as never
+      const finished = (executionId: string) =>
+        execEv('execution.finished', ex(executionId, 1, { status: 'cancelled', automationId: id }), row)
+      store.useStore.setState({ automations: [row] })
+      // observe tracking: a finish refetches only a tracked id
+      const isTracked = () => {
+        getAutomation.mockClear()
+        store.useStore.getState().applyEvent(finished(`${id}-probe-${Math.random()}`))
+        return getAutomation.mock.calls.length > 0
+      }
+      return { getAutomation, row, isTracked }
+    }
+
+    it('a superseded mount GET hands its arm to the newer GET', async () => {
+      const { getAutomation, row, isTracked } = setup('arm-a1')
+      let resolveFirst!: (v: unknown) => void
+      let resolveSecond!: (v: unknown) => void
+      getAutomation.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r }) as never)
+      getAutomation.mockImplementationOnce(() => new Promise((r) => { resolveSecond = r }) as never)
+      const mount = store.useStore.getState().loadAuto('arm-a1', { track: true })
+      const refetch = store.useStore.getState().loadAuto('arm-a1')
+      resolveFirst(row)
+      await mount // dropped: a newer GET was issued
+      resolveSecond(row)
+      await refetch
+      expect(isTracked()).toBe(true)
+    })
+
+    it('a failed mount GET leaves the arm for a later plain GET', async () => {
+      const { getAutomation, row, isTracked } = setup('arm-a2')
+      getAutomation.mockRejectedValueOnce(new Error('offline'))
+      await store.useStore.getState().loadAuto('arm-a2', { track: true })
+      getAutomation.mockResolvedValueOnce(row)
+      await store.useStore.getState().loadAuto('arm-a2')
+      expect(isTracked()).toBe(true)
+    })
+
+    it('a release between arm and land leaves the id untracked', async () => {
+      const { getAutomation, row, isTracked } = setup('arm-a3')
+      let resolveFirst!: (v: unknown) => void
+      getAutomation.mockImplementationOnce(() => new Promise((r) => { resolveFirst = r }) as never)
+      const mount = store.useStore.getState().loadAuto('arm-a3', { track: true })
+      store.useStore.getState().releaseFull('arm-a3')
+      resolveFirst(row)
+      await mount
+      expect(isTracked()).toBe(false)
+      // nor does a later plain GET pick the released arm up
+      getAutomation.mockResolvedValueOnce(row)
+      await store.useStore.getState().loadAuto('arm-a3')
+      expect(isTracked()).toBe(false)
+    })
+  })
+
   it('execution.deleted bumps the delete counter and records the id (§7)', () => {
     const before = store.useStore.getState().executionDeletedSeq
     store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'gone-1' } as never)

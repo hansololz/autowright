@@ -602,7 +602,8 @@ destructive moments recoverable.
   `version` = "vN" label, `size` = total bytes, `files` = file count) plus `memory/`, the
   recursive copy. Each snapshot is self-describing; there is deliberately no index file. The
   list is read from disk on demand, newest `created_at` first — nothing cached, per the §5
-  rebuild-from-disk model.
+  rebuild-from-disk model; a dir whose `snapshot.yaml` names a different `id` is skipped as
+  damaged (§5), so no mutation ever resolves a path from a hand-edited id.
 - **Reasons** — `manual` (MEMORY-card button, optional name); `pre-clear` (automatic, taken
   before §9.2 "Clear memory" empties the dir); `pre-version` (automatic, taken by the engine
   right before the first execution of a version with no recorded execution yet — real "vN"

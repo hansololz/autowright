@@ -949,7 +949,8 @@ def test_linux_stop_when_not_installed(systemd, monkeypatch):
     out = systemd.service.stop()
     assert out == "already stopped — service not installed, nothing was running"
     assert service.result_code(out) == 0
-    assert "stop" not in _systemd_verbs(systemd.calls)
+    # §3: the unit is still stopped by name with its file gone.
+    assert ("stop", linux.UNIT_NAME) in systemd.calls
 
     monkeypatch.setattr(linux, "_sweep_strays", lambda: 3)
     out = systemd.service.stop()

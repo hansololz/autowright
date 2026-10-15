@@ -271,8 +271,9 @@ def uninstall() -> str:
 def status() -> str:
     r = _launchctl("list")
     if isinstance(r, _TimedOut):
-        # §3 tri-state: never "stopped" for a job it couldn't see.
-        return f"{_TIMED_OUT} — can't tell whether the service is running"
+        # §3 tri-state: never "stopped" for a job it couldn't see - a failed
+        # status (exit 1), as on Linux and Windows.
+        return f"status failed: {_TIMED_OUT} — can't tell whether the service is running"
     for line in r.stdout.splitlines():
         if LABEL in line:
             pid = line.split()[0]
@@ -310,21 +311,26 @@ def stop() -> str:
     processes, keep plist and shim."""
     p = plist_path()
     installed = p.exists()
+    # §3: the no-plist result line reports what the label bootout found, so
+    # launchd's view is read before it runs - a registration that outlived a
+    # hand-deleted plist was stopped, not "already stopped".
+    registered_before = None if installed else _registered()
     registered, n = _stop_core(p)
     if registered is None:
         return f"stop failed: {_TIMED_OUT}"
     if registered:
         return "stop failed: launchd still reports the job"
     if not installed:
-        # §3: no plist, but a directly-spawned backend (isolated dev) or
-        # strays can still be alive — the sweep ended them. With a clean
-        # verdict this is a successful stop: stop is idempotent, and "nothing
-        # registered, nothing running" already satisfies it (it must not
-        # abort the §4.9 QUIT/RESET flows on a machine whose registration is
-        # missing).
-        if n:
-            return f"stopped — service was not installed; ended {n} lingering process(es)"
-        return "already stopped — service not installed, nothing was running"
+        # §3: no plist, but a registration, a directly-spawned backend
+        # (isolated dev) or strays can still be alive — the bootout and the
+        # sweep ended them. With a clean verdict this is a successful stop:
+        # stop is idempotent, and "nothing registered, nothing running"
+        # already satisfies it (it must not abort the §4.9 QUIT/RESET flows on
+        # a machine whose registration is missing).
+        if registered_before is False and not n:
+            return "already stopped — service not installed, nothing was running"
+        note = f"; ended {n} lingering process(es)" if n else ""
+        return f"stopped — service was not installed{note}"
     note = f" · ended {n} lingering process(es)" if n else ""
     return f"stopped — returns at next login or app launch{note}"
 

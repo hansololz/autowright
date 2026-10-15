@@ -197,6 +197,19 @@ class SystemdService:
 
         p = unit_path()
         if not p.exists():
+            # §3: `disable --now` runs by unit name even with the unit file
+            # gone - a hand-deleted file leaves the loaded unit, with
+            # `Restart=always`, able to respawn the backend. Systemd refusing
+            # a unit it doesn't know is the expected answer here; only a
+            # timeout is a verdict it couldn't give.
+            r = _systemctl("disable", "--now", UNIT_NAME)
+            if isinstance(r, _TimedOut):
+                return f"uninstall failed: couldn't stop the unit ({_TIMED_OUT})"
+            # `disable` of a unit whose file is gone can refuse before its
+            # `--now` stop runs — the explicit stop by name is what ends a
+            # still-loaded unit (same call the `stop` verb makes).
+            if isinstance(_systemctl("stop", UNIT_NAME), _TimedOut):
+                return f"uninstall failed: couldn't stop the unit ({_TIMED_OUT})"
             out = "service was not installed"
         else:
             # §3 tri-state: a failed or timed-out stop keeps the unit file —
@@ -232,7 +245,14 @@ class SystemdService:
         then sweep stray processes (directly-spawned dev backends, stray CLI
         invocations — whatever lives outside the unit's cgroup)."""
         if not unit_path().exists():
-            # §3: no registration, but strays can still be alive — sweep them.
+            # §3: the unit is stopped by name even with its file gone (the
+            # macOS no-plist rule) - a hand-deleted file leaves the loaded
+            # unit, with `Restart=always`, able to respawn the backend.
+            # Systemd refusing a unit it doesn't know is the expected answer;
+            # only a timeout is a verdict it couldn't give.
+            if isinstance(_systemctl("stop", UNIT_NAME), _TimedOut):
+                return f"stop failed: {_TIMED_OUT}"
+            # No registration, but strays can still be alive — sweep them.
             # Either way a successful, idempotent stop (mirrors macOS).
             n = _sweep_strays()
             if n:

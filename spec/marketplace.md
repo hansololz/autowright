@@ -230,7 +230,8 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
     catalog…`).
 - **Add** takes a link or a file path (the §22.3 modal's three ways - a dropped or chosen
   file, a typed path, a pasted link - all land as one of those two), reads it, validates,
-  and caches; any failure answers 422 and stores nothing. The row's `location` is the link
+  and caches; any failure answers 422 and stores nothing (a failed copy write — disk
+  full, a read-only volume — included, never a 500). The row's `location` is the link
   exactly as pasted (stripped) or the file's resolved path (a leading `~` expanded). The same location (exact string equality; a path compares by
   resolved path) cannot be in the table twice - 409 "that marketplace is already added".
   `expanded` starts `true`, `auto_refresh` starts `false`.
@@ -282,11 +283,13 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   Automations installed from it are ordinary automations, and archive files the catalog
   referenced are the user's files; both are untouched. The built-in row refuses (409,
   above).
-- **Disk-first for every mutation** — settings, remove and refresh alike, not only add:
+- **Disk-first for every mutation** — settings, remove, refresh (single, all, and the
+  auto sweep) and the §22.7 catalog save alike, not only add:
   memory changes only once `marketplaces.yaml` is written, or it is rolled back to the
   pre-call row when the write fails (a removed row returns to its place and its directory
   stays; changed settings revert), so the page never shows a state the next launch won't
-  have. A refresh whose copy write fails (disk full, a read-only volume) records that as
+  have — and the failed table write itself answers the same 409 as the read-only
+  degradation, carrying the OS reason, never a 500. A refresh whose copy write fails (disk full, a read-only volume) records that as
   the row's `error` — the ordinary 200 — never a 500.
 - The table is loaded once at backend startup into memory and rewritten whole on every
   change, like agents and secrets. Nothing here is ever executed: a catalog is data, an

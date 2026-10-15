@@ -325,7 +325,15 @@ markdown documents land first, the folder's `automation.yaml` (the manifest) is 
 **last** as the commit point — a folder without it is never adopted by the startup walk.
 "Restore vX as vN+1" (§4.4) writes the new folder through that same writer from vX's loaded
 content — never a direct tree copy — so a crash mid-restore leaves no adoptable folder,
-just an incomplete directory the next save overwrites.
+just an incomplete directory the next save skips (it is never adopted and never
+overwritten; deleting the automation removes it). The new version's number is the
+first one past `current_version` that is free **both** in memory and on disk — a `vN`
+folder the startup walk skipped (unreadable manifest, a user's half-repaired folder) is
+never overwritten or, on a failed save, removed. A save whose pointer flip fails rolls
+back everything the attempt touched: the version leaves memory and disk, and the
+automation's cached reference ids (memoized per version number) are dropped too, so the
+next save — which reuses the same number — is judged on its own content, never on the
+failed attempt's.
 
 Executions live under `<dataPath>/executions/` — unless the configured directory is itself
 named `executions`, in which case it is used directly rather than nested again (the §4.9
@@ -442,7 +450,11 @@ invalid YAML, an impossible unquoted date (`2026-13-45`, which PyYAML raises as 
 alike — loads as its default with a warning in the app log; a damaged file never bricks
 startup into a launchd crash loop. That same error set is the rule wherever YAML from a
 hand-edited or untrusted source is parsed: a §5.1 archive member answers the ordinary 422,
-an agent's `manifest.yaml`/`actions.yaml` a validation error — never a 500.
+an agent's `manifest.yaml`/`actions.yaml` a validation error — never a 500. The same
+leniency covers a hand-edited top-level field of the wrong type: an automation `name` that
+is not text loads as its text form when it is a plain scalar (`name: 2024` → "2024") and
+as the directory name otherwise (missing, empty, a list or mapping), so a name-collision
+check or rename never raises on it.
 **Relocated data path, unreachable (decided):** only the default data path is ever created
 on first run. A relocated `dataPath` whose `executions/` directory isn't there at load (an
 unmounted volume, a typo) opens an **in-memory index for the session** and never re-creates
@@ -461,7 +473,10 @@ still skips the record with a warning. Every other YAML the store reads on a req
 version's `automation.yaml`, the draft slot's `test.yaml` and container files, a snapshot's
 `snapshot.yaml` — goes through the same mapping-or-default seam: a file whose root is not a
 mapping loads as absent with a warning, never as an attribute error that turns every
-`GET /state` into a 500. A version folder whose manifest is unreadable is treated as absent
+`GET /state` into a 500. A snapshot whose `snapshot.yaml` `id` differs from its directory
+name is damaged and skipped by the listing (§6.3: the id *is* the dir name), so the prune
+and every other snapshot mutation only ever touch the directory they were listed from —
+never a path a hand-edited id points at. A version folder whose manifest is unreadable is treated as absent
 (the automation skips at startup when that was its current version, per the versions rule
 above) — never loaded as an empty version that would run zero steps and "succeed". For the three top-level
 store files (`settings.yaml`, `agents.yaml`, `secrets.yaml`) the degradation is **read-only**:
@@ -692,8 +707,12 @@ is not a stored id (a leftover `<id>` placeholder, a commented-out old reference
 422 naming the step — an archive the importer would reject is never produced, and the
 "re-export" guidance is never handed out for bytes that would re-export identically. For
 the same reason export refuses (422, naming the step) a version whose manifest can't travel
-— a step with no file name or a non-integer `timeout`, both hand-edited shapes the lenient
-loader tolerates — rather than writing a member named `None`. Import validates every
+— a step with no file name, a non-integer `timeout` or `retries` (an integer is ASCII
+digits only), a present `timeout` below 1 or `retries` outside 1–10 (a stored 0 or null
+reads as "none" and is simply not written, like an absent key), or `timeout` beside
+`no_timeout` / `retries` beside `infinite_retries` — every shape the importer below
+rejects, all hand-edited shapes the lenient loader tolerates — rather than writing a
+member named `None` or an archive that fails on arrival. Import validates every
 parameter definition's `name` as non-empty text: a list-valued name passes a truthiness
 check, lands, and then breaks every read of the automation.
 
@@ -744,9 +763,14 @@ answers 422 and writes nothing):
 - Validate: `format_version`, every yaml's schema, step files matching the steps manifest
   (step `agents:`/`secrets:` entries in the archive's `{ ref, why? }` form — the §4.1 id
   form and the old name form are rejected: local ids never travel), §4.2 param kinds (each
-  definition carries `name`, `kind`, and `default` — the rule the app's own save path
-  enforces, so the first edit of an imported version can never 422 on a definition the user
-  never wrote),
+  definition carries `name`, `kind`, and `default`, and no name is declared twice — the
+  rules the app's own save path enforces, so the first edit of an imported version can
+  never 422 on a definition the user never wrote; the same holds for the save path's other
+  definition rules: a step `agent: true` carries a nonempty `why`, every step `secrets:`
+  entry carries one, a step listing several `agents:` entries carries one per entry (§8
+  rule 7 — a single entry's is optional, as the app's own exports write it), and a
+  package has a nonempty `why` and a bare pip name — import rejects exactly what
+  `POST /versions` would),
   §4.7 agent configs
   (harness/mode/model rules), §4.8 secret names, trigger
   kinds with at most one `app_start`. Refs must be unique per kind. The manifest's optional `os` must be a non-empty
@@ -795,7 +819,11 @@ answers 422 and writes nothing):
   record - and the user rebinds or removes the reference in the editor, where the §8
   drafting context carries the wanted names and descriptions so the chat agent can help.
   Nothing unresolved is ever granted.
-- **Grants — auto-grant every match.** `allowedSecrets` = the matched secrets;
+- **Grants — auto-grant every match of a referenced record.** A secrets.yaml or
+  agents.yaml record nothing in the archive references (no step entry, no code subscript,
+  no trigger secret, not the manifest's authoring agent) is ignored before matching — it
+  can never widen a grant, since export never writes one and a hand-edited archive must
+  not grant by listing. `allowedSecrets` = the matched secrets;
   `stepAgents` = the matched step agents plus the resolved authoring agent (deduped, the
   authoring agent first when it was not already among them, so a bare `agent: true` step's
   first-enabled-agent fallback lands on the authoring agent). Both are passed **directly

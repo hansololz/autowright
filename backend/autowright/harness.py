@@ -945,7 +945,16 @@ class OpenCodeHandler(Handler):
         # (the read loop's per-line idle reset already covers it).
 
     def reply(self, raw: str) -> str:
-        return "\n\n".join(self._texts) if self._texts else raw
+        if not self._texts:
+            return raw
+        # §8: a preamble part ("Let me check…") before the ===QUESTION===
+        # part must not hide the marker — the reply starts at the last part
+        # that opens with it.
+        marked = [i for i, text in enumerate(self._texts)
+                  if text.lstrip().startswith("===QUESTION===")]
+        if marked:
+            return "\n\n".join(self._texts[marked[-1]:])
+        return "\n\n".join(self._texts)
 
 
 HANDLERS: dict[str, type[Handler]] = {
@@ -1114,23 +1123,47 @@ class _ScratchWatcher:
         return out
 
 
+def _fence_left_open(text: str) -> bool:
+    """Whether `text` ends inside a markdown code fence — the same fence walk
+    as `_mark_outside_fences`."""
+    fenced = False
+    for line in text.splitlines():
+        if FENCE_OPEN_RE.match(line.rstrip()):
+            fenced = not fenced
+    return fenced
+
+
 def _recombine(stdout_text: str, documents: list[tuple[str, str]]) -> str:
     """§8 file-writing delivery: stdout prose + collected documents → the
     ordinary envelope, so validation, repair, logging, and the §5 audit
     framing all see one canonical text.
 
-    A line-anchored ===BLOCKED=== on stdout wins outright — blockers ride
+    A line-anchored ===BLOCKED=== on stdout wins outright (only a scratch
+    notes.md rides beside it) — blockers ride
     stdout by contract (a fenced quote of the marker alongside written files
     would mispick here; the drafting parser then fails it and a repair round
     corrects — accepted, the shape-aware parse lives in drafting). An empty
     scratch falls back to stdout unchanged (an answer-only chat reply, or an
     agent that ignored the OUTPUT section and printed the envelope)."""
     if blocked_mark_outside_fences(stdout_text):
-        return stdout_text
+        # §8: a notes.md the agent wrote beside a blocker is appended after
+        # the envelope's ===END=== as its own closed block (the shape
+        # drafting's parse_blockers accepts); every other document is ignored.
+        notes = next((content for name, content in documents
+                      if name == "notes.md"), None)
+        if notes is None:
+            return stdout_text
+        body = notes.rstrip("\n")
+        return (stdout_text.rstrip() + "\n===FILE: notes.md===\n" + body
+                + "\n===END===\n")
     if not documents:
         return stdout_text
     marker = file_mark_outside_fences(stdout_text)
     prose = (stdout_text[:marker.start()] if marker else stdout_text).strip()
+    if _fence_left_open(prose):
+        # §8: a prose whose last code fence is left open is closed with a
+        # fence line first, or the whole envelope would parse as fenced prose.
+        prose += "\n```"
     parts = [prose] if prose else []
     for name, content in documents:
         body = content.rstrip("\n")

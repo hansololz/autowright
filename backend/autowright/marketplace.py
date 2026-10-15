@@ -82,8 +82,10 @@ AUTO_REFRESH_DELAY_S = 30
 AUTO_REFRESH_INTERVAL_S = 60 * 60
 AUTO_REFRESH_MIN_AGE_S = 24 * 60 * 60
 # How long a stop waits for the sweeper: a start after a stop must never leave
-# two threads sweeping the same table.
-AUTO_REFRESH_STOP_S = 5
+# two threads sweeping the same table, but a sweeper inside a 60 s catalog read
+# must never eat the shutdown box either (§3) - it is a daemon, so one that
+# outlives the wait dies with the process.
+AUTO_REFRESH_STOP_S = 0.5
 
 ARCHIVE_EXTENSION = ".autowright"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
@@ -787,8 +789,16 @@ class MarketplaceStore:
         only, so the parsed-copy memo a row carries in memory stays out of the
         file. Caller holds the lock."""
         self._require_writable()
-        save_yaml(self.file(), {"sources": [{key: source[key] for key in COLUMNS}
-                                            for source in self.sources]})
+        try:
+            save_yaml(self.file(), {"sources": [{key: source[key] for key in COLUMNS}
+                                                for source in self.sources]})
+        except OSError as e:
+            # §22.2: a table write that fails (disk full, a read-only volume)
+            # is the same unwritable answer as the read-only degradation
+            # (409 with the reason) — every caller has rolled its row back by
+            # the time this propagates; never a 500.
+            raise MarketplaceUnwritable(
+                f"couldn't write marketplaces.yaml: {e.strerror or e}") from e
 
     def _require_writable(self) -> None:
         """§22.2 read-only degradation: refuse every write while the table file
@@ -847,7 +857,14 @@ class MarketplaceStore:
             with self.lock:
                 if self._taken(location):
                     raise MarketplaceDuplicate(ALREADY_ADDED)
-                self._stamp_refresh(source, text)
+                try:
+                    self._stamp_refresh(source, text)
+                except OSError as e:
+                    # §22.2: a failed copy write (disk full, a read-only
+                    # volume) is the ordinary 422 with nothing stored, never a
+                    # 500 - the except below removes any partial copy.
+                    raise MarketplaceError(
+                        f"couldn't write the catalog copy: {e.strerror or e}") from None
                 self.sources.append(source)
                 try:
                     self._save()
@@ -882,8 +899,16 @@ class MarketplaceStore:
             # Removed while it downloaded: the KeyError is the route's 404 and
             # nothing is written.
             source = self._find(source_id)
+            # §22.2 disk-first: the pre-call row, restored in place (other
+            # references hold this dict) when the table write fails.
+            before = dict(source)
             if self._apply_to_row(source_id, location, text, error):
-                self._save()
+                try:
+                    self._save()
+                except BaseException:
+                    source.clear()
+                    source.update(before)
+                    raise
             return self.serialize(source)
 
     def refresh_all(self) -> list[dict]:
@@ -904,10 +929,15 @@ class MarketplaceStore:
                 break
             fetched.append((source_id, location, *self._fetch_catalog(location)))
         with self.lock:
+            before = self._snapshot_rows(source_id for source_id, *_ in fetched)
             applied = [self._apply_to_row(source_id, location, text, error)
                        for source_id, location, text, error in fetched]
             if any(applied):
-                self._save()
+                try:
+                    self._save()
+                except BaseException:
+                    self._restore_rows(before)
+                    raise
             return [self.serialize(s) for s in self.sources]
 
     @staticmethod
@@ -953,12 +983,37 @@ class MarketplaceStore:
             # the table: what it read on the way out is dropped.
             return swept
         with self.lock:
+            before = self._snapshot_rows(source_id for source_id, *_ in fetched)
             for source_id, location, text, error in fetched:
                 if self._apply_to_row(source_id, location, text, error):
                     swept.append(source_id)
             if swept:
-                self._save()
+                try:
+                    self._save()
+                except BaseException:
+                    self._restore_rows(before)
+                    raise
         return swept
+
+    def _snapshot_rows(self, source_ids) -> list[tuple[dict, dict]]:
+        """§22.2 disk-first: each named row that still exists, paired with a
+        copy of it as it stands - `_restore_rows` puts the copies back in place
+        (other references hold the row dicts) when the table write fails.
+        Caller holds the lock."""
+        rows = []
+        for source_id in source_ids:
+            try:
+                source = self._find(source_id)
+            except KeyError:
+                continue
+            rows.append((source, dict(source)))
+        return rows
+
+    @staticmethod
+    def _restore_rows(rows: list[tuple[dict, dict]]) -> None:
+        for source, before in rows:
+            source.clear()
+            source.update(before)
 
     def refresh_pending(self) -> list[str]:
         """§22.2 pending: every pending row (the freshly seeded built-in
@@ -1298,8 +1353,18 @@ class MarketplaceStore:
                 for path in written:
                     _unlink(path)
                 raise
+            # §22.2 disk-first: the pre-call row, restored in place (other
+            # references hold this dict) when the table write fails.
+            before = dict(source)
             self._commit_catalog(source, catalog, written)
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                source.clear()
+                source.update(before)
+                for path in written:
+                    _unlink(path)
+                raise
             return self.serialize(source)
 
     def _prepare_catalog(self, source: dict, body: dict, export) -> tuple[dict, list]:

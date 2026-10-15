@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from . import __version__, harness, paths, timefmt, triggers as triggerlib
+from . import __version__, harness, packages as pkglib, paths, timefmt, triggers as triggerlib
 from .drafting import STEP_FILE_RE
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import AGENT_REF_RE, SECRET_REF_RE, Store, new_id, strip_param_values
@@ -47,6 +47,9 @@ _ANY_AGENT_SUBSCRIPT_RE = re.compile(r"\bagents\[\s*[\"']([^\"'\n]*)[\"']\s*\]")
 # §5.1 ref rule: decimal strings assigned per kind in listing order; a
 # hand-written YAML integer reads as its string form.
 _REF_RE = re.compile(r"^[0-9]+$")
+# §5.1: a travelling step `timeout`/`retries` is an integer of ASCII digits
+# only - `str.isdigit()` also takes superscripts and other Unicode digits.
+_ASCII_INTEGER_RE = re.compile(r"^[0-9]+$")
 PARAM_KINDS = ("text", "number", "toggle", "list", "kv")
 MODES = ("default", "ollama", "custom")
 # Any well-formed uuid passes the §4.3 field validator — the archive form
@@ -174,6 +177,19 @@ def _referenced_agent_ids(store: Store, refs: _ExportRefs, a: dict, ver: dict) -
     return out
 
 
+def _travelling_integer(step: dict, key: str) -> int:
+    """§5.1 export: a step `timeout`/`retries` as the integer the importer
+    takes - an int, or text of ASCII digits only. Anything else is a 422
+    naming the step, never an archive that fails on arrival."""
+    value = step[key]
+    if isinstance(value, bool) or not (
+            isinstance(value, int)
+            or (isinstance(value, str) and _ASCII_INTEGER_RE.match(value.strip()))):
+        raise TransferError(f"step {step['file']!r} has a non-integer {key} "
+                            f"({value!r}) — repair the automation first")
+    return int(value)
+
+
 def export_automation(store: Store, a: dict, include_values: bool = True) -> bytes:
     """The §5.1 archive for an automation's current version, as zip bytes."""
     with store.lock:
@@ -270,21 +286,29 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
             # §4.1 per-step time limits travel — a no_timeout long-runner must
             # not silently regain the default watchdog on another Mac.
             if s.get("timeout"):
-                timeout = s["timeout"]
-                if isinstance(timeout, bool) or not (
-                        isinstance(timeout, int)
-                        or (isinstance(timeout, str) and timeout.strip().isdigit())):
-                    raise TransferError(f"step {s['file']!r} has a non-integer timeout "
-                                        f"({timeout!r}) — repair the automation first")
-                entry["timeout"] = int(timeout)
+                timeout = _travelling_integer(s, "timeout")
+                if timeout < 1:
+                    raise TransferError(f"step {s['file']!r} has a timeout below 1 "
+                                        f"({timeout}) — repair the automation first")
+                entry["timeout"] = timeout
             if s.get("no_timeout"):
+                if "timeout" in entry:
+                    raise TransferError(f"step {s['file']!r} combines timeout and "
+                                        "no_timeout — repair the automation first")
                 entry["no_timeout"] = True
             # §4.1 retry pair travels the same way (§8: same shape rules as the
             # timeout pair) — an infinite_retries listener must not become
             # single-attempt on another Mac.
             if s.get("retries"):
-                entry["retries"] = int(s["retries"])
+                retries = _travelling_integer(s, "retries")
+                if not 1 <= retries <= 10:
+                    raise TransferError(f"step {s['file']!r} has retries outside 1-10 "
+                                        f"({retries}) — repair the automation first")
+                entry["retries"] = retries
             if s.get("infinite_retries"):
+                if "retries" in entry:
+                    raise TransferError(f"step {s['file']!r} combines retries and "
+                                        "infinite_retries — repair the automation first")
                 entry["infinite_retries"] = True
             steps.append(entry)
         meta["steps"] = steps
@@ -526,10 +550,16 @@ def _validate(z: zipfile.ZipFile) -> dict:
     params = meta.get("params") or []
     if not isinstance(params, list):
         raise TransferError("param definitions must be a list")
+    seen_params: set[str] = set()
     for p in params:
         if (not isinstance(p, dict) or not isinstance(p.get("name"), str)
                 or not p["name"].strip() or p.get("kind") not in PARAM_KINDS):
             raise TransferError(f"invalid parameter definition: {p!r}")
+        # §5.1/§8 rule 3: the save path's own rule (drafting's copy) - two
+        # definitions of one name would silently collapse in the editor.
+        if p["name"] in seen_params:
+            raise TransferError(f"param `{p['name']}` is declared twice")
+        seen_params.add(p["name"])
         # §4.2/§5.1: every definition carries a default — the rule the app's own
         # save path enforces, so the first edit of an imported version can never
         # 422 on a definition the user never wrote.
@@ -548,6 +578,17 @@ def _validate(z: zipfile.ZipFile) -> dict:
             or not isinstance(p.get("import"), str) or not p["import"]
             for p in packages):
         raise TransferError("invalid packages declaration")
+    # §5.1: the save path's package rules (drafting's copy) - a bare pip
+    # name and a nonempty why - so import rejects exactly what
+    # `POST /versions` would.
+    for p in packages:
+        pip_name = p["pip"].strip()
+        if not pkglib.PIP_NAME_RE.match(pip_name):
+            raise TransferError(f"packages: {pip_name!r} must be a bare distribution "
+                                "name — no version specifier")
+        if not str(p.get("why") or "").strip():
+            raise TransferError(f"packages: {pip_name} needs a why — one line on what "
+                                "the steps use it for")
     steps_meta = meta.get("steps") or []
     if not isinstance(steps_meta, list) or not steps_meta:
         raise TransferError("the archive holds no steps")
@@ -607,6 +648,17 @@ def _validate(z: zipfile.ZipFile) -> dict:
                                 "archives carry numbered references; re-export the "
                                 "automation with the current version")
         if s.get("agent"):
+            # §5.1/§8 rule 7: the save path's own rules (drafting's copy).
+            if not (s.get("why") or "").strip():
+                raise TransferError(f"step {s['name']}: agent: true requires a why")
+            listed = [g for g in (s.get("agents") or [])
+                      if isinstance(g, dict) and _entry_ref(g) is not None]
+            if len(listed) > 1:
+                for g in listed:
+                    if not str(g.get("why") or "").strip():
+                        raise TransferError(
+                            f"step {s['name']}: agent {_entry_ref(g)!r} needs a why — "
+                            "one line on its role (required when a step lists several agents)")
             entry["agent"] = True
             entry["why"] = s.get("why") or ""
             entry["agents"] = [
@@ -622,6 +674,13 @@ def _validate(z: zipfile.ZipFile) -> dict:
                 raise TransferError(f"step {s['file']!r} lists secrets by id or name - "
                                     "archives carry numbered references; re-export the "
                                     "automation with the current version")
+            # §5.1/§8 rule 6: every declared secret carries its per-use note
+            # (drafting's copy).
+            for g in s["secrets"]:
+                if (isinstance(g, dict) and _entry_ref(g) is not None
+                        and not str(g.get("why") or "").strip()):
+                    raise TransferError(f"step {s['name']}: secret {_entry_ref(g)!r} needs "
+                                        "a why — one line on why the step uses it")
             entry["secrets"] = [
                 {"ref": r,
                  **({"why": str(g["why"]).strip()} if str(g.get("why") or "").strip() else {})}
@@ -743,6 +802,20 @@ def _validate(z: zipfile.ZipFile) -> dict:
         if agent_ref not in agent_ref_set:
             raise TransferError(f"the manifest's agent {agent_ref} isn't listed in the "
                                 "archive's agents.yaml")
+
+    # §5.1 grants: a secrets.yaml / agents.yaml record nothing in the archive
+    # references (no step entry, no code subscript, no trigger secret, not the
+    # manifest's authoring agent) is ignored before matching - it can never
+    # widen a grant or land as an unresolved reference.
+    referenced_agents = {agent_ref} if agent_ref is not None else set()
+    referenced_secrets = {t["secret"] for t in triggers if t["kind"] == "discord"}
+    for s in steps:
+        referenced_agents.update(g["ref"] for g in s.get("agents") or [])
+        referenced_secrets.update(g["ref"] for g in s.get("secrets") or [])
+        referenced_agents.update(m.group(1) for m in _ANY_AGENT_SUBSCRIPT_RE.finditer(s["code"]))
+        referenced_secrets.update(m.group(1) for m in _ANY_SECRET_SUBSCRIPT_RE.finditer(s["code"]))
+    agents = [g for g in agents if g["ref"] in referenced_agents]
+    secrets = [e for e in secrets if e["ref"] in referenced_secrets]
 
     spec_md = _text(z, "automation/spec.md")
     # §21.4 (2026-09-07): an archive from an older release may carry

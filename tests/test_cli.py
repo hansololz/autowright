@@ -3977,3 +3977,74 @@ def test_catalog_remove_help_numbers_by_the_catalog_file():
     help_text = " ".join(parser.format_help().split())
     assert "its position in the catalog file" in help_text
     assert "by the number `marketplace list` prints" not in help_text
+
+
+# ---------------------------------------------------------------- 2026-10-15 audit
+
+
+def test_push_reports_an_impossible_manifest_date_without_a_traceback(tmp_path, capsys):
+    """§20/§5: the run_if_missed lift catches the whole YAML error set - an
+    impossible unquoted date (a ValueError, not a YAMLError) reaches the
+    drafting validator, which prints its parse error line and exits 1."""
+    d = tmp_path / "wd"
+    _run(_WorkdirClient(), "automation", "pull", "Daily Report", str(d))
+    capsys.readouterr()
+    with (d / "manifest.yaml").open("a") as f:
+        f.write("note: 2026-13-45\n")
+    c = _WorkdirClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "push", "Daily Report", str(d))
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "manifest.yaml" in err
+    assert "Traceback" not in err
+    assert not any(m != "GET" for m, _p, _b in c.posted)
+
+
+@pytest.mark.parametrize("ref", ["", "   "])
+def test_an_empty_execution_reference_is_a_usage_error_never_the_newest(ref):
+    """§20: only an omitted execution reference means the newest - an empty
+    one (an unset shell variable) is a usage error and sends nothing."""
+    c = _RouteClient()  # an empty GET table: any request would assert
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "execution", "cancel", ref)
+    assert str(ei.value.code) == "give an execution id"
+    assert c.fetched == [] and c.calls == []
+
+
+@pytest.mark.parametrize("ref", ["", "   "])
+def test_marketplace_refresh_with_an_empty_source_is_a_usage_error(ref):
+    """§20: `marketplace refresh ""` is a usage error, never refresh-all."""
+    c = _MarketClient(SOURCES)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "marketplace", "refresh", ref)
+    assert str(ei.value.code) == "give a marketplace name or id"
+    assert c.calls == [] and c.reads == []
+
+
+def test_since_the_epoch_day_east_of_utc_is_a_usage_error():
+    """§20: the pre-epoch check reads the computed stamp - local midnight on
+    1970-01-01 east of UTC is a negative stamp, refused like 1969."""
+    import time
+
+    from autowright.cli import _local_stamp_ms
+
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Tokyo"
+    time.tzset()
+    try:
+        with pytest.raises(SystemExit) as ei:
+            _local_stamp_ms("1970-01-01", end_of_day=False, flag="--since")
+        assert str(ei.value.code) == "error: --since: dates before 1970 aren't supported"
+        # --until reads the same local midnight, even though its end of day
+        # would land after the epoch
+        with pytest.raises(SystemExit) as ei:
+            _local_stamp_ms("1970-01-01", end_of_day=True, flag="--until")
+        assert str(ei.value.code) == "error: --until: dates before 1970 aren't supported"
+        assert _local_stamp_ms("1970-01-02", end_of_day=False, flag="--since") > 0
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()

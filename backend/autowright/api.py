@@ -839,7 +839,16 @@ def _delete_auto(a: dict, automation_id: str, live: list[str]) -> None:
     if live and not engine.wait_finished(live):
         logging.getLogger(__name__).warning(
             "delete %s: an execution thread outlived the kill grace — removing anyway", automation_id)
+    # §7/§19: the delete takes the automation's §4.5 test rows with it — one
+    # `execution.deleted` per id (delete_automation discards the ids, so
+    # snapshot them first and announce the ones actually gone).
+    with store.lock:
+        test_ids = [h["id"] for h in store.execs.values()
+                    if is_test(h) and h["automation_id"] == automation_id]
     store.delete_automation(a)
+    with store.lock:
+        gone = [eid for eid in test_ids if eid not in store.execs]
+    _publish_execs_deleted(gone)
 
 
 def _publish_execs_deleted(execution_ids) -> None:
@@ -1811,14 +1820,32 @@ def post_draft(body: models.DraftJobStart) -> dict:
     # §19: the owner stamp — the automation's draft container, or the pending
     # slot when no automationId was sent — lets the draft-settle endpoints
     # cancel this job when the draft settles.
-    job_id = draft_jobs.start(mode, agent, body.text, current, grants,
-                              chat_history=body.chat, executions=executions,
-                              pkg_state=pkg_state,
-                              owner_id=owner_id)
-    # §19: the mid-delete check and the job's registration are one critical
-    # section — a DELETE (or a draft discard) landing while the context was
-    # being built cancels the job right here. The cancels run outside the
-    # lock: they kill processes.
+    # §19: the refusal is decided inside the registry's own lock, before the
+    # new job supersedes anything — a stale POST must never cancel the owner's
+    # fresh job. Plain dict reads, no store.lock: a discard bumps the
+    # generation under store.lock BEFORE its settle's cancel takes the
+    # registry lock, so a bump this read misses is followed by a cancel that
+    # still finds (and cancels) the job registered here.
+    def admit() -> str | None:
+        if auto is not None and auto.get("_deleting"):
+            return "deleting"
+        if draft_generations.get(owner_id, 0) != generation:
+            return "discarded"
+        return None
+
+    try:
+        job_id = draft_jobs.start(mode, agent, body.text, current, grants,
+                                  chat_history=body.chat, executions=executions,
+                                  pkg_state=pkg_state,
+                                  owner_id=owner_id, admit=admit)
+    except drafting.DraftRefused as e:
+        if e.reason == "deleting":
+            raise HTTPException(404, "automation not found") from None
+        raise HTTPException(409, "the draft was discarded") from None
+    # §19 belt-and-braces (now rarely hit — `admit` above refuses first): a
+    # DELETE (or a draft discard) landing between the admit and here cancels
+    # the job right here. The cancels run outside the lock: they kill
+    # processes.
     with store.lock:
         deleting = auto is not None and bool(auto.get("_deleting"))
         discarded = draft_generations.get(owner_id, 0) != generation

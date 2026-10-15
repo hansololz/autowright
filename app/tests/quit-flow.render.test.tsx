@@ -13,13 +13,16 @@ type Result = { ok: true } | { busy: true } | { error: string }
 const quitAll = vi.fn<(force?: boolean) => Promise<Result>>()
 const showToast = vi.fn<(msg: string) => void>()
 let requested: (() => void) | null = null
+let cancelled: (() => void) | null = null
 const unsubscribe = vi.fn()
 
 beforeEach(() => {
   requested = null
+  cancelled = null
   ;(window as unknown as Record<string, unknown>).autowright = {
     quitAll,
     onQuitRequested: (cb: () => void) => { requested = cb; return unsubscribe },
+    onQuitCancelled: (cb: () => void) => { cancelled = cb; return () => {} },
   }
   useStore.setState({ showToast, quitStage: null })
   quitAll.mockReset()
@@ -54,6 +57,21 @@ describe('QuitFlow (§4.9 shared quit flow)', () => {
     await screen.findByRole('alertdialog', { name: 'Quitting Autowright' })
     await screen.findByText('Stopping everything…')
     expect(screen.queryByRole('alertdialog', { name: 'Quit Autowright entirely?' })).toBeNull()
+  })
+
+  it('quit-cancelled clears the overlay a late { ok } left up (§3)', async () => {
+    // main's native flight was up: the late quit-all answered { ok }, so the
+    // overlay stays at "stopping" until main says the flight stood down.
+    quitAll.mockResolvedValue({ ok: true })
+    render(<QuitFlow />)
+    requested!()
+    await screen.findByRole('alertdialog', { name: 'Quitting Autowright' })
+    expect(useStore.getState().quitStage).toBe('stopping')
+    expect(cancelled).toBeTypeOf('function')
+    cancelled!()
+    expect(useStore.getState().quitStage).toBeNull()
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog', { name: 'Quitting Autowright' })).toBeNull())
   })
 
   it('a repeated request while stopping is a no-op', async () => {

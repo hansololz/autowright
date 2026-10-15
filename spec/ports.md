@@ -120,3 +120,10 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   `_fd is None` branch closing the stdin pipe while the writer thread is blocked in
   `write()`. POSIX is covered by the wakeable raw pipes; Windows needs the
   `CancelSynchronousIo` plan above or an overlapped-I/O writer. Verify on a real host.
+- **Linux: the AppImage update relaunch can lose the single-instance lock.** The
+  AppImage updater spawns the new instance before the old one exits (§9); if the new
+  process reaches `requestSingleInstanceLock` first it is refused and quits at once
+  (`main.cjs` quits on a lost lock with no retry), leaving nothing running after
+  "Restart". Needs a real host: verify the ordering, then either retry the lock for a
+  few seconds when launched by the updater or have the old instance release it before
+  the spawn.

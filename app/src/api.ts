@@ -52,6 +52,8 @@ declare global {
       onOpenTarget(cb: (hash: string) => void): (() => void) | void
       // §3 OS quit → the shared §4.9 quit flow (QuitFlow subscribes)
       onQuitRequested(cb: () => void): (() => void) | void
+      // §3 the native quit flight stood down → QuitFlow clears its overlay
+      onQuitCancelled(cb: () => void): (() => void) | void
     }
   }
 }

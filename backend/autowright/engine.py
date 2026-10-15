@@ -83,20 +83,33 @@ def redaction_carry_len(redactions: dict[str, str]) -> int:
 
 
 def hold_read_carry(raw: str, carry: str, carry_len: int,
-                    cap: int = harness.PIPE_READLINE_CAP) -> tuple[str, str]:
+                    cap: int = harness.PIPE_READLINE_CAP,
+                    guards: list[str] = ()) -> tuple[str, str]:
     """§7 read-cap carry: prepend the previous chunk's held-back tail to `raw`;
     when `raw` is a chunk the read cap cut — exactly `cap` characters and no
     trailing newline, so more of the same line follows — hold back its last
     `carry_len` characters for the next read. A shorter newline-free chunk is
     the stream's final fragment (a child's last write without a newline; EOF
     follows), which must not be held: splitting it would hand the log the
-    very two halves the carry exists to prevent. Returns (text to process
-    now, new carry)."""
+    very two halves the carry exists to prevent. The hold-back point is
+    itself a guarded boundary: `guards` (the redaction values) that straddle
+    it move the cut back to the value's start, so the processed text never
+    ends inside a value. Returns (text to process now, new carry)."""
     cut_by_cap = len(raw) >= cap and not raw.endswith("\n")
     raw = carry + raw
     if carry_len <= 0 or not cut_by_cap:
         return raw, ""
-    return raw[:-carry_len], raw[-carry_len:]
+    plain = len(raw) - carry_len
+    cut = plain
+    for guard in guards:
+        if not guard or len(guard) > cap:
+            continue
+        found = raw.find(guard, max(0, cut - len(guard) + 1), cut + len(guard) - 1)
+        if found != -1:
+            cut = min(cut, found)
+    if cut <= 0:
+        cut = plain
+    return raw[:cut], raw[cut:]
 
 REPLY_BUDGET = 100  # §6.1: replies one step attempt may send; the rest are dropped
 
@@ -286,7 +299,7 @@ def kill_orphan_agent_group(pgid: int) -> None:
 def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                      holder: dict, timeout_s: float | None,
                      on_reply=None, step_i: int | None = None,
-                     carry_len: int = 0) -> int:
+                     carry_len: int = 0, cut_guards: list[str] = ()) -> int:
     """One step as a §6.1 executor subprocess — shared by real executions and
     §11 tests. Streams control lines: `log(k, text)` gets every log line,
     `result` collects §4.5 result ops, `holder` gets error/notify/result_touched,
@@ -294,7 +307,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
     `state['proc']` holds the live Popen so a caller can cancel. `timeout_s`
     is the resolved §6 step limit (`step_timeout_for`); None = no watchdog.
     `carry_len` is the §7 read-cap carry (`redaction_carry_len` of the
-    execution's redactions) — 0 when there are no secrets to keep whole."""
+    execution's redactions) — 0 when there are no secrets to keep whole —
+    and `cut_guards` the redaction values the hold-back point must not split."""
     # Watchdog enforces the per-step timeout even when the step produces no
     # output at all (a bare read loop would block forever on a silent hang).
     # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
@@ -454,7 +468,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                     break
                 if timed_out.is_set():
                     break
-                raw, carry = hold_read_carry(raw, carry, carry_len)
+                raw, carry = hold_read_carry(raw, carry, carry_len,
+                                             guards=cut_guards)
                 if raw == "":
                     continue
                 line = raw.rstrip("\n")
@@ -1076,7 +1091,13 @@ class Engine:
             seqs = h.setdefault("_log_seq", {})
             if name not in seqs:
                 p = self.store.log_file(h["id"], name)
-                seqs[name] = sum(1 for _ in p.open(encoding="utf-8")) if p.exists() else 0
+                # errors="replace": the same decode the store's seed
+                # uses (§5), so an undecodable byte can't raise here.
+                if p.exists():
+                    with p.open(encoding="utf-8", errors="replace") as f:
+                        seqs[name] = sum(1 for _ in f)
+                else:
+                    seqs[name] = 0
             seqs[name] += 1
             sequence = seqs[name]
             # On-disk shape (§5): {timestamp, kind, sequence, text} — the owning step/attempt is
@@ -1109,7 +1130,7 @@ class Engine:
             h.get("_log_seq", {}).pop(name, None)
             # The store's per-file line count is keyed the same way — an
             # infiniteRetries step would otherwise leak one key per prune.
-            with self.store.lock:
+            with self.store._log_counts_lock:
                 self.store._log_counts.pop((h["id"], name), None)
 
     @staticmethod
@@ -1667,7 +1688,8 @@ class Engine:
                                 lambda k, text: self._log(h, k, text, redactions),
                                 result, notify_holder, step_timeout_for(s),
                                 on_reply=on_reply, step_i=step_index - 1,
-                                carry_len=redaction_carry_len(redactions))
+                                carry_len=redaction_carry_len(redactions),
+                                cut_guards=list(redactions))
 
     def _notify_end(self, auto: dict, ver: dict, h: dict, result: dict | None,
                     notify_text: str | None) -> None:

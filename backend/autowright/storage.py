@@ -421,6 +421,11 @@ class Store:
         # §5 log line cap: (execution_id, file name) → lines written so far,
         # seeded from disk on first append (see append_log_line).
         self._log_counts: dict[tuple[str, str], int] = {}
+        # §7 leaf lock for `_log_counts` alone: taken under store.lock or the
+        # engine's _log_lock, and never held while acquiring anything else, so
+        # it can't form a lock-order cycle (store.lock -> _log_lock ->
+        # store.lock was the ABBA deadlock when the count used store.lock).
+        self._log_counts_lock = threading.Lock()
         # §19 /state: file path → (stat key, summary) for the small yamls the
         # serializers would otherwise open and parse per automation per call
         # (a draft container's `test.yaml`, the §4.4 pending slot's
@@ -804,9 +809,18 @@ class Store:
             # §5: directory name IS the id — a mismatch means hand-edited disk.
             log.warning("automation dir %s doesn't match its id %r — skipping it at load", d, top["id"])
             return None
+        # §5: a hand-edited name of the wrong type — a plain scalar loads as
+        # its text form (`name: 2024` → "2024"), anything else (missing,
+        # empty, a bool, a list or mapping) as the directory name, so a
+        # name-collision check or rename never raises on it.
+        name = top.get("name")
+        if isinstance(name, (int, float)) and not isinstance(name, bool):
+            name = str(name)
+        elif not isinstance(name, str) or not name:
+            name = d.name
         a: dict = {
             "id": top["id"],
-            "name": top.get("name", d.name),
+            "name": name,
             "description": top.get("description", ""),
             "current_version": int(top.get("current_version", 1)),
             "triggers": self._load_triggers(top.get("triggers", []) or []),
@@ -1405,7 +1419,10 @@ class Store:
         with self.lock:
             self._still_registered(a)
             n = a["current_version"] + 1
-            while n in a["versions"]:
+            # §5: free both in memory and on disk — a vN folder the startup
+            # walk skipped (unreadable manifest, a half-repaired folder) is
+            # never overwritten, nor removed by a failed save's rollback.
+            while n in a["versions"] or (self.auto_dir(a) / "versions" / f"v{n}").exists():
                 n += 1
             ver = {**ver, "when": timefmt.now_iso()}
             vd = self.auto_dir(a) / "versions" / f"v{n}"
@@ -1431,6 +1448,10 @@ class Store:
                 # so a version the user was told failed never resurfaces in
                 # the history at the next load.
                 a["versions"].pop(n, None)
+                # The reference-id memo is keyed by version number alone, and
+                # the next save reuses this number — drop it so that save is
+                # judged on its own content.
+                a.pop("_ref_cache", None)
                 shutil.rmtree(vd, ignore_errors=True)
                 raise
 
@@ -1438,13 +1459,16 @@ class Store:
         with self.lock:
             self._still_registered(a)
             n = a["current_version"] + 1
-            while n in a["versions"]:
+            # §5: free both in memory and on disk — a vN folder the startup
+            # walk skipped (unreadable manifest, a half-repaired folder) is
+            # never overwritten, nor removed by a failed save's rollback.
+            while n in a["versions"] or (self.auto_dir(a) / "versions" / f"v{n}").exists():
                 n += 1
             dst = self.auto_dir(a) / "versions" / f"v{n}"
             # §5: restore writes through the version-folder writer from vX's
             # loaded content — never a tree copy — so the manifest lands last
             # as the commit point and a crash mid-restore leaves no adoptable
-            # folder, just an incomplete directory the next save overwrites.
+            # folder, just an incomplete directory the next save skips.
             restored = {**a["versions"][v], "when": timefmt.now_iso(),
                         "note": f"Restored from v{v}"}
             self._write_version_folder(dst, restored)
@@ -1461,6 +1485,7 @@ class Store:
                 # §5, as in save_new_version: the pointer rolled back, so the
                 # restored version leaves memory and disk with it.
                 a["versions"].pop(n, None)
+                a.pop("_ref_cache", None)
                 shutil.rmtree(dst, ignore_errors=True)
                 raise
 
@@ -1929,8 +1954,9 @@ class Store:
                 # §5 log line cap: the counter lives in memory only while the
                 # execution is live, so a keepForever history never grows the
                 # resident set. An in-place retry re-seeds it from the file.
-                for k in [k for k in list(self._log_counts) if k[0] == h["id"]]:
-                    self._log_counts.pop(k, None)
+                with self._log_counts_lock:
+                    for k in [k for k in list(self._log_counts) if k[0] == h["id"]]:
+                        self._log_counts.pop(k, None)
             if h["status"] not in ("executing", "queued") and h["id"] in self.execs:
                 # §5 slim-on-finish: on a terminal transition the stored record
                 # demotes to the header projection the DB index uses — the body
@@ -2079,7 +2105,9 @@ class Store:
         # Parallel steps of one execution append concurrently, so the read and
         # the increment have to be one step or two writers take the same slot
         # and the cap counts short. The write itself stays outside the hold.
-        with self.lock:
+        # The leaf `_log_counts_lock`, never store.lock: the engine calls this
+        # under its _log_lock, and Engine.retry logs while holding store.lock.
+        with self._log_counts_lock:
             count = self._log_counts.get(key, seeded)
             self._log_counts[key] = count + 1 if count <= self.MAX_LOG_LINES else count
         if count > self.MAX_LOG_LINES:
@@ -2318,8 +2346,9 @@ class Store:
         h = self.execs.pop(execution_id, None)
         # list(): a copy of the keys, so the filter can't trip over a
         # concurrent insert between the two lock acquisitions.
-        for k in [k for k in list(self._log_counts) if k[0] == execution_id]:
-            self._log_counts.pop(k, None)
+        with self._log_counts_lock:
+            for k in [k for k in list(self._log_counts) if k[0] == execution_id]:
+                self._log_counts.pop(k, None)
         # Keep `_latest` honest inside the mutator — no caller should have
         # to remember to recompute after deleting.
         if h:
@@ -2707,7 +2736,14 @@ class Store:
             d = root / name
             if d.is_dir() and not name.startswith(self.DELETED_PREFIX):
                 meta = self._load_mapping(d / "snapshot.yaml")
-                if self._snapshot_meta_ok(meta):
+                if self._snapshot_meta_ok(meta) and str(meta["id"]) != name:
+                    # §5/§6.3: the id IS the dir name — a mismatch is damage,
+                    # and listing it would aim the prune and every other
+                    # snapshot mutation at whatever path the hand-edited id
+                    # names (`id: ..` is the automation dir itself).
+                    log.warning("snapshot %s has id %r in snapshot.yaml — skipping it",
+                                name, meta["id"])
+                elif self._snapshot_meta_ok(meta):
                     out.append(meta)
                 elif meta:
                     log.warning("snapshot %s has unusable snapshot.yaml — skipping it", name)
@@ -3073,7 +3109,8 @@ class Store:
         base = self.run_baseline(a)
         if base is None:  # §5 lenient: a damaged created_at drops the audit, never 500s
             return False
-        return triggerlib.is_overdue(a["triggers"], base, now)
+        return triggerlib.is_overdue(a["triggers"], base, now,
+                                     interval_baseline=self.run_baseline_instant(a))
 
     def problems_json(self, a: dict, cur: dict) -> list[dict]:
         """§4.1 `problems` — the would-this-fire-successfully audit, derived at
@@ -3210,7 +3247,8 @@ class Store:
         # §4.3: the epoch comes from the occurrence's instant — an interval's
         # occurrence is one, and a local naive reading in the fall-back fold
         # would hand the UI the earlier hour.
-        next_ms = triggerlib.next_at_ms(a["triggers"], run_baseline=self.run_baseline(a))
+        next_ms = triggerlib.next_at_ms(a["triggers"], run_baseline=self.run_baseline(a),
+                                        interval_baseline=self.run_baseline_instant(a))
         when = a["versions"].get(a["current_version"], {}).get("when")
         spec_meta = f"v{a['current_version']}"
         if when and (dt := lenient_local(when)):

@@ -695,11 +695,13 @@ def test_agents_match_by_configuration_with_default_tie_break(store):
     name, tie-broken by (higher similarity, then the local default agent)."""
     ids = _put_agents(store, [_agent("Alpha"), _agent("Beta")], default=1)
     # nothing to tell them apart by name → the local default agent wins
-    _, summary = transfer.import_automation(store, _archive(agents=[_ag("1", "Zeta")]))
+    _, summary = transfer.import_automation(store, _archive(agents=[_ag("1", "Zeta")],
+                                                            agent="1"))
     assert summary["agentsMatched"] == [
         {"name": "Zeta", "matchedTo": "Beta", "matchedBy": "configuration", "ready": False}]
     # a name the similarity score can separate beats the default-agent rung
-    _, summary2 = transfer.import_automation(store, _archive(agents=[_ag("1", "Alpha Prime")]))
+    _, summary2 = transfer.import_automation(store, _archive(agents=[_ag("1", "Alpha Prime")],
+                                                             agent="1"))
     assert summary2["agentsMatched"][0]["matchedTo"] == "Alpha"
     assert ids["Beta"] == store.default_agent_id
 
@@ -710,12 +712,14 @@ def test_agent_exact_match_needs_name_harness_mode_and_effective_model(store):
     _put_agents(store, [_agent("coder", harness="OpenCode", mode="custom",
                                model="anthropic/x")])
     _, summary = transfer.import_automation(store, _archive(
-        agents=[_ag("1", "Coder", harness="OpenCode", mode="custom", model="anthropic/x")]))
+        agents=[_ag("1", "Coder", harness="OpenCode", mode="custom", model="anthropic/x")],
+        agent="1"))
     assert summary["agentsMatched"][0]["matchedBy"] == "name"
     # same name, a different model → not the exact rung; the configuration rung
     # doesn't apply either (models differ), so the similarity rung takes it
     _, summary2 = transfer.import_automation(store, _archive(
-        agents=[_ag("1", "Coder", harness="OpenCode", mode="custom", model="anthropic/y")]))
+        agents=[_ag("1", "Coder", harness="OpenCode", mode="custom", model="anthropic/y")],
+        agent="1"))
     assert summary2["agentsMatched"][0]["matchedBy"] == "similarity"
 
 
@@ -1076,11 +1080,12 @@ def test_preview_matches_what_the_import_lands(store):
         agents=[_ag("1", "Alpha"), _ag("2", "Spooky", harness="Gemini CLI")],
         agent="1",
         params=[{"name": "count", "kind": "number", "label": "Count", "default": 0}],
-        packages=[{"pip": "pandas", "import": "pandas"}],
+        packages=[{"pip": "pandas", "import": "pandas", "why": "builds the table"}],
         steps=[{"file": "01-a.py", "name": "A", "description": "d",
                 "code": 'x = secrets["1"]\ny = secrets["2"]\n'},
                {"file": "02-b.py", "name": "B", "description": "", "agent": True,
-                "why": "w", "agents": [{"ref": "1"}, {"ref": "2"}],
+                "why": "w", "agents": [{"ref": "1", "why": "drafts"},
+                                       {"ref": "2", "why": "reviews"}],
                 "code": "print('b')\n"}])
     before = (len(store.autos), len(store.secrets), len(store.agents))
     p = transfer.preview_archive(store, data)
@@ -1089,7 +1094,7 @@ def test_preview_matches_what_the_import_lands(store):
     assert [s["name"] for s in p["steps"]] == ["A", "B"]
     assert [s["agent"] for s in p["steps"]] == [False, True]
     assert p["params"] == [{"name": "count", "kind": "number"}]
-    assert p["packages"] == [{"pip": "pandas", "import": "pandas"}]
+    assert p["packages"] == [{"pip": "pandas", "import": "pandas", "why": "builds the table"}]
     assert p["secrets"] == [
         {"name": "STRIPE_KEY", "description": "", "matchedTo": "STRIPE_API_KEY",
          "matchedBy": "similarity"},
@@ -1497,9 +1502,11 @@ def test_step_manifest_text_fields_must_be_text(store):
             transfer.import_automation(store, bad)
     assert len(store.autos) == before
 
-    # an absent description or why still defaults to the empty string
+    # an absent description or why still defaults to the empty string (the
+    # why only off the non-agent step: an agent step's why is required)
     stripped = _rezip_meta(data, lambda m: {
-        **m, "steps": [{k: v for k, v in s.items() if k not in ("description", "why")}
+        **m, "steps": [{k: v for k, v in s.items()
+                        if k != "description" and (k != "why" or s.get("agent"))}
                        for s in m["steps"]]})
     b, _ = transfer.import_automation(store, stripped)
     ver = b["versions"][b["current_version"]]

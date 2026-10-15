@@ -458,17 +458,26 @@ class Listeners:
         self._conns: dict[str, _Conn] = {}  # token-secret id → connection
         self._imsg: _ImsgWatcher | None = None
         self._stop = threading.Event()
+        # Orders stop() against a connection's creation: the flag is set and
+        # the connections snapshotted under it, and _reconcile re-reads the
+        # flag under it before adding one, so no connection can start after
+        # stop() took its snapshot.
+        self._conns_lock = threading.Lock()
 
     def start(self) -> None:
         t = threading.Thread(target=self._loop, daemon=True, name="ad-listeners")
         t.start()
 
     def stop(self) -> None:
-        self._stop.set()
         # Snapshot: a _reconcile already in flight on the manager thread keeps
         # mutating _conns until it notices the stop flag — iterating the live
         # dict here can raise mid-shutdown, before backend.json is unlinked.
-        for c in list(self._conns.values()):
+        # Flag and snapshot are taken under the lock a creation holds, so a
+        # connection either made the snapshot or is never started.
+        with self._conns_lock:
+            self._stop.set()
+            conns = list(self._conns.values())
+        for c in conns:
             c.stop()
         if self._imsg is not None:
             self._imsg.close()
@@ -508,11 +517,12 @@ class Listeners:
                 log.warning("discord listener for %s died - restarting it", secret[:8])
                 self._conns.pop(secret).stop()
         for secret in desired - self._conns.keys():
-            if self._stop.is_set():
-                return
-            conn = _Conn(secret, self)
-            self._conns[secret] = conn
-            conn.start()
+            with self._conns_lock:
+                if self._stop.is_set():
+                    return
+                conn = _Conn(secret, self)
+                self._conns[secret] = conn
+                conn.start()
         for secret in list(self._conns.keys() - desired):
             self._conns.pop(secret).stop()
             with self.store.lock:

@@ -967,7 +967,7 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
     expect(w.shows).toBe(0)
   })
 
-  it('a finished reload resets the death count — a later death gets its own reload (§9)', () => {
+  it('a reload alive 60 s past its load resets the death count — a later death gets its own reload (§9)', () => {
     vi.useFakeTimers()
     const m = loadMain()
     m.invoke('open-app', '/app')
@@ -976,9 +976,11 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
     w.fire('did-finish-load')
     w.fire('render-process-gone', { reason: 'oom' })
     expect(w.loads).toBe(2)
-    // The reload painted, so a death days later is a new one, not a repeat.
+    // The reload painted and stayed alive 60 s, so a death days later is a
+    // new one, not a repeat.
     w.fire('did-start-loading')
     w.fire('did-finish-load')
+    vi.advanceTimersByTime(60_000)
     w.fire('render-process-gone', { reason: 'crashed' })
     expect(w.loads).toBe(3)
     expect(m.errors).toEqual([])
@@ -986,6 +988,27 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
     // …but a second death before that reload finished still reports and quits.
     w.fire('render-process-gone', { reason: 'crashed' })
     expect(w.loads).toBe(3)
+    expect(m.errors).toHaveLength(1)
+    expect(m.quits).toBe(1)
+  })
+
+  it('a reload that dies again within 60 s of its load is a repeat — report and quit (§9)', () => {
+    vi.useFakeTimers()
+    const m = loadMain()
+    m.invoke('open-app', '/app')
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    vi.advanceTimersByTime(60_000)
+    w.fire('render-process-gone', { reason: 'oom' })
+    expect(w.loads).toBe(2)
+    // The reload loads, then the renderer dies again on its first steps: the
+    // finished load alone no longer clears the count.
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    vi.advanceTimersByTime(59_000)
+    w.fire('render-process-gone', { reason: 'crashed' })
+    expect(w.loads).toBe(2)
     expect(m.errors).toHaveLength(1)
     expect(m.quits).toBe(1)
   })
@@ -1065,6 +1088,7 @@ const platMod = realRequire(join(PLATFORM_DIR, 'index.cjs')) as {
   updateFeedUrl: (arch: string) => string | null
   bundledPythonPath: (resourcesPath: string) => string
   shimText: (python: string) => string
+  defaultShimPath: () => string
   applyLoginItem: (app: { isPackaged: boolean }, enabled: boolean, exec?: unknown) => void
   panelPosition: (pt: Point, display: Display, height?: number) => { x: number, y: number }
 }
@@ -1611,7 +1635,11 @@ describe('main.cjs bounded service children (§3)', () => {
       // While the dialog is up: a second Cmd+Q / SIGINT is a no-op, and a late
       // quit-all from the renderer answers without a stop or a force modal.
       expect(m.emit('before-quit')).toBe(true)
-      expect(await m.invoke('quit-all', {})).toEqual({ error: 'a quit is already in progress' })
+      // §3: a late quit-all answers success — never an error the renderer
+      // would toast over the overlay of a quit that is going ahead.
+      const late = await m.invoke('quit-all', {}) as Record<string, unknown>
+      expect(late).toEqual({ ok: true })
+      expect(late).not.toHaveProperty('error')
       await new Promise((resolve) => setTimeout(resolve, 20))
       expect(m.dialogs).toHaveLength(1)
       expect(stops).toEqual([])
@@ -1620,6 +1648,51 @@ describe('main.cjs bounded service children (§3)', () => {
       await vi.waitFor(() => expect(m.quits).toBe(1))
       expect(stops).toEqual([['-m', 'autowright.service', 'stop']])
       expect(m.dialogs).toHaveLength(1)
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('a Cancel at the native busy dialog pushes quit-cancelled to the window (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const stops: string[][] = []
+    const m = loadMain({
+      execFile: (_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') },
+      showMessageBox: async () => ({ response: 1 }),
+    })
+    // A window that never loaded: the OS quit runs the native flight.
+    m.invoke('open-app', '/app')
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    // Up but answering 500: the gate reads busy.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, status: 500 } as Response)
+    try {
+      expect(m.emit('before-quit')).toBe(true)
+      // A late quit-all answered { ok } and left the overlay up — the
+      // stand-down tells the renderer to drop it.
+      await vi.waitFor(() => expect(m.sent).toContainEqual(['quit-cancelled', undefined]))
+      expect(m.log()).toContain('quit: cancelled at the busy confirm')
+      expect(stops).toEqual([])
+      expect(m.quits).toBe(0)
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('a native stop failure pushes quit-cancelled to the window too (§3)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const m = loadMain({ execFile: (_py, _args, _o, cb) => {
+      cb(Object.assign(new Error('exit 1'), { code: 1 }), 'stop failed: launchd still reports the job', '')
+    } })
+    m.invoke('open-app', '/app')
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    try {
+      expect(m.emit('before-quit')).toBe(true)
+      await vi.waitFor(() => expect(m.errors).toHaveLength(1))
+      expect(m.sent).toContainEqual(['quit-cancelled', undefined])
+      expect(m.quits).toBe(0)
     } finally {
       fetchSpy.mockRestore()
     }
@@ -2588,6 +2661,35 @@ describe('main.cjs quit and reset quiet the shell (§3)', () => {
       expect(await m.invoke('open-archive')).toBeNull()
       expect(existsSync(join(m.home, 'logs'))).toBe(false)
       expect(m.log()).toBe('')
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('reset keeps the CLI shim directory when it lives inside the data root (§3 step 5)', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('offline in tests'))
+    try {
+      const m = loadMain({ execFile: (_py, _a, _o, cb) => { cb(null, 'stopped', '') } })
+      // The win32 placement: the shim sits in <data root>\bin.
+      const shimSpy = vi.spyOn(platMod, 'defaultShimPath')
+        .mockReturnValue(join(m.home, 'bin', 'autowright.cmd'))
+      try {
+        writeFileSync(join(m.home, 'backend.json'),
+          JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+        mkdirSync(join(m.home, 'bin'))
+        writeFileSync(join(m.home, 'bin', 'autowright.cmd'), 'shim')
+        mkdirSync(join(m.home, 'automations'))
+        writeFileSync(join(m.home, 'settings.yaml'), 'x: 1')
+        expect(await m.invoke('reset-all')).toEqual({ ok: true })
+        expect(existsSync(join(m.home, 'bin', 'autowright.cmd'))).toBe(true)
+        expect(existsSync(join(m.home, 'automations'))).toBe(false)
+        expect(existsSync(join(m.home, 'settings.yaml'))).toBe(false)
+        expect(existsSync(join(m.home, 'backend.json'))).toBe(false)
+      } finally {
+        shimSpy.mockRestore()
+      }
     } finally {
       fetchSpy.mockRestore()
     }

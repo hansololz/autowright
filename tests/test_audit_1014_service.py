@@ -128,7 +128,7 @@ def test_load_reads_an_unknown_probe_as_timed_out(launchd):
 def test_status_on_a_timed_out_list_says_so(launchd, monkeypatch):
     monkeypatch.setattr(launchd.mod, "_launchctl", lambda *a: launchd.mod._TimedOut())
     assert launchd.mod.status() == \
-        "launchctl timed out — can't tell whether the service is running"
+        "status failed: launchctl timed out — can't tell whether the service is running"
 
 
 # ---------- §3 Linux: a failed `disable --now` keeps the unit ----------

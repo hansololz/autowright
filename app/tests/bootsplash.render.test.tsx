@@ -91,3 +91,15 @@ describe('§3 quit-entirely on the boot splash', () => {
     })
   }
 })
+
+describe('§3 the toast rides on the boot splash', () => {
+  for (const connected of [false, null] as const) {
+    it(`a toast set while the splash is up is shown (connected ${String(connected)})`, async () => {
+      backendStatus.mockResolvedValue({ state: 'installing', detail: '' })
+      render(<App />)
+      act(() => { storeMod.useStore.setState({ connected }) })
+      act(() => { storeMod.useStore.getState().showToast('The backend service could not be stopped') })
+      expect(await screen.findByText('The backend service could not be stopped')).toBeTruthy()
+    })
+  }
+})

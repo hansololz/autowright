@@ -16,7 +16,11 @@ export default function QuitFlow() {
   // (main's native fallback stands down once that IPC arrives).
   useEffect(() => {
     const off = window.autowright?.onQuitRequested?.(() => { void useStore.getState().quitAll() })
-    return () => { off?.() }
+    // §3: a late quit-all answered { ok } while main's native flight was up;
+    // when that flight stands down (Cancel, or a stop failure) main says so
+    // and the overlay clears.
+    const offCancelled = window.autowright?.onQuitCancelled?.(() => { useStore.getState().cancelQuit() })
+    return () => { off?.(); offCancelled?.() }
   }, [])
 
   return (

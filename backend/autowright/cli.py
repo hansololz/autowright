@@ -161,13 +161,17 @@ def find_automation(c: Client, ref: str) -> dict:
 
 
 def find_execution(c: Client, ref: str | None) -> dict:
-    if not ref:
+    if ref is None:
         # §20: the bare no-reference form means "the newest" — one row is all
         # it needs, so it reads limit=1 rather than the whole list.
         newest = c.req("GET", "/executions?limit=1")["executions"]
         if newest:
             return newest[0]
         sys.exit("no execution found")
+    # §20: an empty reference (an unset shell variable) is a usage error,
+    # never "the newest" - only a left-out reference means that.
+    if not ref.strip():
+        sys.exit("give an execution id")
     # §19/§20: the server does the prefix match, so only rows that could
     # resolve cross the wire — every short id the CLI ever printed resolves
     # back (§20 reference rule) without reading the whole list.
@@ -404,7 +408,7 @@ def _lift_run_if_missed(step_files: dict[str, str]) -> tuple[dict[str, str], set
         return step_files, set(), []
     try:
         manifest = yaml.safe_load(text)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError, RecursionError):
         return step_files, set(), []  # the drafting validator reports the parse error
     entries = manifest.get("triggers") if isinstance(manifest, dict) else None
     if not isinstance(entries, list) or not any(
@@ -1339,7 +1343,14 @@ def _local_stamp_ms(text: str, *, end_of_day: bool, flag: str = "") -> int:
             dt = datetime.strptime(text, fmt)
         except ValueError:
             continue
-        if dt.year < 1970:
+        # §20: the check reads the computed stamp of the date's local
+        # midnight (or the given minute), not the calendar year - a local
+        # 1970-01-01 east of UTC is still before the epoch.
+        try:
+            ms = int(dt.timestamp() * 1000)
+        except (OverflowError, OSError, ValueError):
+            ms = -1
+        if ms < 0:
             raise SystemExit(f"error: {flag or 'the date'}: dates before 1970 aren't supported")
         if whole_day and end_of_day:
             dt = dt + timedelta(days=1, milliseconds=-1)
@@ -1684,7 +1695,11 @@ def cmd_marketplace_set(c: Client, args) -> None:
 
 
 def cmd_marketplace_refresh(c: Client, args) -> None:
-    if args.source:
+    if args.source is not None:
+        # §20: an empty-but-present reference is a usage error, never
+        # refresh-all - only a left-out source means every catalog.
+        if not args.source.strip():
+            sys.exit("give a marketplace name or id")
         s = find_source(c, args.source)
         if not s.get("location"):
             # §22.2: a catalog with no location is the app's only copy - the

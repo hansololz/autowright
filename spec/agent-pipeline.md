@@ -992,7 +992,14 @@ same retryable timeout error; cancelling
 the job (Start over, or an edit that supersedes an in-flight steps call, §11) kills the harness
 process **and releases its pipes and stdin write** the same way the watchdog kill does (the
 release callable travels with the held process), so a cancel can never leave the call
-alive until its idle window or hard cap through an escapee holding stdout. Everything built
+alive until its idle window or hard cap through an escapee holding stdout. Both run
+**whether or not the CLI process itself has already exited**: a helper left in the
+session group after the CLI returned (a backgrounded command still holding stdout) is
+exactly the escapee the group kill and the release exist for, so neither is gated on the
+leader still being alive — the same rule for the shutdown kill of every building job;
+and the cancel's 5 s term-then-kill escalation sends the KILL to the group
+unconditionally, since a leader that already exited makes the wait return at once and a
+survivor that trapped the TERM would otherwise never see it. Everything built
 after the spawn (the readers, the writer, the watchdog and drain threads, the scratch
 watcher) is constructed inside the call's own try: a failure there (fd exhaustion) kills
 the group and releases what was built, never leaving the child running. One pre-flight guards the known interactive trap: a signed-out Gemini CLI does not
@@ -1048,7 +1055,10 @@ applies to these flags as each CLI lands there):
   verification this mode still owes. Runtime calls stay bare.
 - **OpenCode** - `opencode run --format json` (JSONL events on stdout): `text` events'
   part text becomes a `text` event each (the **reply is every text part joined in
-  order**, falling back to raw stdout when none arrived), `tool_use` events become
+  order**, falling back to raw stdout when none arrived — except that when a later part
+  begins with the §8 `===QUESTION===` marker, the parts before it were working-out, not
+  the answer, and the reply is the text from that part on, so the question type survives
+  a preamble such as "Let me check the spec…"), `tool_use` events become
   `tool` events carrying the tool name and its input (`bash`'s `command`) - except
   `write` and `edit`, which count as bare activity: the scratch watcher is the single
   source of `file` events, so a write tool event would double-report the same document
@@ -1089,8 +1099,15 @@ residue an agent leaves behind (`__pycache__`, helper scripts) is ignored. The c
 reply is then **recombined** into the ordinary envelope so validation, repair, logging,
 and the §5 audit framing all see one canonical text: a line-anchored `===BLOCKED===` on
 stdout wins outright (the stdout text is the reply, scratch ignored - blockers ride
-stdout by contract); otherwise the stdout prose (clipped at the first `===FILE:` marker
-when the agent redundantly printed blocks too) followed by one `===FILE: <name>===` block
+stdout by contract) — with one addition: a `notes.md` the agent wrote to the scratch dir
+beside a blocker is appended after the envelope's `===END===` as the optional blocker
+notes block (the OUTPUT section tells a file-writing harness that `notes.md` is the one
+file it may still write when blocked, so what it learned survives on every harness, not
+only the stdout ones); every other scratch document beside a blocker is ignored.
+Otherwise the stdout prose (clipped at the first `===FILE:` marker
+when the agent redundantly printed blocks too; a prose whose last code fence is left
+open is closed with a fence line first, so the appended markers are never read as quoted
+text inside it) followed by one `===FILE: <name>===` block
 per collected document in first-seen order, closed with `===END===`; an empty scratch dir
 falls back to the stdout text as the reply unchanged (an answer-only chat reply, or an
 agent that ignored the OUTPUT section - the envelope parser then sees whatever it

@@ -418,7 +418,11 @@ the update bullets below).
   thread (`run_in_threadpool`), never on the event loop: a message listener's gateway close
   can take its library's full close timeout, and a listener's stop is fire-and-forget (the
   close runs on a short-lived thread nobody joins — the gateway session is disposable at
-  shutdown), so the lifespan's shutdown stays inside the 5 s box whatever the network does. The kill pass also flips the engine into a stopping
+  shutdown), so the lifespan's shutdown stays inside the 5 s box whatever the network does.
+  The §22 marketplace auto-refresh sweeper is stopped the same way at shutdown: its stop
+  flag is set and the thread (a daemon, possibly inside a 60 s catalog read) is joined for
+  at most 0.5 s, never the full box — the wait for live records to finalize `interrupted`
+  is sized from what the box has left and must not be eaten by a network read. The kill pass also flips the engine into a stopping
   state in which every later `start` is refused ("the backend is shutting down"), closing the
   window a tick already inside `fire_trigger` could otherwise slip through. Uvicorn owns
   SIGTERM/SIGINT only once `run()` installs its handlers, though — and `backend.json` is
@@ -479,9 +483,16 @@ the update bullets below).
   the native path share it, and a repeated Cmd+Q while it runs is ignored. The flight
   covers the native busy dialog too: while it is up, a second Cmd+Q, the dock's Quit, a
   second SIGINT, or a late `quit-all` from the renderer is a no-op (never a second stacked
-  dialog, never the renderer's force modal beside the native one). "A loaded main window"
-  includes the boot splash — the §9 quit overlay is mounted on the splash branch as well,
+  dialog, never the renderer's force modal beside the native one; the late `quit-all` IPC
+  answers success, never an error the renderer would toast next to the native dialog —
+  and because that leaves the renderer's overlay at its "stopping" stage, the native
+  flight's two ways of standing down, a Cancel at the busy dialog and a failed stop shown
+  in the native error box, push `quit-cancelled` to the window so the overlay clears
+  rather than staying up over an app that is not quitting). "A loaded main window"
+  includes the boot splash — the §9 quit overlay **and the toast** are mounted on the
+  splash branch as well,
   so a Cmd+Q while ensure-backend is still installing shows the overlay and its outcome
+  (a failed stop's error reaches the user as the ordinary toast, never a vanished overlay)
   rather than running natively for up to four minutes with no feedback. An OS quit that
   arrives **while a reset (below) is in flight is ignored** — the reset ends the process
   itself with `app.exit(0)`, and a second `service stop` racing its `deleteAllData` would
@@ -506,10 +517,21 @@ the update bullets below).
   bootout needs no plist), and reports "already stopped" only when the verdict is clean.
   The unload wait keeps waiting on an unknown probe until its deadline rather than reading
   it as gone, and `_load`'s "not registered afterwards" verdict is only ever a definite
-  False (an unknown reads `launchctl timed out`). `status` prints `launchctl timed out`
-  when the list call timed out, never "stopped" for a job it couldn't see. The Linux
+  False (an unknown reads `launchctl timed out`). `status` prints `status failed:
+  launchctl timed out` when the list call timed out, never "stopped" for a job it couldn't
+  see — a probe that timed out is a failed status on every OS (exit 1, the Linux and
+  Windows wording already is `status failed: …`). The no-plist `stop`'s result line
+  reports what the bootout found: "stopped" when a registration was booted out (strays
+  swept or not), "already stopped — service not installed, nothing was running" only when
+  nothing was registered. The Linux
   `uninstall` applies the same rule to its `disable --now`: a failed or timed-out stop keeps
-  the unit file and answers `uninstall failed: …`. `stop` is bootout **plus a stray-process sweep**: after
+  the unit file and answers `uninstall failed: …`; and Linux `stop` mirrors the no-plist
+  rule — `systemctl --user stop` runs by unit name whether or not the unit file is still
+  on disk (a hand-deleted unit file leaves the loaded unit, with `Restart=always`, able to
+  respawn the backend), and `uninstall` runs `disable --now` the same way before its
+  verdict, followed by an explicit `stop` by unit name (a `disable` of a unit whose file is
+  gone can refuse before its `--now` stop runs); systemd refusing a unit it doesn't know
+  is the expected answer there, only a timeout fails the verb. `stop` is bootout **plus a stray-process sweep**: after
   launchd deregisters the job (or the 10 s deregistration wait expires), the stop TERM-then-KILLs
   every remaining process whose command line carries an Autowright marker (the §2
   `kill_matching` primitive), always excluding the stop process itself and its own process
@@ -576,7 +598,9 @@ the update bullets below).
      bullet) — reset proceeds on a machine whose service was never registered.
   5. Delete the execution data in the captured `dataPath`, the logs root, and every entry of
      the data root **except** the live Chromium profile `electron/` — Chromium holds open
-     handles on it, so deleting it would fail (on Windows, a sharing violation outright).
+     handles on it, so deleting it would fail (on Windows, a sharing violation outright) —
+     and except the platform's CLI shim directory when it lives inside the data root
+     (Windows: `bin\`, the shim's §3 home), since the shim survives a reset on every OS.
      The executions dir is deleted **selectively, never wholesale**: only entries Autowright
      wrote — `executions.db` (and its `-wal`/`-shm` siblings) and per-execution directories
      identified by a contained `execution.yaml` — then the directory itself is removed only

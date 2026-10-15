@@ -107,7 +107,11 @@ remain plain dicts (§2).
   the owner's **draft generation** through one shared settle helper (bump, then cancel);
   a `POST /drafts` that read the older generation before building its context is refused
   at registration (409, "the draft was discarded"), so a settle can never miss a job that
-  was still being registered and later re-attach its outcome to the next draft; a job that
+  was still being registered and later re-attach its outcome to the next draft. That
+  refusal is decided **inside the registry's own lock, before the new job supersedes
+  anything**: a stale request never cancels the owner's legitimate post-settle job nor
+  consumes its held outcome on its way to the 409 (the mid-delete 404 is judged there
+  too) — a refused registration is side-effect free for the fresh draft; a job that
   already settled by the time that check runs (a missing harness binary fails on its own
   thread at once) is dropped from the held outcomes right there, never left for the fresh
   draft to inherit (the
@@ -951,7 +955,12 @@ already neutralize. The provider config and
   forgets an id's full-record status when the last page holding it unmounts — and a GET
   issued after that (a PATCH's reload answering late) lands the record without re-tracking
   it; tracking resumes only with a page's own mount load — so the
-  finish-triggered and change-triggered refetches stay bounded to the pages open now. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
+  finish-triggered and change-triggered refetches stay bounded to the pages open now. A
+  mount load's tracking is **armed when issued, not granted when it lands**: if a page
+  action's reload supersedes the mount GET on the wire (the per-id sequence drops the
+  older answer), or the mount GET fails, the armed tracking carries to the next GET for
+  that id that lands — unless the page released the id in between — so a page that is
+  still open never ends up untracked because its first GET lost a race. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
   successful open), re-reading `backend.json` before each attempt, and re-`GET /state` on
   reconnect (a client page holding a *full* automation record — one the client fetched
   through `GET /automations/{id}` itself, tracked as a set of ids and never inferred from

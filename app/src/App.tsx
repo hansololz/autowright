@@ -273,9 +273,10 @@ export default function App() {
 
   // §3/§9: the boot splash is a loaded main window too — a Cmd+Q while
   // ensure-backend is still installing shows the quit overlay and its outcome
-  // rather than running natively with no feedback.
+  // rather than running natively with no feedback. The toast rides here too:
+  // a quit error toasted on the splash must be visible.
   if (connected === null || connected === false) {
-    return <><BootSplash waiting={connected === false} /><QuitFlow /></>
+    return <><BootSplash waiting={connected === false} /><QuitFlow /><Toast msg={toast} /></>
   }
 
   // §13: the panel renders its own Toast — a failed tray execute is never silent

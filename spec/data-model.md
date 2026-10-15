@@ -441,9 +441,11 @@ records excluded; a run in progress counts; the run's trigger doesn't matter —
 start, another trigger's firing, or this trigger's own last firing all reset the cadence),
 falling back to the automation's `created_at` if it never ran; a trigger stored without the
 stamp (hand-edited disk) anchors at the run baseline alone, like the §4.1 overdue rule. The
-baseline reaches the scheduler as the run's UTC instant, never as a naive local wall-clock
-time round-tripped back (which would resolve a run inside a fall-back hour's repeated
-readings to the later one and push the next occurrence out by an hour). Its
+baseline reaches the scheduler, `nextAtMs`, and the §4.1 overdue audit as the run's UTC
+instant, never as a naive local wall-clock time round-tripped back (which would resolve a
+run inside a fall-back hour's repeated readings to one of the two and leave the countdown
+or the audit an hour off from the moment the scheduler fires — a naive value cannot
+round-trip a fold, so every interval-anchor reader takes the stored instant). Its
 occurrences are `anchor + n × every` for `n ≥ 1`; because a firing starts a run, the anchor
 moves to that run's start and the next occurrence is one `every` after it — "every 6 hours
 since the last run". Consequences, all following from the anchor rule: a manual Execute

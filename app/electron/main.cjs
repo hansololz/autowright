@@ -555,6 +555,10 @@ function createWindow(hash) {
   let failed = false
   let failStreak = 0
   let rendererDeaths = 0
+  // §9: the death count resets only once a (re)loaded renderer has stayed
+  // alive 60 s past its load — a reload that paints and then dies again at
+  // once is a repeat, not a new death.
+  let rendererAliveTimer = null
   // §9 watchdog: whatever else goes wrong, the app is never left running with
   // no window at all. Armed with the window, disarmed the moment it shows (or
   // the window closes), and fired below when neither happened in time.
@@ -578,9 +582,15 @@ function createWindow(hash) {
       appLog(`window: renderer loaded after ${failStreak} failed attempt(s)`)
       failStreak = 0
     }
-    // §9: a load that finished painted again, so a later death is a new one
-    // and gets its own reload — only a death before this point is a repeat.
-    rendererDeaths = 0
+    // §9: a load that finished painted again; once it has stayed alive 60 s,
+    // a later death is a new one and gets its own reload — a death before
+    // then is still a repeat.
+    if (rendererAliveTimer) clearTimeout(rendererAliveTimer)
+    rendererAliveTimer = setTimeout(() => {
+      rendererAliveTimer = null
+      rendererDeaths = 0
+    }, 60_000)
+    rendererAliveTimer.unref()
     if (!winLoaded) {
       winLoaded = true
       clearWatchdog()
@@ -602,6 +612,10 @@ function createWindow(hash) {
   // rather than staying resident and invisible.
   win.webContents.on('render-process-gone', (_e, details) => {
     if (win !== w || w.isDestroyed()) return
+    if (rendererAliveTimer) {
+      clearTimeout(rendererAliveTimer)
+      rendererAliveTimer = null
+    }
     rendererDeaths += 1
     appLog(`window: renderer process gone (${details?.reason || 'unknown'}) — death ${rendererDeaths}`)
     if (rendererDeaths === 1) {
@@ -1625,8 +1639,10 @@ function stopAndQuit(force, label) {
 
 ipcMain.handle('quit-all', async (_e, opts) => {
   if (resetInFlight) return { error: 'a reset is in flight' }
-  // §3: the native busy dialog is up — this flight is already asking.
-  if (nativeQuitPending) return { error: 'a quit is already in progress' }
+  // §3: the native busy dialog is up — this flight is already asking. The
+  // late call answers success: the quit is going ahead, and an error here
+  // would only toast over the renderer's overlay.
+  if (nativeQuitPending) return { ok: true }
   // The renderer took an OS quit over (§3): the native fallback stands down.
   if (quitAskTimer) { clearTimeout(quitAskTimer); quitAskTimer = null }
   return stopAndQuit(!!opts?.force, 'quit-all')
@@ -1672,6 +1688,13 @@ async function quitNatively() {
   }
 }
 
+// §3: the native flight stood down (a Cancel at its busy dialog, or a stop
+// failure). A late quit-all answered { ok } and left the renderer's overlay at
+// its "stopping" stage — this push clears it.
+function sendQuitCancelled() {
+  if (win && !win.isDestroyed()) win.webContents.send('quit-cancelled')
+}
+
 async function quitNativelyHeld() {
   let r = await stopAndQuit(false, 'quit')
   if (r.busy) {
@@ -1688,11 +1711,13 @@ async function quitNativelyHeld() {
     } catch { /* no dialog on this host — treat as Cancel */ }
     if (response !== 0) {
       appLog('quit: cancelled at the busy confirm')
+      sendQuitCancelled()
       return
     }
     r = await stopAndQuit(true, 'quit')
   }
   if (r.error) {
+    sendQuitCancelled()
     // §3: the app stays up — and says so, since no renderer is showing it.
     try {
       dialog.showErrorBox('Autowright',
@@ -1783,10 +1808,16 @@ async function deleteExecutionData(dataPath, label) {
 // holds open handles on it, so deleting it would fail (on Windows a sharing
 // violation outright). The profile is cleared instead, which is what
 // matters: every §15 localStorage marker (`ad-cli-installed` among them) goes.
-// Its residual Chromium internals are accepted residue (§3).
+// Its residual Chromium internals are accepted residue (§3). The platform's
+// CLI shim directory is kept too when it lives inside the data root (Windows:
+// bin\) — the shim survives a reset (§3).
 async function deleteAllData(dataPath, label) {
   const root = appSupportDir()
   const profile = path.join(root, 'electron')
+  const shimDir = path.dirname(plat.defaultShimPath())
+  const keptShimEntry = shimDir.startsWith(root + path.sep)
+    ? path.relative(root, shimDir).split(path.sep)[0]
+    : null
   if (dataPath) await deleteExecutionData(dataPath, label)
   await deletePath(logsDir(), label)
   let entries = []
@@ -1795,6 +1826,7 @@ async function deleteAllData(dataPath, label) {
   } catch { /* no data root at all — nothing to sweep */ }
   for (const name of entries) {
     if (path.join(root, name) === profile) continue
+    if (name === keptShimEntry) continue
     await deletePath(path.join(root, name), label)
   }
   try {

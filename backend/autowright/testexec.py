@@ -229,6 +229,9 @@ def _run(engine: Engine, shadow: dict, ver: dict, h: dict, state: dict,
             save_yaml(dbase / "test.yaml", summary)
     if orphaned:
         store.delete_execution(h["id"])
+        # §19 execution.deleted: the orphaned test's row leaves the §7 list
+        # live, published for its own id after its execution.finished.
+        hub.publish("execution.deleted", executionId=h["id"])
 
 
 def clear_scratch() -> None:

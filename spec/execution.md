@@ -79,11 +79,19 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   rule for text that bypasses the executor entirely (a child writing straight to the
   inherited fd): a chunk the read cap cut — one with no trailing newline — holds back its
   last (longest secret value − 1) characters, prepended to the next chunk before
-  redaction, so the read cap can't split a value either. Log lines land in **sequence
+  redaction, so the read cap can't split a value either; the hold-back point is itself a
+  guarded boundary (moved back to the start of any secret value straddling it, as the
+  line writer's overflow flush does), so the carry can never split a value the chunk
+  already held whole. Log lines land in **sequence
   order**: the sequence number is taken and the line appended under one lock, since the
   §19 `sinceSequence` follow slices the file by line number and would skip a line that
   landed after a higher-numbered one (the off-thread reply worker and the step thread
-  append to the same file). Then the
+  append to the same file). That engine log lock is a **leaf below the store lock**: a
+  caller may log while holding the store lock (the §7 retry writes its "retrying from
+  step" line inside its admission hold), so the append itself never takes the store lock —
+  the store's per-file line counters are guarded by their own small lock that is never
+  held while acquiring anything else. Nesting the store lock under the log lock would
+  wedge the backend the moment a retry races a streaming step. Then the
   execution gets its final status,
   duration, result object; automation gets latest/resultChip/lastExecutionLabel "Today"; toast
   summarizes. An execution whose steps include `skipped` ones but no failures finishes
@@ -480,7 +488,10 @@ automation's; in create mode the draft's name, "New automation" fallback), never
 the redundant pair (a mocked sender still appears between: "Test · Dave"). Test rows share
 the record's draft-scoped lifetime (§11 keep-latest): starting the next test replaces the
 previous row, and a settling draft removes its rows — both through the §19 `execution.deleted`
-event, so the list never keeps a ghost row on the live path — and the page's accumulated
+event, so the list never keeps a ghost row on the live path (`DELETE /automations/{id}`
+removes the automation's test rows the same way, one event per id, and a live test a
+settle cancelled, which deletes itself when its thread lands, publishes the event for its
+own id after its `execution.finished`) — and the page's accumulated
 deeper pages drop the deleted id as well, wherever it sorted (a filtered fetch, page 3), so
 the rows and the pill total never disagree. Three sections, top to bottom —
 active work, then what it is holding up, then history: **Executing** (`executing` rows, newest

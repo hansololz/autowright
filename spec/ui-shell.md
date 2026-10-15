@@ -77,9 +77,12 @@ what separates success from failure. Every other show path — the deep-link/sec
 failed window is never shown blank. Two guards keep that rule from stranding a live app
 behind no window at all. A renderer process that dies (`render-process-gone` - out of
 memory, a crash in the bundle) is logged to `app.log` and reloaded once — the count resets
-when that reload finishes loading, so two unrelated deaths days apart in one long-lived
-window each get their reload; a second death before the reload has painted has nothing
-left to paint, so the shell shows an error box naming
+only once the reloaded renderer has **stayed alive 60 s past its load** (a timer armed
+by the load, cleared by a death), so two unrelated deaths days apart in one long-lived
+window each get their reload; a second death inside that window — before the reload has
+painted, or a renderer that loads and then dies every time (an out-of-memory crash on a
+huge `/state`, a deterministic crash in the post-boot render) — must not reload forever
+in a flashing loop, so the shell shows an error box naming
 `app.log` and quits rather than staying resident and invisible. And a watchdog armed when
 the window is created fires 15 s later if the window still has not shown: with a renderer
 that simply loaded slowly it shows the window anyway, and with nothing ever loaded (every

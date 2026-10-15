@@ -178,7 +178,9 @@ def test_wedged_launchctl_times_out_into_a_plain_failure(svc, monkeypatch):
     assert svc.mod.result_code(out) == 1
     # and the read-only actions degrade instead of raising
     # §3 tri-state: a timed-out list is never read as "stopped".
-    assert svc.mod.status() == "launchctl timed out — can't tell whether the service is running"
+    out = svc.mod.status()
+    assert out == "status failed: launchctl timed out — can't tell whether the service is running"
+    assert svc.mod.result_code(out) == 1
     assert svc.mod.restart() == "restart failed: launchctl timed out"
 
 

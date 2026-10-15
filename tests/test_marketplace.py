@@ -2219,7 +2219,8 @@ def test_create_leaves_no_catalog_file_behind_when_the_row_cant_be_stored(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(marketplace, "save_yaml", boom)
-    with pytest.raises(OSError):
+    # §22.2: a failed table write is the 409 unwritable answer, never a bare OSError
+    with pytest.raises(marketplace.MarketplaceUnwritable):
         market.create_catalog(str(folder))
     assert list(folder.iterdir()) == []
 

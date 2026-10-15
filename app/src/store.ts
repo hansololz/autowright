@@ -263,6 +263,13 @@ const fullLoaded = new Set<string>()
 // page's unmount.
 const fullReleases = new Map<string, number>()
 
+// §19 mount-load arms: id → the fullReleases value when a page's mount load
+// ({ track: true }) was issued. Tracking is armed at issue, not granted when
+// that GET lands: a superseded mount GET (a newer GET for the id issued while
+// it was on the wire) or a failed one leaves the arm for the next GET that
+// lands; a release in between makes the arm stale.
+const trackArmed = new Map<string, number>()
+
 // §19 per-id ordering: the newest GET /automations/{id} issued for an id wins —
 // an older response resolving later (a finish refetch slowed by the memory
 // walk, overtaken by a PATCH's refetch) is dropped rather than regressing
@@ -896,6 +903,7 @@ export const useStore = create<Model>((set, get) => ({
     // refetch already on its way) lands the record without re-tracking it;
     // tracking resumes only with a page's own mount load.
     const tracked = fullLoaded.has(automationId)
+    if (opts?.track) trackArmed.set(automationId, releases)
     try {
       const a = await api.getAutomation(automationId)
       // §19 per-id ordering: a newer GET for this id was issued while this one
@@ -910,9 +918,14 @@ export const useStore = create<Model>((set, get) => ({
       if (!held && !opts?.insert) return
       // §19: a page that let go of this id while the GET was on the wire
       // released it; the record still lands, the tracking does not come back.
-      if ((opts?.track || tracked) && (fullReleases.get(automationId) ?? 0) === releases) {
+      // A mount load's arm counts for whichever GET lands first after it,
+      // unless a release happened since it was armed.
+      const current = fullReleases.get(automationId) ?? 0
+      const armed = trackArmed.get(automationId)
+      if ((tracked && current === releases) || (armed !== undefined && armed === current)) {
         fullLoaded.add(automationId)
       }
+      trackArmed.delete(automationId) // consumed, or stale past a release
       set({
         automations: held
           ? automations.map((x) => (x.id === automationId ? a : x))
@@ -928,6 +941,7 @@ export const useStore = create<Model>((set, get) => ({
 
   releaseFull(automationId) {
     fullLoaded.delete(automationId)
+    trackArmed.delete(automationId)
     fullReleases.set(automationId, (fullReleases.get(automationId) ?? 0) + 1)
   },
 

@@ -28,6 +28,7 @@ import signal
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -205,8 +206,9 @@ Delivery override for this environment — this changes HOW you return files, no
 - Do NOT print ===FILE: blocks or ===END=== to stdout. Print only your prose there (the
   answer or plan that would accompany the files).
 - Write each file as soon as it is ready, one after another — do not batch them at the end.
-- If you are blocked, write NO files and print the blocker envelope
-  (===BLOCKED=== … ===END===) to stdout exactly as the instructions specify.
+- If you are blocked, print the blocker envelope (===BLOCKED=== … ===END===) to stdout
+  exactly as the instructions specify; the ONLY file you may still write then is notes.md
+  (the full updated notes) — write no other file.
 - When asked to resend corrected files, follow the VALIDATION ERRORS note. If it lists
   blocks as kept, write only the failed files — the kept ones are held by the backend
   exactly as you wrote them and must not be resent. If it asks for the full envelope and
@@ -1502,6 +1504,16 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
 
 # ---------- background jobs ----------
 
+class DraftRefused(Exception):
+    """§19: `DraftJobs.start`'s `admit` check refused the new job inside the
+    registry lock — before it superseded anything. `reason` is the admit
+    callable's string ("deleting" | "discarded")."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class Cancelled(Exception):
     """§8: the job was cancelled. Raised out of `_invoke` (checked before every
     harness spawn and after every return) so cancellation unwinds the whole
@@ -1540,7 +1552,13 @@ class DraftJobs:
               current: dict | None, grants: dict,
               chat_history: list | None = None, executions: str | None = None,
               pkg_state: list[dict] | None = None,
-              owner_id: str | None = None) -> str:
+              owner_id: str | None = None,
+              admit: Callable[[], str | None] | None = None) -> str:
+        """`admit`, when given, is called inside the registry lock BEFORE the
+        owner's building job is cancelled or its held outcome consumed (§19
+        "decided inside the registry's own lock, before the new job
+        supersedes anything"): a reason string raises `DraftRefused` and
+        leaves the registry untouched."""
         job_id = str(uuid.uuid4())
         # §8 unified stage set: every job enters at the phase where its real
         # work starts — sync at the workflow phase, chat at the neutral
@@ -1574,6 +1592,8 @@ class DraftJobs:
         # each scan before the other inserts and both survive building.
         superseded: list[dict] = []
         with self._lock:
+            if admit is not None and (reason := admit()):
+                raise DraftRefused(reason)
             cancelled = [v for v in self.jobs.values()
                          if v["status"] == "building" and v.get("_owner") == owner_id]
             for v in cancelled:
@@ -1646,9 +1666,11 @@ class DraftJobs:
         """§8 "cancelling the job kills the harness process" — never under
         self._lock."""
         proc = j["_proc"].get("proc")
-        if proc and proc.poll() is None:
+        if proc:
             # The whole session group (§8 "cancelling the job kills the harness
             # process") — CLIs spawn helpers that terminate alone won't reach.
+            # §8: whether or not the CLI leader itself has already exited — a
+            # helper it left behind still holds the group and the pipes.
             harness.kill_group(proc, signal.SIGTERM)
             # §8: and release its pipes and stdin write the way the watchdog
             # kill does, so an escapee holding stdout can't keep the call
@@ -1661,11 +1683,15 @@ class DraftJobs:
                 # §8: a CLI that traps SIGTERM must still die - same
                 # term-then-kill escalation as the engine's step groups
                 # (sig=None is the §2 kill-hard form; SIGKILL by name does
-                # not exist on Windows).
+                # not exist on Windows). The escalation is unconditional:
+                # when the leader already exited, wait() returns at once,
+                # and a group survivor that trapped the TERM would otherwise
+                # never see the KILL (an empty group is a harmless no-op).
                 try:
                     p.wait(timeout=5.0)
                 except Exception:  # noqa: BLE001 - timeout or a raced reap
-                    harness.kill_group(p)
+                    pass
+                harness.kill_group(p)
 
             threading.Thread(target=_hard_kill, daemon=True,
                              name="ad-draft-kill").start()
@@ -1751,7 +1777,9 @@ class DraftJobs:
                 j["status"] = "cancelled"
         for j in live:
             proc = j["_proc"].get("proc")
-            if proc and proc.poll() is None:
+            # §8: whether or not the CLI leader has already exited — the
+            # group may still hold a helper and the pipes.
+            if proc:
                 harness.kill_group(proc)
                 # §8/§3: release the pipes too, so a drafting thread is never
                 # left blocked on an escapee's pipe past the shutdown box.
@@ -1811,7 +1839,9 @@ class DraftJobs:
                         if t.get("kind") == "discord" and t.get("secret")}
         draft, _errors, blockers, diagnosed, bnotes = self._call_with_repair(
             job, agent, build_steps_prompt(spec_md, current, grants),
-            lambda files: validate_steps(files, grants, trig_secrets), "steps")
+            lambda files: validate_steps(
+                files, grants, trig_secrets,
+                unresolved=(current or {}).get("unresolved_references")), "steps")
         if blockers:
             # The blocker response's optional notes.md rides the payload (§8) —
             # the caller already holds the spec, a sync never changes it.

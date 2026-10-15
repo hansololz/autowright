@@ -65,6 +65,9 @@ contextBridge.exposeInMainWorld('autowright', {
   // application menu's Quit, the dock's Quit) and the §4.9 QuitFlow runs the
   // shared quit flow — same overlay, same busy question, same quit-all.
   onQuitRequested: (cb) => _push('quit-requested', cb),
+  // §3: the native quit flight stood down (Cancel at its busy dialog, or a
+  // stop failure) — the renderer drops its quit overlay.
+  onQuitCancelled: (cb) => _push('quit-cancelled', cb),
 })
 
 // One push-channel subscription at a time (replace on re-register), returning
