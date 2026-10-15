@@ -59,7 +59,7 @@ autowright automation show <name>      # spec, steps, triggers, params, history
 autowright automation show <name> --json   # full record, machine-readable
 ```
 
-Every read verb takes `--json`. Automations are addressed by name (case-insensitive,
+Every read verb except `marketplace list` takes `--json`. Automations are addressed by name (case-insensitive,
 unique substring works) or id (a unique prefix works — the 8-char ids the CLI prints
 resolve); executions and snapshots by id prefix.
 

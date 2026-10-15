@@ -170,11 +170,15 @@ def test_wedged_launchctl_times_out_into_a_plain_failure(svc, monkeypatch):
         raise subprocess.TimeoutExpired(cmd, kw["timeout"])
 
     monkeypatch.setattr(svc.mod.subprocess, "run", wedged)
+    # §3: an unknown probe keeps the unload wait going until its deadline —
+    # shortened so the test doesn't sit out the real 10 s.
+    monkeypatch.setattr(svc.mod, "_UNLOAD_DEADLINE_S", 0.2)
     out = svc.mod.install()
     assert out == "install failed: launchctl timed out"
     assert svc.mod.result_code(out) == 1
     # and the read-only actions degrade instead of raising
-    assert svc.mod.status() == "stopped (plist present) — returns at next login or app launch"
+    # §3 tri-state: a timed-out list is never read as "stopped".
+    assert svc.mod.status() == "launchctl timed out — can't tell whether the service is running"
     assert svc.mod.restart() == "restart failed: launchctl timed out"
 
 
@@ -517,7 +521,9 @@ def test_stop_when_not_installed(svc, capsys, no_kill_matching):
     out = svc.mod.stop()
     assert out == "already stopped — service not installed, nothing was running"
     assert svc.mod.result_code(out) == 0
-    assert svc.actions() == []  # nothing to unload
+    # §3: a registration outlives a hand-deleted plist — the job is still
+    # booted out by label (bootout needs no plist).
+    assert svc.actions() == [["launchctl", "bootout", f"{_gui_domain()}/{svc.mod.LABEL}"]]
     # The §3 sweep still ran — with the §15 stub it simply found nothing.
     assert no_kill_matching[0] == paths.sweep_markers()
     assert svc.mod.main(["stop"]) == 0
@@ -532,7 +538,8 @@ def test_stop_without_a_plist_reports_the_strays_it_ended(svc, monkeypatch):
     out = svc.mod.stop()
     assert out == "stopped — service was not installed; ended 3 lingering process(es)"
     assert svc.mod.result_code(out) == 0
-    assert svc.actions() == []  # the sweep is the whole stop
+    # the label bootout, then the sweep
+    assert svc.actions() == [["launchctl", "bootout", f"{_gui_domain()}/{svc.mod.LABEL}"]]
 
 
 @launchd_only

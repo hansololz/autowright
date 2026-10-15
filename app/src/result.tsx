@@ -3,7 +3,7 @@
 // and a collapsible FILES footer with a "Show in Finder" button. Collapse
 // state is component state only (§7: per session, never persisted).
 import React, { useEffect, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from './api'
 import { usePlatformCopy } from './platformCopy'
@@ -85,6 +85,26 @@ export function ViewCard({ title, kind, meta, mono = true, defaultOpen = true, t
 
 // ---------- markdown (§4.5 shared renderer) ----------
 
+// §4.5: images render only from `data:` URLs. react-markdown's default
+// transform blanks every `data:` URL, so an image source of `data:image/*`
+// is let through; every other URL keeps the default treatment.
+function markdownUrlTransform(value: string, key: string, node: { tagName: string }): string {
+  if (node.tagName === 'img' && key === 'src' && /^data:image\//i.test(value)) return value
+  return defaultUrlTransform(value)
+}
+
+// §4.5: any other image source renders as its alt text (or the file name)
+// followed by the URL as an ordinary link - never a fetch, which would tell a
+// third-party author when the user opened the page and from which address.
+function MarkdownImage({ src, alt, title }: { src?: unknown; alt?: string; title?: string }) {
+  const url = typeof src === 'string' ? src : ''
+  if (url.startsWith('data:')) return <img src={url} alt={alt} title={title} />
+  const fileName = url.split(/[?#]/)[0].split('/').filter(Boolean).pop() ?? ''
+  const label = alt || fileName
+  if (!url) return <>{label}</>
+  return <>{label ? label + ' ' : ''}<a href={url} target="_blank" rel="noreferrer">{url}</a></>
+}
+
 export const Markdown = React.memo(function Markdown({ text, small }: { text: string; small?: boolean }) {
   // GFM via react-markdown + remark-gfm; output is React elements (never
   // injected HTML). Styling lives in tokens.css under .ad-md; `small` is the
@@ -96,8 +116,10 @@ export const Markdown = React.memo(function Markdown({ text, small }: { text: st
     <div className={small ? 'ad-md ad-md-sm' : 'ad-md'}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={markdownUrlTransform}
         components={{
           a: ({ node: _, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+          img: ({ src, alt, title }) => <MarkdownImage src={src} alt={alt} title={title} />,
           table: ({ node: _, ...props }) => <div className="ad-md-tablewrap"><table {...props} /></div>,
         }}
       >

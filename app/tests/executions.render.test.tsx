@@ -431,6 +431,22 @@ describe('executions list finished paging (§7)', () => {
     expect(screen.getAllByTestId('execution-row').length).toBe(50)
   })
 
+  it('drops a deleted row from the accumulated deeper pages (§7 execution.deleted)', async () => {
+    const windowRows = finishedRows(50)
+    mockedApi.listExecutions.mockResolvedValue({ executions: finishedRows(50, 50), total: 120 })
+    seed(windowRows, 120)
+    render(<ExecutionsList />)
+
+    fireEvent.click(pagerButton('Next'))
+    await waitFor(() => expect(screen.getByText('e-0070')).toBeTruthy())
+    // e-0070 sorts past the window's span: the absorption prune never reaches it
+    act(() => {
+      storeMod.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'e-0070' } as never)
+    })
+    await waitFor(() => expect(screen.queryByText('e-0070')).toBeNull())
+    expect(screen.getByText('e-0071')).toBeTruthy()
+  })
+
   // §7: under a filter the readout has only the fetches to go by, and the
   // window's own matching rows can outnumber what the server counted — a total
   // under the rows in hand would strand them behind a finished pager.

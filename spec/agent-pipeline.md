@@ -502,7 +502,8 @@ clipped `result.md` excerpt and the result-file list. Log lines are the already-
 execution output (§6); secret values never travel. The section is bounded: each log-tail
 line is clipped to 2,000 characters (marker `… [clipped]`), each run's block to 24 K
 characters (its per-step tails shrink — fewer lines per step, the last lines kept — until
-it fits), and the whole section to 64 K characters — past that, runs are dropped
+it fits; the §4.5 error message is itself capped at 4,000 characters, so no block exceeds
+the cap through its message alone), and the whole section to 64 K characters — past that, runs are dropped
 oldest-first, but the **newest run and the run a Fix with AI asked about** (the request's
 `executionId`, re-sorted into its chronological slot, which is often the oldest) are never
 dropped — so a step that logs one JSON document per line (§6 lines run to 2 MB) can never
@@ -747,7 +748,11 @@ notes rewrite (§11).
    prose (a chat answer showing what an actions.yaml looks like must never arm a sync).
    Once the envelope has started, every later marker counts — a block's *content* may be
    fenced (the fence-stripping rule above), so fence state is only consulted before the
-   first real marker.
+   first real marker. A fence line is any line that starts with three backticks and holds
+   no further backtick (trailing whitespace and an info string such as `yaml title=x`
+   don't matter — CommonMark forbids backticks in the info string), and the shape-aware
+   walk and the fence-stripping rule use that one test, so a fence the walk misses can
+   never let a quoted envelope arm a sync or a quoted blocker read as a real one.
 2. The sync call must return `manifest.yaml` and every file listed in `steps` — a `spec.md` block in
    its response is a validation error (the spec is already settled); an optional `notes.md` block
    (above) is allowed and excluded from the step-file matching.
@@ -1059,11 +1064,16 @@ prompt gains one final **OUTPUT** section - the only per-harness prompt differen
 directing the agent to WRITE each response document the TASK names as a real file in its
 current working directory (exact file names, no subdirectories) instead of printing
 `===FILE:` blocks, to keep its prose answer on stdout, when blocked to still print
-the blocker envelope to stdout, never as a file, and - on a repair round - to write
-**every** file again, the corrected and the unchanged ones alike: each round runs in a
-fresh scratch dir, so only the files written that round exist, and a round that rewrote
-only the failed file would lose the manifest and the other steps and fail validation on
-their absence. Codex's sandbox escalates to
+the blocker envelope to stdout, never as a file, and - on a repair round - to follow the
+VALIDATION ERRORS note: a **chat** repair lists the blocks it kept (held by the backend,
+not to be resent) and asks only for the failed ones, so only those are written; a
+**sync or steps** repair asks for the full envelope and lists nothing kept, and then
+**every** file must be written again, the corrected and the unchanged ones alike — each
+round runs in a fresh scratch dir, so only the files written that round exist, and a
+full-envelope round that rewrote only the failed file would lose the manifest and the
+other steps and fail validation on their absence (the OUTPUT section states both cases;
+a wording that assumed a kept list on every round once made Codex, Gemini and OpenCode
+sync repairs drop the manifest). Codex's sandbox escalates to
 `--sandbox workspace-write` for these calls only, confining writes to the scratch cwd
 (runtime stays `read-only`; Gemini and OpenCode have no sandbox flag to escalate - §6).
 A poll-based **scratch watcher** (0.3 s) turns each response document that lands into a
@@ -1071,7 +1081,8 @@ A poll-based **scratch watcher** (0.3 s) turns each response document that lands
 and orders documents by first appearance; a final sweep after the child exits catches a
 document written in the last poll interval, and the recombined envelope also lists any
 accepted-name document on disk the watcher never polled, so a stop whose join timed out
-can't lose one. Only §8 response-document names count -
+can't lose one; every document, polled or not, is size-checked by `stat` before it is
+read, so the output cap holds for one that grew past it after its last poll too. Only §8 response-document names count -
 `spec.md`, `notes.md`, `manifest.yaml`, `actions.yaml`, and
 `NN-name.py` step files - as flat regular files (never directories or symlinks), so
 residue an agent leaves behind (`__pycache__`, helper scripts) is ignored. The call's

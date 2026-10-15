@@ -313,6 +313,39 @@ describe('§9.2 Fix with AI', () => {
     expect(storeMod.useStore.getState().surface).not.toBe('create')
     expect(storeMod.useStore.getState().fixExec).toBeNull()
   })
+
+  // §9.2: a load that lands after the user left the page is dropped.
+  it('a load that lands after unmount opens nothing', async () => {
+    let resolveLoad: (value: Execution) => void = () => {}
+    mockedApi.getExecution.mockImplementation(() => new Promise<Execution>((r) => { resolveLoad = r }))
+    seed(auto(), [failedRow])
+    storeMod.useStore.setState({ executionFull: {}, fixExec: null, surface: 'app' })
+    const view = render(<AutomationDetail />)
+    fireEvent.click(screen.getByRole('button', { name: /Fix with AI/ }))
+    await waitFor(() => expect(mockedApi.getExecution).toHaveBeenCalledWith('e-old'))
+    view.unmount()
+    await act(async () => { resolveLoad(failedRow) })
+    expect(storeMod.useStore.getState().surface).toBe('app')
+    expect(storeMod.useStore.getState().fixExec).toBeNull()
+  })
+
+  // §9.2: detail → detail keeps the page mounted; a load for the automation
+  // the user has since left is dropped too.
+  it('a load that lands after another automation opened opens nothing', async () => {
+    let resolveLoad: (value: Execution) => void = () => {}
+    mockedApi.getExecution.mockImplementation(() => new Promise<Execution>((r) => { resolveLoad = r }))
+    seed(auto(), [failedRow])
+    storeMod.useStore.setState({ executionFull: {}, fixExec: null, surface: 'app' })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByRole('button', { name: /Fix with AI/ }))
+    await waitFor(() => expect(mockedApi.getExecution).toHaveBeenCalledWith('e-old'))
+    act(() => {
+      storeMod.useStore.setState({ automationId: 'a2', automations: [auto(), auto({ id: 'a2', name: 'Other' })] })
+    })
+    await act(async () => { resolveLoad(failedRow) })
+    expect(storeMod.useStore.getState().surface).toBe('app')
+    expect(storeMod.useStore.getState().fixExec).toBeNull()
+  })
 })
 
 // §19: the page forgets the full-record status for its id on unmount, so a

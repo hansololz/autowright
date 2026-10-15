@@ -393,7 +393,7 @@ describe('applyEvent', () => {
     expect(getAutomation).not.toHaveBeenCalled()
     // opened (fetched through loadAuto) → refetch
     getAutomation.mockResolvedValueOnce(row({ latest: null }))
-    await store.useStore.getState().loadAuto('fin-a1')
+    await store.useStore.getState().loadAuto('fin-a1', { track: true })
     getAutomation.mockClear()
     store.useStore.getState().applyEvent(finished('e2'))
     expect(getAutomation).toHaveBeenCalledWith('fin-a1')
@@ -410,7 +410,7 @@ describe('applyEvent', () => {
       execEv('execution.finished', ex(id, 1, { status: 'cancelled', automationId: 'rel-a1' }), row)
     store.useStore.setState({ automations: [row] })
     getAutomation.mockResolvedValueOnce(row)
-    await store.useStore.getState().loadAuto('rel-a1')
+    await store.useStore.getState().loadAuto('rel-a1', { track: true })
     getAutomation.mockClear()
     store.useStore.getState().applyEvent(finished('r1'))
     expect(getAutomation).toHaveBeenCalledTimes(1)
@@ -418,6 +418,37 @@ describe('applyEvent', () => {
     store.useStore.getState().releaseFull('rel-a1')
     store.useStore.getState().applyEvent(finished('r2'))
     expect(getAutomation).not.toHaveBeenCalled()
+  })
+
+  it('a GET issued after the release lands the record without re-tracking it (§19)', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    const row = { id: 'untrack-a1', name: 'Auto', lastStatus: 'none', triggers: [], live: [] } as never
+    const finished = (id: string) =>
+      execEv('execution.finished', ex(id, 1, { status: 'cancelled', automationId: 'untrack-a1' }), row)
+    store.useStore.setState({ automations: [row] })
+    getAutomation.mockResolvedValueOnce(row)
+    await store.useStore.getState().loadAuto('untrack-a1', { track: true })
+    store.useStore.getState().releaseFull('untrack-a1')
+    // a finish or change refetch issued after the release (no `track`)
+    getAutomation.mockResolvedValueOnce({ ...(row as object), name: 'Renamed' } as never)
+    await store.useStore.getState().loadAuto('untrack-a1')
+    expect(store.useStore.getState().automations[0].name).toBe('Renamed')
+    getAutomation.mockClear()
+    store.useStore.getState().applyEvent(finished('u1'))
+    expect(getAutomation).not.toHaveBeenCalled()
+    // a page's own mount load turns tracking back on
+    getAutomation.mockResolvedValueOnce(row)
+    await store.useStore.getState().loadAuto('untrack-a1', { track: true })
+    getAutomation.mockClear()
+    store.useStore.getState().applyEvent(finished('u2'))
+    expect(getAutomation).toHaveBeenCalledTimes(1)
+  })
+
+  it('execution.deleted bumps the delete counter and records the id (§7)', () => {
+    const before = store.useStore.getState().executionDeletedSeq
+    store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'gone-1' } as never)
+    expect(store.useStore.getState().executionDeletedSeq).toBe(before + 1)
+    expect(store.useStore.getState().lastDeletedExecutionId).toBe('gone-1')
   })
 })
 
@@ -506,7 +537,7 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     const full = auto('full-a1', { latest: { executionId: 'e1' }, steps: [{ name: 's1' }] })
     store.useStore.setState({ automations: [full] })
     getAutomation.mockResolvedValueOnce(full)
-    await store.useStore.getState().loadAuto('full-a1')
+    await store.useStore.getState().loadAuto('full-a1', { track: true })
     getAutomation.mockClear()
     store.useStore.getState().applyEvent({
       event: 'automation.changed', automationId: 'full-a1', automation: auto('full-a1', { name: 'Renamed' }),
@@ -532,7 +563,7 @@ describe('applyEvent — automation.changed row patching (§19)', () => {
     const getAutomation = vi.mocked(apiMod.api.getAutomation)
     store.useStore.setState({ automations: [auto('del-a1')] })
     getAutomation.mockResolvedValueOnce(auto('del-a1'))
-    await store.useStore.getState().loadAuto('del-a1')
+    await store.useStore.getState().loadAuto('del-a1', { track: true })
     store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'del-a1', automation: null })
     store.useStore.setState({ automations: [auto('del-a1')] })
     getAutomation.mockClear()

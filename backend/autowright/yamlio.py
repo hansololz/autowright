@@ -23,10 +23,12 @@ def load_yaml_checked(path: Path, default: Any = None) -> tuple[Any, bool]:
         return (default if data is None else data), True
     except FileNotFoundError:
         return default, True
-    except (yaml.YAMLError, UnicodeDecodeError, OSError) as e:
+    except (yaml.YAMLError, UnicodeDecodeError, OSError, ValueError, RecursionError) as e:
         # Disk is hand-editable (§5) — a corrupt or unreadable file (bad YAML,
-        # bad encoding, bad permissions) must never brick startup into a
-        # launchd crash loop; skip it with a warning like malformed triggers.
+        # bad encoding, bad permissions, an impossible unquoted date such as
+        # `2026-13-45` that PyYAML raises as ValueError, nesting too deep for
+        # the parser) must never brick startup into a launchd crash loop; skip
+        # it with a warning like malformed triggers.
         log.warning("unreadable YAML at %s (%s) — using the default", path, e)
         return default, False
 

@@ -14,6 +14,7 @@ import getpass
 import http.client
 import json
 import os
+import re
 import shutil
 import sys
 import textwrap
@@ -117,6 +118,11 @@ def _resolve(items: list[dict], ref: str, noun: str) -> dict:
     """§20 reference rule, shared by every id-and-name lookup: the id, then an
     exact name (case-insensitive), then a unique id prefix, then a unique name
     substring."""
+    # §20: an empty reference (an unset shell variable) is a usage error,
+    # never a match - every id starts with "" and every name contains it, so
+    # with one record on file it would select (and delete) that record.
+    if not ref.strip():
+        sys.exit(f"give {'an' if noun[0] in 'aeiou' else 'a'} {noun} name or id")
     for it in items:
         if it["id"] == ref:
             return it
@@ -139,6 +145,15 @@ def _resolve(items: list[dict], ref: str, noun: str) -> dict:
                  + " - use the id instead")
     sys.exit(f"no {noun} matches {ref!r} - "
              f"have: {', '.join(it['name'] for it in items) or '(none)'}")
+
+
+def _exit_if_ambiguous(ref: str, matches: list[dict], name_of) -> None:
+    """§20: a name two records share (duplicates already on disk still load)
+    exits with the candidate list, the way `_resolve` does — never a silent
+    first match. `name_of` reads a record's printed name."""
+    if len(matches) > 1:
+        sys.exit(f"{ref!r} is ambiguous - matches: "
+                 + ", ".join(f"{name_of(it)} ({it['id'][:8]})" for it in matches))
 
 
 def find_automation(c: Client, ref: str) -> dict:
@@ -596,11 +611,13 @@ def _grants(args, draft: dict, agents: list[dict], secrets: list[dict],
     # headless workdir never becomes unpushable.
     granted_agent_ids = [i for i in stored_agents if i in agent_name_by_id]
     for name in args.grant_agent:
-        # §4.7 uniqueness makes the case-insensitive match unambiguous.
+        # §4.7 names are unique at write time, but duplicates already on disk
+        # still load — two matches exit with the candidate list.
         match = [a for a in agents
                  if (a.get("name") or a["harness"]).lower() == name.lower()]
         if not match:
             sys.exit(f"no agent named {name!r} — have: {', '.join(known_agents) or '(none)'}")
+        _exit_if_ambiguous(name, match, lambda a: a.get("name") or a["harness"])
         if match[0]["id"] not in granted_agent_ids:
             granted_agent_ids.append(match[0]["id"])
     granted_secret_ids = [i for i in stored_secrets if i in secret_name_by_id]
@@ -609,6 +626,7 @@ def _grants(args, draft: dict, agents: list[dict], secrets: list[dict],
         if not match:
             sys.exit(f"no stored secret named {name!r} — have: "
                      f"{', '.join(sorted(known_secrets)) or '(none)'}")
+        _exit_if_ambiguous(name, match, lambda s: s["name"])
         if match[0]["id"] not in granted_secret_ids:
             granted_secret_ids.append(match[0]["id"])
 
@@ -789,6 +807,7 @@ def cmd_automation_create(c: Client, args) -> None:
         if not match:
             sys.exit(f"no agent named {args.agent!r} — have: "
                      f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
+        _exit_if_ambiguous(args.agent, match, lambda a: a.get("name") or a["harness"])
         agent_id = match[0]["id"]
     # §20 grant model: create grants exactly the --grant-* flags — no all-on seed.
     step_agents, allowed_secrets = _grants(args, draft, agents, secrets)
@@ -1190,9 +1209,11 @@ def cmd_trigger_add(c: Client, args) -> None:
             sys.exit(f"{flag} doesn't apply to {_KIND_LABELS[entry['kind']]}: "
                      f"{_MODIFIER_REASONS[flag]}")
     if args.timezone:
-        if entry["kind"] == "interval":
-            # §4.3: an interval is a duration, not a wall-clock moment.
-            sys.exit("--timezone doesn't apply to --every: an interval has no timezone")
+        if entry["kind"] not in ("cron", "time"):
+            # §4.3: only cron and a one-shot carry a zone - an interval is a
+            # duration, and the event kinds have no wall-clock moment. Refused,
+            # never stored and silently dropped.
+            sys.exit("--timezone only applies to cron and --at triggers")
         entry["timezone"] = args.timezone
     if getattr(args, "no_run_if_missed", False):
         if entry["kind"] not in ("cron", "interval", "time"):
@@ -1255,6 +1276,10 @@ def cmd_memory_clear(c: Client, args) -> None:
 
 
 def _find_snapshot(c: Client, auto: dict, ref: str) -> dict:
+    # §20: an empty reference is a usage error - a bare prefix test would
+    # select the only snapshot on file.
+    if not ref.strip():
+        sys.exit("give a snapshot id")
     snaps = c.req("GET", f"/automations/{auto['id']}")["snapshots"]
     matches = [s for s in snaps if s["id"].startswith(ref)]
     if len(matches) == 1:
@@ -1302,16 +1327,20 @@ def cmd_snapshot_delete(c: Client, args) -> None:
 
 # ---------------------------------------------------------------- execution
 
-def _local_stamp_ms(text: str, *, end_of_day: bool) -> int:
+def _local_stamp_ms(text: str, *, end_of_day: bool, flag: str = "") -> int:
     """§20 `--since` / `--until`: a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`
     as epoch ms — the §19 inclusive `startedFromMs` / `startedToMs`. A bare
-    date on `--until` means the end of that day."""
+    date on `--until` means the end of that day. A date before 1970 is a usage
+    error named with the flag - no execution predates the epoch, and a
+    negative stamp is a server 422 (or an OverflowError on some platforms)."""
     from datetime import datetime, timedelta
     for fmt, whole_day in (("%Y-%m-%dT%H:%M", False), ("%Y-%m-%d", True)):
         try:
             dt = datetime.strptime(text, fmt)
         except ValueError:
             continue
+        if dt.year < 1970:
+            raise SystemExit(f"error: {flag or 'the date'}: dates before 1970 aren't supported")
         if whole_day and end_of_day:
             dt = dt + timedelta(days=1, milliseconds=-1)
         return int(dt.timestamp() * 1000)
@@ -1332,8 +1361,10 @@ def _row_count(text: str) -> int:
 def cmd_execution_list(c: Client, args) -> None:
     # §20: an inverted range is a usage error named with the flags' own words,
     # raised before anything crosses the wire.
-    since = _local_stamp_ms(args.since, end_of_day=False) if args.since else None
-    until = _local_stamp_ms(args.until, end_of_day=True) if args.until else None
+    since = (_local_stamp_ms(args.since, end_of_day=False, flag="--since")
+             if args.since else None)
+    until = (_local_stamp_ms(args.until, end_of_day=True, flag="--until")
+             if args.until else None)
     if since is not None and until is not None and since > until:
         raise SystemExit("error: --since is after --until — swap them")
     # §20: -n rides to the server as the §19 limit — only the printed rows
@@ -1461,6 +1492,11 @@ def cmd_secret_list(c: Client, args) -> None:
         print(f"{s['name'] + tag:<28} used by: {used}")
 
 
+# §4.8 secret-name form - a copy of api.SECRET_NAME_RE (the CLI stays free of
+# the server's imports); `secret set` checks it before asking for a value.
+SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
 def _secret_by_name(c: Client, name: str) -> dict | None:
     """§20: names are the CLI's secret surface; the API routes are id-keyed
     (§4.8) — resolve before calling them."""
@@ -1470,10 +1506,22 @@ def _secret_by_name(c: Client, name: str) -> dict | None:
 def cmd_secret_set(c: Client, args) -> None:
     # §20: a secret value never rides argv — it would land in shell history and
     # in every local process's view of the process list.
+    # §20: the name is checked (§4.8 form) before the prompt or the stdin
+    # read, so a lowercase name never asks for a value it will then refuse.
+    # An existing name passes too (it edits via the id route), but any stored
+    # name already has this form - the backend refuses the rest at create.
+    if not SECRET_NAME_RE.match(args.name):
+        sys.exit("secret names must match [A-Z][A-Z0-9_]* — "
+                 "uppercase letters, digits and underscores, starting with a letter")
     # §20: --stdin takes the WHOLE of stdin, so a multi-line value (a PEM key)
-    # lands intact; only the trailing newline is trimmed.
+    # lands intact; exactly one trailing newline (`\n` or `\r\n`) is trimmed,
+    # never a run of them.
     if args.stdin:
-        value = sys.stdin.read().rstrip("\n")
+        value = sys.stdin.read()
+        if value.endswith("\r\n"):
+            value = value[:-2]
+        elif value.endswith("\n"):
+            value = value[:-1]
     else:
         try:
             value = getpass.getpass(f"value for {args.name}: ")
@@ -1819,7 +1867,9 @@ def cmd_marketplace_catalog_add(c: Client, args) -> None:
             if not args.export_to:
                 sys.exit(f"{s['name']!r} is kept by Autowright - "
                          "say where to export with --export-to")
-            export_folder = os.path.abspath(args.export_to)
+            # §20: tilde-expanded first, like `dataPath=` - zsh leaves `~`
+            # after `=` alone in `--export-to=~/…`.
+            export_folder = os.path.abspath(os.path.expanduser(args.export_to))
     catalog = _read_catalog(c, s)
     entries = _catalog_entries(catalog) + [entry]
     saved = _save_catalog(c, s, catalog, entries, export_folder)
@@ -1902,9 +1952,10 @@ def cmd_settings_set(c: Client, args) -> None:
             # §20: an off-list value is refused in the setting's own words, the
             # way `execution list --status` refuses one outside its choices.
             sys.exit(f"{k} must be {' or '.join(kind)}, got {raw!r}")
-    if data_path is not None:
-        c.req("POST", "/settings/data-path", {"path": data_path})
-        print(f"execution data now at {data_path}")
+    # §20: the ordinary keys go first, in one PATCH, and `dataPath=` after - a
+    # refused ordinary key leaves the data path untouched (c.req exits before
+    # the POST), and a refused data path leaves the ordinary keys applied and
+    # says so. Never a switched data path behind a failed command.
     if patch:
         c.req("PATCH", "/settings", patch)
         print(f"set {', '.join(patch)}")
@@ -1914,6 +1965,14 @@ def cmd_settings_set(c: Client, args) -> None:
             # PATCH answers, but nothing outside the app changes until it
             # syncs (and headless there is no app to apply it at all).
             print("takes effect when the app next syncs, within a minute")
+    if data_path is not None:
+        try:
+            c.req("POST", "/settings/data-path", {"path": data_path})
+        except SystemExit as e:
+            if not patch:
+                raise
+            sys.exit(f"settings applied; data path unchanged: {e.code}")
+        print(f"execution data now at {data_path}")
 
 
 # ---------------------------------------------------------------- service
@@ -3197,8 +3256,11 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                         "file on this machine - it is exported beside it)")
     p = _sub(cg, "remove", cmd_marketplace_catalog_remove,
              "drop one of the catalog's automations",
-             description="Drop the automation at the given number from the catalog, as "
-                         "`marketplace list` prints it."
+             description="Drop the automation at the given number from the catalog. The "
+                         "number is its position in the catalog file - the order "
+                         "`marketplace catalog` edits see - which can differ from the "
+                         "last-refresh copy `marketplace list` shows; the confirmation "
+                         "names the removed entry's title."
                          "\n\n"
                          "The archive file stays where it is - it is yours, so nothing there "
                          "is deleted. Delete it yourself if you don't want it shared.",
@@ -3208,7 +3270,8 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                    help="which marketplace: its name, a unique part of its name, its id, or "
                         "an id prefix")
     p.add_argument("n", type=int, metavar="N",
-                   help="which automation, by the number `marketplace list` prints beside it")
+                   help="which automation, by its position in the catalog file - the order "
+                        "`marketplace catalog` edits see")
     _add_service(top)
     return ap
 

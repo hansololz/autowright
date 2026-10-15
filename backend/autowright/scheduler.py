@@ -49,6 +49,9 @@ class Scheduler:
         # Keys already warned about a wall-clock rewind too large for DST (a
         # system-timezone change) — one warning per rewind, not one per tick.
         self._warned_rewind: set[tuple[str, str]] = set()
+        # §4.9 degraded session: the "nothing fires" warning is logged once
+        # per degraded stretch, not once per tick.
+        self._warned_unreachable = False
         self._stop = threading.Event()
         self._last_retention = clock()
         # §6: the previous tick's clock readings (the scheduler's start before
@@ -148,6 +151,18 @@ class Scheduler:
         this automation at tick start; anything queued mid-tick is picked up
         by the finish-time drain or the next tick — the same one-tick
         granularity the safety net always had)."""
+        if self.store.exec_dir_unreachable:
+            # §4.9 degraded session: the relocated data path is unreachable, so
+            # nothing may create an execution record — no firing, no queue
+            # drain, no drop record, and no one-shot consumed. Baselines still
+            # advance, so nothing that passed meanwhile catches up later.
+            if not self._warned_unreachable:
+                self._warned_unreachable = True
+                log.warning("the data path isn't reachable — nothing fires this session")
+            for t in list(a["triggers"]):
+                self._set_baseline((a["id"], t["id"]), now, now_utc)
+            return
+        self._warned_unreachable = False
         due: list[tuple[datetime, dict]] = []
         dropped: list[dict] = []  # §6 runIfMissed-off triggers whose span was slept through
         # §4.3 interval anchor: the automation's run baseline, read once per

@@ -168,6 +168,9 @@ def wedged_service(home, monkeypatch):
         raise subprocess.TimeoutExpired(cmd, kw["timeout"])
 
     monkeypatch.setattr(service.subprocess, "run", wedged)
+    # §3: an unknown probe keeps the unload wait going until its deadline —
+    # shortened here so the wedged cases don't sit out the real 10 s.
+    monkeypatch.setattr(service, "_UNLOAD_DEADLINE_S", 0.2)
     return SimpleNamespace(mod=service, plist=plist)
 
 

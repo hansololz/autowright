@@ -199,7 +199,10 @@ class SystemdService:
         if not p.exists():
             out = "service was not installed"
         else:
-            _systemctl("disable", "--now", UNIT_NAME)  # best effort
+            # §3 tri-state: a failed or timed-out stop keeps the unit file —
+            # never a deleted unit under a still-running backend.
+            if detail := _run_ok("disable", "--now", UNIT_NAME):
+                return f"uninstall failed: couldn't stop the unit ({detail})"
             try:
                 p.unlink()
             except OSError as e:

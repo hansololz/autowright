@@ -47,7 +47,13 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   place — by another automation whose id happens to start with those characters; names are
   unique at write time, so an exact-name match is never ambiguous); executions and snapshots by id prefix. Every short id the CLI
   prints (the 8-character `[abcd1234]` forms in list/create/ambiguity output) must therefore
-  resolve when passed back. Ambiguity or no match exits with the candidate list.
+  resolve when passed back. Ambiguity or no match exits with the candidate list. An empty
+  reference (an unset shell variable) is a usage error (exit 1, like every usage error — 2
+  stays the follow signal), never a match — a bare
+  prefix test would otherwise select the only automation or snapshot and delete it. The
+  `--grant-agent` / `--grant-secret` names resolve by the same rule: a name two records
+  share (duplicates already on disk still load) exits with the candidate list, never the
+  first match.
 - **`--json`** on every read verb (`status`, `instructions`, `automation list|show|diff`,
   `param list`, `trigger list`, `memory show`, `snapshot list`, `execution list|show`,
   `secret list`, `agent list|check`, `settings show`) prints the raw API JSON instead of the human
@@ -70,14 +76,19 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   resolved by the usual reference rules and sent as one §19 `automation` value), and
   `--since` / `--until` take a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (`--until` with a
   bare date means the end of that day) and ride as the inclusive §19
-  `startedFromMs` / `startedToMs` - a value in neither form is a usage error; `-n` rides to the server as the §19
+  `startedFromMs` / `startedToMs` - a value in neither form, or a date before 1970, is a
+  usage error; `-n` rides to the server as the §19
   `limit`, so only the printed rows cross the wire — `-n` below 1 and a `--since` after its
   `--until` are usage errors named with the flags' own words, never a server 422 quoting
   wire parameter names — while reference resolution still reads the uncapped list (§19;
   the bare no-reference form of `execution show|tail|cancel|retry|skip|result` means "the
   newest" and reads `limit=1`), `settings set` lists its keys with
-  each one's value form (`dataPath=` is tilde-expanded and then made absolute against the
-  current directory before it travels, like `marketplace add`'s path and `set location=` —
+  each one's value form (`settings set` applies the ordinary keys first, in one PATCH, and
+  `dataPath=` after: a refused data path leaves the ordinary keys applied and says so, a
+  refused ordinary key leaves the data path untouched — never a switched data path behind
+  a failed command; `dataPath=` is tilde-expanded and then made absolute against the
+  current directory before it travels, like `marketplace add`'s path, `--export-to` and
+  `set location=` —
   zsh doesn't expand `~` after `=` in an ordinary argument, so without the expansion
   `dataPath=~/Data` would land in a folder literally named `~` under the current directory; the backend refuses a relative path with 422,
   since it would resolve against the backend's own cwd) (and, after setting one of the shell-owned keys `login` or
@@ -351,7 +362,8 @@ trigger verbs' affair) stay out of the manifest, so editing a manifest line can 
 duplicate one. Between pushes, `trigger add` (cron by default,
 `--every <duration>` for a §4.3 interval (the interval dialect; the stored canonical form
 is what `trigger list` labels), `--at` for a §4.3 one-shot — cron and `--at` take `--timezone <zone>`, an IANA zone, stored on the
-entry (`--timezone` with `--every` exits 1 - an interval has no zone), and all three take
+entry (`--timezone` with `--every`, `--app-start`, `--discord` or `--imessage` exits 1 -
+only cron and `--at` carry a zone; it is never stored and silently dropped), and all three take
 `--no-run-if-missed`, storing §4.3 `runIfMissed: false`; that flag with any other
 trigger kind exits 1; every modifier is checked against its kind the same way — `--pattern`,
 `--mention`, `--author`, or `--secret` with a cron, `--every`, `--at`, or `--app-start` exits 1
@@ -378,7 +390,9 @@ value exits 1 naming the expected form.
 
 **Secret values never ride argv** — `secret set NAME` takes no value argument: it prompts
 (`getpass`, no echo), or reads the **whole** of stdin with `--stdin` for scripted use (a multi-line value such as
-a PEM key lands intact; only the trailing newline is trimmed). A value
+a PEM key lands intact; exactly one trailing newline is trimmed, never a run of them). The
+name is validated (§4.8 form) before the prompt or the stdin read, so a lowercase name never
+asks for a value it will then refuse. A value
 passed as an argument would land in shell history and in every local process's view of the
 process list - the kind of secret-value exposure Autowright otherwise keeps out of scripts,
 logs, and argv (§1 core promise, §4.8).

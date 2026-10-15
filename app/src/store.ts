@@ -53,6 +53,11 @@ interface Model {
   // §19 executionsTotal — the §9 Executions pill; every header the backend
   // holds, not just the window.
   executionsTotal: number
+  // §7 execution.deleted: bumped (and the id recorded) by every delete event -
+  // the Executions page drops the id from its accumulated deeper pages, which
+  // live on the page, not here.
+  executionDeletedSeq: number
+  lastDeletedExecutionId: string | null
   agents: Agent[]
   secrets: SecretMeta[]
   settings: Settings | null
@@ -133,7 +138,9 @@ interface Model {
   // failure — the page must not call a transient failure a deleted execution.
   loadExecution(executionId: string): Promise<'ok' | 'gone' | 'error'>
   loadExecLogs(executionId: string, step?: number, attempt?: number): Promise<void>
-  loadAuto(automationId: string, opts?: { insert?: boolean }): Promise<void>
+  // §19 `track`: a page's own mount load (detail page, editor) tracks the id
+  // as a full record; every other GET only keeps tracking that is already on.
+  loadAuto(automationId: string, opts?: { insert?: boolean; track?: boolean }): Promise<void>
   // §19: the page that loaded an id's full record forgets it on unmount, so
   // the finish- and change-triggered refetches stay bounded to open pages.
   releaseFull(automationId: string): void
@@ -304,6 +311,8 @@ export const useStore = create<Model>((set, get) => ({
   automations: [],
   executions: [],
   executionsTotal: 0,
+  executionDeletedSeq: 0,
+  lastDeletedExecutionId: null,
   agents: [],
   secrets: [],
   settings: null,
@@ -609,6 +618,8 @@ export const useStore = create<Model>((set, get) => ({
       set({
         executions: m.executions.filter((e) => e.id !== executionId),
         executionsTotal: Math.max(0, m.executionsTotal - 1),
+        executionDeletedSeq: m.executionDeletedSeq + 1,
+        lastDeletedExecutionId: executionId,
         executionFull,
         execLogs,
         // §11: the tracked test is exactly this record — leaving it tracked
@@ -881,6 +892,10 @@ export const useStore = create<Model>((set, get) => ({
     const sequence = previous + 1
     loadAutoSequence.set(automationId, sequence)
     const releases = fullReleases.get(automationId) ?? 0
+    // §19: a GET issued after the page released the id (a finish or change
+    // refetch already on its way) lands the record without re-tracking it;
+    // tracking resumes only with a page's own mount load.
+    const tracked = fullLoaded.has(automationId)
     try {
       const a = await api.getAutomation(automationId)
       // §19 per-id ordering: a newer GET for this id was issued while this one
@@ -895,7 +910,9 @@ export const useStore = create<Model>((set, get) => ({
       if (!held && !opts?.insert) return
       // §19: a page that let go of this id while the GET was on the wire
       // released it; the record still lands, the tracking does not come back.
-      if ((fullReleases.get(automationId) ?? 0) === releases) fullLoaded.add(automationId)
+      if ((opts?.track || tracked) && (fullReleases.get(automationId) ?? 0) === releases) {
+        fullLoaded.add(automationId)
+      }
       set({
         automations: held
           ? automations.map((x) => (x.id === automationId ? a : x))

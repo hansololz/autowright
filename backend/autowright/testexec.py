@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import paths, timefmt
 from .engine import Engine, _step_sha
+from .firing import DATA_PATH_UNREACHABLE
 from .events import hub
 from .storage import exec_version_label, is_test, safe_step_filename, store
 from .yamlio import atomic_write_text, save_yaml
@@ -46,6 +47,15 @@ def start(engine: Engine, draft: dict, auto: dict | None,
         # of spawning a step group with nobody left to collect it.
         if engine._stopping:
             raise RuntimeError("the backend is shutting down")
+        # §4.9 degraded session: no record may be created while the relocated
+        # data path is unreachable — the same 409 a manual execute gets.
+        if store.exec_dir_unreachable:
+            raise RuntimeError(DATA_PATH_UNREACHABLE)
+        # §19 critical-section rule: a test admitted while the automation is
+        # being deleted would escape the delete's wait set and re-create the
+        # tree after the rmtree — re-checked here, under the lock.
+        if auto is not None and auto.get("_deleting"):
+            raise RuntimeError("this automation is being deleted")
         if any(is_test(h) and h["automation_id"] == container_id
                and h["status"] == "executing" for h in store.execs.values()):
             raise RuntimeError("a test is already executing — cancel it or wait for it to finish")

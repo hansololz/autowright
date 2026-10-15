@@ -496,7 +496,9 @@ export default function CreateFlow() {
   // reconnect, like the §9.2 detail page.
   const reconnects = useStore((s) => s.reconnects)
   useEffect(() => {
-    if (isEdit && automationId) void loadAuto(automationId)
+    // §19: the editor's own mount load tracks the full record (released on
+    // unmount below); a reload issued later never re-tracks on its own.
+    if (isEdit && automationId) void loadAuto(automationId, { track: true })
   }, [reconnects]) // eslint-disable-line react-hooks/exhaustive-deps
   // §19: on unmount, forget the full-record status for the id this editor
   // loaded, so finish- and change-triggered refetches stay bounded to the

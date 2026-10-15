@@ -99,10 +99,18 @@ remain plain dicts (§2).
   when it registers the job and cancels it right there if a DELETE landed in the gap (its
   context build — log reads, RECENT EXECUTIONS — can take seconds), and `POST /tests`
   answers 409 for an automation being deleted rather than running step code during the
-  delete window. `DELETE /draft/{owner}` likewise bumps the owner's **draft generation**;
+  delete window — re-checked under the same lock hold that registers the test record
+  (inside the test start), so a DELETE landing between the route's check and the record's
+  creation can't run step code or leave a record the delete's wait set never saw. Every
+  path that settles a draft — `DELETE /draft/{owner}`, the version save
+  `POST /automations/{id}/versions`, and `POST /automations` with `settlePending` — bumps
+  the owner's **draft generation** through one shared settle helper (bump, then cancel);
   a `POST /drafts` that read the older generation before building its context is refused
-  at registration (409, "the draft was discarded"), so a discard can never miss a job that
-  was still being registered and later re-attach its outcome to the next draft (the
+  at registration (409, "the draft was discarded"), so a settle can never miss a job that
+  was still being registered and later re-attach its outcome to the next draft; a job that
+  already settled by the time that check runs (a missing harness binary fails on its own
+  thread at once) is dropped from the held outcomes right there, never left for the fresh
+  draft to inherit (the
   scheduler's own
   one-shot consumption carries the same registered-object guard for the same reason, and
   so does **every store write into an automation directory** — patch, new version, restore,
@@ -934,10 +942,15 @@ already neutralize. The provider config and
   backend fails requests instead of hanging every surface and pinning the coalesced
   refresh. A client timeout or a connection failure surfaces as plain words — "The backend
   didn't answer in time." / "The backend isn't reachable." — never the browser's "signal
-  timed out" or "Failed to fetch". A newer `GET /automations/{id}` that fails hands its
+  timed out" or "Failed to fetch"; the raw-bytes routes (export, catalog file, preview
+  image, result file) go through the same timed wrapper and surface the API's `detail` the
+  same way — never a bare status text when the API sent a `detail` (a non-JSON body,
+  such as a proxy's 500 page, still falls back to the status line). A newer `GET /automations/{id}` that fails hands its
   slot back (the per-id sequence rolls back to the last one that landed), so an older
   response still in flight can land instead of leaving the record stale. The renderer
-  forgets an id's full-record status when the last page holding it unmounts, so the
+  forgets an id's full-record status when the last page holding it unmounts — and a GET
+  issued after that (a PATCH's reload answering late) lands the record without re-tracking
+  it; tracking resumes only with a page's own mount load — so the
   finish-triggered and change-triggered refetches stay bounded to the pages open now. Clients reconnect with backoff (1.5 s, doubling to a 15 s ceiling, reset on a
   successful open), re-reading `backend.json` before each attempt, and re-`GET /state` on
   reconnect (a client page holding a *full* automation record — one the client fetched

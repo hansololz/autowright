@@ -10,7 +10,10 @@ self-contained (record + logs + workspace + result). An execution directory with
 `execution.yaml` when the store loads (startup, and the §4.9 data-location reload — both
 run with nothing live) is a crash leftover (the dirs are made before the record is
 written) and is removed by that scan; one whose `execution.yaml` exists but can't
-be read stays on disk, out of the index, like any other damaged file. Likewise a
+be read stays on disk, out of the index, like any other damaged file. Dot-prefixed entries
+(`.git`, `.Trashes`, `.fseventsd`) are never adopted and never removed — the §4.9 adopt
+check ignores them, and so does this scan, so a folder adopted beside such entries keeps
+them at every startup. Likewise a
 uuid-named automation directory with no `automation.yaml` (a create that failed after its
 version folder landed) is logged and removed at startup — only at startup, never on the
 §4.9 data-location reload, where a create may be in flight. A SQLite database
@@ -434,8 +437,23 @@ backend's lifetime.
 The in-memory table is rebuilt from the DB at every launch. An automation folder whose
 `versions/` is empty cannot resolve a current version and is skipped at startup with a
 warning in the app log. Every top-level YAML file is hand-editable, so an unreadable one —
-invalid YAML or invalid text encoding alike — loads as its default with a warning in the app
-log; a damaged file never bricks startup into a launchd crash loop. The same backstop covers
+invalid YAML, an impossible unquoted date (`2026-13-45`, which PyYAML raises as a
+`ValueError`, not a `YAMLError`), nesting too deep for the parser, or invalid text encoding
+alike — loads as its default with a warning in the app log; a damaged file never bricks
+startup into a launchd crash loop. That same error set is the rule wherever YAML from a
+hand-edited or untrusted source is parsed: a §5.1 archive member answers the ordinary 422,
+an agent's `manifest.yaml`/`actions.yaml` a validation error — never a 500.
+**Relocated data path, unreachable (decided):** only the default data path is ever created
+on first run. A relocated `dataPath` whose `executions/` directory isn't there at load (an
+unmounted volume, a typo) opens an **in-memory index for the session** and never re-creates
+the tree on the boot disk — not through the index and not through a firing: while the
+session is degraded nothing creates an execution record. The scheduler skips every firing
+(no catch-up later), and manual execute, retry, app-start, listener dispatch and draft
+tests answer 409 "the data path isn't reachable — mount it and relaunch, or choose another
+folder in Settings". A record created there would start a second, hidden history on the
+boot disk, and the next boot would find the directory and open a fresh index over it while
+the real one sat under the remounted volume. Switching the data path (§4.9) reloads and
+ends the degraded session. The same backstop covers
 a hand-edited `execution.yaml`: every timestamp and id field is coerced to a string at the
 read seam (an unquoted ISO timestamp loads from YAML as a `datetime`, and one such record
 would otherwise make the latest-execution comparison raise at boot), and an unparsable one
@@ -472,7 +490,10 @@ Rules:
   write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index — WAL with `synchronous=NORMAL`: a
   process crash loses nothing, a power loss can drop the newest index rows, which the startup
   scan below rebuilds from the yaml; and a top-level `automation.yaml` write that fails
-  (disk full, read-only volume) rolls the in-memory record back to its pre-write fields
+  (disk full, read-only volume) rolls the in-memory record back to its pre-write fields —
+  and a new version (save, restore) whose top-level write failed also removes its
+  just-written `vN` folder, so a version the user was told failed never resurfaces in the
+  history at the next load —
   before the error propagates — memory never runs ahead of disk; the three top-level
   stores follow the same rule: a route that changes `settings.yaml`, `agents.yaml`, or
   `secrets.yaml` builds the new content, writes it, and only then replaces the in-memory
@@ -551,7 +572,11 @@ Rules:
   runaway step can't fill the disk through its logs. The per-file line counter behind the cap
   lives in memory only while the execution is live: it is dropped at the terminal transition
   and re-seeded from the file on a later append (an in-place retry), so a `keepForever`
-  history never grows the backend's resident set. Reading a log back is best-effort: an
+  history never grows the backend's resident set. An append first checks the file's last
+  byte: a torn final line (a crash mid-append) is terminated with a newline before the new
+  record lands, so two records never merge into one unparseable line and the §19 line-number
+  sequence stays aligned with the file; the line counts that seed the sequence (store and
+  engine) read the file with undecodable bytes replaced. Reading a log back is best-effort: an
   undecodable byte run (a crash mid-append) is replaced, an unreadable file answers empty
   lines — never a 500 on a pane that polls at 1 Hz.
 - Secret values never appear in any file — Keychain only, keyed by the secret's §4.8 id
@@ -665,7 +690,12 @@ on disk they never are (§4.1/§4.3/§4.8: ids only). Export runs the same scan 
 writes anything: a step whose code subscripts `secrets[...]`/`agents[...]` with a key that
 is not a stored id (a leftover `<id>` placeholder, a commented-out old reference) answers
 422 naming the step — an archive the importer would reject is never produced, and the
-"re-export" guidance is never handed out for bytes that would re-export identically.
+"re-export" guidance is never handed out for bytes that would re-export identically. For
+the same reason export refuses (422, naming the step) a version whose manifest can't travel
+— a step with no file name or a non-integer `timeout`, both hand-edited shapes the lenient
+loader tolerates — rather than writing a member named `None`. Import validates every
+parameter definition's `name` as non-empty text: a list-valued name passes a truthiness
+check, lands, and then breaks every read of the automation.
 
 **Matching - import never creates records.** No agent or secret record is ever created by
 import (no placeholders, no copies of the exporter's agents). Each archive ref instead

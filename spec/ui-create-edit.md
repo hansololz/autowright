@@ -481,7 +481,10 @@ prompt reverts as soon as any entry follows the question); while viewing an old 
   Keep draft, closing the window — never does: the job keeps building in the background
   (§19 background continuation; its lifetime is the draft's, the same rule as the draft
   test) and re-entering the editor re-attaches to it (Background continuation &
-  re-attach below). When a settle path does cancel, the pending user entry stays in the
+  re-attach below). A Run test whose `POST /tests` answers after the editor unmounted
+  tracks nothing (the leave cleanup already cleared the tracked test; the re-attach on
+  entry finds a live record of the same automation on its own), so a test started in one
+  editor never shows up in another automation's TEST card or seeds its analyze pill. When a settle path does cancel, the pending user entry stays in the
   persisted thread with no composer left to return the request to, so every settle flush
   that cancels an in-flight chat job appends the system chip "Edit
   stopped — the spec is unchanged." (the composer cancel's toast copy, icon `fa-ban`) right

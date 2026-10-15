@@ -18,8 +18,8 @@ from typing import Any
 
 from . import harness, keychain, listeners, notify, packages as pkglib, paths, platform, timefmt
 from .events import hub
-from .executor import CTRL, _LineWriter, substantive_probe
-from .firing import finish_queued
+from .executor import CLIP_MARKER, CTRL, ERROR_MESSAGE_CAP, _LineWriter, substantive_probe
+from .firing import DATA_PATH_UNREACHABLE, finish_queued
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
                       clamp_max_parallel, exec_version_label, is_test, new_id,
                       resolve_param_value, trigger_label)
@@ -73,6 +73,30 @@ STEP_DRAIN_GRACE_S = 2.0
 # §7: the executor's own per-line cap, reused so a child writing to the inherited
 # fd (which never passes through _LineWriter) gets the same bound.
 MAX_LOG_LINE_CHARS = _LineWriter.MAX_LINE
+
+
+def redaction_carry_len(redactions: dict[str, str]) -> int:
+    """§7 read-cap carry: how many trailing characters of a chunk the bounded
+    read cut hold back — the longest redaction value − 1 (0 with no secrets),
+    so no value can be split by the read cap."""
+    return max((len(value) for value in redactions if value), default=1) - 1
+
+
+def hold_read_carry(raw: str, carry: str, carry_len: int,
+                    cap: int = harness.PIPE_READLINE_CAP) -> tuple[str, str]:
+    """§7 read-cap carry: prepend the previous chunk's held-back tail to `raw`;
+    when `raw` is a chunk the read cap cut — exactly `cap` characters and no
+    trailing newline, so more of the same line follows — hold back its last
+    `carry_len` characters for the next read. A shorter newline-free chunk is
+    the stream's final fragment (a child's last write without a newline; EOF
+    follows), which must not be held: splitting it would hand the log the
+    very two halves the carry exists to prevent. Returns (text to process
+    now, new carry)."""
+    cut_by_cap = len(raw) >= cap and not raw.endswith("\n")
+    raw = carry + raw
+    if carry_len <= 0 or not cut_by_cap:
+        return raw, ""
+    return raw[:-carry_len], raw[-carry_len:]
 
 REPLY_BUDGET = 100  # §6.1: replies one step attempt may send; the rest are dropped
 
@@ -261,13 +285,16 @@ def kill_orphan_agent_group(pgid: int) -> None:
 
 def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                      holder: dict, timeout_s: float | None,
-                     on_reply=None, step_i: int | None = None) -> int:
+                     on_reply=None, step_i: int | None = None,
+                     carry_len: int = 0) -> int:
     """One step as a §6.1 executor subprocess — shared by real executions and
     §11 tests. Streams control lines: `log(k, text)` gets every log line,
     `result` collects §4.5 result ops, `holder` gets error/notify/result_touched,
     `on_reply(text)` gets each §6.1 reply() call (None → replies are dropped).
     `state['proc']` holds the live Popen so a caller can cancel. `timeout_s`
-    is the resolved §6 step limit (`step_timeout_for`); None = no watchdog."""
+    is the resolved §6 step limit (`step_timeout_for`); None = no watchdog.
+    `carry_len` is the §7 read-cap carry (`redaction_carry_len` of the
+    execution's redactions) — 0 when there are no secrets to keep whole."""
     # Watchdog enforces the per-step timeout even when the step produces no
     # output at all (a bare read loop would block forever on a silent hang).
     # No watchdog at all on a no_timeout step (§6) — cancel/skip still kill it.
@@ -407,6 +434,11 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         except OSError:  # BrokenPipeError: the group died before it read ctx
             pass
         _close_pipe(proc.stdin)  # closed on every path, so no fd is left open
+        # §7 read-cap carry: the held-back tail of the last chunk the read
+        # cap cut — prepended to the next read before any processing, so a
+        # secret value straddling the cap reaches redaction whole. Ahead of a
+        # control line it simply becomes part of the fragment before it.
+        carry = ""
         try:
             while True:
                 # Size-capped readline: a step (or an inherited-fd child)
@@ -416,9 +448,15 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                 # (agent prompt/reply are 200k-char capped upstream).
                 raw = reader.readline()
                 if raw == "":
+                    if carry.strip():
+                        log("out", carry)
+                    carry = ""
                     break
                 if timed_out.is_set():
                     break
+                raw, carry = hold_read_carry(raw, carry, carry_len)
+                if raw == "":
+                    continue
                 line = raw.rstrip("\n")
                 # §6.1: a child that inherited fd 1 can leave a newline-free
                 # fragment in front of the executor's control line — the op
@@ -628,6 +666,12 @@ class Engine:
             # nothing left to kill it.
             if self._stopping:
                 raise RuntimeError("the backend is shutting down")
+            # §4.9 degraded session: the relocated data path's executions/ dir
+            # was missing at load — no record may be created, or it would start
+            # a second, hidden history on the boot disk. Refused BEFORE any
+            # record exists (the API answers 409 with this text).
+            if self.store.exec_dir_unreachable:
+                raise RuntimeError(DATA_PATH_UNREACHABLE)
             # §19 delete: an admission racing the DELETE window (the automation
             # is still registered while its live executions are cancelled and
             # awaited) must not start — it would escape the delete's wait set
@@ -753,6 +797,9 @@ class Engine:
             # rule as `start`, and a retry launches its own engine thread.
             if self._stopping:
                 raise RuntimeError("the backend is shutting down")
+            # §4.9 degraded session: the same refusal as `start`.
+            if self.store.exec_dir_unreachable:
+                raise RuntimeError(DATA_PATH_UNREACHABLE)
             # §19 delete: the same DELETE-window refusal as `start` — a retry
             # admitted while the automation's live executions are cancelled
             # and awaited would escape the delete's wait set.
@@ -1019,9 +1066,12 @@ class Engine:
             cur = h.get("_cur")
         name = cur["log"] if cur else self.store.EXEC_LOG
         # Per-file monotonic seq (§5) — resumed by counting existing lines, so a
-        # retried execution's execution.ndjson keeps a gapless sequence. Under
-        # one lock: the reply worker logs off-thread, and two read-modify-writes
-        # racing would hand the same sequence to two lines.
+        # retried execution's execution.ndjson keeps a gapless sequence. The
+        # sequence is taken AND the line appended under one lock (§7 sequence
+        # order): the reply worker logs off-thread, two read-modify-writes
+        # racing would hand the same sequence to two lines, and a line landing
+        # after a higher-numbered one would be skipped by the §19
+        # `sinceSequence` follow, which slices the file by line number.
         with self._log_lock:
             seqs = h.setdefault("_log_seq", {})
             if name not in seqs:
@@ -1029,14 +1079,15 @@ class Engine:
                 seqs[name] = sum(1 for _ in p.open(encoding="utf-8")) if p.exists() else 0
             seqs[name] += 1
             sequence = seqs[name]
-        # On-disk shape (§5): {timestamp, kind, sequence, text} — the owning step/attempt is
-        # implicit in the filename. The serialized/UI shape adds the derived
-        # local clock label `time` (read_log for files, here for the live event).
-        line = {"timestamp": timefmt.now_iso(), "kind": kind, "sequence": sequence, "text": text}
+            # On-disk shape (§5): {timestamp, kind, sequence, text} — the owning step/attempt is
+            # implicit in the filename. The serialized/UI shape adds the derived
+            # local clock label `time` (read_log for files, here for the live event).
+            line = {"timestamp": timefmt.now_iso(), "kind": kind, "sequence": sequence, "text": text}
+            accepted = self.store.append_log_line(h["id"], name, line)
         # Publish only lines the store accepted — past the §5 cap the live
         # pane must match the stored log, and a runaway step must not keep
         # queuing loop callbacks for lines that exist nowhere.
-        if self.store.append_log_line(h["id"], name, line):
+        if accepted:
             hub.publish("execution.log", executionId=h["id"], automationId=h["automation_id"],
                         stepIndex=cur["i"] if cur else None,
                         attempt=cur["number"] if cur else None,
@@ -1286,6 +1337,11 @@ class Engine:
                         err = notify_holder.get("error")
                         message = self._redact(h, (err or {}).get("message")
                                                or f"step failed (exit code {rc})", redactions)
+                        # §4.5: clipped again after redaction — the executor's
+                        # own guarded clip can't bound a message the engine
+                        # built, nor survive a redaction that lengthened it.
+                        if len(message) > ERROR_MESSAGE_CAP:
+                            message = message[:ERROR_MESSAGE_CAP] + CLIP_MARKER
                         reason = (err or {}).get("reason") or failure_reason(rc, err)
                         attempt["error"] = {"message": message, "reason": reason}
                         if (forever or pass_tries < budget) and \
@@ -1610,7 +1666,8 @@ class Engine:
         return run_step_process(script, ctx, state,
                                 lambda k, text: self._log(h, k, text, redactions),
                                 result, notify_holder, step_timeout_for(s),
-                                on_reply=on_reply, step_i=step_index - 1)
+                                on_reply=on_reply, step_i=step_index - 1,
+                                carry_len=redaction_carry_len(redactions))
 
     def _notify_end(self, auto: dict, ver: dict, h: dict, result: dict | None,
                     notify_text: str | None) -> None:

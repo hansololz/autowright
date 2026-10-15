@@ -230,7 +230,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   rmtree a huge backlog and a tick stalled past the grace window would make the
   missed-executions rule above misread scheduler lag as sleep and drop a
   `runIfMissed: false` occurrence the Mac never slept through; each delete renames the
-  execution directory aside under the store lock and removes the renamed tree outside it, so
+  execution directory aside under the store lock — re-checking the record's status inside
+  that same hold, so a record retried into `executing` since the sweep decided is skipped,
+  never moved from under a running engine thread; a database error on one delete is logged
+  and the batch moves on, like a disk error — and removes the renamed tree outside it, so
   no `rmtree` ever runs under the lock — deleting an automation does the same with its whole
   tree, and so does every memory-tree removal (clearing memory, deleting or pruning a
   snapshot, dropping the displaced tree on a restore — its crash leftovers included —
@@ -428,9 +431,10 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   output (result.md, result.html, images, CSVs, …); any file dropped there is part of the
   result (§4.5), so there is no attach call, and tables are markdown tables in result.md.
   The chip is stored on the execution record, so it is **redacted exactly like a log line**
-  before it is persisted or published (§5: secret values never appear in any file).
+  before it is persisted or published (§5: secret values never appear in any file); it is
+  capped at 1,000 characters by a §7 guarded cut, never a fixed slice ahead of redaction.
 - `notify(text)` — requests the end-of-execution notification (engine still applies the §4.9 setting
-  and the one-notification rule). The notification title is the automation name, overridable by a
+  and the one-notification rule; the text is capped at 10,000 characters by a §7 guarded cut). The notification title is the automation name, overridable by a
   param literally named `notification_title`. The body is **redacted like a log line** before it
   reaches the OS: a notification leaves the app's own storage (the `osascript` argv is visible
   to any local process, and the text persists in Notification Center's database). The

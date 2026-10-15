@@ -338,10 +338,7 @@ export const api = {
   // §5.1 transfer archives — raw zip bytes both ways (§19: no multipart)
   exportAutomation: async (automationId: string, values: boolean): Promise<ArrayBuffer> => {
     const path = `/automations/${automationId}/export?values=${values ? 1 : 0}`
-    const r = await fetch(base + path, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: requestSignal('GET', path),
-    })
+    const r = await timedFetch('GET', path, { headers: { Authorization: `Bearer ${token}` } })
     // §19 error convention (same as req/rawPost): surface the API's `detail`,
     // so the §9.2 export toast says WHY — e.g. the §5.1 422 naming the step
     // whose secret or agent reference has no record to travel with.
@@ -403,10 +400,7 @@ export const api = {
   // convention as exportAutomation: the API's `detail` reaches the toast).
   marketplaceCatalogFile: async (id: string): Promise<ArrayBuffer> => {
     const path = `/marketplace/sources/${id}/file`
-    const r = await fetch(base + path, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: requestSignal('GET', path),
-    })
+    const r = await timedFetch('GET', path, { headers: { Authorization: `Bearer ${token}` } })
     if (!r.ok) throw await apiError(r)
     return r.arrayBuffer()
   },
@@ -414,23 +408,32 @@ export const api = {
   // with the route timeout.
   marketplaceImage: async (id: string, index: number, signal?: AbortSignal): Promise<Blob> => {
     const path = `/marketplace/sources/${id}/entries/${index}/image`
-    const r = await fetch(base + path, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: requestSignal('GET', path, signal),
-    })
-    if (!r.ok) throw new Error(r.statusText)
+    const r = await timedFetch('GET', path, { headers: { Authorization: `Bearer ${token}` } }, signal)
+    if (!r.ok) throw await apiError(r)
     return r.blob()
   },
   // Raw result-dir file (§4.5) — Response, not JSON: callers .text() or .blob() it.
   resultFile: async (executionId: string, name: string): Promise<Response> => {
     const path = `/executions/${executionId}/result/${encodeURIComponent(name)}`
-    const r = await fetch(base + path, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: requestSignal('GET', path),
-    })
-    if (!r.ok) throw new Error(r.statusText)
+    const r = await timedFetch('GET', path, { headers: { Authorization: `Bearer ${token}` } })
+    if (!r.ok) throw await apiError(r)
     return r
   },
+}
+
+// §9.2/§22.3: the native save dialog through one seam. Electron wraps a
+// rejected invoke as "Error invoking remote method 'save-file': Error: …";
+// the toast gets the main process's own plain words instead.
+export async function saveFile(defaultName: string, data: ArrayBuffer): Promise<string | null> {
+  const bridge = window.autowright
+  if (!bridge) return null
+  try {
+    return await bridge.saveFile(defaultName, data)
+  } catch (e) {
+    const raw = (e as Error).message ?? String(e)
+    const plain = raw.replace(/^Error invoking remote method '[^']*': (?:Error: )?/, '')
+    throw new Error(plain.startsWith("Couldn't save the file") ? plain : `Couldn't save the file: ${plain}`)
+  }
 }
 
 // §19 reconnect backoff: the first retry is quick (a backend restart is back

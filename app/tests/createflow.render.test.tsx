@@ -629,6 +629,21 @@ describe('CreateFlow test-run modal (§11)', () => {
     expect(mockedApi.postTest).toHaveBeenCalledTimes(1)
   })
 
+  it('a Run test whose POST answers after the editor unmounted tracks nothing (§11)', async () => {
+    armPendingPoll()
+    let land!: (v: unknown) => void
+    ;(mockedApi.postTest as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((r) => { land = r }))
+    storeMod.useStore.setState({ test: null })
+    const view = render(<CreateFlow />)
+    fireEvent.click(within(screen.getByTestId('test-card')).getByText('Test draft'))
+    fireEvent.click(within(screen.getByTestId('test-modal')).getByText('Run test'))
+    expect(mockedApi.postTest).toHaveBeenCalledTimes(1)
+    view.unmount()
+    await act(async () => { land({ executionId: 'e-late' }) })
+    expect(storeMod.useStore.getState().test).toBeNull()
+  })
+
   it('a settled failed run: Run again returns to the setup phase, View execution opens the run', async () => {
     // the spy stands in for the store's go before the first render — the card
     // reads it through a selector, so swapping it mid-test would need a flush

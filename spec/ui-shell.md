@@ -76,8 +76,10 @@ what separates success from failure. Every other show path — the deep-link/sec
 `showApp`, the dock/tray `activate` reopen — defers to that first load: a still-loading or
 failed window is never shown blank. Two guards keep that rule from stranding a live app
 behind no window at all. A renderer process that dies (`render-process-gone` - out of
-memory, a crash in the bundle) is logged to `app.log` and reloaded once; a second death
-in the same window has nothing left to paint, so the shell shows an error box naming
+memory, a crash in the bundle) is logged to `app.log` and reloaded once — the count resets
+when that reload finishes loading, so two unrelated deaths days apart in one long-lived
+window each get their reload; a second death before the reload has painted has nothing
+left to paint, so the shell shows an error box naming
 `app.log` and quits rather than staying resident and invisible. And a watchdog armed when
 the window is created fires 15 s later if the window still has not shown: with a renderer
 that simply loaded slowly it shows the window anyway, and with nothing ever loaded (every
@@ -481,7 +483,11 @@ automation… in red). Export… opens a small modal — "Export "`<name>`"" wit
 this off when sharing with someone else."), footer note "Secret values and memory are never
 included in the file", accent Export / quiet Cancel — then a native save dialog (main-process IPC, default
 name `<name>.autowright` in Downloads) writes the §19 export response; success toasts
-"Exported to `<file>`."
+"Exported to `<file>`." A write the dialog's chosen path refuses (the folder is gone, a
+read-only volume) toasts plain words — "Couldn't save the file: <reason>" — never the
+IPC wrapper's "Error invoking remote method" text; the renderer calls the dialog through
+one `api.saveFile` helper that strips that wrapper, for every export surface (§22 catalog
+export included).
 
 **Capacity popup** — pressing Execute now while **any**
 execution of this automation is live never fires blind: the click opens a modal decided by
@@ -552,7 +558,8 @@ Sections top to bottom:
   cache first when it isn't in the §19 `/state` window — a weekly automation's last failure
   can be past the window — with an in-flight guard, and a failed load stays on the page
   and toasts "This execution no longer exists." on a 404 or "Couldn't load this
-  execution. Try again." otherwise). No-executions empty
+  execution. Try again." otherwise; a load that lands after the user left the page or
+  opened another automation is dropped — the editor never opens over a different page). No-executions empty
   state (dashed
   card): "No executions yet / Press Execute now — the first result will appear right here."
 - **TRIGGERS** card — one row per trigger (kind icon — fa-clock for

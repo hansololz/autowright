@@ -20,6 +20,12 @@ log = logging.getLogger("autowright.firing")
 
 QUEUE_TTL_S = float(os.environ.get("AUTOWRIGHT_QUEUE_TTL_S", "120"))  # §15 knob
 
+# §4.9 degraded session (`Store.exec_dir_unreachable`): the refusal every
+# record-creating path gives while the relocated data path is unreachable —
+# the API answers 409 with this text.
+DATA_PATH_UNREACHABLE = ("the data path isn't reachable — mount it and relaunch, "
+                         "or choose another folder in Settings")
+
 
 def finish_never_ran(store: Store, h: dict, note: str, *,
                      finished_at: str | None = None,
@@ -92,6 +98,11 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
         # phantom until the next restart's repair. (`start` refuses too, but
         # the capacity branch below never reaches it.)
         if a.get("_deleting"):
+            return False
+        # §4.9 degraded session: nothing creates an execution record — not a
+        # start, not a queued entry, not a skipped one. Refused like the DELETE
+        # window above: no record, nothing started.
+        if store.exec_dir_unreachable:
             return False
         if engine.at_capacity(a):
             queued = store.queued_execs(a["id"]) if payload else []
@@ -196,6 +207,9 @@ def queue_manual(store: Store, engine: Engine, a: dict, trigger: str,
         # would outlive the automation itself.
         if a.get("_deleting"):
             raise RuntimeError("this automation is being deleted")
+        # §4.9 degraded session: no record of any kind (409 at the API).
+        if store.exec_dir_unreachable:
+            raise RuntimeError(DATA_PATH_UNREACHABLE)
         if not engine.at_capacity(a):
             return engine.start(a, trigger, version_label=version_label), False
         # Same label parse/resolve as engine.start — a queue admission must

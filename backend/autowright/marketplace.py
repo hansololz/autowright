@@ -1052,6 +1052,9 @@ class MarketplaceStore:
                 if auto_refresh:
                     raise MarketplaceError(AUTO_NEEDS_LOCATION)
                 new_auto = False
+            # §22.2 disk-first: the pre-call row, restored in place (other
+            # references hold this dict) when the table write fails.
+            before = dict(source)
             if location is not ... and new_location != source["location"]:
                 # §22.2: the new place has never been read - the header shows
                 # "added", and with auto refresh on the row is due at the next
@@ -1062,7 +1065,12 @@ class MarketplaceStore:
             source["auto_refresh"] = new_auto
             if expanded is not None:
                 source["expanded"] = bool(expanded)
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                source.clear()
+                source.update(before)
+                raise
             return self.serialize(source)
 
     def remove(self, source_id: str) -> None:
@@ -1075,8 +1083,15 @@ class MarketplaceStore:
             source = self._find(source_id)
             if source["builtin"]:
                 raise MarketplaceBuiltin(BUILTIN_NOT_REMOVABLE)
+            index = self.sources.index(source)
             self.sources.remove(source)
-            self._save()
+            try:
+                self._save()
+            except BaseException:
+                # §22.2 disk-first: the row returns to its place and its
+                # directory stays when the table write fails.
+                self.sources.insert(index, source)
+                raise
         # §6: no rmtree ever runs under a store lock.
         shutil.rmtree(self.source_dir(source_id), ignore_errors=True)
 
@@ -1118,7 +1133,13 @@ class MarketplaceStore:
         if text is None:
             source["error"] = error
         else:
-            self._stamp_refresh(source, text)
+            try:
+                self._stamp_refresh(source, text)
+            except OSError as e:
+                # §22.2: a copy write that fails (disk full, a read-only
+                # volume) is the row's `error` - the ordinary 200, never a
+                # 500 - and `refreshed_at` keeps the last successful read.
+                source["error"] = f"couldn't save the catalog copy: {e}"
         return True
 
     def _stamp_refresh(self, source: dict, text: str) -> None:

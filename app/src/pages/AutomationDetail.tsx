@@ -1,7 +1,7 @@
 // Automation detail (§4.3/§4.4/§7, prototype "Automation detail" screen).
 // Thin page shell — the section cards live in ./detail/ (§17).
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../api'
+import { api, saveFile } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import type { Automation, Execution } from '../types'
@@ -59,6 +59,16 @@ export default function AutomationDetail() {
   // window, so its record is loaded before the editor opens; a second click
   // while that load is in flight does nothing.
   const fixLoading = useRef(false)
+  // §9.2 Fix with AI: a load that lands after the user left the page (mounted
+  // false; re-armed on mount for StrictMode's extra cleanup) or opened
+  // another automation (detail → detail keeps this page mounted) is dropped.
+  const mountedRef = useRef(true)
+  const automationIdRef = useRef(automationId)
+  automationIdRef.current = automationId
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const [specOpen, setSpecOpen] = useState(true)
   const [, setTick] = useState(0)
 
@@ -67,7 +77,7 @@ export default function AutomationDetail() {
   // hold none of those fields, so without this the page would sit on the old
   // bodies under a new version number until it was navigated away from.
   useEffect(() => {
-    if (automationId) void loadAuto(automationId)
+    if (automationId) void loadAuto(automationId, { track: true })
   }, [automationId, reconnects])
   // §19: forget the full-record status for the id this page loaded once it
   // lets go of it (unmount, or detail → detail), so finish- and
@@ -440,10 +450,12 @@ export default function AutomationDetail() {
               onFix={async () => {
                 if (fixLoading.current) return
                 const executionId = failedExec.id
+                const clickedId = automationId
                 if (!useStore.getState().executionFull[executionId]) {
                   fixLoading.current = true
                   const result = await useStore.getState().loadExecution(executionId)
                   fixLoading.current = false
+                  if (!mountedRef.current || automationIdRef.current !== clickedId) return
                   if (result !== 'ok') {
                     showToast(result === 'gone'
                       ? 'This execution no longer exists.'
@@ -580,7 +592,7 @@ export default function AutomationDetail() {
                 const data = await api.exportAutomation(auto.id, exportValues)
                 close()
                 const safe = auto.name.replace(/[/\\:*?"<>|]+/g, ' ').trim() || 'automation'
-                const path = await window.autowright?.saveFile(`${safe}.autowright`, data)
+                const path = await saveFile(`${safe}.autowright`, data)
                 if (path) showToast(`Exported to ${path}.`)
               } catch (e) {
                 showToast((e as Error).message)

@@ -339,12 +339,55 @@ async function syncBackendVersion(py, running) {
   })
 }
 
+// §3 ensure-backend: the registration's own line from `service status`, asked
+// before any reinstall. Read-only, so it stays outside the install interlock,
+// but bounded like every service child; a failed ask reads as whatever it
+// printed (usually nothing), which is never "active".
+function serviceStatusLine(py) {
+  return new Promise((resolve) => {
+    execFile(py, ['-m', 'autowright.service', 'status'], SERVICE_CHILD_OPTIONS, (_err, stdout) => {
+      resolve(String(stdout || '').trim())
+    })
+  })
+}
+
+// §3: every platform's service manager prints a running job as a line that
+// starts with "active" (launchd "active (pid …)", systemd "active (pid …)" /
+// "active (unit running)", Task Scheduler "active (task running)"); "loaded,
+// not active", "stopped …", "not installed" and a failed ask never do.
+const ACTIVE_WAIT_MS = 20_000
+
+// §3: a job the service manager reports active is a backend still coming up
+// (the login item and the job start together at login, and the probe window
+// is about a second), so keep probing 2 s apart for up to 20 s more before
+// an install may bootout it. Non-null ≙ the backend's version once it answers.
+async function awaitActiveBackend(py) {
+  const line = await serviceStatusLine(py)
+  if (!line.startsWith('active')) {
+    appLog(`ensure-backend: service status says "${line || 'nothing'}" — installing`)
+    return null
+  }
+  appLog('ensure-backend: the service manager reports the job active — waiting for /health')
+  const deadline = Date.now() + ACTIVE_WAIT_MS
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000))
+    const running = await backendVersion()
+    if (running !== null) return running
+  }
+  appLog(`ensure-backend: the active job did not answer /health within ${ACTIVE_WAIT_MS / 1000} s — installing`)
+  return null
+}
+
 async function ensureBackend() {
   const py = bundledPython()
   if (!py) return
   // Non-null ≙ our backend, identified and versioned. A foreign server on a
   // stale backend.json port lands in the install branch below, not in 'ok'.
-  const running = await backendVersion()
+  let running = await backendVersion()
+  if (running === null) {
+    ensureStatus = { state: 'installing', detail: '' }
+    running = await awaitActiveBackend(py)
+  }
   if (running !== null) {
     ensureStatus = { state: 'ok', detail: '' }
     if (running !== app.getVersion()) void syncBackendVersion(py, running)
@@ -535,6 +578,9 @@ function createWindow(hash) {
       appLog(`window: renderer loaded after ${failStreak} failed attempt(s)`)
       failStreak = 0
     }
+    // §9: a load that finished painted again, so a later death is a new one
+    // and gets its own reload — only a death before this point is a repeat.
+    rendererDeaths = 0
     if (!winLoaded) {
       winLoaded = true
       clearWatchdog()
@@ -887,10 +933,23 @@ async function userBinOnLoginPath() {
   return userBinOnPath
 }
 
+// §3: the shim path is only ever written when absent or a regular file. A
+// symlink there, dangling or not, is foreign: every read, write and chmod
+// would land wherever the link points. lstat, never stat, so the link itself
+// is what gets judged.
+function shimIsSymlink(shim) {
+  try {
+    return fs.lstatSync(shim).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
 async function cliStatus() {
   const python = backendInfo()?.python
   const onPath = await userBinOnLoginPath()
   const shim = shimPaths()[0]
+  if (shimIsSymlink(shim)) return { state: 'foreign', path: shim, onPath }
   let current
   try {
     current = fs.readFileSync(shim, 'utf-8')
@@ -928,7 +987,11 @@ function cliInstall() {
   const shim = shimPaths()[0]
   // Something else already owns that name (another tool's `autowright`, a
   // hand-written script): a file we did not write is never overwritten — the
-  // §4.9 card says so and leaves the choice to the user.
+  // §4.9 card says so and leaves the choice to the user. A symlink is foreign
+  // whatever it points at (§3).
+  if (shimIsSymlink(shim)) {
+    return { ok: false, error: `A different autowright command already exists at ${shim}. Remove it first.` }
+  }
   try {
     if (!fs.readFileSync(shim, 'utf-8').includes(SHIM_MARKER)) {
       return { ok: false, error: `A different autowright command already exists at ${shim}. Remove it first.` }
@@ -952,6 +1015,8 @@ function cliInstall() {
 // §4.9 card toasts.
 function cliUninstall() {
   const p = shimPaths()[0]
+  // §3: a symlink is foreign — never followed, never unlinked.
+  if (shimIsSymlink(p)) return { ok: true }
   let text
   try {
     text = fs.readFileSync(p, 'utf-8')
@@ -1075,7 +1140,17 @@ ipcMain.handle('save-file', async (_e, defaultName, data) => {
   if (r.canceled || !r.filePath) return null
   // Async IO: archives run to 64 MB (§5.1) and the target can be a network
   // volume — a sync write here would stall the whole main process.
-  await fs.promises.writeFile(r.filePath, Buffer.from(data))
+  try {
+    await fs.promises.writeFile(r.filePath, Buffer.from(data))
+  } catch (e) {
+    // §9.2: the renderer toasts this text (minus the IPC wrapper it strips) —
+    // plain words, never an ENOENT dump with the raw path in front.
+    const why = e?.code === 'ENOENT' ? 'that folder no longer exists'
+      : e?.code === 'EACCES' || e?.code === 'EPERM' || e?.code === 'EROFS' ? 'that location is read-only'
+      : e?.code === 'ENOSPC' ? 'the disk is full'
+      : String(e?.message || e)
+    throw new Error(`Couldn't save the file: ${why}`)
+  }
   return r.filePath
 })
 ipcMain.handle('open-archive', async () => {

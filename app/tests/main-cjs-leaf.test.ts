@@ -5,7 +5,7 @@
 // no admin prompt exists, and nothing ever writes to the legacy
 // /usr/local/bin (the pre-08-15 bug was a silent best-effort write there).
 // main.cjs has no importable module structure, so the guard reads the source.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
@@ -221,7 +221,8 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // …and every caller still reads "healthy" off exactly that answer, so the
     // stricter probe can't be routed around.
     expect(src).toContain('return (await backendVersion()) !== null')
-    expect(src).toMatch(/const running = await backendVersion\(\)\n\s*if \(running !== null\) \{/)
+    expect(src).toMatch(/let running = await backendVersion\(\)\n\s*if \(running === null\) \{/)
+    expect(src).toMatch(/running = await awaitActiveBackend\(py\)\n\s*\}\n\s*if \(running !== null\) \{/)
   })
 
   it('the ready chain survives a throwing tray (§9/§13)', () => {
@@ -270,9 +271,10 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     const bounds = src.match(/timeout: SERVICE_CHILD_TIMEOUT_MS/g) ?? []
     expect(bounds).toHaveLength(1)
     expect(src).toContain('const SERVICE_CHILD_TIMEOUT_MS = 120_000')
-    // Both spawn sites carry the same options object…
-    const spawns = src.match(/'autowright\.service', (?:'install'|verb)\], SERVICE_CHILD_OPTIONS/g) ?? []
-    expect(spawns).toHaveLength(2)
+    // All three spawn sites (install, the stop/reset verb, and ensure-backend's
+    // status ask) carry the same options object…
+    const spawns = src.match(/'autowright\.service', (?:'install'|'status'|verb)\], SERVICE_CHILD_OPTIONS/g) ?? []
+    expect(spawns).toHaveLength(3)
     // …and the wait for an in-flight install child is raced against its own
     // deadline rather than awaited outright.
     expect(src).toMatch(/await Promise\.race\(\[\n\s*serviceInstallDone\.then\(\(\) => null\)/)
@@ -965,6 +967,29 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
     expect(w.shows).toBe(0)
   })
 
+  it('a finished reload resets the death count — a later death gets its own reload (§9)', () => {
+    vi.useFakeTimers()
+    const m = loadMain()
+    m.invoke('open-app', '/app')
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    w.fire('render-process-gone', { reason: 'oom' })
+    expect(w.loads).toBe(2)
+    // The reload painted, so a death days later is a new one, not a repeat.
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    w.fire('render-process-gone', { reason: 'crashed' })
+    expect(w.loads).toBe(3)
+    expect(m.errors).toEqual([])
+    expect(m.quits).toBe(0)
+    // …but a second death before that reload finished still reports and quits.
+    w.fire('render-process-gone', { reason: 'crashed' })
+    expect(w.loads).toBe(3)
+    expect(m.errors).toHaveLength(1)
+    expect(m.quits).toBe(1)
+  })
+
   it('a deep link that arrives before the load is replayed once, never dropped', () => {
     vi.useFakeTimers()
     const m = loadMain()
@@ -1632,10 +1657,13 @@ describe('main.cjs bounded service children (§3)', () => {
     writeFileSync(bundled, '#!/bin/sh\n')
     nodeProcess.resourcesPath = resources
     try {
-      // No backend.json, so ensure-backend goes straight to `service install`
-      // — and that child never calls back. quit-all used to sit on
-      // `await serviceInstallDone` for the life of the app.
-      const m = loadMain({ ready: true, execFile: () => {} })
+      // No backend.json and no registration, so ensure-backend goes on to
+      // `service install` — and that child never calls back. quit-all used to
+      // sit on `await serviceInstallDone` for the life of the app.
+      const m = loadMain({
+        ready: true,
+        execFile: (_py, args, _o, cb) => { if (args[2] === 'status') cb(null, 'not installed', '') },
+      })
       // Two 500 ms gaps: with no backend.json the probe still runs its three
       // attempts (§3 re-reads the file each one) before concluding absent.
       await vi.advanceTimersByTimeAsync(1000)
@@ -1733,6 +1761,108 @@ describe('main.cjs /health probe retries (§3)', () => {
       rmSync(resources, { recursive: true, force: true })
     }
   })
+
+  // §3: when every probe goes unanswered, ensure-backend asks `service status`
+  // before reinstalling. A bundled interpreter makes this a packaged launch.
+  function withBundledPython(): string {
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = platMod.bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    return resources
+  }
+
+  it('a job the service manager reports active is waited for, never reinstalled', async () => {
+    vi.useFakeTimers()
+    const resources = withBundledPython()
+    let healthy = false
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (!String(input).includes('/health') || !healthy) return Promise.reject(new Error('still coming up'))
+      return Promise.resolve({ ok: true, json: async () => ({ app: 'Autowright', version: '0.0.0' }) } as Response)
+    })
+    const children: string[][] = []
+    try {
+      const m = loadMain({
+        ready: true,
+        execFile: (_py, args, _o, cb) => { children.push(args); cb(null, 'active (pid 4242) · port 65000\n', '') },
+      })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+      // The first probe's three unanswered attempts, then the status ask.
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(children).toEqual([['-m', 'autowright.service', 'status']])
+      expect(m.log()).toContain('reports the job active — waiting for /health')
+      // A few seconds later the backend answers: 'ok', and no install ever ran.
+      await vi.advanceTimersByTimeAsync(6000)
+      healthy = true
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(children).toEqual([['-m', 'autowright.service', 'status']])
+    } finally {
+      fetchSpy.mockRestore()
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  it('an active job still silent after 20 s is reinstalled', async () => {
+    vi.useFakeTimers()
+    const resources = withBundledPython()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('silent'))
+    const children: string[][] = []
+    try {
+      const m = loadMain({
+        ready: true,
+        execFile: (_py, args, _o, cb) => {
+          children.push(args)
+          if (args[2] === 'status') cb(null, 'active (pid 4242)\n', '')
+        },
+      })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(children).toEqual([['-m', 'autowright.service', 'status']])
+      // Still inside the 20 s window: no install yet.
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(children).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(children).toEqual([
+        ['-m', 'autowright.service', 'status'],
+        ['-m', 'autowright.service', 'install'],
+      ])
+      expect(m.log()).toContain('did not answer /health within 20 s — installing')
+    } finally {
+      fetchSpy.mockRestore()
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  for (const line of ['stopped (plist present) — returns at next login or app launch', 'not installed',
+    'loaded, not active (pid -)', 'launchctl timed out']) {
+    it(`a registration that says "${line}" is installed right away`, async () => {
+      vi.useFakeTimers()
+      const resources = withBundledPython()
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('nothing listening'))
+      const children: string[][] = []
+      try {
+        const m = loadMain({
+          ready: true,
+          execFile: (_py, args, _o, cb) => {
+            children.push(args)
+            if (args[2] === 'status') cb(null, `${line}\n`, '')
+          },
+        })
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(children).toEqual([
+          ['-m', 'autowright.service', 'status'],
+          ['-m', 'autowright.service', 'install'],
+        ])
+        expect(await m.invoke('backend-status')).toEqual({ state: 'installing', detail: '' })
+      } finally {
+        fetchSpy.mockRestore()
+        rmSync(resources, { recursive: true, force: true })
+      }
+    })
+  }
 })
 
 // ---- §3 CLI shim writes ----------------------------------------------------
@@ -1773,6 +1903,41 @@ describe('main.cjs CLI shim writes (§3)', () => {
     })
     // Untouched: a file we did not write is never overwritten.
     expect(readFileSync(shim, 'utf-8')).toContain('someone elses tool')
+  })
+
+  it('a symlink at the shim path is foreign — never read, written or removed through (§3)', async () => {
+    if (process.platform === 'win32') return // symlinks need elevation there
+    const { m, shim } = loadWithShim()
+    // A link to a file carrying our own marker still counts as foreign: every
+    // operation would land wherever the link points.
+    const target = join(shimDir!, 'elsewhere')
+    writeFileSync(target, platMod.shimText('/old/python'), { mode: 0o644 })
+    symlinkSync(target, shim)
+    expect(await m.invoke('cli-status')).toMatchObject({ state: 'foreign', path: shim })
+    expect(await m.invoke('cli-install')).toEqual({
+      ok: false,
+      error: `A different autowright command already exists at ${shim}. Remove it first.`,
+    })
+    expect(await m.invoke('cli-uninstall')).toEqual({ ok: true })
+    expect(lstatSync(shim).isSymbolicLink()).toBe(true)
+    expect(readFileSync(target, 'utf-8')).toBe(platMod.shimText('/old/python'))
+    expect(statSync(target).mode & 0o777).toBe(0o644)
+  })
+
+  it('a dangling symlink at the shim path is foreign, not missing (§3)', async () => {
+    if (process.platform === 'win32') return // symlinks need elevation there
+    const { m, shim } = loadWithShim()
+    const target = join(shimDir!, 'nowhere')
+    symlinkSync(target, shim)
+    expect(await m.invoke('cli-status')).toMatchObject({ state: 'foreign', path: shim })
+    expect((await m.invoke('cli-install') as { ok: boolean }).ok).toBe(false)
+    // The install never created the file the link points at.
+    expect(existsSync(target)).toBe(false)
+  })
+
+  it('a missing shim path still reads as missing', async () => {
+    const { m, shim } = loadWithShim()
+    expect(await m.invoke('cli-status')).toMatchObject({ state: 'missing', path: shim })
   })
 
   it('cli-install writes the shim where there is nothing in the way', async () => {

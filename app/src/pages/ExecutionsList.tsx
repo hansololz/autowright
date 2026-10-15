@@ -250,6 +250,16 @@ export default function ExecutionsList() {
     // re-run this one.
   }, [executions]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // §7 execution.deleted: the accumulated deeper pages drop the deleted id as
+  // well - the absorption prune above only reaches rows inside the window's
+  // span, so a deleted row past it would otherwise stay on its page.
+  const executionDeletedSeq = useStore((s) => s.executionDeletedSeq)
+  useEffect(() => {
+    const deletedId = useStore.getState().lastDeletedExecutionId
+    if (executionDeletedSeq === 0 || !deletedId) return
+    setFetched((f) => (f.some((e) => e.id === deletedId) ? f.filter((e) => e.id !== deletedId) : f))
+  }, [executionDeletedSeq])
+
   // §7: the QUEUED FOR column counts up — each cell ticks itself (QueuedFor),
   // so the page never re-renders for the clock.
 

@@ -102,3 +102,21 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   AppImage sits under the runtime's `/tmp/.mount_*` FUSE mount that disappears when the app
   exits. If so, the backend cannot start at login without the app. Verify on a real host;
   likely remedy is extracting the Python tree to a stable location at install time.
+  (2026-10-14 audit: confirmed by reading — `bundledPythonPath(process.resourcesPath)`
+  lands under the mount, and the unit has `Restart=always` with `StartLimitIntervalSec=0`,
+  so after a reboot systemd retries a missing `ExecStart` every 2 s; the CLI shim points
+  there too. Same remedy.)
+- **Linux: a logout runs the quit-entirely flow.** Electron's `powerMonitor 'shutdown'` on
+  Linux comes from logind's `PrepareForShutdown`, which fires on poweroff/reboot only; a
+  logout reaches the app as SIGTERM → `before-quit`, which §3 treats as a user quit and
+  stops the user unit. With lingering enabled the backend then stays stopped across the
+  next login. Verify on a real host; likely remedy is treating SIGTERM/SIGHUP from the
+  session manager as a session end (UI-only quit) the way `'shutdown'` is.
+- **Windows: cross-thread pipe close can wedge on the buffer lock.** Two sites, both
+  traced through CPython's Windows `communicate` (helper threads blocked in `read()` hold
+  the `BufferedReader` lock, so a `close()` from another thread waits on it): the
+  `packages.py` pip drain after the 2 s `communicate(timeout=)` (`_pip_lock` held, so a
+  wedge locks out every later install until restart), and `PipeWriter.defuse()`'s
+  `_fd is None` branch closing the stdin pipe while the writer thread is blocked in
+  `write()`. POSIX is covered by the wakeable raw pipes; Windows needs the
+  `CancelSynchronousIo` plan above or an overlapped-I/O writer. Verify on a real host.

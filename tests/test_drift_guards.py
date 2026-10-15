@@ -784,7 +784,8 @@ def test_bundled_bytecode_is_recompiled_unchecked_hash_and_probed():
 
 def test_electron_service_children_never_write_bytecode():
     """§3: every bundled interpreter the Electron main process spawns (the
-    ensure-backend / version-sync `install`, quit-all's and reset's `stop`)
+    ensure-backend / version-sync `install`, ensure-backend's `status` probe,
+    quit-all's and reset's `stop`)
     runs with PYTHONDONTWRITEBYTECODE=1 — the one wedge observed was the
     interpreter's own start-up write of a stale .pyc into the sealed bundle,
     and a service verb must never depend on being able to write there."""
@@ -793,7 +794,8 @@ def test_electron_service_children_never_write_bytecode():
     opts = opts[:opts.index("\n}\n")]
     assert "PYTHONDONTWRITEBYTECODE: '1'" in opts and "...process.env" in opts, (
         "SERVICE_CHILD_OPTIONS must add PYTHONDONTWRITEBYTECODE=1 on top of the inherited environment")
-    assert src.count("execFile(py, ['-m', 'autowright.service'") == 2, (
-        "the two service spawns (runServiceInstall, runServiceVerb) moved — re-pin them")
-    assert src.count("SERVICE_CHILD_OPTIONS, (") == 2, (
+    assert src.count("execFile(py, ['-m', 'autowright.service'") == 3, (
+        "the three service spawns (runServiceInstall, serviceStatusLine, runServiceVerb) "
+        "moved — re-pin them")
+    assert src.count("SERVICE_CHILD_OPTIONS, (") == 3, (
         "every service child must spawn with SERVICE_CHILD_OPTIONS")

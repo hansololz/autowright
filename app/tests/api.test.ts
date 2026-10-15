@@ -4,7 +4,7 @@
 // stubbed before connectInfo() is called, which fills the module-level
 // base/token used by every request.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, connectInfo, IMAGE_REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS, openWs, REQUEST_TIMEOUT_MS, requestTimeoutMs } from '../src/api'
+import { api, connectInfo, IMAGE_REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS, openWs, REQUEST_TIMEOUT_MS, requestTimeoutMs, saveFile } from '../src/api'
 
 const setBackendInfo = (info: { port: number; token: string } | null) => {
   ;(window as unknown as Record<string, unknown>).autowright = {
@@ -183,6 +183,55 @@ describe('client request timeout (§19)', () => {
     // §22.3 marketplace images: the backend slot wait plus the fetch
     expect(requestTimeoutMs('GET', '/marketplace/sources/s1/entries/3/image')).toBe(IMAGE_REQUEST_TIMEOUT_MS)
     expect(IMAGE_REQUEST_TIMEOUT_MS).toBe(90_000)
+  })
+})
+
+// §19: the raw-bytes routes (export, catalog file, preview image, result file)
+// go through the same timed wrapper and the same error convention as req.
+describe('raw-bytes routes (§19)', () => {
+  beforeEach(async () => {
+    setBackendInfo({ port: 4242, token: 'tok' })
+    await connectInfo()
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const rawCalls = () => [
+    () => api.exportAutomation('a1', false),
+    () => api.marketplaceCatalogFile('s1'),
+    () => api.marketplaceImage('s1', 3),
+    () => api.resultFile('e1', 'result.md'),
+  ]
+
+  it('a connection failure surfaces as plain words, never "Failed to fetch"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
+    for (const call of rawCalls()) await expect(call()).rejects.toThrow("The backend isn't reachable.")
+  })
+
+  it('an error answer surfaces the API detail and status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 422, statusText: 'Unprocessable Entity',
+      json: async () => ({ detail: 'Step 2 names a secret with no record.' }),
+    }) as unknown as Response))
+    for (const call of rawCalls()) {
+      const err = await call().then(() => null, (e: Error & { status?: number }) => e)
+      expect(err!.message).toBe('Step 2 names a secret with no record.')
+      expect(err!.status).toBe(422)
+    }
+  })
+
+  it('sends the bearer header and the route timeout, merged with the caller signal', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    const fetchMock = vi.fn(async () => ({ ok: true, blob: async () => new Blob() }) as unknown as Response)
+    vi.stubGlobal('fetch', fetchMock)
+    const caller = new AbortController()
+    await api.marketplaceImage('s1', 3, caller.signal)
+    expect(timeout).toHaveBeenCalledWith(IMAGE_REQUEST_TIMEOUT_MS)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('http://127.0.0.1:4242/marketplace/sources/s1/entries/3/image')
+    expect(init.method).toBe('GET')
+    expect(init.headers).toEqual({ Authorization: 'Bearer tok' })
+    caller.abort()
+    expect(init.signal!.aborted).toBe(true)
   })
 })
 
@@ -378,5 +427,36 @@ describe('openWs reconnect backoff (§19)', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(FakeSocket.made.length).toBe(1)
     expect(infoCalls).toBe(before)
+  })
+})
+
+describe('saveFile (§9.2 native save dialog seam)', () => {
+  // 2026-10-14 audit: Electron wraps a rejected invoke as "Error invoking
+  // remote method 'save-file': Error: …" — the toast gets plain words.
+  const w = window as unknown as { autowright?: { saveFile: (n: string, d: ArrayBuffer) => Promise<string | null> } }
+  afterEach(() => { delete w.autowright })
+
+  it('passes a saved path and a cancelled dialog through', async () => {
+    w.autowright = { saveFile: vi.fn(async () => '/Users/x/out.yaml') }
+    expect(await saveFile('out.yaml', new ArrayBuffer(1))).toBe('/Users/x/out.yaml')
+    w.autowright = { saveFile: vi.fn(async () => null) }
+    expect(await saveFile('out.yaml', new ArrayBuffer(1))).toBeNull()
+  })
+
+  it('strips the IPC wrapper and keeps the main process plain words', async () => {
+    w.autowright = { saveFile: vi.fn(async () => {
+      throw new Error("Error invoking remote method 'save-file': Error: Couldn't save the file: that folder no longer exists")
+    }) }
+    await expect(saveFile('out.yaml', new ArrayBuffer(1)))
+      .rejects.toThrow("Couldn't save the file: that folder no longer exists")
+    w.autowright = { saveFile: vi.fn(async () => {
+      throw new Error("Error invoking remote method 'save-file': Error: ENOENT: no such file or directory, open '/x/y'")
+    }) }
+    await expect(saveFile('out.yaml', new ArrayBuffer(1)))
+      .rejects.toThrow("Couldn't save the file: ENOENT: no such file or directory, open '/x/y'")
+  })
+
+  it('answers null outside Electron', async () => {
+    expect(await saveFile('out.yaml', new ArrayBuffer(1))).toBeNull()
   })
 })

@@ -183,9 +183,17 @@ def _unload(p: Path) -> None:
     and leaves no registration at all (§3)."""
     if _launchctl("bootout", f"gui/{os.getuid()}/{LABEL}").returncode != 0:
         _launchctl("unload", str(p))
-    deadline = time.monotonic() + _UNLOAD_DEADLINE_S
+    _wait_unregistered(_UNLOAD_DEADLINE_S)
+
+
+def _wait_unregistered(seconds: float) -> None:
+    """Poll until launchd no longer knows the job, bounded by a wall-clock
+    deadline and the command budget. Tri-state (§3): only a definite False
+    ends the wait early — an unknown probe keeps waiting until the deadline
+    rather than being read as gone."""
+    deadline = time.monotonic() + seconds
     while True:
-        if not _registered():
+        if _registered() is False:
             return
         if time.monotonic() >= deadline or _budget_exhausted():
             return
@@ -205,7 +213,11 @@ def _load(p: Path) -> str | None:
         if r2.returncode != 0:
             return (r.stderr.strip() or r2.stderr.strip()
                     or f"launchctl exited {r.returncode}")
-    if not _registered():
+    registered = _registered()
+    if registered is None:
+        # §3 tri-state: an unknown probe is never "not registered".
+        return _TIMED_OUT
+    if not registered:
         return "launchctl accepted the plist but the job is not registered"
     return None
 
@@ -234,23 +246,33 @@ def install() -> str:
 
 @_budgeted
 def uninstall() -> str:
+    """§3: `stop` plus removal — the same unload and stray sweep, and only
+    after a clean verdict (not registered) are the plist and shim removed. A
+    job still held, or one launchctl couldn't answer for, keeps both: never a
+    deleted plist under a running KeepAlive job."""
     p = plist_path()
-    _unload(p)
-    shim_note = _remove_shim()
+    registered, n = _stop_core(p)
+    if registered is None:
+        return f"uninstall failed: {_TIMED_OUT}"
+    if registered:
+        return "uninstall failed: launchd still reports the job"
     if p.exists():
         p.unlink()
         out = "service unloaded and removed"
     else:
         out = "service was not installed"
-    # §3 tri-state: a timed-out probe is unknown, never "not registered".
-    if _registered() is None:
-        out = f"uninstall failed: {_TIMED_OUT}"
+    if n:
+        out += f" · ended {n} lingering process(es)"
+    shim_note = _remove_shim()
     return f"{out} · {shim_note}" if shim_note else out
 
 
 @_budgeted
 def status() -> str:
     r = _launchctl("list")
+    if isinstance(r, _TimedOut):
+        # §3 tri-state: never "stopped" for a job it couldn't see.
+        return f"{_TIMED_OUT} — can't tell whether the service is running"
     for line in r.stdout.splitlines():
         if LABEL in line:
             pid = line.split()[0]
@@ -287,36 +309,44 @@ def stop() -> str:
     """§3 quit-entirely backend half: unload the job and sweep stray
     processes, keep plist and shim."""
     p = plist_path()
-    if not p.exists():
-        # §3: no registration, but a directly-spawned backend (isolated dev)
-        # or strays can still be alive — sweep them. Either way this is a
-        # successful stop: stop is idempotent, and "nothing registered,
-        # nothing running" already satisfies it (it must not abort the §4.9
-        # QUIT/RESET flows on a machine whose registration is missing).
-        n = _sweep_strays()
+    installed = p.exists()
+    registered, n = _stop_core(p)
+    if registered is None:
+        return f"stop failed: {_TIMED_OUT}"
+    if registered:
+        return "stop failed: launchd still reports the job"
+    if not installed:
+        # §3: no plist, but a directly-spawned backend (isolated dev) or
+        # strays can still be alive — the sweep ended them. With a clean
+        # verdict this is a successful stop: stop is idempotent, and "nothing
+        # registered, nothing running" already satisfies it (it must not
+        # abort the §4.9 QUIT/RESET flows on a machine whose registration is
+        # missing).
         if n:
             return f"stopped — service was not installed; ended {n} lingering process(es)"
         return "already stopped — service not installed, nothing was running"
-    _unload(p)
+    note = f" · ended {n} lingering process(es)" if n else ""
+    return f"stopped — returns at next login or app launch{note}"
+
+
+def _stop_core(p: Path) -> tuple[bool | None, int]:
+    """§3 shared half of `stop` and `uninstall`: unload the job, sweep stray
+    processes, and judge the result tri-state. With no plist on disk the job
+    is still booted out by label (a registration outlives a hand-deleted
+    plist; bootout needs no plist). Returns (still registered — None when
+    launchctl couldn't answer, the swept process count)."""
+    if p.exists():
+        _unload(p)
+    else:
+        _launchctl("bootout", f"gui/{os.getuid()}/{LABEL}")
+        _wait_unregistered(_UNLOAD_DEADLINE_S)
     n = _sweep_strays()
     if n and _registered():
         # bootout already requested removal, so KeepAlive cannot respawn the
         # job — the sweep's kill is what lets launchd finish a removal that
         # outlived _unload's wait. Give it a short second window.
-        deadline = time.monotonic() + _SWEEP_DEADLINE_S
-        while True:
-            if not _registered():
-                break
-            if time.monotonic() >= deadline or _budget_exhausted():
-                break
-            time.sleep(_POLL_INTERVAL_S)
-    registered = _registered()
-    if registered is None:
-        return f"stop failed: {_TIMED_OUT}"
-    if registered:
-        return "stop failed: launchd still reports the job"
-    note = f" · ended {n} lingering process(es)" if n else ""
-    return f"stopped — returns at next login or app launch{note}"
+        _wait_unregistered(_SWEEP_DEADLINE_S)
+    return _registered(), n
 
 
 @_budgeted

@@ -243,7 +243,12 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
         if pkgs:
             meta["packages"] = pkgs
         steps = []
-        for s in ver["steps"]:
+        for i, s in enumerate(ver["steps"], 1):
+            # §5.1: a manifest that can't travel (hand-edited shapes the
+            # lenient loader tolerates) is a 422 naming the step — never a
+            # member named `None` or a 500 from int().
+            if not isinstance(s.get("file"), str) or not s["file"]:
+                raise TransferError(f"step {i} has no file name — repair the automation first")
             entry = {"file": s["file"], "name": s.get("name", ""), "description": s.get("description", "")}
             if s.get("agent"):
                 entry["agent"] = True
@@ -265,7 +270,13 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
             # §4.1 per-step time limits travel — a no_timeout long-runner must
             # not silently regain the default watchdog on another Mac.
             if s.get("timeout"):
-                entry["timeout"] = int(s["timeout"])
+                timeout = s["timeout"]
+                if isinstance(timeout, bool) or not (
+                        isinstance(timeout, int)
+                        or (isinstance(timeout, str) and timeout.strip().isdigit())):
+                    raise TransferError(f"step {s['file']!r} has a non-integer timeout "
+                                        f"({timeout!r}) — repair the automation first")
+                entry["timeout"] = int(timeout)
             if s.get("no_timeout"):
                 entry["no_timeout"] = True
             # §4.1 retry pair travels the same way (§8: same shape rules as the
@@ -366,7 +377,9 @@ def _yaml_or_reject(z: zipfile.ZipFile, path: str, required: bool = True) -> dic
         return {}
     try:
         data = yaml.safe_load(raw.decode("utf-8"))
-    except (yaml.YAMLError, UnicodeDecodeError) as e:
+    except (yaml.YAMLError, UnicodeDecodeError, ValueError) as e:
+        # ValueError: an impossible unquoted date (`2026-13-45`) — PyYAML
+        # raises it outside its own error family.
         raise TransferError(f"{path} isn't valid YAML: {e}") from None
     except RecursionError:
         # Deeply nested collections blow the parser's stack instead of raising
@@ -514,7 +527,8 @@ def _validate(z: zipfile.ZipFile) -> dict:
     if not isinstance(params, list):
         raise TransferError("param definitions must be a list")
     for p in params:
-        if not isinstance(p, dict) or not p.get("name") or p.get("kind") not in PARAM_KINDS:
+        if (not isinstance(p, dict) or not isinstance(p.get("name"), str)
+                or not p["name"].strip() or p.get("kind") not in PARAM_KINDS):
             raise TransferError(f"invalid parameter definition: {p!r}")
         # §4.2/§5.1: every definition carries a default — the rule the app's own
         # save path enforces, so the first edit of an imported version can never

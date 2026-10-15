@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import sys
 
 import pytest
 
@@ -868,7 +869,7 @@ def test_trigger_add_interval():
         "kind": "interval", "every": "PT6H", "enabled": True, "source": "user",
         "runIfMissed": False}
     sent_before = len(c.posted)
-    with pytest.raises(SystemExit, match="an interval has no timezone"):
+    with pytest.raises(SystemExit, match="--timezone only applies to cron and --at triggers"):
         cli.cmd_trigger_add(c, args(every="PT6H", timezone="Asia/Tokyo"))
     assert len(c.posted) == sent_before
 
@@ -3772,3 +3773,207 @@ def test_create_never_settles_the_pending_app_draft(tmp_path):
     _run(c, "automation", "create", str(d), "--grant-secret", "API_TOKEN")
     _, _, body = next(p for p in c.posted if p[:2] == ("POST", "/automations"))
     assert body["settlePending"] is False
+
+
+# ---------------------------------------------------------------- 2026-10-14 audit
+
+
+@pytest.mark.parametrize("ref", ["", "   "])
+def test_an_empty_reference_is_a_usage_error_never_a_match(ref):
+    """§20: an empty reference (an unset shell variable) never matches - a
+    bare prefix test would select the only automation or snapshot on file."""
+    from autowright import cli
+
+    with pytest.raises(SystemExit) as ei:
+        cli._resolve([dict(FULL_AUTO)], ref, "automation")
+    assert str(ei.value.code) == "give an automation name or id"
+    c = _RouteClient(_auto_gets(dict(FULL_AUTO, snapshots=SNAPS)))
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "snapshot", "delete", "Daily Report", ref)
+    assert str(ei.value.code) == "give a snapshot id"
+    assert c.calls == []                       # nothing deleted
+
+
+def test_cmd_marketplace_catalog_add_expands_a_tilde_in_export_to(
+        tmp_path, monkeypatch, capsys):
+    """§20 tilde rule: `--export-to ~/…` is tilde-expanded before it is made
+    absolute, like `dataPath=`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    c = _MarketClient([*SOURCES, KEPT_SOURCE],
+                      gets={KEPT_CATALOG_PATH: {"name": "Kept", "description": "",
+                                                "entries": []},
+                            "/automations": [dict(FULL_AUTO)]},
+                      writes={KEPT_CATALOG_PATH: {"id": "m3333333-c", "name": "Kept"}})
+    _run(c, "marketplace", "catalog", "add", "Kept", "Daily Report",
+         "--export-to", "~/shared")
+    assert c.calls[0][2]["exportFolder"] == str(tmp_path / "shared")
+    capsys.readouterr()
+
+
+class _FailingDataPathClient(_RouteClient):
+    """A backend that refuses the data-path move the way c.req does: exit 1
+    with the API detail."""
+
+    def req(self, method, path, body=None, timeout=30):
+        result = super().req(method, path, body, timeout)
+        if path == "/settings/data-path":
+            sys.exit("422: the folder isn't writable")
+        return result
+
+
+def test_cmd_settings_set_patches_ordinary_keys_before_the_data_path(capsys):
+    """§20: the ordinary keys go first, in one PATCH, and `dataPath=` after -
+    a refused data path leaves them applied and says so."""
+    c = _RouteClient()
+    _run(c, "settings", "set", "dataPath=/Volumes/T7/aw", "days=10")
+    assert c.calls == [("PATCH", "/settings", {"days": 10}),
+                       ("POST", "/settings/data-path", {"path": "/Volumes/T7/aw"})]
+    capsys.readouterr()
+
+    c = _FailingDataPathClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "settings", "set", "dataPath=/Volumes/T7/aw", "days=10")
+    assert str(ei.value.code) == \
+        "settings applied; data path unchanged: 422: the folder isn't writable"
+    assert c.calls[0] == ("PATCH", "/settings", {"days": 10})
+
+    # a data path alone fails with the API's own line, nothing to qualify
+    with pytest.raises(SystemExit) as ei:
+        _run(_FailingDataPathClient(), "settings", "set", "dataPath=/Volumes/T7/aw")
+    assert str(ei.value.code) == "422: the folder isn't writable"
+
+
+def test_cmd_settings_set_a_refused_patch_never_moves_the_data_path():
+    """§20: a refused ordinary key leaves the data path untouched - c.req
+    exits on the PATCH, before the POST is sent."""
+
+    class _RefusingPatch(_RouteClient):
+        def req(self, method, path, body=None, timeout=30):
+            result = super().req(method, path, body, timeout)
+            if method == "PATCH":
+                sys.exit("422: days: out of range")
+            return result
+
+    c = _RefusingPatch()
+    with pytest.raises(SystemExit):
+        _run(c, "settings", "set", "dataPath=/Volumes/T7/aw", "days=99999")
+    assert c.calls == [("PATCH", "/settings", {"days": 99999})]
+
+
+@pytest.mark.parametrize("flag", ["--since", "--until"])
+def test_cmd_execution_list_refuses_a_date_before_1970(flag):
+    """§20: a date before 1970 is a usage error naming the flag, never a
+    negative stamp riding to the server."""
+    with pytest.raises(SystemExit) as ei:
+        _run(_RouteClient(_auto_gets()), "execution", "list", flag, "1969-12-31")
+    assert str(ei.value.code) == f"error: {flag}: dates before 1970 aren't supported"
+
+
+@pytest.mark.parametrize("piped, stored", [
+    ("abc\n\n", "abc\n"),         # exactly one newline, never a run of them
+    ("abc\r\n", "abc"),           # a CRLF terminator goes whole
+    ("abc", "abc"),               # no terminator, nothing trimmed
+])
+def test_cmd_secret_set_stdin_trims_exactly_one_trailing_newline(
+        monkeypatch, capsys, piped, stored):
+    from autowright import cli
+
+    secrets = [{"id": "s-1", "name": "API_TOKEN", "set": True, "usedBy": []}]
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(piped))
+    c = _RouteClient({"/secrets": secrets})
+    _run(c, "secret", "set", "API_TOKEN", "--stdin")
+    assert c.calls == [("PUT", "/secrets/s-1", {"value": stored})]
+    capsys.readouterr()
+
+
+def test_cmd_secret_set_checks_the_name_before_reading_a_value(monkeypatch):
+    """§20: the §4.8 name form is checked before the prompt or the stdin read,
+    in the server's own words - a lowercase name never asks for a value."""
+    from autowright import cli
+
+    def _never(*_a, **_k):
+        raise AssertionError("asked for a value")
+
+    monkeypatch.setattr(cli.getpass, "getpass", _never)
+    stdin = io.StringIO("value\n")
+    monkeypatch.setattr(cli.sys, "stdin", stdin)
+    for extra in ([], ["--stdin"]):
+        c = _RouteClient({"/secrets": []})
+        with pytest.raises(SystemExit) as ei:
+            _run(c, "secret", "set", "api_token", *extra)
+        assert str(ei.value.code).startswith("secret names must match [A-Z][A-Z0-9_]*")
+        assert c.calls == []
+    assert stdin.tell() == 0                   # stdin never read
+
+
+class _DuplicateGrantClient(_WorkdirClient):
+    """Duplicates already on disk still load (§4.7/§4.8 uniqueness is enforced
+    at write time only)."""
+
+    def req(self, method, path, body=None, timeout=30):
+        if method == "GET" and path == "/agents":
+            return [{"id": "ag111111", "name": "Fast local", "harness": "OpenCode"},
+                    {"id": "ag222222", "name": "fast LOCAL", "harness": "Codex"}]
+        if method == "GET" and path == "/secrets":
+            return [{"id": API_TOKEN_ID, "name": "API_TOKEN", "set": True, "usedBy": []},
+                    {"id": "se222222", "name": "API_TOKEN", "set": True, "usedBy": []}]
+        return super().req(method, path, body, timeout)
+
+
+@pytest.mark.parametrize("flag, value, listing", [
+    ("--grant-agent", "fast local", "Fast local (ag111111), fast LOCAL (ag222222)"),
+    ("--grant-secret", "API_TOKEN", f"API_TOKEN ({API_TOKEN_ID[:8]}), API_TOKEN (se222222)"),
+    ("--agent", "Fast local", "Fast local (ag111111), fast LOCAL (ag222222)"),
+])
+def test_cmd_automation_create_a_shared_grant_name_exits_with_the_candidates(
+        tmp_path, flag, value, listing):
+    """§20: a name two records share exits with the candidate list, never the
+    first match."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, FULL_AUTO)
+    c = _DuplicateGrantClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "create", str(d), flag, value)
+    assert str(ei.value.code) == f"{value!r} is ambiguous - matches: {listing}"
+    assert c.posted == []
+
+
+@pytest.mark.parametrize("kind", [
+    {"every": "PT6H"}, {"app_start": True},
+    {"discord": "123", "secret": "API_TOKEN"}, {"imessage": "+15551234567"}])
+def test_trigger_add_refuses_timezone_on_a_zoneless_kind(kind):
+    """§20: only cron and --at carry a zone; any other kind with --timezone
+    exits 1, never stored and silently dropped."""
+    from types import SimpleNamespace
+
+    from autowright import cli
+
+    args = SimpleNamespace(**{"automation": "Daily Report", "discord": None,
+                              "secret": None, "pattern": None, "mention": False,
+                              "author": None, "imessage": None, "app_start": False,
+                              "at": None, "every": None, "expression": None,
+                              "timezone": "Asia/Tokyo", **kind})
+    c = _WorkdirClient()
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_trigger_add(c, args)
+    assert str(ei.value.code) == "--timezone only applies to cron and --at triggers"
+    assert c.posted == []
+
+
+def test_catalog_remove_help_numbers_by_the_catalog_file():
+    """§22.7: remove numbers entries by the catalog file's own order, which can
+    differ from the last-refresh copy `marketplace list` shows - the help says
+    so rather than pointing at `marketplace list`."""
+    from autowright import cli
+
+    import argparse
+
+    parser = cli.build_parser(full=True)
+    for word in ("marketplace", "catalog", "remove"):
+        parser = next(a for a in parser._actions
+                      if isinstance(a, argparse._SubParsersAction)).choices[word]
+    help_text = " ".join(parser.format_help().split())
+    assert "its position in the catalog file" in help_text
+    assert "by the number `marketplace list` prints" not in help_text

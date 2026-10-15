@@ -47,6 +47,10 @@ description: Build, launch, and drive Autowright (Electron + Python backend) to 
   `-m autowright.` process on the machine — it would kill the developer's own backend.
   End a driven app with `electronApp.evaluate(({ app }) => app.exit(0))` (what
   `e2e/harness.ts` `closeApp` does), then kill the process if it lingers.
+- **A driven dev launch installs the REAL CLI shim** (`ensureCliFirstRun`: when
+  `~/.local/bin/autowright` is missing it writes one pointing at the repo venv and logs
+  `cli-install: CLI installed at …`; observed 2026-10-14). After a session remove it if it
+  didn't exist before, or leave the user's real shim alone if it did.
 - **Driving Electron with the stored `login: true` registers REAL login items** pointing at
   the dev `app/node_modules/electron/dist/Electron.app` (the §4.9 apply-settings push runs on
   boot regardless of `AUTOWRIGHT_HOME`). After a verify session, check System Settings login

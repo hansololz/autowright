@@ -882,7 +882,7 @@ def create_auto(body: models.AutomationCreate) -> dict:
         raise HTTPException(422, err)
     _validate_draft_steps(d)  # §19: the §8 validators run server-side
     if body.settlePending:
-        _cancel_live_draft_work(None)  # §11/§19: Create settles the pending slot — its live test and jobs die
+        _settle_draft(None)  # §11/§19: Create settles the pending slot — its live test and jobs die
     a = store.create_automation(
         _draft_to_version(d),
         # §4.1/§19: the name may be agent-seeded or the fallback, so create
@@ -949,7 +949,7 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
     # before the cancels (the in-lock check below stays authoritative).
     with store.lock:
         _reject_live_draft_exec(a)
-    _cancel_live_draft_work(automation_id)  # §11/§19: saving settles the draft — its live test and jobs die
+    _settle_draft(automation_id)  # §11/§19: saving settles the draft — its live test and jobs die
     ver = _draft_to_version(d)
     with store.lock:
         # Same guard as PUT/DELETE draft: saving deletes the draft container,
@@ -988,9 +988,10 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
 
 
 # §19 draft generation: per owner (automation id, None = the pending slot),
-# bumped by `DELETE /draft/{owner}` under store.lock. A `POST /drafts` that
-# read an older generation before building its context is refused at
-# registration, so a discard never misses a job still being assembled.
+# bumped under store.lock by every draft settle (`_settle_draft`: the discard,
+# the version save, the settling create). A `POST /drafts` that read an older
+# generation before building its context is refused at registration, so a
+# settle never misses a job still being assembled.
 draft_generations: dict[str | None, int] = {}
 
 
@@ -1012,6 +1013,17 @@ def _cancel_live_draft_work(container_id: str | None) -> list[str]:
         engine.cancel(h["id"])
     draft_jobs.cancel_for(container_id)
     return [h["id"] for h in live]
+
+
+def _settle_draft(owner_id: str | None) -> list[str]:
+    """§19 the one shared draft-settle helper (bump, then cancel): bump the
+    owner's draft generation under store.lock, so a POST /drafts registering
+    after the cancels sees the bump and cancels itself, then cancel the
+    owner's live draft work outside the lock. Returns the cancelled test
+    execution ids."""
+    with store.lock:
+        draft_generations[owner_id] = draft_generations.get(owner_id, 0) + 1
+    return _cancel_live_draft_work(owner_id)
 
 
 def _reject_live_draft_exec(a: dict) -> None:
@@ -1098,13 +1110,10 @@ def delete_draft_container(owner: str) -> dict:
     # A refused settle must be side-effect free: check the 409 condition
     # before the cancels (the in-lock check below stays authoritative).
     owner_id = a["id"] if a is not None else None
-    with store.lock:
-        if a is not None:
+    if a is not None:
+        with store.lock:
             _reject_live_draft_exec(a)
-        # §19 draft generation: bumped before the cancels, so a POST /drafts
-        # registering after them sees the bump and cancels itself.
-        draft_generations[owner_id] = draft_generations.get(owner_id, 0) + 1
-    _cancel_live_draft_work(owner_id)  # §11/§19: discard settles the draft
+    _settle_draft(owner_id)  # §11/§19: discard settles the draft
     with store.lock:
         if a is not None:
             _reject_live_draft_exec(a)
@@ -1817,7 +1826,9 @@ def post_draft(body: models.DraftJobStart) -> dict:
         draft_jobs.cancel_for(owner_id)
         raise HTTPException(404, "automation not found")
     if discarded:
-        draft_jobs.cancel(job_id)
+        # §19: a job that already settled (a missing harness binary fails on
+        # its own thread at once) is dropped from the held outcomes too.
+        draft_jobs.discard(job_id)
         raise HTTPException(409, "the draft was discarded")
     return {"jobId": job_id}
 

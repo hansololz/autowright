@@ -180,17 +180,19 @@ class Execution:
 
 
 class Log:
+    # §7: each call goes out as guarded ≤ MAX_LOG_PIECE pieces — an oversize
+    # `log(json.dumps(...))` must never tear the engine's bounded read.
     def __call__(self, text: str) -> None:
-        emit("log", kind="out", text=str(text))
+        _emit_log("out", str(text))
 
     def info(self, text: str) -> None:
-        emit("log", kind="out", text=str(text))
+        _emit_log("out", str(text))
 
     def warn(self, text: str) -> None:
-        emit("log", kind="wrn", text=str(text))
+        _emit_log("wrn", str(text))
 
     def error(self, text: str) -> None:
-        emit("log", kind="err", text=str(text))
+        _emit_log("err", str(text))
 
 
 class Result:
@@ -214,8 +216,9 @@ class Result:
 
     def chip(self, text: str) -> None:
         # A chip is a short §4.5 badge — cap it so a runaway string can never
-        # blow the engine's size-capped control-line read.
-        emit("result", field="chip", value=str(text)[:1_000])
+        # blow the engine's size-capped control-line read. §7: a guarded cut,
+        # never a fixed slice ahead of the engine's redaction.
+        emit("result", field="chip", value=(_guarded_pieces(str(text), 1_000) or [""])[0])
 
 
 def substantive_probe(part: str) -> bool:
@@ -385,6 +388,19 @@ def fetch_page(url: str) -> str:
 # §7: the automation's secret values (plus each substantive line of a
 # multi-line value, §4.8) a log-piece cut must never split — set in `main()`.
 _cut_guards: list[str] = []
+# §7: longest cut guard − 1 (0 with no guards) — how many trailing characters
+# the line writer's newline-free overflow flush holds back, so a value
+# straddling two `write` calls is never split by the buffer's own end. Set in
+# `main()` beside `_cut_guards`.
+_GUARD_TAIL = 0
+
+# §7 / §4.5: the structured `error` event's message is clipped here (guarded
+# cut, marker below) and again by the engine after redaction.
+ERROR_MESSAGE_CAP = 4_000
+CLIP_MARKER = "… [clipped]"
+# §7: every executor-originated log text goes out as pieces of at most this
+# many characters — far under the engine's size-capped readline.
+MAX_LOG_PIECE = 131_072
 
 
 def _build_cut_guards(scan: dict[str, str]) -> list[str]:
@@ -400,8 +416,68 @@ def _build_cut_guards(scan: dict[str, str]) -> list[str]:
     return guards
 
 
+def _guard_tail(guards: list[str]) -> int:
+    """§7: the overflow hold-back — longest guard − 1, 0 when there are none."""
+    return max((len(guard) for guard in guards), default=1) - 1
+
+
+def _guarded_boundary(text: str, start: int, end: int, limit: int) -> int:
+    """§7: `end` moved back to just before any `_cut_guards` occurrence that
+    straddles it (a guard longer than `limit` can't be kept whole and is
+    ignored). May return `start` — callers decide what an empty piece means."""
+    cut = end
+    for guard in _cut_guards:
+        if len(guard) > limit:
+            continue
+        # Any occurrence starting in this window straddles `end`.
+        found = text.find(guard, max(start, end - len(guard) + 1), end + len(guard) - 1)
+        if found != -1:
+            cut = min(cut, found)
+    return cut
+
+
+def _guarded_pieces(text: str, limit: int) -> list[str]:
+    """§7: `text` as consecutive pieces of at most `limit` characters. A
+    boundary that would split an occurrence of a secret value (`_cut_guards`)
+    moves back to just before it, so the engine redacts every piece whole;
+    never an empty piece (a boundary with nowhere to move cuts at `limit`).
+    Empty text gives no pieces."""
+    pieces: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + limit, len(text))
+        if end < len(text):
+            cut = _guarded_boundary(text, start, end, limit)
+            if cut > start:  # never an empty piece — cut at the limit then
+                end = cut
+        pieces.append(text[start:end])
+        start = end
+    return pieces
+
+
+def _guarded_clip(text: str, limit: int, marker: str = CLIP_MARKER) -> str:
+    """§7: the first guarded piece of `text`, with `marker` appended when
+    something was cut — never a fixed slice that could leave a secret's head
+    behind as a fragment the engine's redaction can't match."""
+    if len(text) <= limit:
+        return text
+    return _guarded_pieces(text, limit)[0] + marker
+
+
+def _emit_log(kind: str, text: str) -> None:
+    """§7: one log text as ≤ MAX_LOG_PIECE guarded pieces, each its own
+    control line — an oversize `log()` never tears the engine's bounded read."""
+    for piece in _guarded_pieces(text, MAX_LOG_PIECE) or [text]:
+        emit("log", kind=kind, text=piece)
+
+
+def _emit_error(error_type: str, message: str) -> None:
+    """§7: the structured `error` event, its message clipped at a guarded cut."""
+    emit("error", type=error_type, message=_guarded_clip(message, ERROR_MESSAGE_CAP))
+
+
 class _LineWriter(io.TextIOBase):
-    MAX_LINE = 131_072  # a newline-free stream must not grow the buffer unbounded
+    MAX_LINE = MAX_LOG_PIECE  # a newline-free stream must not grow the buffer unbounded
 
     def __init__(self, kind: str):
         self.kind = kind
@@ -414,24 +490,9 @@ class _LineWriter(io.TextIOBase):
         unparsable JSON). §7: a cut never falls inside an occurrence of a
         secret value (`_cut_guards`) — the boundary moves back to just before
         it, so the engine's redaction sees every occurrence whole."""
-        start = 0
-        while start < len(text):
-            end = min(start + self.MAX_LINE, len(text))
-            if end < len(text):
-                cut = end
-                for guard in _cut_guards:
-                    if len(guard) > self.MAX_LINE:
-                        continue
-                    # Any occurrence starting in this window straddles `end`.
-                    found = text.find(guard, max(start, end - len(guard) + 1), end + len(guard) - 1)
-                    if found != -1:
-                        cut = min(cut, found)
-                if cut > start:  # never an empty piece — cut at MAX_LINE then
-                    end = cut
-            piece = text[start:end]
+        for piece in _guarded_pieces(text, self.MAX_LINE):
             if piece.strip():
                 emit("log", kind=self.kind, text=piece)
-            start = end
 
     def write(self, s: str) -> int:  # type: ignore[override]
         self.buf += s
@@ -440,8 +501,16 @@ class _LineWriter(io.TextIOBase):
             if line.strip():
                 self._emit(line)
         if len(self.buf) > self.MAX_LINE:
-            self._emit(self.buf)
-            self.buf = ""
+            # §7: hold back the last `_GUARD_TAIL` characters — a secret value
+            # whose head ends this buffer may finish in the next `write`. The
+            # hold-back point itself is a guarded boundary, so a value already
+            # whole in the buffer is never split by it either.
+            cut = len(self.buf) - _GUARD_TAIL
+            if _GUARD_TAIL and cut > 0:
+                cut = _guarded_boundary(self.buf, 0, cut, self.MAX_LINE)
+            if cut > 0:
+                self._emit(self.buf[:cut])
+                self.buf = self.buf[cut:]
         return len(s)
 
     def flush(self) -> None:
@@ -459,8 +528,9 @@ def main() -> int:
     # a wiring mistake that drops it must fail loudly here, not silently
     # narrow the outbound scan to the step's own secrets (fail closed).
     scan_secrets = ctx.pop("scan_secrets")
-    global _cut_guards
+    global _cut_guards, _GUARD_TAIL
     _cut_guards = _build_cut_guards(scan_secrets)
+    _GUARD_TAIL = _guard_tail(_cut_guards)
     # §6.2: declared packages live in the user-writable site-packages dir — the
     # bundled interpreter never has them installed directly.
     if ctx.get("site_packages"):
@@ -493,8 +563,9 @@ def main() -> int:
 
     def notify(text: str) -> None:
         # macOS notifications show ~150 chars — cap well above that so an
-        # oversize string can't blow the engine's control-line read.
-        emit("notify", text=str(text)[:10_000])
+        # oversize string can't blow the engine's control-line read. §7: a
+        # guarded cut, never a fixed slice ahead of the engine's redaction.
+        emit("notify", text=(_guarded_pieces(str(text), 10_000) or [""])[0])
 
     def reply(text: str) -> None:
         # §6.1: only message-trigger executions have an origin to answer; the
@@ -556,8 +627,8 @@ def main() -> int:
             msg = (f"import {', '.join(bad)} isn't allowed — steps may only import "
                    f"the Python stdlib, the curated packages, and this automation's "
                    f"declared packages (§6.2)")
-            emit("error", type="DisallowedImport", message=msg)
-            emit("log", kind="err", text=msg)
+            _emit_error("DisallowedImport", msg)
+            _emit_log("err", msg)
             return 4
         code = compile(source, script, "exec")
         exec(code, g)  # noqa: S102 — this is the engine's job
@@ -569,8 +640,8 @@ def main() -> int:
         # failure time is exactly the output tail the user needs in the log.
         sys.stdout.flush()
         sys.stderr.flush()
-        emit("error", type="MissingSecret", message=str(e))
-        emit("log", kind="err", text=str(e))
+        _emit_error("MissingSecret", str(e))
+        _emit_log("err", str(e))
         return 3
     except SystemExit as e:
         # A step calling sys.exit() / sys.exit(0) is an ordinary early exit,
@@ -589,8 +660,8 @@ def main() -> int:
         else:
             msg = f"SystemExit: {e.code}"
             rc = 1
-        emit("error", type="SystemExit", message=msg)
-        emit("log", kind="err", text=msg)
+        _emit_error("SystemExit", msg)
+        _emit_log("err", msg)
         return rc
     except BaseException as e:  # noqa: BLE001
         # §7 failure diagnostics: the engine stores this structured event as the
@@ -600,10 +671,10 @@ def main() -> int:
             sys.stderr.flush()
         except Exception:  # noqa: BLE001
             pass
-        emit("error", type=type(e).__name__,
-             message=f"{type(e).__name__}: {e}" if str(e) else type(e).__name__)
+        _emit_error(type(e).__name__,
+                    f"{type(e).__name__}: {e}" if str(e) else type(e).__name__)
         for ln in traceback.format_exc().strip().splitlines():
-            emit("log", kind="err", text=ln)
+            _emit_log("err", ln)
         return 1
 
 

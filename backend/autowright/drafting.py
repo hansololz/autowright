@@ -207,10 +207,12 @@ Delivery override for this environment — this changes HOW you return files, no
 - Write each file as soon as it is ready, one after another — do not batch them at the end.
 - If you are blocked, write NO files and print the blocker envelope
   (===BLOCKED=== … ===END===) to stdout exactly as the instructions specify.
-- When asked to resend corrected files, follow the VALIDATION ERRORS note: write only
-  the failed files — the blocks it lists as kept are held by the backend exactly as you
-  wrote them and must not be resent. Each attempt starts with an empty working
-  directory; a kept file you don't write stays kept, a failed file you skip is dropped."""
+- When asked to resend corrected files, follow the VALIDATION ERRORS note. If it lists
+  blocks as kept, write only the failed files — the kept ones are held by the backend
+  exactly as you wrote them and must not be resent. If it asks for the full envelope and
+  lists nothing kept, write EVERY file again — the corrected and the unchanged ones
+  alike. Each attempt starts with an empty working directory: on a full-envelope round
+  a file you skip is lost."""
 # Canonical in harness (the recombiner needs it too; drafting imports
 # harness, never the reverse) — aliased so every drafting reference stays.
 FENCE_OPEN_RE = harness.FENCE_OPEN_RE
@@ -761,7 +763,7 @@ def parse_blockers(text: str) -> tuple[list[dict] | None, str | None]:
         notes = (files.get("notes.md") or "").strip() or None
     try:
         data = yaml.safe_load(text[m.end(): endm.start()])
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, ValueError, RecursionError) as e:
         raise ValueError(f"blocker envelope doesn't parse as yaml: {e}")
     blockers = data.get("blockers") if isinstance(data, dict) else None
     if not isinstance(blockers, list) or not blockers:
@@ -888,7 +890,10 @@ def validate_actions(text: str, param_names: list[str] | None = None,
     — the range `triggers` op indexes must fall in."""
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, ValueError, RecursionError) as e:
+        # §5: PyYAML raises ValueError on an impossible date (2026-13-45)
+        # and RecursionError on a deeply nested document — both are agent
+        # output errors that feed the repair round, never a 500.
         return {}, [f"actions.yaml doesn't parse as yaml: {e}"]
     if not isinstance(data, dict):
         return {}, ["actions.yaml must be a yaml mapping"]
@@ -1120,7 +1125,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         return {}, errors
     try:
         manifest = yaml.safe_load(files["manifest.yaml"]) or {}
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, ValueError, RecursionError) as e:  # same set as actions.yaml
         return {}, [f"manifest.yaml doesn't parse: {e}"]
     if not isinstance(manifest, dict):
         return {}, ["manifest.yaml must be a mapping"]
@@ -1681,6 +1686,21 @@ class DraftJobs:
             if v["status"] in _HELD_STATUSES:
                 self._publish(v, "consumed")
 
+    def discard(self, job_id: str) -> None:
+        """§19 POST /drafts refused at registration ("the draft was
+        discarded"): cancel the job if it is still building, else drop its
+        record — an outcome that settled before the check (a missing harness
+        binary fails at once) must not be held for the fresh draft."""
+        if self.cancel(job_id):
+            return
+        with self._lock:
+            j = self.jobs.get(job_id)
+            if j is None or j["status"] == "building":
+                return
+            del self.jobs[job_id]
+        if j["status"] in _HELD_STATUSES:
+            self._publish(j, "consumed")
+
     def ack(self, job_id: str) -> str:
         """§19 POST /drafts/{jobId}/ack — the §11 editor consumed a settled
         job's outcome (applied + persisted). Drops the record. Returns
@@ -1968,7 +1988,7 @@ class DraftJobs:
                     + f"({', '.join(failed)}); omit one to drop it entirely."
                     + "\nAny prose before your first block replaces the accompanying "
                     + "chat message.")
-        return (out + "\n\n=== VALIDATION ERRORS — fix these and resend ===\n- "
+        return (out + "\n\n=== VALIDATION ERRORS — fix these and resend the full envelope ===\n- "
                 + "\n- ".join(errors))
 
     @staticmethod
@@ -2372,7 +2392,7 @@ class DraftJobs:
                         manifest = yaml.safe_load(text[end:marks[i + 1][1]])
                         steps = manifest.get("steps") if isinstance(manifest, dict) else None
                         state["total"] = len(steps) if isinstance(steps, list) and steps else None
-                    except yaml.YAMLError:
+                    except (yaml.YAMLError, ValueError, RecursionError):
                         pass
                     break
         return state["total"]
@@ -2384,7 +2404,7 @@ class DraftJobs:
         proving it complete)."""
         try:
             manifest = yaml.safe_load(content)
-        except yaml.YAMLError:
+        except (yaml.YAMLError, ValueError, RecursionError):
             return
         steps = manifest.get("steps") if isinstance(manifest, dict) else None
         state["total"] = len(steps) if isinstance(steps, list) and steps else None

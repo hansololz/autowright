@@ -49,6 +49,11 @@ const exportAutomation = vi.fn<(automationId: string, values: boolean) => Promis
 
 vi.mock('../src/api', () => ({
   connectInfo: vi.fn(async () => true),
+  // §9.2 save seam: the page saves through api.saveFile, which hands the
+  // call to the bridge stub above.
+  saveFile: (n: string, d: ArrayBuffer) =>
+    (window as unknown as { autowright: { saveFile: (n: string, d: ArrayBuffer) => Promise<string | null> } })
+      .autowright.saveFile(n, d),
   openWs: vi.fn(() => () => {}),
   api: {
     state: vi.fn(async () => ({

@@ -384,8 +384,11 @@ past one-shot found on disk at load is consumed unfired either way (only a *pars
 counts as spent — an unreadable `at`, such as an unquoted timestamp YAML loaded as a datetime,
 is dropped with the §5 malformed-trigger warning, never consumed silently). A due one-shot
 is consumed only when its firing was attempted — an execution started, or a skipped
-record written; a tick that meets the shutting-down engine (§7) consumes nothing, so the
-one-shot fires at the next start's wake catch-up instead of vanishing with no record.
+record written; a tick that meets the shutting-down engine (§7) consumes nothing in that
+session: the trigger stays on disk, and the next start's load spends it like any other past
+one-shot found there (consumed unfired — there is no startup catch-up queue, §6). The
+shutdown path itself never consumes, so a one-shot can't be spent by a tick that fired
+nothing.
 Storage: written to
 `automation.yaml` only when false - an absent key reads as true, so every trigger stored
 before the field existed keeps today's behavior (§21). The API serializes it explicitly on
@@ -886,8 +889,9 @@ note: optional note ("previous execution still in progress", "the queue was full
 error: { step | null, message, reason | null } | null — failed executions only: the failing
   step's name — null when the execution failed before any step ran (the pre-step secret
   checks, a package-install failure; the §7/§9.2 failure headline then reads "Execution
-  failed") — its error message (redacted), and a plain-word possible reason when the engine
-  can classify the failure (§7 failure diagnostics). The same error is also stored on the failing
+  failed") — its error message (redacted, and capped at 4,000 characters — §7: the executor
+  clips it at a guarded cut and the engine clips again after redaction), and a plain-word
+  possible reason when the engine can classify the failure (§7 failure diagnostics). The same error is also stored on the failing
   attempt ({ message, reason }); the execution-level field mirrors the latest failing attempt
   and is cleared by a retry pass that succeeds (attempt history keeps the old error)
 pgid: int | null — on-disk only (never in list/full JSON): the process-group id of the live
@@ -928,7 +932,12 @@ directly into `result/` (result.md, result.html, images, CSVs, …). There is no
 file list is the directory listing. Renderable files get their own result views (§7): `.md`
 rendered as GitHub-flavored markdown — one shared Markdown component (react-markdown +
 remark-gfm, app-styled; output is React elements, never injected HTML, so no sanitizer is
-needed) used everywhere the app renders markdown, with one standard styling for every
+needed; **images render only from `data:` URLs** — a markdown image whose source is any
+other scheme (`https://host/x.png` in an imported or marketplace automation's spec, in a
+result.md, or in chat text) renders as its alt text followed by the URL as an ordinary
+link, never as a fetch: loading it would tell a third-party author when the user opened
+the page and from which address — the same `img-src data:` rule the `.html` result view
+enforces through its CSP) used everywhere the app renders markdown, with one standard styling for every
 surface: result views, the Build-instructions and Framework-instructions cards, and the
 Spec cards (create flow and automation page — no spec-specific look; markdown renders the
 same there as anywhere else). The component offers exactly one **compact variant**

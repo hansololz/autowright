@@ -282,6 +282,12 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   Automations installed from it are ordinary automations, and archive files the catalog
   referenced are the user's files; both are untouched. The built-in row refuses (409,
   above).
+- **Disk-first for every mutation** — settings, remove and refresh alike, not only add:
+  memory changes only once `marketplaces.yaml` is written, or it is rolled back to the
+  pre-call row when the write fails (a removed row returns to its place and its directory
+  stays; changed settings revert), so the page never shows a state the next launch won't
+  have. A refresh whose copy write fails (disk full, a read-only volume) records that as
+  the row's `error` — the ordinary 200 — never a 500.
 - The table is loaded once at backend startup into memory and rewritten whole on every
   change, like agents and secrets. Nothing here is ever executed: a catalog is data, an
   archive lands only through import.
@@ -360,7 +366,7 @@ catalog…** is the way to author one in-app, and §22.1 documents the file shap
   saves the catalog file the app holds: §19 `GET …/file` for the bytes, then the §3
   `save-file` dialog with the default name `marketplace-catalog.yaml`; a saved file toasts
   "Exported to <path>.", a cancelled dialog does nothing, a failed fetch toasts the
-  reason. This is how a catalog created in the app leaves the app: the user puts the file
+  reason, and a failed write toasts the §9.2 plain words ("Couldn't save the file: …"). This is how a catalog created in the app leaves the app: the user puts the file
   wherever they share from), **Refresh** (`fa-rotate`; rendered only when the catalog has
   a location; disabled while **any** refresh — this catalog, another catalog, or Refresh
   all — is running, since one refresh runs at a time from the page), **Catalog

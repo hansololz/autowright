@@ -197,6 +197,12 @@ class _WakeableRaw(io.RawIOBase):
                 pass
 
 
+# §7: the size-capped readline every streamed child pipe is read with — a
+# newline-free chunk of exactly this length was cut by the cap (more follows);
+# a shorter one is the stream's final fragment (EOF follows).
+PIPE_READLINE_CAP = 2_000_000
+
+
 class PipeReader:
     """§2 pipe-release contract: a line reader over a child's text pipe that
     a kill path can release from ANY thread without waiting for EOF.
@@ -213,7 +219,7 @@ class PipeReader:
     in-memory stand-ins) the calls fall through to the pipe object's own
     blocking reads and `defuse()` redirects its fd to the null device."""
 
-    def __init__(self, f, cap: int = 2_000_000):
+    def __init__(self, f, cap: int = PIPE_READLINE_CAP):
         self._f = f
         self._cap = cap
         self._raw: _WakeableRaw | None = None
@@ -619,7 +625,10 @@ def _deterministic_failure(stderr_tail: str) -> bool:
 FILE_MARK_RE = re.compile(r"^===FILE: (.+?)===\s*$", re.M)
 BLOCKED_MARK_RE = re.compile(r"^===BLOCKED===\s*$", re.M)
 STEP_FILE_RE = re.compile(r"^(\d{2})-[a-z0-9][a-z0-9-]*\.py$")
-FENCE_OPEN_RE = re.compile(r"^```[\w+.-]*$")
+# §8 fence line: three backticks then anything holding no further backtick
+# (an info string such as "yaml title=x", trailing whitespace) — matched
+# against the rstripped line.
+FENCE_OPEN_RE = re.compile(r"^```[^`]*$")
 
 
 def _mark_outside_fences(text: str, pattern: re.Pattern) -> re.Match | None:
@@ -630,7 +639,7 @@ def _mark_outside_fences(text: str, pattern: re.Pattern) -> re.Match | None:
     pos = 0
     for line in text.splitlines(keepends=True):
         bare = line.rstrip("\r\n")
-        if FENCE_OPEN_RE.match(bare):
+        if FENCE_OPEN_RE.match(bare.rstrip()):
             fenced = not fenced
         elif not fenced and pattern.match(bare):
             return pattern.match(text, pos)
@@ -1082,17 +1091,27 @@ class _ScratchWatcher:
             try:
                 if not entry.is_file(follow_symlinks=False):
                     continue
-                size = entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+            names.append(entry.name)
+        out: list[tuple[str, str]] = []
+        for name in names:
+            path = self._scratch / name
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
             except OSError:
                 continue
             if size > STDOUT_CAP_CHARS:
-                # Same stat-first cap as the poll: never pulled into memory.
+                # §8: every document, polled or not, gets the poll's stat-first
+                # cap — a polled one can have grown past it after its last
+                # poll, and it is never pulled into memory.
                 raise HarnessError(
                     f"{self._harness} produced over "
                     f"{STDOUT_CAP_CHARS // 1_000_000} MB of output — aborting")
-            names.append(entry.name)
-        return [(name, self._read(name)) for name in names
-                if (self._scratch / name).is_file()]
+            out.append((name, self._read(name)))
+        return out
 
 
 def _recombine(stdout_text: str, documents: list[tuple[str, str]]) -> str:

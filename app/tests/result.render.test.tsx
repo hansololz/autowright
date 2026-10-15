@@ -50,6 +50,27 @@ describe('Markdown (§4.5 shared renderer)', () => {
     expect(a.getAttribute('rel')).toBe('noreferrer')
     expect(document.querySelector('.ad-md-tablewrap table')).toBeTruthy()
   })
+
+  it('images render only from data: URLs (§4.5)', () => {
+    const pixel = 'data:image/png;base64,iVBORw0KGgo='
+    render(<Markdown text={`![dot](${pixel})`} />)
+    const img = document.querySelector('.ad-md img') as HTMLImageElement
+    expect(img).toBeTruthy()
+    expect(img.getAttribute('src')).toBe(pixel)
+    expect(img.getAttribute('alt')).toBe('dot')
+  })
+
+  it('any other image source renders as its alt text plus an ordinary link, never an <img> (§4.5)', () => {
+    render(<Markdown text={'![Chart](https://host.example/x.png)\n\n![](https://host.example/path/y.png)'} />)
+    expect(document.querySelector('.ad-md img')).toBeNull()
+    const links = Array.from(document.querySelectorAll('.ad-md a')) as HTMLAnchorElement[]
+    expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://host.example/x.png', 'https://host.example/path/y.png'])
+    expect(links.every((a) => a.getAttribute('target') === '_blank' && a.getAttribute('rel') === 'noreferrer')).toBe(true)
+    const text = document.querySelector('.ad-md')!.textContent!
+    expect(text).toContain('Chart https://host.example/x.png')
+    // no alt text: the file name stands in
+    expect(text).toContain('y.png https://host.example/path/y.png')
+  })
 })
 
 describe('ResultSection file-kind routing (§7)', () => {

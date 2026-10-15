@@ -65,7 +65,15 @@ the update bullets below).
   helper for no gain). No sudo required. A healthy backend is never touched, so an app launch
   never interrupts running executions — the health probe retries (three attempts, 2 s each,
   500 ms apart) before concluding the backend is unreachable, so a backend busy under its
-  store lock at launch is never bootout-ed as absent. Registration output/errors append to `app.log`
+  store lock at launch is never bootout-ed as absent; and when every probe goes unanswered
+  (no `backend.json` yet, or a port nothing listens on) the step asks the registration
+  itself before reinstalling — `service status`, the launchd job line: a job launchd
+  reports **active** is a backend still coming up (the login item and `RunAtLoad` start
+  together at login, and the probe window above is about one second), so the probe keeps
+  going for up to 20 s more (2 s apart) before `service install` may bootout it, and a
+  wake or missed-run catch-up execution already running is never killed by an app launch.
+  Only a job that is unregistered, loaded-but-inactive, or still silent after that window
+  is reinstalled. Registration output/errors append to `app.log`
   (visible in the §9.3 developer log overlay). Dev launches (`electron .` from the repo) have no
   bundled Python, so the ensure step is a no-op there — `scripts/dev.sh` installs the service
   from the repo venv before launching Electron, through the same `service install` code.
@@ -216,7 +224,10 @@ the update bullets below).
   which the one-`VERSION` design excludes by construction). The command is a shim script named
   `autowright`: `#!/bin/sh` with an `# autowright CLI shim` marker line, then
   `exec "<python>" -m autowright.cli "$@"` (module form per the shebang rule above; `<python>`
-  is the backend's real interpreter). On Windows (§2 groundwork, defined by `win32.cjs`) the
+  is the backend's real interpreter). The shim path is written only when it is absent or a
+  regular file: a symlink there, dangling or not, is treated as foreign — never written,
+  rewritten or chmodded through, since every operation would land wherever the link points
+  (every probe uses `lstat`). On Windows (§2 groundwork, defined by `win32.cjs`) the
   shim is a batch file `autowright.cmd`: `@echo off`, a `rem autowright CLI shim` marker line,
   then `"<python>" -m autowright.cli %*`, CRLF line endings, installed at
   `%LOCALAPPDATA%\Autowright\bin\autowright.cmd` (user-owned, same no-privilege rule; the
@@ -481,11 +492,24 @@ the update bullets below).
   found" — a dead dev backend must never make the app unquittable.
   The wait for launchd to finish a bootout is bounded
   by a 10 s wall-clock deadline (5 s for the second window after the sweep), never a poll
-  count. `stop` and `uninstall` judge "still registered" **tri-state**: a `launchctl print`
-  that timed out (or was skipped by an exhausted budget) is *unknown*, never "not
-  registered", so they answer `stop failed: launchctl timed out` (exit 1) instead of
-  reporting a stopped job launchd still holds — with `KeepAlive`, one that would respawn
-  the backend right after Quit. `stop` is bootout **plus a stray-process sweep**: after
+  count. `stop`, `uninstall`, `status`, and the unload wait inside `install`/`restart` judge
+  "still registered" **tri-state**: a `launchctl print` that timed out (or was skipped by
+  an exhausted budget) is *unknown*, never "not registered", so `stop` answers `stop
+  failed: launchctl timed out` (exit 1) instead of reporting a stopped job launchd still
+  holds — with `KeepAlive`, one that would respawn the backend right after Quit. `uninstall`
+  is `stop` plus removal: it runs the same unload and the same stray sweep, and only after a
+  clean verdict (not registered) deletes the plist and removes the shim; a job still held
+  answers `uninstall failed: launchd still reports the job`, an unknown one
+  `uninstall failed: launchctl timed out` (both exit 1, plist and shim kept — never a
+  deleted plist under a running KeepAlive job). `stop` with no plist on disk still boots
+  the job out by label before its sweep (a registration outlives a hand-deleted plist;
+  bootout needs no plist), and reports "already stopped" only when the verdict is clean.
+  The unload wait keeps waiting on an unknown probe until its deadline rather than reading
+  it as gone, and `_load`'s "not registered afterwards" verdict is only ever a definite
+  False (an unknown reads `launchctl timed out`). `status` prints `launchctl timed out`
+  when the list call timed out, never "stopped" for a job it couldn't see. The Linux
+  `uninstall` applies the same rule to its `disable --now`: a failed or timed-out stop keeps
+  the unit file and answers `uninstall failed: …`. `stop` is bootout **plus a stray-process sweep**: after
   launchd deregisters the job (or the 10 s deregistration wait expires), the stop TERM-then-KILLs
   every remaining process whose command line carries an Autowright marker (the §2
   `kill_matching` primitive), always excluding the stop process itself and its own process

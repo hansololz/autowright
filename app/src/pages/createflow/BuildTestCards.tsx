@@ -184,6 +184,14 @@ export function TestCard({
   // true once the record is tracked, so without this a second click during the
   // POST starts a second test run.
   const [posting, setPosting] = useState(false)
+  // §11: a Run test whose POST /tests answers after the editor unmounted
+  // tracks nothing. Re-armed on mount: StrictMode runs the cleanup once
+  // before the real mount.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   // §11: the tracked test is an ordinary execution record — steps/status render
   // off it (executionFull carries the body; the header list covers the gap before
@@ -283,6 +291,7 @@ export function TestCard({
         ...(mock ? { triggerMock: mock } : {}), // §11 test trigger message — only when text is nonempty
         enabledAgents: rev.enabledAgents, allowedSecrets: rev.allowedSecrets,
       })
+      if (!mountedRef.current) return
       beginTest(executionId)
       setTestedFp(fp)
     } catch (e) {

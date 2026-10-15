@@ -340,6 +340,10 @@ def client(home):
     store.agents = [{"id": "mock", "harness": "Claude Code", "mode": "default",
                      "model": None}]
     store.default_agent_id = "mock"  # §4.7 single pointer
+    # Held drafting outcomes are process-global: a test that starts a real
+    # pending job and never acks it would otherwise leak a `job` ref into the
+    # next test's GET /draft/pending (order-dependent on an xdist worker).
+    api.draft_jobs.jobs.clear()
     # §22.2: the marketplace sources store loads once at startup like the §5
     # store, re-read here so it follows this test's AUTOWRIGHT_HOME.
     api.marketplace_store.load()

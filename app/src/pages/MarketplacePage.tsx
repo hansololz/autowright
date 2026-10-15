@@ -3,7 +3,7 @@
 // import. The page and its nav row render for everyone (§22 visibility; only
 // the MARKETPLACE_HIDDEN parking switch can hide them) - no setting gates them.
 import React, { useEffect, useRef, useState } from 'react'
-import { api } from '../api'
+import { api, saveFile } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import type { ImportPreview, ImportSummary, MarketplaceEntry, MarketplaceSource } from '../types'
@@ -501,7 +501,7 @@ export default function MarketplacePage() {
   const exportCatalog = async (id: string) => {
     try {
       const data = await api.marketplaceCatalogFile(id)
-      const path = await window.autowright?.saveFile(CATALOG_FILE, data)
+      const path = await saveFile(CATALOG_FILE, data)
       if (path) showToast(`Exported to ${path}.`)
     } catch (e) { showToast((e as Error).message) }
   }

@@ -584,6 +584,9 @@ class Store:
             # reconcile compares every execution.yaml against the index's last
             # durable write.
             index_mtime = self._exec_index_mtime()
+            # §5 relocated-path degraded session: set by _open_exec_index when
+            # the executions dir is unreachable — nothing may create a record.
+            self.exec_dir_unreachable = False
             self.execdb, self.execs = self._open_exec_index()
             self._reconcile_exec_index(index_mtime)
             self._refresh_exec_derived()
@@ -657,6 +660,7 @@ class Store:
         if not self.executions_dir().is_dir() and self.data_path() != paths.default_data_path():
             log.warning("the configured data path %s isn't reachable — using an in-memory "
                         "index this session", self.data_path())
+            self.exec_dir_unreachable = True
             return ExecDB(None), {}
         try:
             db = ExecDB(path)
@@ -735,6 +739,11 @@ class Store:
             return
         # list(): the sweeps below rename directories aside inside the loop.
         for ed in list(d.iterdir()):
+            if ed.name.startswith(".") and not ed.name.startswith(self.DELETED_PREFIX):
+                # §5: dot-prefixed entries (`.git`, `.Trashes`, `.fseventsd`)
+                # are never adopted and never removed — the §4.9 adopt check
+                # ignores them too.
+                continue
             if ed.name.startswith(self.DELETED_PREFIX):
                 # A crash between delete_execution's aside-rename and its
                 # rmtree — the record is already gone from the index, so
@@ -1418,9 +1427,11 @@ class Store:
                 return self._commit_toplevel(a, mutate)
             except Exception:
                 # §5: the pointer rolled back, so the new version must leave
-                # memory with it. Its folder is tolerated on disk — the next
-                # save skips numbers that are taken.
+                # memory with it — and disk: its just-written folder goes too,
+                # so a version the user was told failed never resurfaces in
+                # the history at the next load.
                 a["versions"].pop(n, None)
+                shutil.rmtree(vd, ignore_errors=True)
                 raise
 
     def restore_version(self, a: dict, v: int) -> int:
@@ -1448,9 +1459,9 @@ class Store:
                 return self._commit_toplevel(a, mutate)
             except Exception:
                 # §5, as in save_new_version: the pointer rolled back, so the
-                # restored version leaves memory with it. Its folder is
-                # tolerated on disk — the next save skips numbers that are taken.
+                # restored version leaves memory and disk with it.
                 a["versions"].pop(n, None)
+                shutil.rmtree(dst, ignore_errors=True)
                 raise
 
     def draft_dir(self, a: dict | None) -> Path:
@@ -2026,6 +2037,9 @@ class Store:
             body = self.read_exec_yaml(execution_id)
             return {**h, **body} if body else {**h, "steps": [], "redacted_secrets": [], "params": []}
 
+    # §5 relocated-path degraded session (class default: a store that never
+    # loaded is reachable; reopen_exec_index sets it from the open).
+    exec_dir_unreachable = False
     # ---------- logs (§5 logs/, one file per step attempt) ----------
     EXEC_LOG = "execution.ndjson"
     # §5 line cap: a log file stops appending at this many lines — one final
@@ -2058,7 +2072,7 @@ class Store:
         seeded = 0
         if key not in self._log_counts:
             try:
-                with open(p, encoding="utf-8") as f:
+                with open(p, encoding="utf-8", errors="replace") as f:
                     seeded = sum(1 for _ in f)
             except OSError:
                 seeded = 0
@@ -2076,8 +2090,21 @@ class Store:
                     "text": f"Log truncated at {self.MAX_LOG_LINES} lines — "
                             "further output is discarded (the step keeps executing)"}
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        data = (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
+        # §5: a torn final line (a crash mid-append) is terminated before the
+        # new record lands, so two records never merge into one unparseable
+        # line and the §19 line-number sequence stays aligned with the file.
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, 2)
+                if f.tell() > 0:
+                    f.seek(-1, 2)
+                    if f.read(1) != b"\n":
+                        data = b"\n" + data
+        except OSError:
+            pass  # no file yet (or unreadable) — nothing to terminate
+        with open(p, "ab") as f:
+            f.write(data)
         return True
 
     def read_log(self, execution_id: str, step_idx: int | None = None,
@@ -2241,7 +2268,11 @@ class Store:
     # behind; the load sweeps them (see _reconcile_exec_index and load_all).
     DELETED_PREFIX = ".ad-tmp-deleted-"
 
-    def delete_execution(self, execution_id: str) -> None:
+    def delete_execution(self, execution_id: str, finished_only: bool = False) -> None:
+        # `finished_only` (the §6 retention sweep): the record's status is
+        # re-checked inside the same hold that renames it aside, so one retried
+        # into a live state since the sweep decided is skipped — never moved
+        # from under a running engine thread.
         # §6 retention paragraph: the rmtree runs OUTSIDE store.lock. An
         # execution dir holds a log file per step attempt plus its result
         # files, and walking it under the lock stalls every firing and every
@@ -2251,6 +2282,10 @@ class Store:
         aside = None
         try:
             with self.lock:
+                if finished_only:
+                    h = self.execs.get(execution_id)
+                    if h is None or h["status"] in ("executing", "queued"):
+                        return
                 aside = self.executions_dir() / f"{self.DELETED_PREFIX}{execution_id}"
                 shutil.rmtree(aside, ignore_errors=True)
                 try:
@@ -2331,7 +2366,9 @@ class Store:
         for eid in doomed:
             try:
                 self.delete_execution(eid)
-            except OSError:
+            except (OSError, sqlite3.Error) as e:
+                if isinstance(e, sqlite3.Error):
+                    log.warning("deleting test execution %s failed: %s", eid, e)
                 # §19: the delete logged the path and the reason — the sweep
                 # moves on to the next record instead of abandoning the batch,
                 # and the record it couldn't remove stays registered (so it is
@@ -2396,19 +2433,24 @@ class Store:
         # retried into a live state since selection.
         removed = 0
         for eid in doomed:
+            # The status re-check runs inside the delete's own rename hold
+            # (`finished_only`), so nothing can flip the record live between
+            # the check and the rename; the rmtree still runs after the hold.
             with self.lock:
-                h = self.execs.get(eid)
-                if h is None or h["status"] in ("executing", "queued"):
-                    continue
-            # The delete takes its own short hold and rmtrees after releasing
-            # it — calling it from inside the re-check hold above would nest
-            # the two (RLock) and put the rmtree back under the lock.
+                present = eid in self.execs
             try:
-                self.delete_execution(eid)  # maintains each automation's `_latest`
-            except OSError:
-                # §19: the delete logged the path and the reason — one stuck
-                # directory must not keep the rest of the batch on disk.
+                # maintains each automation's `_latest`
+                self.delete_execution(eid, finished_only=True)
+            except (OSError, sqlite3.Error) as e:
+                # §19: the delete logged the path and the reason (a database
+                # error is logged here) — one stuck record must not keep the
+                # rest of the batch on disk.
+                if isinstance(e, sqlite3.Error):
+                    log.warning("retention: deleting %s failed: %s", eid, e)
                 continue
+            with self.lock:
+                if not present or eid in self.execs:
+                    continue  # skipped by the re-check — not removed
             removed += 1
         return removed
 

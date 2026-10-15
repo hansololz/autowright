@@ -116,6 +116,14 @@ def local_instant(naive: datetime, not_after: datetime) -> datetime:
     return past[-1] if past else readings[0]
 
 
+def _baseline_instant(baseline: datetime | None, now: datetime) -> datetime | None:
+    """§4.3: a run baseline as the instant it was — a local naive one through
+    `local_instant` (latest reading not after `now`), an aware one unchanged."""
+    if baseline is None or baseline.tzinfo is not None:
+        return baseline
+    return local_instant(baseline, now.astimezone())
+
+
 def interval_instant(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
     """The first `anchor + n × every` (n ≥ 1) strictly after `after`, as the
     aware UTC instant it really is. §4.3: the arithmetic runs on instants,
@@ -676,14 +684,19 @@ def next_at_ms(triggers: list[dict], after: datetime | None = None,
     nothing is coming. Taken from each occurrence's instant rather than from
     `next_at`'s local naive minimum: an interval's occurrence is an instant
     (§4.3), and a naive reading inside the fall-back fold resolves to the
-    earlier hour, which is not the moment the scheduler fires."""
+    earlier hour, which is not the moment the scheduler fires. The interval
+    anchor is an instant too: a naive `run_baseline` is converted once with
+    `local_instant` (latest reading not after now), never handed to
+    `interval_anchor` naive — that would resolve a fold to the earlier
+    reading, where the scheduler's `run_baseline_instant` has the later."""
     base = after or datetime.now()
+    interval_baseline = _baseline_instant(run_baseline, base)
     insts = []
     for t in triggers:
         if not t["enabled"]:
             continue
         if t["kind"] == "interval":
-            insts.append(interval_instant(t, base, run_baseline))
+            insts.append(interval_instant(t, base, interval_baseline))
         elif (n := trigger_next(t, after, run_baseline)) is not None:
             insts.append(n.astimezone())
     return int(min(insts).timestamp() * 1000) if insts else None
@@ -701,8 +714,12 @@ def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = 
     scheduler fires. For an interval that per-trigger baseline is its §4.3
     anchor, so it is overdue once `anchor + 2 × every` has passed. Cron and
     interval only: one-shots are consumed by the §4.3 spent rule, and
-    app-start/message triggers have no schedule."""
+    app-start/message triggers have no schedule. An interval's anchor reads
+    the baseline as an instant (`local_instant`, latest reading not after
+    now) — the same reading `next_at_ms` and the scheduler use; the cron math
+    keeps the naive baseline."""
     now = now or datetime.now()
+    interval_baseline = _baseline_instant(baseline, now)
     for t in triggers:
         if t.get("kind") not in SCHEDULE_KINDS or not t.get("enabled"):
             continue
@@ -712,9 +729,10 @@ def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = 
             # moment, and the §6 drop record already shows each one.
             continue
         since = enabled_since(t)  # None for a trigger stored without the stamp
+        anchor_baseline = interval_baseline if t["kind"] == "interval" else baseline
         first = trigger_next(t, after=max(baseline, since) if since else baseline,
-                             run_baseline=baseline)
-        second = trigger_next(t, after=first, run_baseline=baseline) if first else None
+                             run_baseline=anchor_baseline)
+        second = trigger_next(t, after=first, run_baseline=anchor_baseline) if first else None
         if second is not None and second < now:
             return True
     return False
