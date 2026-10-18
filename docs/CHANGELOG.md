@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.13.2 - 2026-10-18
+
+- You can now click a notification to jump straight to the run or automation it came from.
+- Notifications can be switched off entirely, or set per automation, so only the ones you want reach you.
+- Any automation can now be duplicated from its menu, giving you a copy to change without touching the original.
+- Stopping a run now takes effect right away instead of leaving it hanging.
+- Interval triggers now fire when they should, and a retried step no longer leaves a run stuck.
+- Secrets stay hidden in long run output, and an exported automation now carries everything you saved.
+
 ## v0.13.1 - 2026-09-20
 
 - Autowright now reopens normally after you quit it, instead of hanging on launch.
