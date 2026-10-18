@@ -50,7 +50,7 @@ const auto = (triggers: Trigger[]): Automation => ({
   live: [], maxParallel: 1, maxQueued: 0, resultChip: null, resultStatus: null,
   lastExecutionLabel: 'Today', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
   unresolvedReferences: {},
-  snapshotSettings: { preVersion: true, preClear: true, preRestore: true }, specMeta: '',
+  snapshotSettings: { preVersion: true, preClear: true, preRestore: true }, specMeta: '', notifications: null,
 })
 
 const onSave = vi.fn()

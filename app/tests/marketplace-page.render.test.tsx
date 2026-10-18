@@ -204,7 +204,7 @@ const auto = (over: Partial<Automation> = {}): Automation => ({
   lastStatus: 'succeeded', live: [], maxParallel: 1, maxQueued: 0, resultChip: null,
   resultStatus: null, lastExecutionLabel: '', agentId: null, stepAgents: [],
   allowedSecrets: [], problems: [], unresolvedReferences: {},
-  snapshotSettings: { preVersion: true, preClear: true, preRestore: true }, specMeta: '',
+  snapshotSettings: { preVersion: true, preClear: true, preRestore: true }, specMeta: '', notifications: null,
   ...over,
 })
 

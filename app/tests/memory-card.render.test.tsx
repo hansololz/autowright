@@ -50,7 +50,7 @@ const auto = (
   allTriggersOff: false, nextAtMs: null, notes: '', lastStatus: 'succeeded',
   live: [], maxParallel: 1, maxQueued: 10, resultChip: null, resultStatus: null,
   lastExecutionLabel: 'Today', agentId: null, stepAgents: [], allowedSecrets: [], problems: [],
-  unresolvedReferences: {}, snapshotSettings, specMeta: '',
+  unresolvedReferences: {}, snapshotSettings, specMeta: '', notifications: null,
   memory: { path: '/m', size: '12 KB', updated: 'Today' }, snapshots,
 })
 
