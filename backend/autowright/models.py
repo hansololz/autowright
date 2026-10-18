@@ -118,6 +118,10 @@ class AutomationPatch(BaseModel):
     snapshotSettings: SnapshotSettingsPatch = None
     maxParallel: StrictInt = Field(default=None, ge=1)   # §6 — strict int, floor 1
     maxQueued: StrictInt = Field(default=None, ge=0)     # §6 — strict int, floor 0
+    # §4.1 per-automation notifications override. An explicit null is a real
+    # value (clear back to inherit); the handler's `exclude_unset` dump keeps
+    # it and drops an absent key, so absent leaves the override alone.
+    notifications: Literal["attention", "all", "never"] | None = None
 
 
 class ConcurrencyIn(BaseModel):
@@ -140,6 +144,14 @@ class AutomationCreate(BaseModel):
     # §19: true = the §11 Create button, consuming the pending create-mode
     # slot; false = the §20 CLI create, which leaves the slot untouched.
     settlePending: bool = True
+
+
+class AutomationDuplicate(BaseModel):
+    """POST /automations/{id}/duplicate (§19): `name` trimmed, blank or
+    omitted → the source name, deduped per §4.1 like create."""
+
+    name: StrictStr | None = None
+    copyMemory: StrictBool = False
 
 
 class VersionSave(BaseModel):
@@ -407,7 +419,7 @@ class SettingsPatch(BaseModel):
     keepForever: StrictBool = None
     developerMode: StrictBool = None
     cliEnabled: StrictBool = None
-    notifications: Literal["attention", "all"] = None
+    notifications: Literal["attention", "all", "never"] = None
     days: StrictInt = None
 
 

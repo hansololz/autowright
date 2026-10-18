@@ -221,9 +221,24 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (it follows the stored `chipStatus`: a `result.status('attention')` or `('changes')` set
   without a chip stores no status, §4.5, and notifies nothing — a notification never
   announces a state the record cannot show);
-  notify only on changes (per the notifications setting). **Sender (decided):** the backend posts
-  macOS notifications itself via `osascript -e 'display notification …'` — works headless with no
-  UI process; the Electron app never posts.
+  notify only on changes (per the **effective** notifications setting: the automation's §4.1
+  `notifications` override when set, else the §4.9 global value — an effective `never` posts
+  nothing for that automation, overdue included, whether it comes from the override or from
+  the global setting). **Sender (decided 2026-10-18, reversing the 2026-07
+  osascript-only rule):** the backend still *decides* every notification — the engine and the
+  overdue sweep, so headless operation keeps working — but at post time it picks one of two
+  carriers, never both. When a §19 `role=shell` WebSocket subscriber is connected (the
+  Electron main process, §13), the backend publishes one `notification.posted` event carrying
+  the title, body, and a **click target** (`{ page: "execution", executionId }` for a run's
+  notification, `{ page: "automation", automationId }` for overdue), and the shell posts the OS
+  notification under the app's own identity so a click opens the app on that target (§13).
+  With no shell subscriber (headless, the UI quit) the backend posts natively through the
+  platform notifier exactly as before — macOS `osascript -e 'display notification …'`,
+  Windows toast, Linux `notify-send` — which carries no click action. The choice is made
+  once per notification from the hub's subscriber roles at that instant; a shell that
+  disconnects a moment later loses at most that one notification, and a shell that connects
+  takes over from the next one. The post still runs on its own thread (the `notify(text)`
+  bullet in §6.1), whichever carrier wins.
 - **Overdue sweep** — once an hour on the scheduler tick (beside the retention sweep, same
   cadence — though the retention sweep only *decides* on the tick: its deletes run on their
   own worker thread, single-flight, because a first sweep after a retention change can
@@ -242,14 +257,18 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   process-wide reaper thread removes the aside trees — and an aside dir a crash left behind, `.ad-tmp-deleted-*`, is swept at the next
   startup reconcile), the backend evaluates
   every automation's §4.1 `overdue` state. An automation
-  observed overdue at **two consecutive sweeps** gets one macOS notification — title the
-  automation's name, body "Scheduled executions are being missed." — and its
+  observed overdue at **two consecutive sweeps** gets one OS notification — title the
+  automation's name, body "Scheduled executions are being missed.", click target the
+  automation's detail page (the §6 carrier rule above) — and its
   `automation.changed` event is published so open surfaces update live. Two sweeps, not
   one, so a backend that boots into a stale morning (occurrences slept through overnight,
   §6 missed-executions rule) doesn't cry at startup about an automation whose next
   occurrence is about to clear it; a genuinely dead schedule still notifies within ~2
   hours of the sweep first seeing it. Overdue counts as attention-worthy, so the
-  notification posts under both §4.9 `notifications` values, like a failed execution's.
+  notification posts under the `attention` and `all` settings alike, like a failed
+  execution's — except when the automation's **effective** setting (§4.1 override, else §4.9
+  global) is `never`, which silences this notification too (the §13 tray dot and the §4.1
+  `overdue` problem still show it: those are health signals, not notifications).
   Re-notification only after the automation leaves and re-enters overdue; the
   observed/notified state is in-memory only (derived-not-stored, §4.1), so a backend
   restart may re-notify once — acceptable, the condition is still true.
@@ -433,11 +452,12 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   The chip is stored on the execution record, so it is **redacted exactly like a log line**
   before it is persisted or published (§5: secret values never appear in any file); it is
   capped at 1,000 characters by a §7 guarded cut, never a fixed slice ahead of redaction.
-- `notify(text)` — requests the end-of-execution notification (engine still applies the §4.9 setting
+- `notify(text)` — requests the end-of-execution notification (engine still applies the §6
+  effective notifications setting — the §4.1 override, else the §4.9 global —
   and the one-notification rule; the text is capped at 10,000 characters by a §7 guarded cut). The notification title is the automation name, overridable by a
   param literally named `notification_title`. The body is **redacted like a log line** before it
   reaches the OS: a notification leaves the app's own storage (the `osascript` argv is visible
-  to any local process, and the text persists in Notification Center's database). The
+  to any local process, the §19 `notification.posted` event crosses to the shell, and the text persists in Notification Center's database). The
   engine posts it on its own thread: the OS notifier can block for its full timeout, and
   the §6 slot release, the `execution.finished` event and the queue drain must not wait
   behind it (the §6 overdue sweep already posts the same way).

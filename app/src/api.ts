@@ -265,6 +265,10 @@ export const api = {
   deleteSnapshot: (automationId: string, snapshotId: string) =>
     req('DELETE', `/automations/${automationId}/memory/snapshots/${snapshotId}`),
   createAutomation: (body: Record<string, unknown>) => req<import('./types').Automation>('POST', '/automations', body),
+  // §5 store-level duplicate: current version as v1, triggers off, memory only
+  // with copyMemory; the server dedupes the name (§4.1), the landed one is in the answer
+  duplicateAutomation: (automationId: string, body: { name?: string; copyMemory?: boolean }) =>
+    req<import('./types').Automation>('POST', `/automations/${automationId}/duplicate`, body),
   saveVersion: (automationId: string, body: Record<string, unknown>) =>
     req<{ version: number }>('POST', `/automations/${automationId}/versions`, body),
   // §19 version diff: the backend diffs, the §9.2 modal only renders

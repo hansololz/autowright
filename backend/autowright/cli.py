@@ -828,6 +828,72 @@ def cmd_automation_create(c: Client, args) -> None:
     ensure_packages(c, draft.get("packages") or [])
 
 
+def cmd_automation_duplicate(c: Client, args) -> None:
+    a = find_automation(c, args.automation)
+    body: dict = {}
+    if args.name is not None:
+        body["name"] = args.name
+    if args.copy_memory:
+        body["copyMemory"] = True
+    r = c.req("POST", f"/automations/{a['id']}/duplicate", body)
+    if args.json:
+        _pjson(r)
+        return
+    # §20: the landed name is the server's §4.1 deduped one.
+    print(f"duplicated {a['name']!r} as {r['name']!r} [{r['id'][:8]}] — triggers off")
+
+
+# §20 `automation set`: the §4.1 operational settings with no workdir file.
+# key → its value form, as the usage error lists it.
+AUTOMATION_SET_KEYS = {"notifications": "inherit|attention|all|never",
+                       "maxParallel": "<int ≥ 1>", "maxQueued": "<int ≥ 0>"}
+NOTIFICATIONS_WORDS = ("inherit", "attention", "all", "never")
+
+
+def _automation_set_usage(problem: str) -> None:
+    sys.exit(f"{problem}; have: "
+             + ", ".join(f"{k}={form}" for k, form in AUTOMATION_SET_KEYS.items()))
+
+
+def cmd_automation_set(c: Client, args) -> None:
+    # §20: every KEY=VALUE parses before anything travels, and all of them go
+    # in one PATCH, so a refused value leaves every key unchanged.
+    patch: dict = {}
+    for item in args.values:
+        k, sep, raw = item.partition("=")
+        if not sep:
+            _automation_set_usage(f"expected KEY=VALUE, got {item!r}")
+        if k not in AUTOMATION_SET_KEYS:
+            _automation_set_usage(f"unknown key {k!r}")
+        raw = raw.strip()
+        if k == "notifications":
+            if raw not in NOTIFICATIONS_WORDS:
+                sys.exit("notifications must be one of " + ", ".join(NOTIFICATIONS_WORDS))
+            patch[k] = None if raw == "inherit" else raw
+        else:
+            floor = 1 if k == "maxParallel" else 0
+            try:
+                value = int(raw)
+            except ValueError:
+                value = None
+            if value is None or value < floor:
+                sys.exit(f"{k} must be an integer of at least {floor}, got {raw!r}")
+            patch[k] = value
+    a = find_automation(c, args.automation)
+    try:
+        c.req("PATCH", f"/automations/{a['id']}", patch)
+    except SystemExit as e:
+        # §20: a server-side refusal of the override reads in the CLI's own
+        # words, not the pydantic literal list.
+        if "notifications" in patch and str(e.code).startswith("422: notifications"):
+            sys.exit("notifications must be one of " + ", ".join(NOTIFICATIONS_WORDS))
+        raise
+
+    def shown(k: str) -> str:
+        return "inherit" if patch[k] is None else str(patch[k])
+    print(f"updated {a['name']!r} — " + " · ".join(f"{k}: {shown(k)}" for k in patch))
+
+
 def cmd_automation_delete(c: Client, args) -> None:
     a = find_automation(c, args.automation)
     if not args.yes:
@@ -1920,9 +1986,9 @@ def _menu_bar_icon_help() -> str:
 SHELL_OWNED_KEYS = ("login", "menuBarIcon")
 # key → how its value parses: bool (§20 on|off), int, or the tuple of words it
 # accepts. §20 help rule: a stated vocabulary is exactly what the command parses,
-# so `notifications` lists the same two words the `settings set` epilog does.
+# so `notifications` lists the same three words the `settings set` epilog does.
 SETTINGS_KEYS = {"login": bool, "menuBarIcon": bool, "keepAwake": bool, "automaticUpdateCheck": bool,
-                 "notifications": ("attention", "all"), "days": int, "keepForever": bool,
+                 "notifications": ("attention", "all", "never"), "days": int, "keepForever": bool,
                  "developerMode": bool, "cliEnabled": bool}
 
 
@@ -1966,7 +2032,9 @@ def cmd_settings_set(c: Client, args) -> None:
         else:
             # §20: an off-list value is refused in the setting's own words, the
             # way `execution list --status` refuses one outside its choices.
-            sys.exit(f"{k} must be {' or '.join(kind)}, got {raw!r}")
+            words = (' or '.join(kind) if len(kind) == 2
+                     else ', '.join(kind[:-1]) + f", or {kind[-1]}")
+            sys.exit(f"{k} must be {words}, got {raw!r}")
     # §20: the ordinary keys go first, in one PATCH, and `dataPath=` after - a
     # refused ordinary key leaves the data path untouched (c.req exits before
     # the POST), and a refused data path leaves the ordinary keys applied and
@@ -2441,6 +2509,49 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
     p.add_argument("--agent", metavar="NAME",
                    help="which configured agent is recorded as the author, by agent name")
     _grant_flags(p)
+    p = _sub(ag, "duplicate", cmd_automation_duplicate,
+             "copy an automation as a new one, triggers off", json_flag=True,
+             description="Create a new automation from an existing one's current version, "
+                         "as its version 1. Its description, parameter values, grants, "
+                         "concurrency, notifications, and snapshot settings come along; its "
+                         "triggers come along switched off, so the copy never executes "
+                         "beside the original until you turn them on with `trigger on`."
+                         "\n\n"
+                         "The name is --name, or the original's name; a name already taken "
+                         "gets a number appended rather than colliding, and the printed name "
+                         "is the one it landed under. Memory starts empty unless you pass "
+                         "--copy-memory. The unsaved draft, chat, execution history, and "
+                         "memory snapshots are never copied.",
+             epilog="Examples:\n"
+                    "  autowright automation duplicate report\n"
+                    "  autowright automation duplicate report --name \"Weekly report\"\n"
+                    "  autowright automation duplicate report --copy-memory --json")
+    _ref(p)
+    p.add_argument("--name", metavar="TEXT",
+                   help="name the copy (default: the original's name, with a number appended)")
+    p.add_argument("--copy-memory", action="store_true",
+                   help="start the copy with the original's memory instead of empty")
+    p = _sub(ag, "set", cmd_automation_set,
+             "change an automation's notifications or concurrency",
+             description="Change the operational settings that have no file in a pulled "
+                         "workdir: notifications (inherit uses the app setting), maxParallel "
+                         "(how many executions may run at once), and maxQueued (how many "
+                         "message firings may wait when every slot is busy). They change "
+                         "immediately, with no new version."
+                         "\n\n"
+                         "Every KEY=VALUE travels in one request, so a refused value leaves "
+                         "all of them unchanged.",
+             epilog="Keys:\n"
+                    "  notifications=inherit|attention|all|never\n"
+                    "  maxParallel=<int ≥ 1>\n"
+                    "  maxQueued=<int ≥ 0>\n"
+                    "\n"
+                    "Examples:\n"
+                    "  autowright automation set report notifications=never\n"
+                    "  autowright automation set report maxParallel=2 maxQueued=5")
+    _ref(p)
+    p.add_argument("values", nargs="+", metavar="KEY=VALUE",
+                   help="one or more settings to change")
     p = _sub(ag, "delete", cmd_automation_delete, "delete an automation and everything it has",
              description="Delete an automation, every version of it, its memory, its memory "
                          "snapshots, and its whole execution history, including the result "
@@ -3040,8 +3151,10 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                     "                               laptop that is asleep would not trigger\n"
                     "                               automations\n"
                     "  automaticUpdateCheck=on|off  check once a day for a newer version\n"
-                    "  notifications=attention|all  notify only when something needs you, or\n"
-                    "                               after every execution\n"
+                    "  notifications=attention|all|never\n"
+                    "                               notify only when something needs you,\n"
+                    "                               after every execution, or never (failures\n"
+                    "                               still show in the app)\n"
                     "  days=N                       how long to keep execution history, in\n"
                     "                               days (at least 1, default 90)\n"
                     "  keepForever=on|off           keep execution history forever, ignoring\n"

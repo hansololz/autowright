@@ -72,6 +72,26 @@ describe('Settings rows (§4.9)', () => {
     }
   })
 
+  it('Notify me: three radios, Never patches exactly its key, its caption shows only under never', async () => {
+    const s = useStore.getState()
+    useStore.setState({ platformCapabilities: { ...s.platformCapabilities, notifications: true } })
+    const caption = 'Failures still show on the Automations list and the menu bar.'
+    setup()
+    render(<SettingsPage />)
+    const group = await screen.findByRole('radiogroup', { name: 'Notify me' })
+    const radios = group.querySelectorAll('[role="radio"]')
+    expect(radios.length).toBe(3)
+    expect(screen.queryByText(caption)).toBeNull()
+    patchSettings.mockClear()
+    fireEvent.click(screen.getByRole('radio', { name: 'Never' }))
+    expect(patchSettings).toHaveBeenCalledTimes(1)
+    expect(patchSettings).toHaveBeenCalledWith({ notifications: 'never' })
+    cleanup()
+    setup({ notifications: 'never' })
+    render(<SettingsPage />)
+    expect(await screen.findByText(caption)).toBeTruthy()
+  })
+
   it('settings not loaded yet: the title and the busy state, no cards', () => {
     ;(window as unknown as Record<string, unknown>).autowright = { cliStatus, pickFolder, platformInfo }
     useStore.setState({ settings: null })

@@ -2609,3 +2609,209 @@ def test_cron_expression_is_trimmed_on_load(store, home):
     b = s2.autos[a["id"]]
     assert b["triggers"][0]["expression"] == "30 7 * * *"
     assert s2.auto_json(b)["triggerChip"] == "Daily 7:30"
+
+
+# ---------- §4.1 notifications override (§21.4 2026-10-18) ----------
+
+def test_automation_without_notifications_loads_as_inherit(store, home, caplog):
+    """§21.4 2026-10-18 fixture: an automation.yaml from before the override
+    existed (no `notifications` key) loads as null ("use the app setting"),
+    serializes null on both shapes, and re-saves without the key. A value
+    outside the three reads as null with a warning and is dropped at the next
+    top-level write; a set value round-trips."""
+    import logging
+
+    from autowright.storage import Store, effective_notifications, load_yaml, save_yaml
+
+    a = store.create_automation(make_version(), "Old Shape", None)
+    top_file = store.auto_dir(a) / "automation.yaml"
+    top = load_yaml(top_file)
+    top.pop("notifications", None)
+    save_yaml(top_file, top)  # the pre-change shape: key absent
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    assert b["notifications"] is None
+    assert s2.auto_json(b)["notifications"] is None
+    assert s2.auto_json(b, full=False)["notifications"] is None
+    assert effective_notifications({"notifications": "all"}, b) == "all"
+    s2.patch_automation(b, {"description": "touched"})
+    assert "notifications" not in load_yaml(top_file)
+
+    # an unrecognized value: null with a warning, dropped at the next write
+    top = load_yaml(top_file)
+    top["notifications"] = "loud"
+    save_yaml(top_file, top)
+    s3 = Store()
+    with caplog.at_level(logging.WARNING, logger="autowright.storage"):
+        s3.load_all()
+    c = s3.autos[a["id"]]
+    assert c["notifications"] is None
+    assert any("notifications" in r.message for r in caplog.records)
+    s3.patch_automation(c, {"description": "touched again"})
+    assert "notifications" not in load_yaml(top_file)
+
+    # a set value round-trips, and null clears it back to the absent key
+    s3.patch_automation(c, {"notifications": "never"})
+    assert load_yaml(top_file)["notifications"] == "never"
+    s4 = Store()
+    s4.load_all()
+    d = s4.autos[a["id"]]
+    assert d["notifications"] == "never"
+    assert s4.auto_json(d, full=False)["notifications"] == "never"
+    assert effective_notifications({"notifications": "all"}, d) == "never"
+    s4.patch_automation(d, {"notifications": None})
+    assert d["notifications"] is None
+    assert "notifications" not in load_yaml(top_file)
+
+
+def test_effective_notifications_global_never_and_lenient_fallback():
+    """§6 effective setting: the override wins when set, else the §4.9 global
+    value; an unknown stored global value reads as `attention`."""
+    from autowright.storage import effective_notifications
+
+    assert effective_notifications({"notifications": "never"}, {"notifications": None}) == "never"
+    assert effective_notifications({"notifications": "never"}, {"notifications": "all"}) == "all"
+    assert effective_notifications({"notifications": "sometimes"}, {"notifications": None}) == "attention"
+
+
+# ---------- §5 duplicating an automation ----------
+
+def _duplicable(store, **create):
+    """A source automation with every copied top-level field set away from its
+    default, so a verbatim copy is observable."""
+    from autowright.storage import new_id
+
+    ver = make_version()
+    a = store.create_automation(ver, "Report", "agent-1", triggers=[
+        {"id": new_id(), "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+         "source": "user"},
+        {"id": new_id(), "kind": "cron", "enabled": True, "expression": "0 9 * * *",
+         "source": "agent", "runIfMissed": False},
+    ], enabled_agents=["agent-1"], allowed_secrets=["secret-1"], **create)
+    store.patch_automation(a, {
+        "description": "Daily report", "paramValues": {"greeting": "hey", "count": 5},
+        "maxParallel": 3, "maxQueued": 2, "notifications": "never",
+        "snapshotSettings": {"preClear": False}})
+    # a value for a param the current version no longer defines is kept on the
+    # source (values are never pruned) but never copied
+    a["param_values"]["retired"] = "old"
+    return a
+
+
+def test_duplicate_copies_the_operational_fields_and_turns_triggers_off(store, home):
+    from autowright.storage import Store, load_yaml
+
+    a = _duplicable(store, origin_os="windows")
+    b = store.duplicate_automation(a["id"])
+    assert b["id"] != a["id"]
+    assert b["name"] == "Report 2"  # §4.1 dedupe of the source name
+    assert store.autos[b["id"]] is b
+    for field in ("description", "agent_id", "enabled_agents", "allowed_secrets",
+                  "memory_snapshots", "max_parallel", "max_queued", "notifications",
+                  "origin_os"):
+        assert b[field] == a[field], field
+    assert b["memory_snapshots"]["pre_clear"] is False
+    assert b["notifications"] == "never" and b["max_parallel"] == 3
+    assert b["param_values"] == {"greeting": "hey", "count": 5}
+    # triggers: fresh ids, all off, no enable stamp, provenance kept
+    assert len(b["triggers"]) == 2
+    assert {t["id"] for t in b["triggers"]}.isdisjoint({t["id"] for t in a["triggers"]})
+    assert all(t["enabled"] is False and "enabledAt" not in t for t in b["triggers"])
+    assert [t["source"] for t in b["triggers"]] == ["user", "agent"]
+    assert b["triggers"][1]["runIfMissed"] is False
+    assert all(t["enabled"] for t in a["triggers"])  # the source is untouched
+    # v1 only, the source's current version with a fresh note and stamp
+    assert b["current_version"] == 1 and list(b["versions"]) == [1]
+    assert b["versions"][1]["note"] == "Duplicated from Report v1"
+    # memory starts empty; the top-level file landed
+    mem = store.auto_dir(b) / "memory"
+    assert mem.is_dir() and not any(mem.iterdir())
+    top = load_yaml(store.auto_dir(b) / "automation.yaml")
+    assert top["notifications"] == "never" and top["origin_os"] == "windows"
+    # it survives a reload unchanged
+    s2 = Store()
+    s2.load_all()
+    c = s2.autos[b["id"]]
+    assert c["name"] == "Report 2" and c["versions"][1]["note"] == "Duplicated from Report v1"
+    assert [s["code"] for s in c["versions"][1]["steps"]] == \
+        [s["code"] for s in a["versions"][1]["steps"]]
+
+
+def test_duplicate_copies_the_current_version_byte_for_byte(store, home):
+    """§5: every file of the source's v<current> folder except the manifest's
+    `when` and `note`; older versions and the draft are never copied."""
+    from autowright.storage import load_yaml
+
+    a = _duplicable(store)
+    ver = make_version()
+    ver["steps"][0]["code"] = 'from autowright import log\nlog("v2 code")\n'
+    ver["notes"] = "Working notes."
+    store.save_new_version(a, {**ver, "note": "Second"})
+    store.save_draft(a, {**make_version(), "steps": [
+        {"file": "01-draft.py", "name": "Draft", "description": "", "code": "print('draft')\n"}]})
+    b = store.duplicate_automation(a["id"])
+    src = store.auto_dir(a) / "versions" / "v2"
+    dst = store.auto_dir(b) / "versions" / "v1"
+    names = sorted(p.name for p in src.iterdir())
+    assert sorted(p.name for p in dst.iterdir()) == names
+    for n in names:
+        if n != "automation.yaml":
+            assert (dst / n).read_bytes() == (src / n).read_bytes(), n
+    src_manifest, dst_manifest = load_yaml(src / "automation.yaml"), load_yaml(dst / "automation.yaml")
+    assert dst_manifest["note"] == "Duplicated from Report v2"
+    assert dst_manifest["when"] == b["created_at"]  # stamped now
+    assert {k: v for k, v in dst_manifest.items() if k not in ("when", "note")} == \
+        {k: v for k, v in src_manifest.items() if k not in ("when", "note")}
+    assert list(b["versions"]) == [1] and b["draft"] is None
+    assert not (store.auto_dir(b) / "draft").exists()
+    assert b["versions"][1]["notes"].strip() == "Working notes."
+
+
+def test_duplicate_name_dedupes_a_typed_name_too(store, home):
+    a = _duplicable(store)
+    store.create_automation(make_version(), "Weekly", None)
+    assert store.duplicate_automation(a["id"], name="  Fresh name ")["name"] == "Fresh name"
+    assert store.duplicate_automation(a["id"], name="weekly")["name"] == "weekly 2"
+    assert store.duplicate_automation(a["id"], name="   ")["name"] == "Report 2"
+    assert store.duplicate_automation(a["id"])["name"] == "Report 3"
+
+
+def test_duplicate_of_a_needs_fixing_automation_stays_needs_fixing(store, home):
+    """§5: a needs-fixing original duplicates into a needs-fixing copy."""
+    from autowright.storage import new_id
+
+    missing = new_id()
+    a = _imported(store, secret_in_code=missing,
+                  unresolved={missing: {"kind": "secret", "name": "MAIL_PASS",
+                                        "description": "mail"}})
+    b = store.duplicate_automation(a["id"])
+    assert b["unresolved_references"] == a["unresolved_references"]
+    assert b["unresolved_references"] is not a["unresolved_references"]
+    assert store.auto_json(b)["unresolvedReferences"] == store.auto_json(a)["unresolvedReferences"]
+
+
+def test_duplicate_unknown_source_raises_not_found(store, home):
+    import pytest
+
+    from autowright.storage import AutomationGoneError
+
+    with pytest.raises(AutomationGoneError):
+        store.duplicate_automation("no-such-id")
+
+
+def test_copy_memory_into_copies_the_source_tree(store, home):
+    a = _duplicable(store)
+    src = store.auto_dir(a) / "memory"
+    (src / "nested").mkdir(parents=True)
+    (src / "seen.json").write_text('["a"]')
+    (src / "nested" / "deep.txt").write_text("deep")
+    b = store.duplicate_automation(a["id"])
+    assert not any((store.auto_dir(b) / "memory").iterdir())
+    with store.memory_ops:
+        store.copy_memory_into(b, a["id"])
+    dst = store.auto_dir(b) / "memory"
+    assert (dst / "seen.json").read_text() == '["a"]'
+    assert (dst / "nested" / "deep.txt").read_text() == "deep"
+    assert (src / "seen.json").exists()  # the source keeps its memory

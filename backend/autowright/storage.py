@@ -217,6 +217,35 @@ def clamp_max_queued(v: Any) -> int:
         return DEFAULT_MAX_QUEUED
 
 
+# §4.1 per-automation `notifications` override values; None (stored as an
+# absent key) inherits the §4.9 app setting.
+NOTIFICATIONS_OVERRIDES = ("attention", "all", "never")
+
+
+def load_notifications_override(v: Any, where: Any) -> str | None:
+    """§4.1 `notifications` from a hand-editable automation.yaml — lenient
+    (§5): a value outside the three strings reads as absent with a warning
+    and is dropped at the next top-level write, never a load failure."""
+    if v is None:
+        return None
+    if isinstance(v, str) and v in NOTIFICATIONS_OVERRIDES:
+        return v
+    log.warning("automation %s has an unrecognized notifications value %r — using the app setting",
+                where, v)
+    return None
+
+
+def effective_notifications(settings: dict, auto: dict) -> str:
+    """§6 effective notifications setting: the automation's §4.1 override when
+    set, else the §4.9 global value. The global read is lenient: a stored
+    value outside the three strings reads as `attention`."""
+    override = auto.get("notifications")
+    if override in NOTIFICATIONS_OVERRIDES:
+        return override
+    value = settings.get("notifications")
+    return value if value in NOTIFICATIONS_OVERRIDES else "attention"
+
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "login": True,
     "menuBarIcon": True,
@@ -834,6 +863,9 @@ class Store:
             # rather than dropping the automation at load.
             "max_parallel": clamp_max_parallel(top.get("max_parallel")),
             "max_queued": clamp_max_queued(top.get("max_queued")),
+            # §4.1 per-automation notifications override — absent key = the
+            # pre-change shape, inheriting the app setting (§21.4 2026-10-18).
+            "notifications": load_notifications_override(top.get("notifications"), d),
             # §4.1 originOs — an unrecognized token loads as-is (it always
             # counts as a mismatch); a non-string is dropped, not fatal.
             **({"origin_os": top["origin_os"].strip()}
@@ -1199,8 +1231,8 @@ class Store:
     TOPLEVEL_FIELDS = ("id", "name", "description", "current_version", "triggers",
                        "agent_id", "enabled_agents", "allowed_secrets",
                        "memory_snapshots", "param_values", "max_parallel",
-                       "max_queued", "origin_os", "unresolved_references",
-                       "created_at", "updated_at")
+                       "max_queued", "notifications", "origin_os",
+                       "unresolved_references", "created_at", "updated_at")
 
     def _commit_toplevel(self, a: dict, mutate):
         """§5 disk-first: run `mutate`, write `automation.yaml`, and roll the
@@ -1236,6 +1268,10 @@ class Store:
             "param_values": a["param_values"],
             "max_parallel": a["max_parallel"],
             "max_queued": a["max_queued"],
+            # §4.1: written only when set — absent = inherit the §4.9 setting
+            # (§21.4 2026-10-18).
+            **({"notifications": a["notifications"]}
+               if a.get("notifications") in NOTIFICATIONS_OVERRIDES else {}),
             **({"origin_os": a["origin_os"]} if a.get("origin_os") else {}),
             # §4.1: absent when empty — the pre-change shape stays the shape
             # for automations that carry nothing unresolved (§21.4 2026-08-24).
@@ -1340,6 +1376,7 @@ class Store:
                 "memory_snapshots": {"pre_version": True, "pre_clear": True, "pre_restore": True},
                 "param_values": {}, "created_at": now, "updated_at": now,
                 "max_parallel": DEFAULT_MAX_PARALLEL, "max_queued": DEFAULT_MAX_QUEUED,
+                "notifications": None,
                 # §4.1 originOs: stamped only by §5.1 import; cleared by the
                 # next edit save (save_new_version) — a local rework
                 # supersedes "built elsewhere".
@@ -1361,6 +1398,128 @@ class Store:
             self._write_toplevel(a)
             self.autos[automation_id] = a
             return a
+
+    def duplicate_automation(self, source_id: str, name: str | None = None) -> dict:
+        """§5 store-level duplicate (never an export-then-import round trip):
+        a fresh uuid, the §4.1 deduped name, the source's current version as
+        v1 (every file byte for byte except the manifest's `when` and `note`),
+        the top-level operational fields copied, triggers off with fresh ids,
+        and `memory/` empty — `copy_memory_into` fills it afterwards when the
+        caller asked. The draft, chat, snapshots and executions are never
+        copied. Write order is the create path's: version folder (manifest
+        last, the commit point), `memory/`, top-level `automation.yaml`, then
+        the in-memory insert."""
+        with self.lock:
+            source = self.autos.get(source_id)
+            if source is None:
+                raise AutomationGoneError(source_id)
+            source_number = source["current_version"]
+            source_vd = self.auto_dir(source) / "versions" / f"v{source_number}"
+            manifest = load_yaml(source_vd / "automation.yaml")
+            if not isinstance(manifest, dict):
+                raise RuntimeError(f"the current version of {source['name']!r} can't be read")
+            name = self.free_automation_name(
+                (name or "").strip() or source["name"])  # §4.1 uniqueness
+            automation_id = new_id()
+            now = timefmt.now_iso()
+            current = source["versions"].get(source_number) or {}
+            param_names = {p.get("name") for p in current.get("params") or []
+                           if isinstance(p, dict)}
+            triggers = []
+            for t in source["triggers"]:
+                # §5.1 import rule: fresh ids, every one off, no enable stamp —
+                # a copy never double-fires beside its original.
+                copied = copy.deepcopy(t)
+                copied["id"] = new_id()
+                copied["enabled"] = False
+                copied.pop(triggerlib.ENABLED_AT, None)
+                triggers.append(copied)
+            a = {
+                "id": automation_id, "name": name,
+                "description": source.get("description", ""), "current_version": 1,
+                "triggers": triggers,
+                "agent_id": source["agent_id"],
+                "enabled_agents": list(source["enabled_agents"]),
+                "allowed_secrets": list(source["allowed_secrets"]),
+                "memory_snapshots": dict(source["memory_snapshots"]),
+                "param_values": {k: copy.deepcopy(v)
+                                 for k, v in (source["param_values"] or {}).items()
+                                 if k in param_names},
+                "created_at": now, "updated_at": now,
+                "max_parallel": source.get("max_parallel", DEFAULT_MAX_PARALLEL),
+                "max_queued": source.get("max_queued", DEFAULT_MAX_QUEUED),
+                "notifications": (source.get("notifications")
+                                  if source.get("notifications") in NOTIFICATIONS_OVERRIDES
+                                  else None),
+                **({"origin_os": source["origin_os"]} if source.get("origin_os") else {}),
+                # §5: a needs-fixing original duplicates into a needs-fixing copy.
+                **({"unresolved_references": copy.deepcopy(source["unresolved_references"])}
+                   if source.get("unresolved_references") else {}),
+                "versions": {}, "draft": None,
+                "_last_status": "none", "_last_exec_at": None, "_live": set(),
+                "_exec_ids": set(),
+            }
+            vd = self.auto_dir(a) / "versions" / "v1"
+            # Every file but the manifest first, the manifest last — it is the
+            # commit point (`_load_automation` ignores a folder without it).
+            shutil.copytree(
+                source_vd, vd,
+                ignore=lambda directory, names: [
+                    n for n in names
+                    if n.startswith(".ad-tmp-")
+                    or (Path(directory) == source_vd and n == "automation.yaml")])
+            manifest["when"] = now
+            manifest["note"] = f"Duplicated from {source['name']} v{source_number}"
+            save_yaml(vd / "automation.yaml", manifest)
+            (self.auto_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
+            loaded = self._load_version_folder(vd)
+            if loaded is None:
+                loaded = self._version_from_memory(
+                    {**current, "when": manifest["when"], "note": manifest["note"]})
+            a["versions"][1] = loaded
+            self._write_toplevel(a)
+            self.autos[automation_id] = a
+            return a
+
+    def copy_memory_into(self, target: dict, source_id: str) -> None:
+        """§5 duplicate's optional memory copy: the source's `memory/` tree into
+        the brand-new automation's (empty) `memory/`. The caller holds
+        `memory_ops` and never `self.lock` (§5 lock order); the copy stages
+        beside the target outside the lock and lands by rename under it, the
+        restore's disk-first style, so a failure leaves memory empty."""
+        with self.lock:
+            self._still_registered(target)
+            source = self.autos.get(source_id)
+            if source is None:
+                raise AutomationGoneError(source_id)
+            src = self.auto_dir(source) / "memory"
+            mem = self.auto_dir(target) / "memory"
+            tmp = mem.parent / MEMORY_SWAP_TMP
+            if tmp.exists():
+                self._remove_tree(tmp)
+        if not src.exists():
+            return
+        try:
+            shutil.copytree(src, tmp)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        abandoned: BaseException | None = None
+        with self.lock:
+            try:
+                self._still_registered(target)
+            except AutomationGoneError as e:
+                abandoned = e
+            if abandoned is None and target.get("_live"):
+                abandoned = LiveExecutionError("an execution is in progress")
+            if abandoned is None:
+                if mem.exists():
+                    self._remove_tree(mem)
+                tmp.rename(mem)
+                self.invalidate_memory_stats(target)
+                return
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise abandoned
 
     @staticmethod
     def effective_reference_ids(cur: dict) -> tuple[set[str], set[str]]:
@@ -1778,6 +1937,11 @@ class Store:
                 # §19 validated the range already; clamp is the last line of
                 # defense for any other caller.
                 a[k_int] = clamp(patch[k_api])
+        if "notifications" in patch:
+            # §4.1 override — §19 validated the value; None clears it back to
+            # inherit (and drops the key at this write).
+            value = patch["notifications"]
+            a["notifications"] = value if value in NOTIFICATIONS_OVERRIDES else None
         if "snapshotSettings" in patch:
             # §6.3 toggles — partial object, sent keys merged over the stored ones.
             sent = patch["snapshotSettings"] or {}
@@ -3267,6 +3431,9 @@ class Store:
             "live": live_ids,
             "maxParallel": a.get("max_parallel", DEFAULT_MAX_PARALLEL),
             "maxQueued": a.get("max_queued", DEFAULT_MAX_QUEUED),
+            # §4.1 per-automation override; null = inherit the §4.9 setting.
+            "notifications": (a.get("notifications")
+                              if a.get("notifications") in NOTIFICATIONS_OVERRIDES else None),
             "resultChip": chip,
             "resultStatus": chip_status,
             "lastExecutionLabel": "executing…" if live_ids else (timefmt.date_label(last_dt) if last_dt else ""),

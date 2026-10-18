@@ -17,9 +17,22 @@ import { ResultSection, SpecMarkdown } from '../result'
 import { badgeAnim, runAction } from './detail/model'
 import { ConcurrencyCard } from './detail/ConcurrencyCard'
 import { MemoryCard } from './detail/MemoryCard'
+import { NotificationsCard } from './detail/NotificationsCard'
 import { ParamRow } from './detail/ParamRow'
 import { RecentExecutions } from './detail/RecentExecutions'
 import { TriggersCard } from './detail/TriggersCard'
+
+// §4.1 deduped default for a copy's name — the server applies the same rule
+// authoritatively: case-insensitive, the smallest integer ≥ 2 that frees
+// "<name> n" (the source name itself is always taken).
+export function dedupedName(name: string, taken: string[]): string {
+  const base = name.trim() || 'New automation'
+  const names = new Set(taken.map((n) => n.trim().toLowerCase()))
+  if (!names.has(base.toLowerCase())) return base
+  let n = 2
+  while (names.has(`${base} ${n}`.toLowerCase())) n += 1
+  return `${base} ${n}`
+}
 
 export default function AutomationDetail() {
   // Per-field selectors (UI-GUIDE): a bare useStore() re-renders this page on
@@ -51,6 +64,11 @@ export default function AutomationDetail() {
   const [execAsk, setExecAsk] = useState<'parallel' | 'queue' | 'full' | null>(null)
   const [exportAsk, setExportAsk] = useState(false)
   const [exportValues, setExportValues] = useState(true)
+  // §9.2 Duplicate… modal: the copy's name (prefilled) and the memory toggle
+  const [duplicateAsk, setDuplicateAsk] = useState(false)
+  const [duplicateName, setDuplicateName] = useState('')
+  const [duplicateMemory, setDuplicateMemory] = useState(false)
+  const [duplicating, setDuplicating] = useState(false)
   // §9 busy rule: Execute now and Export disable and show busy feedback while
   // their request is in flight — a double-click never fires twice.
   const [starting, setStarting] = useState(false)
@@ -91,6 +109,7 @@ export default function AutomationDetail() {
   useEffect(() => {
     setDiffFrom(null)
     setExportAsk(false)
+    setDuplicateAsk(false)
     setDelAsk(false)
     setExecAsk(null)
     setVerOpen(false)
@@ -287,6 +306,15 @@ export default function AutomationDetail() {
               <MenuRow onClick={() => { setActOpen(false); setExportValues(true); setExportAsk(true) }}>
                 <i className="fa-solid fa-file-export" style={{ fontSize: 11, width: 14, textAlign: 'center', marginRight: 9 }} />
                 Export…
+              </MenuRow>
+              <MenuRow onClick={() => {
+                setActOpen(false)
+                setDuplicateName(dedupedName(auto.name, automations.map((a) => a.name)))
+                setDuplicateMemory(false)
+                setDuplicateAsk(true)
+              }}>
+                <i className="fa-solid fa-clone" style={{ fontSize: 11, width: 14, textAlign: 'center', marginRight: 9 }} />
+                Duplicate…
               </MenuRow>
               <MenuRow danger onClick={() => { setActOpen(false); setDelAsk(true) }}>
                 <i className="fa-solid fa-trash-can" style={{ fontSize: 11, width: 14, textAlign: 'center', marginRight: 9 }} />
@@ -520,6 +548,9 @@ export default function AutomationDetail() {
       {/* §6 concurrency — manual executions can queue too, so every automation gets it */}
       <ConcurrencyCard auto={auto} showToast={showToast} />
 
+      {/* §4.1 notification override — renders only where OS notifications exist */}
+      <NotificationsCard auto={auto} showToast={showToast} />
+
       {/* recent executions */}
       <RecentExecutions execs={recentExecs} />
 
@@ -626,6 +657,69 @@ export default function AutomationDetail() {
                   <BtnPrimary onClick={() => { void doExport() }} disabled={exporting}>
                     {exporting && <Spinner size={10} color="currentColor" style={{ marginRight: 5, verticalAlign: '-1px' }} />}
                     {exporting ? 'Exporting…' : 'Export'}
+                  </BtnPrimary>
+                </div>
+              </>
+            )
+          }}
+        </Modal>
+      )}
+      {duplicateAsk && (
+        <Modal onClose={() => setDuplicateAsk(false)} width={440} ariaLabel={`Duplicate ${auto.name}`}>
+          {(close) => {
+            // §5 store-level duplicate: the server dedupes the name again, so
+            // the toast names the one that landed.
+            const doDuplicate = async () => {
+              if (duplicating) return
+              setDuplicating(true)
+              try {
+                const created = await api.duplicateAutomation(auto.id, {
+                  name: duplicateName.trim() || undefined,
+                  copyMemory: duplicateMemory,
+                })
+                await loadAuto(created.id, { insert: true })
+                close()
+                go('automation', { automationId: created.id })
+                showToast(`Duplicated as “${created.name}”.`)
+              } catch (e) {
+                showToast((e as Error).message)
+              } finally {
+                setDuplicating(false)
+              }
+            }
+            return (
+              <>
+                <h2 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 6px', color: 'var(--text)' }}>
+                  Duplicate “{auto.name}”
+                </h2>
+                <Eyebrow style={{ margin: '14px 0 8px' }}>NAME</Eyebrow>
+                <input
+                  className="ad-input"
+                  value={duplicateName}
+                  onChange={(e) => setDuplicateName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void doDuplicate() }}
+                  aria-label="Name"
+                  spellCheck={false}
+                  autoFocus
+                  style={{ width: '100%', marginBottom: 18 }}
+                />
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>Copy memory</div>
+                    <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-muted)', marginTop: 3 }}>
+                      Start the copy with this automation's remembered state. Leave it off to start fresh, like the first execution.
+                    </div>
+                  </div>
+                  <Toggle on={duplicateMemory} onChange={setDuplicateMemory} />
+                </div>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'flex-end', marginTop: 18 }}>
+                  <span style={{ fontSize: 11.5, color: 'var(--text-faint)', marginRight: 'auto' }}>
+                    Triggers start off. Chat, execution history, and snapshots are not copied.
+                  </span>
+                  <BtnGhost onClick={close}>Cancel</BtnGhost>
+                  <BtnPrimary onClick={() => { void doDuplicate() }} disabled={duplicating}>
+                    {duplicating && <Spinner size={10} color="currentColor" style={{ marginRight: 5, verticalAlign: '-1px' }} />}
+                    {duplicating ? 'Duplicating…' : 'Duplicate'}
                   </BtnPrimary>
                 </div>
               </>

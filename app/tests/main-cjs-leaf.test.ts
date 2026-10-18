@@ -9,7 +9,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const ELECTRON_DIR = join(__dirname, '..', 'electron')
 const src = readFileSync(join(ELECTRON_DIR, 'main.cjs'), 'utf-8')
@@ -391,6 +391,16 @@ interface MainStub {
   log: () => string
   // §3 reset: the exit codes app.exit was called with.
   exits: number[]
+  // §13 shell-posted notifications: every Notification main.cjs constructed.
+  notifications: NotificationRecord[]
+}
+
+// §13: one shown OS notification — its options, its show() count, and a way
+// to fire the click the OS would deliver.
+interface NotificationRecord {
+  options: { title?: string, body?: string }
+  shows: number
+  click: () => void
 }
 
 const realRequire = createRequire(join(ELECTRON_DIR, 'main.cjs'))
@@ -424,6 +434,9 @@ interface LoadOptions {
   // Patch individual `fs` functions main.cjs sees (the §9.3 log-rotation race
   // is otherwise unreachable from a single-threaded test).
   fs?: Record<string, unknown>
+  // §13: what Notification.isSupported() answers (false by default, so no
+  // other test ever opens the shell socket).
+  notificationSupported?: boolean
 }
 
 function loadMain(options: LoadOptions = {}): MainStub {
@@ -447,6 +460,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
   const powerListeners = new Map<string, () => void>()
   let quits = 0
   const exits: number[] = []
+  const notifications: NotificationRecord[] = []
   const home = mkdtempSync(join(tmpdir(), 'aw-main-'))
   process.env.AUTOWRIGHT_HOME = home
 
@@ -574,6 +588,19 @@ function loadMain(options: LoadOptions = {}): MainStub {
     },
     autoUpdater: { on() {}, removeListener() {}, setFeedURL() {}, checkForUpdates() {}, quitAndInstall() {} },
     BrowserWindow: FakeWindow,
+    Notification: class {
+      static isSupported() { return Boolean(options.notificationSupported) }
+      listeners = new Map<string, () => void>()
+      constructor(opts: { title?: string, body?: string }) {
+        notifications.push({
+          options: opts, shows: 0,
+          click: () => { this.listeners.get('click')?.() },
+        })
+      }
+
+      on(event: string, fn: () => void) { this.listeners.set(event, fn) }
+      show() { notifications[notifications.length - 1].shows += 1 }
+    },
     Menu: { buildFromTemplate: () => ({ popup() {} }) },
     Tray: class {
       constructor(icon: unknown) { trays.push(icon) }
@@ -676,7 +703,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       fn({ preventDefault: () => {} })
     },
     opened, externals, revealed, windows, wins, trays, loginItem, aumids, sent, updater,
-    home, errors, exits, dialogs, dialogAnswer, powerListeners,
+    home, errors, exits, dialogs, dialogAnswer, powerListeners, notifications,
     // AUTOWRIGHT_HOME points app.log at this test's own home (§15).
     log: () => {
       try { return readFileSync(join(home, 'logs', 'app.log'), 'utf-8') } catch { return '' }
@@ -2693,5 +2720,193 @@ describe('main.cjs quit and reset quiet the shell (§3)', () => {
     } finally {
       fetchSpy.mockRestore()
     }
+  })
+})
+
+// ---- §13 shell-posted notifications ---------------------------------------
+// Main keeps one `role=shell` WebSocket to the backend while the OS
+// notification API exists, shows each `notification.posted` event as an OS
+// notification, and a click deep-links through showApp. The socket is a
+// double planted as the global WebSocket — the Node global main.cjs uses.
+
+class FakeSocket {
+  static instances: FakeSocket[] = []
+  url: string
+  closed = false
+  listeners = new Map<string, ((event: unknown) => void)[]>()
+  constructor(url: string) { this.url = url; FakeSocket.instances.push(this) }
+  addEventListener(type: string, fn: (event: unknown) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn])
+  }
+
+  close() { this.closed = true }
+  emit(type: string, event: unknown = {}) { for (const fn of this.listeners.get(type) ?? []) fn(event) }
+  message(payload: unknown) { this.emit('message', { data: typeof payload === 'string' ? payload : JSON.stringify(payload) }) }
+}
+
+describe('main.cjs shell notification socket (§13)', () => {
+  const EXECUTION_ID = '9b2f4c1e-7a3d-4e5f-8a6b-1c2d3e4f5a6b'
+  const AUTOMATION_ID = '123e4567-e89b-12d3-a456-426614174000'
+  let fetchSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    FakeSocket.instances = []
+    vi.stubGlobal('WebSocket', FakeSocket)
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    fetchSpy.mockRestore()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  const loadWithBackend = (options: LoadOptions = {}) => {
+    const m = loadMain({ ready: true, ...options })
+    // Written synchronously, before the ready chain's microtask runs.
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 4321, token: 'tok/en', python: '/usr/bin/python3' }))
+    return m
+  }
+
+  const posted = (over: Record<string, unknown> = {}) => ({
+    event: 'notification.posted', id: 'n1', kind: 'execution',
+    title: 'Job failed', body: 'Step 2 raised an error',
+    target: { page: 'execution', executionId: EXECUTION_ID }, ...over,
+  })
+
+  it('never connects when the OS notification API is unavailable', async () => {
+    const m = loadWithBackend({ notificationSupported: false })
+    await vi.waitFor(() => expect(m.wins).toHaveLength(1))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(FakeSocket.instances).toHaveLength(0)
+  })
+
+  it('connects with the shell role and the backend.json token', async () => {
+    loadWithBackend({ notificationSupported: true })
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    expect(FakeSocket.instances[0].url).toBe('ws://127.0.0.1:4321/ws?token=tok%2Fen&role=shell')
+  })
+
+  it('a notification.posted event shows a notification whose click opens the execution', async () => {
+    const m = loadWithBackend({ notificationSupported: true })
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    const socket = FakeSocket.instances[0]
+    socket.emit('open')
+    socket.message(posted())
+    expect(m.notifications).toHaveLength(1)
+    expect(m.notifications[0].options).toEqual({ title: 'Job failed', body: 'Step 2 raised an error' })
+    expect(m.notifications[0].shows).toBe(1)
+    m.notifications[0].click()
+    // The ready chain's window has not loaded yet: the target is held and
+    // replayed on the first successful load (the showApp deep-link rule).
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    expect(m.sent).toContainEqual(['open-target', `/app?execution=${EXECUTION_ID}`])
+  })
+
+  it('an automation target opens the automation', async () => {
+    const m = loadWithBackend({ notificationSupported: true })
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    FakeSocket.instances[0].message(posted({
+      kind: 'overdue', target: { page: 'automation', automationId: AUTOMATION_ID },
+    }))
+    m.notifications[0].click()
+    expect(m.sent).toContainEqual(['open-target', `/app?automation=${AUTOMATION_ID}`])
+  })
+
+  it('malformed payloads and every other event are ignored', async () => {
+    const m = loadWithBackend({ notificationSupported: true })
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    const socket = FakeSocket.instances[0]
+    socket.message('not json {')
+    socket.message({ event: 'execution.finished', title: 'x', body: 'y' })
+    socket.message(posted({ title: 42 }))
+    socket.message(posted({ body: null }))
+    socket.message(posted({ target: { page: 'execution', executionId: '../../etc' } }))
+    socket.message(posted({ target: { page: 'automation', automationId: EXECUTION_ID.toUpperCase() } }))
+    socket.message(posted({ target: { page: 'settings' } }))
+    socket.message(posted({ target: null }))
+    socket.message(null)
+    expect(m.notifications).toHaveLength(0)
+  })
+
+  it('reconnects with the 1.5 s doubling backoff, reset after a connection comes back', async () => {
+    vi.useFakeTimers()
+    const m = loadWithBackend({ notificationSupported: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(FakeSocket.instances).toHaveLength(1)
+    FakeSocket.instances[0].emit('open')
+    FakeSocket.instances[0].emit('close')
+    await vi.advanceTimersByTimeAsync(1499)
+    expect(FakeSocket.instances).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(FakeSocket.instances).toHaveLength(2)
+    // An error and its close are one drop, never two retries.
+    FakeSocket.instances[1].emit('error')
+    FakeSocket.instances[1].emit('close')
+    await vi.advanceTimersByTimeAsync(2999)
+    expect(FakeSocket.instances).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(FakeSocket.instances).toHaveLength(3)
+    FakeSocket.instances[2].emit('open')
+    FakeSocket.instances[2].emit('close')
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(FakeSocket.instances).toHaveLength(4)
+    // Logged once per outage, not per retry.
+    const log = m.log()
+    expect(log.match(/shell socket connected/g)).toHaveLength(2)
+    expect(log.match(/shell socket closed/g)).toHaveLength(2)
+  })
+
+  it('the quit-entirely flow closes the socket before the backend is asked to stop', async () => {
+    let closedAtStop: boolean | null = null
+    const m = loadWithBackend({
+      notificationSupported: true,
+      execFile: (_py, args, _o, cb) => {
+        if (args[2] === 'stop') closedAtStop = FakeSocket.instances[0]?.closed ?? null
+        cb(null, 'stopped', '')
+      },
+    })
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    FakeSocket.instances[0].emit('open')
+    expect(await m.invoke('quit-all', { force: true })).toEqual({ ok: true })
+    expect(closedAtStop).toBe(true)
+  })
+
+  it('a failed stop keeps the app up and the socket comes back', async () => {
+    vi.useFakeTimers()
+    const m = loadWithBackend({
+      notificationSupported: true,
+      execFile: (_py, args, _o, cb) => { if (args[2] === 'stop') cb(new Error('boom'), '', 'boom') },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(FakeSocket.instances).toHaveLength(1)
+    const result = m.invoke('quit-all', { force: true }) as Promise<unknown>
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await result).toEqual({ error: 'boom' })
+    expect(FakeSocket.instances[0].closed).toBe(true)
+    expect(FakeSocket.instances).toHaveLength(2)
+  })
+
+  it('a quit passing through before-quit closes the socket', async () => {
+    vi.useFakeTimers()
+    const m = loadWithBackend({ notificationSupported: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(FakeSocket.instances).toHaveLength(1)
+    m.powerListeners.get('shutdown')!()
+    expect(m.emit('before-quit')).toBe(false)
+    expect(FakeSocket.instances[0].closed).toBe(true)
+    // …and no reconnect follows the close.
+    FakeSocket.instances[0].emit('close')
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(FakeSocket.instances).toHaveLength(1)
   })
 })

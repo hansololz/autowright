@@ -3291,6 +3291,16 @@ def test_settings_patch_strict_types(client):
     assert store.settings["automaticUpdateCheck"] is False
 
 
+def test_settings_patch_accepts_notifications_never(client):
+    """§4.9: `notifications` takes attention, all, or never; anything else is a 422."""
+    from autowright.storage import store
+
+    assert client.patch("/settings", json={"notifications": "never"}).status_code == 200
+    assert store.settings["notifications"] == "never"
+    assert client.patch("/settings", json={"notifications": "sometimes"}).status_code == 422
+    assert store.settings["notifications"] == "never"
+
+
 def test_restore_and_skip_step_strict_ints(client):
     from autowright.storage import store
 
@@ -4672,3 +4682,108 @@ def test_create_and_save_version_apply_draft_interval_triggers(client):
     assert r.status_code == 422
     assert r.json()["detail"] == "an interval can be at most 365 days"
     assert store.autos[a["id"]]["current_version"] == 2
+
+
+# ---------- §4.1 notifications override + §19 duplicate ----------
+
+def test_patch_notifications_override_sets_clears_and_validates(client):
+    """§19 PATCH `notifications`: one of the three strings sets it, an explicit
+    null clears it back to inherit, an absent key leaves it alone, and any
+    other value 422s with nothing stored."""
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Noisy", "mock")
+    r = client.patch(f"/automations/{a['id']}", json={"notifications": "never"})
+    assert r.status_code == 200 and r.json()["notifications"] == "never"
+    r = client.patch(f"/automations/{a['id']}", json={"description": "x"})
+    assert r.json()["notifications"] == "never"  # absent key: untouched
+    for bad in ("loud", "", 1, True):
+        r = client.patch(f"/automations/{a['id']}", json={"notifications": bad})
+        assert r.status_code == 422, bad
+    assert store.autos[a["id"]]["notifications"] == "never"
+    r = client.patch(f"/automations/{a['id']}", json={"notifications": None})
+    assert r.status_code == 200 and r.json()["notifications"] is None
+    row = next(x for x in client.get("/automations").json() if x["id"] == a["id"])
+    assert row["notifications"] is None
+
+
+def test_duplicate_route_answers_201_with_the_create_shape(client, monkeypatch):
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Report", "mock", triggers=[
+        {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+         "source": "user"}])
+    store.patch_automation(a, {"notifications": "all", "maxParallel": 2})
+    (store.auto_dir(a) / "memory" / "seen.json").write_text("[1]")
+    events = _capture_events(monkeypatch)
+    r = client.post(f"/automations/{a['id']}/duplicate", json={})
+    assert r.status_code == 201
+    body = r.json()
+    # the duplicate's own events, before the GET below starts a memory walk
+    # whose landing announces the source row
+    changed = [e for e in events if e["event"] == "automation.changed"]
+    created_keys = set(client.get(f"/automations/{a['id']}").json())
+    assert set(body) == created_keys  # the bare §4 automation JSON
+    assert body["name"] == "Report 2" and body["id"] != a["id"]
+    assert body["notifications"] == "all" and body["maxParallel"] == 2
+    assert body["allTriggersOff"] is True
+    assert not any((store.auto_dir(store.autos[body["id"]]) / "memory").iterdir())
+    # one row for the new automation (a memory-stats walk the response's full
+    # shape started may announce the same row again when it lands)
+    assert changed and {e["automationId"] for e in changed} == {body["id"]}
+    assert changed[0]["automation"]["id"] == body["id"]
+
+
+def test_duplicate_route_names_and_copies_memory(client):
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Report", "mock")
+    (store.auto_dir(a) / "memory" / "seen.json").write_text("[1]")
+    r = client.post(f"/automations/{a['id']}/duplicate",
+                    json={"name": " Weekly ", "copyMemory": True})
+    assert r.status_code == 201
+    b = store.autos[r.json()["id"]]
+    assert b["name"] == "Weekly"
+    assert (store.auto_dir(b) / "memory" / "seen.json").read_text() == "[1]"
+    # a typed name that collides dedupes rather than 422ing
+    r = client.post(f"/automations/{a['id']}/duplicate", json={"name": "weekly"})
+    assert r.status_code == 201 and r.json()["name"] == "weekly 2"
+
+
+def test_duplicate_route_404_and_memory_failure_keeps_the_copy(client, monkeypatch):
+    from autowright.storage import store
+
+    assert client.post("/automations/nope/duplicate", json={}).status_code == 404
+    a = store.create_automation(make_version(), "Report", "mock")
+
+    def broken(target, source_id):
+        raise OSError("disk full")
+    monkeypatch.setattr(store, "copy_memory_into", broken)
+    r = client.post(f"/automations/{a['id']}/duplicate", json={"copyMemory": True})
+    assert r.status_code == 500
+    assert r.json()["detail"] == ("Duplicated as 'Report 2', but its memory could not be "
+                                  "copied: disk full")
+    assert any(x["name"] == "Report 2" for x in store.autos.values())
+
+
+def test_ws_role_shell_registers_a_shell_subscriber(client):
+    """§19 `role=shell`: the hub records the shell so the §6 carrier rule sees
+    it; any other role (or none) is a renderer."""
+    from fastapi.testclient import TestClient
+
+    from autowright import api
+
+    try:
+        with TestClient(api.app) as c:
+            assert api.hub.has_role("shell") is False
+            with c.websocket_connect(f"/ws?token={api.AUTH_TOKEN}&role=bogus"):
+                assert api.hub.has_role("shell") is False
+            with c.websocket_connect(f"/ws?token={api.AUTH_TOKEN}&role=shell"):
+                assert api.hub.has_role("shell") is True
+            for _ in range(100):
+                if not api.hub.has_role("shell"):
+                    break
+                time.sleep(0.01)
+            assert api.hub.has_role("shell") is False
+    finally:
+        api.hub._loop = None

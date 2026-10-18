@@ -68,6 +68,17 @@ maxQueued: int ≥ 0 (default 0) — how many message firings may wait when ever
   (§6 firing queue). 0 (the default) is skip-on-busy; queueing is opt-in per automation.
   Both concurrency fields change on the §9.2 card, or staged through the §11 chat (§8
   `concurrency` action — applied when the user saves, like `param_values`).
+notifications: attention | all | never | null — the per-automation **override** of the §4.9
+  `notifications` setting; null (the default, stored as an absent key) means "use the app
+  setting". The §6 effective setting is this value when set, else the global one: each of the
+  three words carries its §4.9 meaning for this automation alone (an `all` or `attention`
+  override wins over a global `never`); `never` posts no notification
+  for it at all — end-of-execution and the §6 overdue notification alike (the §13 tray dot
+  and the `overdue` problem still show; they are health signals, not notifications). User-owned
+  and never versioned (§5 top-level `automation.yaml`), like the concurrency fields; changed
+  on the §9.2 NOTIFICATIONS card, via §19 PATCH (`null` clears it back to inherit), or §20
+  `automation set notifications=`. Never staged through the §11 chat — the agent shapes a
+  run's notification through `result.status` and `notify()` (§6.1), not through this setting.
 resultChip: short summary chip ("2 new chapters") | null — the chip is optional: null when the
   last successful execution never called result.chip(); failed automations synthesize "Needs attention"
 resultStatus: changes | ok | attention | null — tints resultChip with the §7 chip colors
@@ -1126,9 +1137,18 @@ automaticUpdateCheck: bool (default true) — "Check for updates automatically" 
   manual-only checking. Stored here for §20 CLI parity; consumed by the Electron shell's §3
   automatic-check machinery through the same reconcile path as `login`/`menuBarIcon`. Its
   toggle row lives on the About page's UPDATES card (§9.4), not Settings.
-notifications: attention | all — "Only when something needs attention" / "After every execution"
-  — the row renders only while the §9 store's `capabilities.notifications` is true (§2
-  gating); the stored value keeps §20 CLI parity everywhere.
+notifications: attention | all | never — "Only when something needs attention" / "After every
+  execution" / "Never" (added 2026-10-18 alongside the §4.1 override, same word, same
+  meaning: no end-of-execution and no §6 overdue notification for any automation; the §13 tray
+  dot and the §4.1 problems still show, so the `never` row carries the same caption as the
+  §9.2 card, "Failures still show on the Automations list and the menu bar."). The row is a
+  three-choice radiogroup and renders only while the §9 store's `capabilities.notifications`
+  is true (§2 gating); the stored value keeps §20 CLI parity everywhere. This is the app-wide
+  default; an automation's §4.1 `notifications` override (`attention | all | never`) wins for
+  that automation when set (§6 effective setting) — so a quiet app can opt one automation back
+  in with `all` or `attention`. An unknown stored value is treated as `attention` (lenient, §21). Who posts the notification — the Electron shell
+  when it is running, the backend natively otherwise — is the §6 carrier rule; this setting
+  only decides *whether*.
 days: int ≥ 1 (default 90) — history retention; keepForever: bool disables cleanup
 developerMode: bool (default false) — "Developer mode" ("Logs every backend request and every AI
   request, including the full prompt, to the backend log. Press `` ` `` to show the logs

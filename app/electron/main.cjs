@@ -1,5 +1,5 @@
 // Electron main: one app window + a tray (menu-bar) panel window (§9, §13).
-const { app, autoUpdater, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain, powerMonitor, session, shell, screen } = require('electron')
+const { app, autoUpdater, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, ipcMain, powerMonitor, session, shell, screen } = require('electron')
 const { execFile } = require('child_process')
 const { randomUUID } = require('crypto')
 const fs = require('fs')
@@ -67,6 +67,154 @@ let shellPoll = null
 
 function stopShellPoll() {
   if (shellPoll) { clearInterval(shellPoll); shellPoll = null }
+}
+
+// §13 shell-posted notifications: one WebSocket to the backend with the
+// `shell` role for as long as the app runs — main is the one shell piece
+// alive in the tray-only state, exactly when a notification has nowhere else
+// to land. Connected only when the OS notification API is available; without
+// it main stays off the hub and the backend keeps posting natively (§6
+// carrier rule). Reconnects with the renderer socket's backoff policy (§19):
+// 1.5 s doubling to a 15 s cap, reset once a connection comes back.
+const SHELL_SOCKET_RETRY_MIN_MS = 1500
+const SHELL_SOCKET_RETRY_MAX_MS = 15_000
+let shellSocket = null
+let shellSocketRetryTimer = null
+let shellSocketRetryMs = SHELL_SOCKET_RETRY_MIN_MS
+// True once the quit flows (or the §3 reset) closed the socket: no reconnect.
+let shellSocketStopped = true
+// Open/close are logged once per outage, never per retry.
+let shellSocketUp = false
+// Shown notifications are held until clicked or closed: a notification object
+// the garbage collector takes loses its click handler. Bounded, oldest first.
+const liveNotifications = new Set()
+const LIVE_NOTIFICATIONS_MAX = 50
+
+function notificationsSupported() {
+  try {
+    return Boolean(Notification?.isSupported?.())
+  } catch {
+    return false
+  }
+}
+
+function startShellSocket() {
+  if (!notificationsSupported()) return
+  if (!shellSocketStopped) return
+  shellSocketStopped = false
+  shellSocketRetryMs = SHELL_SOCKET_RETRY_MIN_MS
+  connectShellSocket()
+}
+
+function stopShellSocket() {
+  shellSocketStopped = true
+  if (shellSocketRetryTimer) { clearTimeout(shellSocketRetryTimer); shellSocketRetryTimer = null }
+  const socket = shellSocket
+  // Cleared first, so the close this triggers never schedules a reconnect.
+  shellSocket = null
+  if (socket) {
+    try { socket.close() } catch { /* already closing */ }
+  }
+  if (shellSocketUp) {
+    shellSocketUp = false
+    appLog('notifications: shell socket closed')
+  }
+}
+
+function scheduleShellSocket() {
+  if (shellSocketStopped || quitting || shellSocketRetryTimer) return
+  const wait = shellSocketRetryMs
+  shellSocketRetryMs = Math.min(shellSocketRetryMs * 2, SHELL_SOCKET_RETRY_MAX_MS)
+  shellSocketRetryTimer = setTimeout(() => {
+    shellSocketRetryTimer = null
+    connectShellSocket()
+  }, wait)
+}
+
+function connectShellSocket() {
+  if (shellSocketStopped || quitting) return
+  // backend.json is re-read on every attempt: a backend restart binds a new
+  // port and token.
+  const info = backendInfo()
+  if (!info?.port || !info?.token) { scheduleShellSocket(); return }
+  let socket
+  try {
+    socket = new WebSocket(
+      `ws://127.0.0.1:${info.port}/ws?token=${encodeURIComponent(info.token)}&role=shell`)
+  } catch {
+    scheduleShellSocket()
+    return
+  }
+  shellSocket = socket
+  socket.addEventListener('open', () => {
+    if (shellSocket !== socket) return
+    shellSocketRetryMs = SHELL_SOCKET_RETRY_MIN_MS
+    if (!shellSocketUp) {
+      shellSocketUp = true
+      appLog('notifications: shell socket connected')
+    }
+  })
+  socket.addEventListener('message', (event) => {
+    if (shellSocket !== socket) return
+    let message
+    try {
+      message = JSON.parse(String(event.data))
+    } catch {
+      return
+    }
+    showPostedNotification(message)
+  })
+  // An error arrives with (or just before) a close; whichever comes first
+  // owns the reconnect, the other finds the socket already dropped.
+  const dropped = () => {
+    if (shellSocket !== socket) return
+    shellSocket = null
+    if (shellSocketUp) {
+      shellSocketUp = false
+      appLog('notifications: shell socket closed — reconnecting')
+    }
+    scheduleShellSocket()
+  }
+  socket.addEventListener('close', dropped)
+  socket.addEventListener('error', dropped)
+}
+
+// The event crosses a socket, so its shape is checked before anything is
+// shown: string title and body, and a target whose id is uuid-shaped.
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function notificationTargetHash(target) {
+  if (!target || typeof target !== 'object') return null
+  if (target.page === 'execution' && typeof target.executionId === 'string'
+    && UUID_SHAPE.test(target.executionId)) return `/app?execution=${target.executionId}`
+  if (target.page === 'automation' && typeof target.automationId === 'string'
+    && UUID_SHAPE.test(target.automationId)) return `/app?automation=${target.automationId}`
+  return null
+}
+
+function showPostedNotification(message) {
+  // Every other event on this socket is ignored by main.
+  if (!message || typeof message !== 'object' || message.event !== 'notification.posted') return
+  const { title, body } = message
+  if (typeof title !== 'string' || typeof body !== 'string') return
+  const hash = notificationTargetHash(message.target)
+  if (!hash) return
+  try {
+    const notification = new Notification({ title, body })
+    const release = () => { liveNotifications.delete(notification) }
+    notification.on('click', () => {
+      release()
+      showApp(hash)
+    })
+    notification.on('close', release)
+    liveNotifications.add(notification)
+    if (liveNotifications.size > LIVE_NOTIFICATIONS_MAX) {
+      liveNotifications.delete(liveNotifications.values().next().value)
+    }
+    notification.show()
+  } catch (err) {
+    appLog(`notifications: showing a notification failed: ${String(err?.message || err)}`)
+  }
 }
 
 // One app process only: a second launch (login item racing a manual open,
@@ -1614,10 +1762,12 @@ function stopAndQuit(force, label) {
     if (!bundledPython() && !backendInfo()) {
       appLog(`${label}: no backend to stop — quitting app`)
     } else {
+      stopShellSocket()
       const err = await runServiceVerb('stop', label)
       if (err) {
         // The app stays up (§3), so future ensure/version-sync installs may run.
         quittingAll = false
+        startShellSocket()
         return { error: err }
       }
       appLog(`${label}: backend stopped, quitting app`)
@@ -1861,11 +2011,13 @@ ipcMain.handle('reset-all', async () => {
     stage('secrets')
     await deleteSecrets('reset')
     stage('service')
+    stopShellSocket()
     const err = await runServiceVerb('stop', 'reset')
     if (err) {
       // §3 step 4: a stop failure aborts the reset — the app stays up and
       // nothing has been deleted beyond step 3's secrets.
       quittingAll = false
+      startShellSocket()
       return { error: err }
     }
     stage('data')
@@ -1960,6 +2112,8 @@ app.whenReady().then(() => {
   void refreshTrayAlert()
   void syncShellSettings()
   shellPoll = setInterval(() => { void refreshTrayAlert(); void syncShellSettings() }, 60_000)
+  // §13: the shell's notification socket (a no-op without the OS API).
+  startShellSocket()
   // Last resort: nothing in the chain above may die silently.
 }).catch((err) => appLog(`ready: startup failed: ${String(err?.message || err)}`))
 
@@ -1993,6 +2147,7 @@ app.on('before-quit', (e) => {
   }
   quitting = true
   stopShellPoll()
+  stopShellSocket()
   stopUpdateTimer()
   // §13: app.quit() closes every window next and is cancelled when one
   // refuses — and the panel is deliberately non-closable (Cmd+W must be a

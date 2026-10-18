@@ -141,6 +141,11 @@ automations/<uuid>/
                                # param_values {name: value} (user data, never pruned),
                                # max_parallel / max_queued — §6 concurrency settings
                                # (absent keys default 1 and 0),
+                               # notifications — the §4.1 per-automation override
+                               # (attention | all | never); written only when set, absent
+                               # = inherit the §4.9 setting (§21.4 2026-10-18; a value
+                               # outside the three reads as absent with a warning, §5
+                               # lenient load),
                                # origin_os — §4.1 originOs, the §5.1 platform token of the
                                # archive this automation was imported from; written only
                                # when set, absent otherwise,
@@ -314,6 +319,33 @@ definitions); the top-level `automation.yaml` holds **what the user owns and ope
   they're matched by name and kind: match → current value; param since removed → last stored
   value (values are never pruned), else the definition's default; kind mismatch → default plus
   a `wrn` log line, never silent coercion. Every definition carries a default (§4.2).
+
+**Duplicating an automation** (§9.2 Duplicate…, §19 `POST /automations/{id}/duplicate`, §20
+`automation duplicate`) is a store-level copy, never an export-then-import round trip: the
+§5.1 archive drops concurrency, the snapshot toggles, one-shot triggers and user-sourced
+schedule provenance, rebuilds the grants from references (a copy could end up granted
+something the original was not), and refuses an automation with unresolved references, so
+it is the wrong tool for a same-machine copy. The copy gets a fresh uuid and a name
+deduped by the §4.1 create rule (the smallest free "Name n" suffix, applied to the name the
+user typed or the source name — never a 422). Copied verbatim from the source's top-level
+file: `description`, `agent_id`, `enabled_agents`, `allowed_secrets`, `memory_snapshots`,
+`max_parallel`, `max_queued`, `notifications`, `origin_os`, `unresolved_references` (a
+needs-fixing original duplicates into a needs-fixing copy — the honest outcome), and
+`param_values` filtered to the current version's param names. The **current version only**
+becomes the copy's `versions/v1/` — every file of the source's `v<current>` folder copied
+byte for byte except the manifest's `when` (now) and `note` ("Duplicated from <source name>
+v<N>"); the source's draft, if any, is ignored. Triggers are copied with **fresh ids and every
+one off** (`enabled: false`, no `enabledAt`; `runIfMissed` and `source` kept) — the §5.1
+import rule, so a duplicated cron or chat trigger can never double-fire beside its original
+before the user has changed anything. `memory/` starts empty unless the caller asked to copy
+it, in which case the source's memory tree is copied into the new automation **after** the
+automation exists, under the `memory_ops` lock and never the store lock (the §5 lock-order
+rule: `memory_ops` is never taken while `store.lock` is held) — a failed memory copy leaves
+the automation in place with empty memory and surfaces the error. Never copied: `chat.jsonl`,
+`draft/`, `memory-snapshots/`, executions. The write order is the create path's: the version
+folder (manifest last, the commit point), `memory/`, then the top-level `automation.yaml`,
+then the in-memory insert and one single-row `automation.changed`; a uuid directory left
+without `automation.yaml` by a crash is swept at the next startup like any other.
 
 There is no top-level copy of the "current" spec or steps: the current version is simply
 `versions/v<current_version>/`, resolved through the `current_version` pointer in

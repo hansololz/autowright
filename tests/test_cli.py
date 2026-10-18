@@ -3445,16 +3445,19 @@ def test_cmd_settings_set_data_path_and_errors(capsys):
 
 def test_cmd_settings_set_rejects_an_off_list_notifications_value():
     """§20 help rule: a stated vocabulary is exactly what the command parses -
-    `notifications` takes attention or all, and refuses anything else in the
-    setting's own words."""
+    `notifications` takes attention, all, or never, and refuses anything else
+    in the setting's own words."""
     c = _RouteClient()
     with pytest.raises(SystemExit) as ei:
         _run(c, "settings", "set", "notifications=failures")
-    assert str(ei.value.code) == "notifications must be attention or all, got 'failures'"
+    assert str(ei.value.code) == "notifications must be attention, all, or never, got 'failures'"
     assert c.calls == []
     c = _RouteClient()
     _run(c, "settings", "set", "notifications=attention")
     assert c.calls == [("PATCH", "/settings", {"notifications": "attention"})]
+    c = _RouteClient()
+    _run(c, "settings", "set", "notifications=never")
+    assert c.calls == [("PATCH", "/settings", {"notifications": "never"})]
 
 
 def test_cmd_settings_set_parses_every_item_before_applying_any(capsys):
@@ -4048,3 +4051,89 @@ def test_since_the_epoch_day_east_of_utc_is_a_usage_error():
         else:
             os.environ["TZ"] = saved
         time.tzset()
+
+
+# ---------------------------------------------------------------- §20 duplicate / set
+
+def test_cmd_automation_duplicate_prints_the_landed_name(capsys):
+    reply = {"id": "d1234567-aaaa", "name": "Daily Report 2", "triggers": []}
+    c = _RouteClient(_auto_gets(), reply=reply)
+    _run(c, "automation", "duplicate", "Daily Report")
+    assert c.calls == [("POST", f"/automations/{AUTO_ID}/duplicate", {})]
+    assert capsys.readouterr().out.strip() == \
+        "duplicated 'Daily Report' as 'Daily Report 2' [d1234567] — triggers off"
+
+    c = _RouteClient(_auto_gets(), reply=reply)
+    _run(c, "automation", "duplicate", "Daily Report", "--name", "Weekly", "--copy-memory")
+    assert c.calls == [("POST", f"/automations/{AUTO_ID}/duplicate",
+                        {"name": "Weekly", "copyMemory": True})]
+
+
+def test_cmd_automation_duplicate_json_prints_the_new_automation(capsys):
+    reply = {"id": "d1234567-aaaa", "name": "Daily Report 2", "triggers": []}
+    c = _RouteClient(_auto_gets(), reply=reply)
+    _run(c, "automation", "duplicate", "Daily Report", "--json")
+    assert json.loads(capsys.readouterr().out) == reply
+
+
+def test_cmd_automation_set_sends_one_patch(capsys):
+    c = _RouteClient(_auto_gets())
+    _run(c, "automation", "set", "Daily Report", "notifications=never", "maxParallel=2")
+    assert c.calls == [("PATCH", f"/automations/{AUTO_ID}",
+                        {"notifications": "never", "maxParallel": 2})]
+    assert capsys.readouterr().out.strip() == \
+        "updated 'Daily Report' — notifications: never · maxParallel: 2"
+
+    c = _RouteClient(_auto_gets())
+    _run(c, "automation", "set", "Daily Report", "notifications=inherit", "maxQueued=0")
+    assert c.calls == [("PATCH", f"/automations/{AUTO_ID}",
+                        {"notifications": None, "maxQueued": 0})]
+    assert capsys.readouterr().out.strip() == \
+        "updated 'Daily Report' — notifications: inherit · maxQueued: 0"
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["volume=3"], "unknown key 'volume'"),
+    (["notifications"], "expected KEY=VALUE, got 'notifications'"),
+])
+def test_cmd_automation_set_usage_errors_list_the_keys(argv, message):
+    c = _RouteClient(_auto_gets())
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "set", "Daily Report", *argv)
+    text = str(ei.value.code)
+    assert message in text
+    assert "notifications=inherit|attention|all|never" in text
+    assert "maxParallel=<int ≥ 1>" in text and "maxQueued=<int ≥ 0>" in text
+    assert c.calls == []
+
+
+def test_cmd_automation_set_refuses_bad_values_before_anything_travels():
+    for argv, message in [
+        (["notifications=loud"], "notifications must be one of inherit, attention, all, never"),
+        (["maxParallel=0"], "maxParallel must be an integer of at least 1, got '0'"),
+        (["maxQueued=-1"], "maxQueued must be an integer of at least 0, got '-1'"),
+        (["maxParallel=two"], "maxParallel must be an integer of at least 1, got 'two'"),
+        # a later bad value refuses the whole command - nothing is sent
+        (["maxParallel=2", "notifications=loud"],
+         "notifications must be one of inherit, attention, all, never"),
+    ]:
+        c = _RouteClient(_auto_gets())
+        with pytest.raises(SystemExit) as ei:
+            _run(c, "automation", "set", "Daily Report", *argv)
+        assert str(ei.value.code) == message, argv
+        assert c.calls == []
+
+
+def test_cmd_automation_set_prints_a_server_422_in_the_cli_words():
+    """§20: the server's notifications 422 reads in the CLI's own words."""
+    class Refusing(_RouteClient):
+        def req(self, method, path, body=None, timeout=30):
+            if method == "PATCH":
+                raise SystemExit("422: notifications: Input should be 'attention', "
+                                 "'all' or 'never'")
+            return super().req(method, path, body, timeout)
+
+    with pytest.raises(SystemExit) as ei:
+        _run(Refusing(_auto_gets()), "automation", "set", "Daily Report",
+             "notifications=attention")
+    assert str(ei.value.code) == "notifications must be one of inherit, attention, all, never"

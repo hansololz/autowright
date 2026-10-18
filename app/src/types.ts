@@ -188,6 +188,9 @@ export interface TriggerPreview {
   nextLabel?: string   // "Jul 20, 3:00 PM"-style moment label for nextAtMs
 }
 
+// §4.1 per-automation notification override (§6 effective setting)
+export type AutomationNotifications = 'attention' | 'all' | 'never'
+
 export interface Automation {
   id: string
   name: string
@@ -202,6 +205,7 @@ export interface Automation {
   live: string[]             // §4.1 execution ids in progress, oldest first — maxParallel may allow several
   maxParallel: number        // §6 how many executions may run at once (≥ 1)
   maxQueued: number          // §6 how many message firings may wait for a slot (≥ 0)
+  notifications: AutomationNotifications | null  // §4.1 override of the §4.9 setting; null = use the app setting
   resultChip: string | null
   resultStatus: 'changes' | 'ok' | 'attention' | null
   lastExecutionLabel: string
@@ -451,7 +455,7 @@ export interface Settings {
   menuBarIcon: boolean
   keepAwake: boolean
   automaticUpdateCheck: boolean
-  notifications: 'attention' | 'all'
+  notifications: 'attention' | 'all' | 'never'
   days: number
   keepForever: boolean
   developerMode: boolean

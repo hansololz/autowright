@@ -197,6 +197,13 @@ autowright agent list · agent check <name>        # AI agents available to agen
   match lands the automation needing attention - the user fixes it in the app's editor.
   Export includes the user's param values — `--no-values` leaves
   them out when the archive is for someone else.
+- `automation duplicate <name> [--name NEW] [--copy-memory] [--json]` makes a same-machine
+  copy for a variant ("same job, different URL"): the current version becomes the copy's
+  v1, grants and param values carry over, triggers arrive off, memory starts empty unless
+  `--copy-memory`. Prefer it over export then import on one machine.
+- `automation set <name> KEY=VALUE…` changes the per-automation settings that have no file in
+  the workdir: `notifications=inherit|attention|all|never` (an override of the app-wide
+  setting; `never` silences that automation entirely), `maxParallel=<n>`, `maxQueued=<n>`.
 - `marketplace list` / `marketplace add <link-or-file>` / `marketplace refresh [<name>]` /
   `marketplace remove <name>` / `marketplace install <name> <n>` work with marketplaces -
   catalogs someone published listing shareable automations. Each catalog has a location (a link,
@@ -218,4 +225,5 @@ autowright agent list · agent check <name>        # AI agents available to agen
   description=…` edits the catalog's fields; `marketplace catalog remove <name> <n>` drops entry
   n (its archive file stays). These work on catalogs on this machine only (a link location is
   read-only).
-- `settings show` / `settings set days=30 notifications=all developerMode=on dataPath=/path`.
+- `settings show` / `settings set days=30 notifications=all developerMode=on dataPath=/path`
+  (`notifications` takes `attention|all|never`).

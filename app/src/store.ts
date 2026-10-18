@@ -306,10 +306,19 @@ function evictExecutionCaches(
   return { executionFull, execLogs }
 }
 
-// '/app?automation=<uuid>' — the §13 menu-bar row deep link.
-function automationIdFromHash(hash: string): string | null {
-  const m = hash.match(/automation=([0-9a-f-]{36})/)
-  return m ? m[1] : null
+// §13 deep-link targets: '/app?automation=<uuid>' (the menu-bar row, a
+// notification about an automation) and '/app?execution=<uuid>' (a
+// notification about a run). A hash carrying neither is a plain focus.
+type DeepLink =
+  | { page: 'automation'; automationId: string }
+  | { page: 'execution'; executionId: string }
+
+function deepLinkFromHash(hash: string): DeepLink | null {
+  const automation = hash.match(/automation=([0-9a-f-]{36})/)
+  if (automation) return { page: 'automation', automationId: automation[1] }
+  const execution = hash.match(/execution=([0-9a-f-]{36})/)
+  if (execution) return { page: 'execution', executionId: execution[1] }
+  return null
 }
 
 export const useStore = create<Model>((set, get) => ({
@@ -405,11 +414,12 @@ export const useStore = create<Model>((set, get) => ({
       // prior data its Continue goes straight to the app (§10).
       const onboarded = localStorage.getItem('ad-onboarded') === '1'
       const hash = location.hash
-      const deepAutomationId = onboarded ? automationIdFromHash(hash) : null
+      const deepLink = onboarded ? deepLinkFromHash(hash) : null
       set({
         connected: true,
         surface: hash.includes('menubar') ? 'menubar' : onboarded ? 'app' : 'onboard',
-        ...(deepAutomationId ? { page: 'automation' as const, automationId: deepAutomationId } : {}),
+        ...(deepLink?.page === 'automation' ? { page: 'automation' as const, automationId: deepLink.automationId } : {}),
+        ...(deepLink?.page === 'execution' ? { page: 'execution' as const, executionId: deepLink.executionId } : {}),
         ...(n === refreshSeq ? {
           version: s.version, automations: s.automations, executions: s.executions,
           executionsTotal: s.executionsTotal, agents: s.agents, secrets: s.secrets, settings: s.settings,
@@ -1047,6 +1057,7 @@ window.addEventListener('popstate', (e) => {
 window.autowright?.onOpenTarget?.((hash) => {
   const m = useStore.getState()
   if (m.surface === 'onboard' || m.surface === 'menubar') return
-  const automationId = automationIdFromHash(hash)
-  if (automationId) m.go('automation', { automationId })
+  const deepLink = deepLinkFromHash(hash)
+  if (deepLink?.page === 'automation') m.go('automation', { automationId: deepLink.automationId })
+  else if (deepLink?.page === 'execution') m.go('execution', { executionId: deepLink.executionId })
 })

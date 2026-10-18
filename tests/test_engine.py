@@ -1671,6 +1671,130 @@ def test_notification_title_param_overrides_automation_name(store, monkeypatch):
     assert calls == [("My Title", "Execution failed")]
 
 
+def _targeted_recorder(monkeypatch):
+    """Record notify.post_targeted calls (title, body, kind, target) — the §6
+    carrier entry the engine posts through."""
+    from autowright import notify
+
+    calls = []
+    monkeypatch.setattr(notify, "post_targeted",
+                        lambda title, body, *, kind, target:
+                        calls.append((title, body, kind, target)))
+    return calls
+
+
+def _failing_version():
+    ver = make_version()
+    ver["steps"][0]["code"] = 'raise RuntimeError("boom")\n'
+    return ver
+
+
+def test_notification_override_never_posts_nothing_even_on_failure(store, monkeypatch):
+    """§4.1/§6: an automation whose override is `never` posts no notification,
+    a failure included, whatever the §4.9 global value says."""
+    from autowright.engine import Engine
+
+    calls = _targeted_recorder(monkeypatch)
+    native = _notify_recorder(monkeypatch)
+    store.settings["notifications"] = "all"
+    engine = Engine(store)
+    a = store.create_automation(_failing_version(), "Silent Fail", None)
+    store.patch_automation(a, {"notifications": "never"})
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    _wait_notifiers()
+    assert h["status"] == "failed"
+    assert calls == [] and native == []
+
+
+def test_notification_global_never_posts_nothing_even_on_failure(store, monkeypatch):
+    """§4.9/§6: the global `never` with no override posts no notification, a
+    failure included."""
+    from autowright.engine import Engine
+
+    calls = _targeted_recorder(monkeypatch)
+    native = _notify_recorder(monkeypatch)
+    store.settings["notifications"] = "never"
+    engine = Engine(store)
+    a = store.create_automation(_failing_version(), "Globally Silent Fail", None)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    _wait_notifiers()
+    assert h["status"] == "failed"
+    assert calls == [] and native == []
+
+
+def test_notification_override_attention_posts_failure_under_global_never(store, monkeypatch):
+    """§6 effective setting: the override `attention` re-enables notifications
+    for its automation even though the global setting is `never`."""
+    from autowright.engine import Engine
+
+    calls = _targeted_recorder(monkeypatch)
+    store.settings["notifications"] = "never"
+    engine = Engine(store)
+    a = store.create_automation(_failing_version(), "Overridden Fail", None)
+    store.patch_automation(a, {"notifications": "attention"})
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    _wait_notifiers()
+    assert h["status"] == "failed"
+    assert [(title, body) for title, body, _, _ in calls] == [("Overridden Fail", "Execution failed")]
+
+
+def test_notification_override_all_posts_success_under_global_attention(store, monkeypatch):
+    """§6 effective setting: the override `all` wins over the global `attention`."""
+    from autowright.engine import Engine
+
+    calls = _targeted_recorder(monkeypatch)
+    assert store.settings.get("notifications", "attention") == "attention"
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "Loud Success", None)
+    store.patch_automation(a, {"notifications": "all"})
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    _wait_notifiers()
+    assert h["status"] == "succeeded"
+    assert [(title, body) for title, body, _, _ in calls] == [("Loud Success", "All good")]
+
+
+def test_notification_override_attention_suppresses_success_under_global_all(store, monkeypatch):
+    """§6 effective setting: the override `attention` silences an ordinary
+    success even though the global setting is `all`; a failure still posts."""
+    from autowright.engine import Engine
+
+    calls = _targeted_recorder(monkeypatch)
+    store.settings["notifications"] = "all"
+    engine = Engine(store)
+    a = store.create_automation(make_version(), "Quiet Success", None)
+    store.patch_automation(a, {"notifications": "attention"})
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    _wait_notifiers()
+    assert h["status"] == "succeeded"
+    assert calls == []
+    b = store.create_automation(_failing_version(), "Still Loud", None)
+    store.patch_automation(b, {"notifications": "attention"})
+    h2 = engine.start(b, "manual")
+    wait_done(engine, h2["id"])
+    _wait_notifiers()
+    assert [(title, body) for title, body, _, _ in calls] == [("Still Loud", "Execution failed")]
+
+
+def test_execution_notification_targets_the_execution_page(store, monkeypatch):
+    """§6 carrier rule: an execution's notification carries the execution
+    page as its click target."""
+    from autowright.engine import Engine
+
+    calls = _targeted_recorder(monkeypatch)
+    engine = Engine(store)
+    a = store.create_automation(_failing_version(), "Targeted", None)
+    h = engine.start(a, "manual")
+    wait_done(engine, h["id"])
+    _wait_notifiers()
+    assert calls == [("Targeted", "Execution failed", "execution",
+                      {"page": "execution", "executionId": h["id"]})]
+
+
 def test_agents_for_step_same_name_resolves_by_id():
     """§6/§4.1: two enabled agents can share a display name without ambiguity —
     entries bind by id, so each step gets exactly the agent it lists."""

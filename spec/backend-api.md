@@ -155,7 +155,9 @@ remain plain dicts (§2).
   values, agentId, stepAgents, allowedSecrets, snapshotSettings (the §6.3 automatic-snapshot
   toggles — partial object, sent keys merged over the stored ones), maxParallel (int ≥ 1) and
   maxQueued (int ≥ 0) — the §6 concurrency settings; a non-integer or out-of-range value
-  answers 422 and nothing is stored. Lowering `maxParallel` never kills a running execution:
+  answers 422 and nothing is stored — and `notifications` (the §4.1 override:
+  `"attention" | "all" | "never"`, or `null` to clear it back to inherit; any other value
+  answers 422). Lowering `maxParallel` never kills a running execution:
   the automation simply admits nothing new until it is back under the limit. Lowering
   `maxQueued` below the number already waiting keeps those entries — the cap governs admission,
   not eviction (§6).
@@ -354,6 +356,15 @@ remain plain dicts (§2).
   half-read pair) and the diff itself is computed **outside** it — versions are immutable,
   and difflib over every file must never stall firings or `/state`. A label is exactly `v`
   followed by digits; anything else is the 404.
+- `POST /automations/{id}/duplicate` `{ name?, copyMemory? }` → 201 with the new automation's
+  bare §4 automation JSON (the create shape) — the §5 store-level duplicate: current version
+  as v1, top-level operational fields copied, triggers off with fresh ids, memory empty unless
+  `copyMemory` (default false) is true. `name` (trimmed; blank or omitted → the source name)
+  dedupes per §4.1 like create, so the route never 422s on a collision — the landed name is
+  in the response. 404 on an unknown id. Publishes one single-row `automation.changed` for the
+  new automation (clients insert the row, §19 merge rule for an unknown id). A `copyMemory`
+  failure after the automation landed answers 500 with the automation already created and its
+  memory empty — the response detail says so; the client's follow-up `/state` shows it.
 - `GET /automations/{id}/export?values=0|1` — the §5.1 transfer archive as `application/zip`
   (`Content-Disposition` filename `<name>.autowright`, name sanitized for the filesystem);
   `values=0` omits `param_values` from the manifest (default `1`)
@@ -844,7 +855,7 @@ already neutralize. The provider config and
   names exist for display and the create call)
 - `GET /settings` · `PATCH /settings` (validates before storing: `days` must be an int —
   strict, no coercion, 422 otherwise — and is
-  clamped ≥ 1, `notifications` must be `attention | all` — 422 otherwise, so a bad value can never
+  clamped ≥ 1, `notifications` must be `attention | all | never` — 422 otherwise, so a bad value can never
   persist and silently break the retention sweep; flipping `keepAwake` starts/stops the §3
   permanent power assertion immediately) · `POST /settings/data-path` `{ path }` (sets the
   execution-data location — an absolute path, 422 otherwise; disk-first per §5: the settings
@@ -870,7 +881,17 @@ already neutralize. The provider config and
   `POST /settings/data-path`. The §5.1 import routes are no longer among them: import
   never writes the agents or secrets stores (it creates no records), so an unreadable
   store file cannot block an import.
-- `WS /ws?token=` — events, each `{ event, ... }`: `execution.started` (also re-published when a
+- `WS /ws?token=&role=` — events, each `{ event, ... }`. `role` is optional and names the
+  subscriber kind: `shell` for the Electron main process (§13 — it connects with this role
+  only when the OS notification API is available to it), anything else or absent for a
+  renderer. The hub keeps each subscriber's role so the §6 notification carrier rule can ask
+  "is a shell connected?" at post time; roles grant nothing else (every subscriber receives
+  every event). `notification.posted` `{ id, kind: "execution" | "overdue", title, body,
+  target: { page: "execution", executionId } | { page: "automation", automationId } }` — a
+  notification the backend decided to post (§6) and handed to the shell to show, published
+  **only** while a `shell` subscriber is connected (otherwise the backend posted natively and
+  no event exists); `title` and `body` are already redacted (§6.1 `notify`). Renderers ignore
+  it. Then: `execution.started` (also re-published when a
   failed execution retries in place — same execution id, updated record), `execution.queued`
   (a §6 firing was admitted to the queue — carries the new `queued` record, so it reaches the
   §7 executions list and the §9.2 "N waiting" line without a poll; promotion needs no second

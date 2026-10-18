@@ -68,6 +68,31 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-10-18 - `never` added to the §4.9 `notifications` setting (`settings.yaml`).**
+  The app-wide value set grows from `attention | all` to `attention | all | never`. Additive
+  vocabulary, not a shape change: every file an earlier release wrote still holds one of the
+  two old words and reads unchanged, so no migration exists. Loading stays lenient: a value
+  outside the three words is *treated* as `attention` by the §6 effective-setting helper
+  (never a load failure, never rewritten on its own). Downgrade note (outside the forward-only
+  promise): a release before this one validates only on PATCH, so a stored `never` would be
+  read by it as "neither `all` nor `never`" and behave like `attention`.
+- **2026-10-18 - `notifications` added to `automation.yaml` (§4.1 per-automation override).**
+  The top-level file gains one optional key, `notifications: attention | all | never`,
+  written only when the user set an override on the §9.2 NOTIFICATIONS card, via §19 PATCH,
+  or §20 `automation set`. Additive: an absent key is the old shape and reads as `null`
+  ("use the app setting") - today's behavior, unchanged - so no data rewrite exists;
+  recognition is structural (absent key), the same pattern as `runIfMissed` and
+  `max_parallel`. Loading stays §5 lenient: a value outside the three strings reads as
+  absent with a warning and is dropped at the next top-level write (never a load failure).
+  A §5 duplicate copies the key with the rest of the top-level operational fields. The §5.1
+  archive and the §20 workdir manifest do **not** carry it (it is an operational setting of
+  this install, like concurrency - archives are outside the promise anyway). Downgrade note
+  (outside the forward-only promise, recorded for diagnosis): a release before this one
+  ignores the unknown key and drops it at its next top-level write, so the override is lost
+  on downgrade and the global setting applies. First version writing the new shape: the next
+  release after 2026-10-18; oldest shape still read: v0.6.0 (key absent). Fixture test:
+  `tests/test_storage.py::test_automation_without_notifications_loads_as_inherit`.
+
 - **2026-09-20 - `shown` renamed `expanded` in `marketplaces.yaml` (§22.2).** The
   catalog-table column that says whether the page lists a catalog's entries is now
   `expanded: bool` (default `true`); the concept is expanded/collapsed rather than

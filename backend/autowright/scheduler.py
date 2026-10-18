@@ -15,7 +15,7 @@ from . import paths, timefmt, triggers as triggerlib
 from .engine import Engine
 from .events import hub
 from .firing import drain_queue, finish_never_ran, fire_trigger
-from .storage import Store
+from .storage import Store, effective_notifications
 
 log = logging.getLogger("autowright.scheduler")
 
@@ -365,15 +365,22 @@ class Scheduler:
                         if self.store.autos.get(aid) is not a:
                             continue  # §19: deleted mid-sweep — nobody to notify about
                     self._overdue_notified.add(aid)
-                    # §6: attention-class — posts under both §4.9 notifications
-                    # values, exactly like a failed execution's end notification.
+                    # §6: attention-class — posts under `attention` and `all`,
+                    # exactly like a failed execution's end notification, unless
+                    # the effective setting (the §4.1 override, else the §4.9
+                    # global value) is `never` (the change event still goes
+                    # out: the tray dot and the `overdue` problem are health
+                    # signals, not notifications).
                     # On its own thread: the osascript post can block up to
                     # 10 s, and several automations going overdue in one sweep
                     # would stall the scheduler tick for the sum of them.
-                    threading.Thread(
-                        target=notify.post,
-                        args=(a["name"], "Scheduled executions are being missed."),
-                        daemon=True).start()
+                    if effective_notifications(self.store.settings, a) != "never":
+                        threading.Thread(
+                            target=notify.post_targeted,
+                            args=(a["name"], "Scheduled executions are being missed."),
+                            kwargs={"kind": "overdue",
+                                    "target": {"page": "automation", "automationId": aid}},
+                            daemon=True).start()
                     self._publish_changed(a)
             else:
                 self._overdue_streak.pop(aid, None)

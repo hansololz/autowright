@@ -23,9 +23,9 @@ way it edits any code. The §17 `skills/autowright/` agent skill is the primary 
 ```
 autowright status                       backend health, version, entity counts
 autowright instructions                 §8 framework + build instruction files, verbatim
-autowright automation <verb> …          list · show · pull · push · create · delete · restore ·
+autowright automation <verb> …          list · show · pull · push · create · duplicate · delete · restore ·
                                         diff --from vN [--to vN] · execute [--version vN|draft] [--queue] ·
-                                        export · import ·
+                                        export · import · set KEY=VALUE… ·
                                         param list|set · trigger list|add|on|off|remove ·
                                         memory show|clear · snapshot list|create|restore|delete
 autowright execution <verb> …           list · show · tail · cancel · retry · skip · result
@@ -322,6 +322,22 @@ learns about an install failure at build time, not when a trigger fires.
   joins the §6 queue instead of failing ("queued — execution `<id>` (waiting for a free
   slot)"; `-f` follows through promotion per the follow semantics above). Without the flag
   a busy automation stays a plain refusal (409).
+
+**`automation duplicate <automation> [--name NAME] [--copy-memory] [--json]`** POSTs §19
+`/automations/{id}/duplicate` and prints `duplicated '<source>' as '<landed name>' [<id8>] —
+triggers off` (the landed name is the server's §4.1 deduped one, so it may carry a suffix the
+user didn't type); `--copy-memory` forwards `copyMemory: true`; `--json` prints the new
+automation's JSON instead (the one create-like verb with a machine mode, so a script gets the
+new id without scraping). Exit 0 on success, 1 on any error.
+
+**`automation set <automation> KEY=VALUE…`** PATCHes the §4.1 operational settings that have
+no file in the §20 workdir: `notifications=inherit|attention|all|never` (`inherit` sends
+`null`), `maxParallel=<int ≥ 1>`, `maxQueued=<int ≥ 0>`. All keys travel in one PATCH, so a
+refused value leaves every key unchanged (the server's 422 is printed in the CLI's own
+words: "notifications must be one of inherit, attention, all, never"). Prints
+`updated '<name>' — notifications: never · maxParallel: 2` naming only the keys sent. An
+unknown key or a bare key without `=` is a usage error listing the three keys with their
+value forms, like `settings set`.
 
 **`automation export [path]`** writes the §5.1 archive (default `<name>.autowright` in the
 current directory) and never clobbers: an existing file at the target exits 1 with

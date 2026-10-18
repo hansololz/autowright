@@ -21,7 +21,8 @@ from .events import hub
 from .executor import CLIP_MARKER, CTRL, ERROR_MESSAGE_CAP, _LineWriter, substantive_probe
 from .firing import DATA_PATH_UNREACHABLE, finish_queued
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
-                      clamp_max_parallel, exec_version_label, is_test, new_id,
+                      clamp_max_parallel, effective_notifications, exec_version_label,
+                      is_test, new_id,
                       resolve_param_value, trigger_label)
 
 log = logging.getLogger("autowright.engine")
@@ -1693,8 +1694,11 @@ class Engine:
 
     def _notify_end(self, auto: dict, ver: dict, h: dict, result: dict | None,
                     notify_text: str | None) -> None:
-        """§6: at most one notification, at the end, per the §4.9 setting."""
-        setting = self.store.settings.get("notifications", "attention")
+        """§6: at most one notification, at the end, per the effective
+        notifications setting (the §4.1 override, else the §4.9 global)."""
+        setting = effective_notifications(self.store.settings, auto)
+        if setting == "never":
+            return
         status = h["status"]
         # §6: the notification follows the STORED chipStatus — a
         # `result.status(...)` set without a chip stores nothing (§4.5) and must
@@ -1710,4 +1714,5 @@ class Engine:
             for p in ver.get("params", []):
                 if p["name"] == "notification_title":
                     title_param = resolve_param_value(p, auto["param_values"]) or None
-            notify.post(title_param or auto["name"], body)
+            notify.post_targeted(title_param or auto["name"], body, kind="execution",
+                                 target={"page": "execution", "executionId": h["id"]})

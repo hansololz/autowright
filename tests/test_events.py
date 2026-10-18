@@ -80,3 +80,33 @@ def test_unsubscribe_stops_delivery(loop):
     hub.unsubscribe(gone)
     hub.publish("tick", n=2)
     assert _get(loop, kept) == {"event": "tick", "n": 2}
+
+
+def test_subscriber_roles_and_has_role():
+    """§19 role param: the hub keeps each subscriber's role so the §6 carrier
+    rule can ask whether a shell is connected; unsubscribe clears it."""
+    from autowright.events import EventHub
+
+    hub = EventHub()
+    renderer = hub.subscribe()
+    assert hub.has_role("shell") is False
+    assert hub.has_role("renderer") is True
+    shell = hub.subscribe("shell")
+    assert hub.has_role("shell") is True
+    hub.unsubscribe(shell)
+    assert hub.has_role("shell") is False
+    hub.unsubscribe(renderer)
+    assert hub.has_role("renderer") is False
+
+
+def test_every_role_receives_every_event(loop):
+    """§19: roles grant nothing — a shell and a renderer both get each event."""
+    from autowright.events import EventHub
+
+    hub = EventHub()
+    hub.bind_loop(loop)
+    shell = hub.subscribe("shell")
+    renderer = hub.subscribe("renderer")
+    hub.publish("automation.changed", automationId="a-1")
+    assert _get(loop, shell) == {"event": "automation.changed", "automationId": "a-1"}
+    assert _get(loop, renderer) == {"event": "automation.changed", "automationId": "a-1"}

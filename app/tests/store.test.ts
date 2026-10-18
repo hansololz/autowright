@@ -1158,6 +1158,71 @@ describe('onOpenTarget surface guard (§13)', () => {
     openTarget!('#/app?automation=123e4567-e89b-12d3-a456-426614174000')
     expect(store.useStore.getState().page).toBe('automations')
     expect(store.useStore.getState().automationId).toBeNull()
+    openTarget!('#/app?execution=123e4567-e89b-12d3-a456-426614174000')
+    expect(store.useStore.getState().page).toBe('automations')
+    expect(store.useStore.getState().executionId).toBeNull()
+  })
+
+  it('an execution deep link is ignored while onboarding', () => {
+    store.useStore.setState({ surface: 'onboard' })
+    openTarget!('#/app?execution=123e4567-e89b-12d3-a456-426614174000')
+    expect(store.useStore.getState().page).toBe('automations')
+    expect(store.useStore.getState().executionId).toBeNull()
+  })
+})
+
+describe('execution deep link (§13 two target forms)', () => {
+  const EXECUTION_ID = '9b2f4c1e-7a3d-4e5f-8a6b-1c2d3e4f5a6b'
+
+  it('open-target with execution=<uuid> lands on the execution page', () => {
+    store.useStore.setState({ surface: 'app' })
+    openTarget!(`#/app?execution=${EXECUTION_ID}`)
+    const m = store.useStore.getState()
+    expect(m.page).toBe('execution')
+    expect(m.executionId).toBe(EXECUTION_ID)
+  })
+
+  it('a malformed execution id is a plain focus', () => {
+    store.useStore.setState({ surface: 'app' })
+    openTarget!('#/app?execution=SHORT')
+    expect(store.useStore.getState().page).toBe('automations')
+    expect(store.useStore.getState().executionId).toBeNull()
+  })
+
+  const bootWithHash = async (hash: string) => {
+    const backing = new Map<string, string>([['ad-onboarded', '1']])
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => backing.set(k, v),
+    })
+    const savedHash = location.hash
+    vi.mocked(apiMod.connectInfo).mockResolvedValueOnce(true)
+    vi.mocked(apiMod.api.state).mockResolvedValueOnce({
+      version: 'v', automations: [], executions: [], executionsTotal: 0, agents: [], secrets: [],
+      settings: { cliEnabled: false }, pendingDraft: null,
+    } as never)
+    try {
+      location.hash = hash
+      await store.useStore.getState().boot()
+    } finally {
+      location.hash = savedHash
+      vi.unstubAllGlobals()
+    }
+  }
+
+  it('a cold boot at execution=<uuid> lands on the execution page', async () => {
+    await bootWithHash(`#/app?execution=${EXECUTION_ID}`)
+    const m = store.useStore.getState()
+    expect(m.surface).toBe('app')
+    expect(m.page).toBe('execution')
+    expect(m.executionId).toBe(EXECUTION_ID)
+  })
+
+  it('a cold boot at automation=<uuid> still lands on the automation', async () => {
+    await bootWithHash('#/app?automation=123e4567-e89b-12d3-a456-426614174000')
+    const m = store.useStore.getState()
+    expect(m.page).toBe('automation')
+    expect(m.automationId).toBe('123e4567-e89b-12d3-a456-426614174000')
   })
 })
 

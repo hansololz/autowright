@@ -9,8 +9,25 @@ finish its cross-module imports before that swap.
 """
 from __future__ import annotations
 
+import uuid
+
 from . import platform
 
 
 def post(title: str, body: str) -> None:
     platform.current().notifier.post(title, body)
+
+
+def post_targeted(title: str, body: str, *, kind: str, target: dict) -> None:
+    """§6 carrier rule: hand the notification to the Electron shell when a
+    §19 `role=shell` subscriber is connected (one `notification.posted`
+    event carrying the click target), else post natively. Never both; the
+    choice is made from the hub's roles at this instant. The native leg goes
+    through the module-level `post` so the §15 test fixture still catches it.
+    """
+    from .events import hub
+    if hub.has_role("shell"):
+        hub.publish("notification.posted", id=str(uuid.uuid4()), kind=kind,
+                    title=title, body=body, target=target)
+        return
+    post(title, body)

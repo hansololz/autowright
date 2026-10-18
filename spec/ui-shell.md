@@ -480,8 +480,20 @@ shrinks; the description ellipsizes first). When the description is empty the de
 and the chip stands alone on the row.
 Then the version chip dropdown (§4.4 read-only history + footer
 explainer), status badge, then the §9 header-action cluster: Edit (ghost), Execute now (accent
-primary), ellipsis menu at the far right edge (**Export…**, then Delete
-automation… in red). Export… opens a small modal — "Export "`<name>`"" with one toggle row,
+primary), ellipsis menu at the far right edge (**Export…**, **Duplicate…**, then Delete
+automation… in red). Duplicate… opens a small modal — "Duplicate "`<name>`"" with a **Name**
+text field (eyebrow "NAME" over an `ad-input`, the §22.7 catalog-editor field pattern) prefilled with the §4.1 deduped default for the source name ("`<name>` 2" when
+the source name is taken, which it always is; the server applies the same rule
+authoritatively, so the landed name may differ from the prefill only if another automation
+took it meanwhile), one toggle row **"Copy memory"** (off; help: "Start the copy with this
+automation's remembered state. Leave it off to start fresh, like the first execution."),
+footer note "Triggers start off. Chat, execution history, and snapshots are not copied." —
+accent Duplicate / quiet Cancel. Duplicate POSTs §19 `/automations/{id}/duplicate` (the
+button disables with busy feedback, §9 commit rule), then loads the new automation into the
+store (insert), navigates to its detail page, and toasts "Duplicated as "`<landed name>`"."
+A failed request toasts the error and keeps the modal open. The copy is the §5 store-level
+duplicate — current version only, the draft ignored; a source with a draft shows nothing
+extra, the footer note covers it. Export… opens a small modal — "Export "`<name>`"" with one toggle row,
 "Include parameter values" (on; help: "Your saved parameter values travel with the file — turn
 this off when sharing with someone else."), footer note "Secret values and memory are never
 included in the file", accent Export / quiet Cancel — then a native save dialog (main-process IPC, default
@@ -773,6 +785,22 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   value can lose one of the updates." No modal and no block — the caution is inline, specific,
   and stays visible while the setting is above 1. An automation whose steps never touch memory
   gets no caution.
+- **NOTIFICATIONS** card — the §4.1 per-automation override, rendered only while the §9
+  store's `capabilities.notifications` is true (the same gate as the §4.9 Settings row) and
+  for every automation when it is. Eyebrow "NOTIFICATIONS", caption "Changes apply
+  immediately.", then one row in the §9.2 row layout: title **"Notify me"**, and at the row's
+  right a `PopMenu` value button (the §9.2 trigger-timezone menu precedent: current label +
+  caret, no new primitive) opening four `MenuRow`s — **"Use the app setting"** (`null`;
+  its label appends the §4.9 value in faint text, "Use the app setting · Only when something
+  needs attention", so the row says what it inherits), **"Only when something needs
+  attention"** (`attention`), **"After every execution"** (`all`), **"Never for this
+  automation"** (`never`). The chosen row is highlighted like every `MenuRow` and carries a
+  14 px accent check column (the `MenuItemRow` convention). Picking a row PATCHes
+  `notifications` immediately like the concurrency rows — no version, no AI; the button keeps
+  showing the committed label through the round-trip and only a failed PATCH reverts it
+  alongside the error toast. Under the row, while the value is `never`, a quiet caption:
+  "Failures still show on the Automations list and the menu bar." (the §13 dot and the
+  §4.1 problems are not notifications).
 - **RECENT EXECUTIONS** — the automation's 5 newest execution history rows (status badge,
   then the execution id's first 8 chars in faint mono — same short id the Executions page rows show — then
   trigger·version — a message-triggered row puts the §4.5 `triggerSender` between them,
@@ -1759,5 +1787,33 @@ With no main window, the window is created loading that hash and the renderer's 
 `automation=<id>` to land on the automation's detail page. With an existing window, main pushes the
 target over IPC (`open-target`) and the renderer navigates in place — never a page reload,
 which would drop the WebSocket and all renderer state. The footer link sends plain `'/app'`
-(focus only). Deep links are ignored while onboarding hasn't completed.
+(focus only). Deep links are ignored while onboarding hasn't completed. Two target forms
+exist: `automation=<uuid>` (the §9.2 detail page) and `execution=<uuid>` (the §7 execution
+page — `go('execution', { executionId })`, which needs no automation id; an execution the
+§6 retention sweep has since removed lands on the page's own not-found state). Both are
+parsed by one hash reader at boot and on `open-target`; a hash carrying neither is a plain
+focus. The menubar surface ignores both, as before.
+
+**Shell-posted notifications (decided 2026-10-18).** The Electron main process keeps **one
+WebSocket to the backend** (§19 `/ws?token=&role=shell`, the token from `backend.json`;
+reconnect with the renderer socket's backoff policy — 1.5 s doubling to a 15 s cap, reset
+once a connection comes back — using the Node global `WebSocket`, no new dependency) for as
+long as the app runs — the main process is the one shell piece alive in the tray-only state
+(window closed, panel never opened), which is exactly when a notification has nowhere else to
+land. It connects with the `shell` role **only when the OS notification API is available**
+(`Notification.isSupported()`); otherwise it stays off the hub and the backend keeps posting
+natively (§6 carrier rule — the backend never posts both ways). On `notification.posted` it
+shows an OS notification with the event's `title` and `body` under the app's own identity
+(the packaged bundle id, so macOS lists "Autowright" in Notification Center and asks the user
+to allow notifications on the first post; the dev launch shows as "Electron" through the same
+code — no dev-only path), and a **click** calls the deep-link `showApp` above with
+`'/app?execution=<id>'` or `'/app?automation=<id>'` from the event's `target` — the window is
+created or focused and the renderer lands on the run or the automation. Every other event on
+that socket is ignored by main; the §13 60 s tray poll stays as it is. The socket is closed
+during the §3 quit flows before the backend is asked to stop (quit-entirely, reset, and the
+plain quit's `before-quit` pass-through); a stop that fails leaves the app running, so those
+paths reopen it. Each connect attempt re-reads `backend.json` for the port and token, the
+same source as every main-process fetch, so a backend that came back on a new port is
+picked up by the next retry. Shown notifications are held by main until clicked or closed
+(bounded at 50) — a garbage-collected notification object would lose its click handler.
 

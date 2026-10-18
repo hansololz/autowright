@@ -187,3 +187,69 @@ def test_post_routes_through_the_composed_notifier(no_notifications, monkeypatch
     monkeypatch.setattr(platmod, "current", lambda: fake)
     real_post("Title", "Body")
     assert seen == [("Title", "Body")]
+
+
+# ---------- §6 carrier rule: shell-posted vs native ----------
+
+def _carrier_hub(monkeypatch, loop):
+    from autowright import events
+    from autowright.events import EventHub
+
+    hub = EventHub()
+    hub.bind_loop(loop)
+    monkeypatch.setattr(events, "hub", hub)
+    return hub
+
+
+@pytest.fixture()
+def carrier_loop():
+    import asyncio
+    import threading
+
+    lp = asyncio.new_event_loop()
+    t = threading.Thread(target=lp.run_forever, daemon=True)
+    t.start()
+    yield lp
+    lp.call_soon_threadsafe(lp.stop)
+    t.join(timeout=5)
+    lp.close()
+
+
+def test_post_targeted_hands_the_notification_to_a_connected_shell(monkeypatch, carrier_loop):
+    """§6: with a `role=shell` subscriber connected the backend publishes one
+    `notification.posted` event and never posts natively."""
+    import asyncio
+
+    from autowright import notify
+
+    hub = _carrier_hub(monkeypatch, carrier_loop)
+    native = []
+    monkeypatch.setattr(notify, "post", lambda title, body: native.append((title, body)))
+    shell = hub.subscribe("shell")
+    target = {"page": "execution", "executionId": "e-1"}
+    notify.post_targeted("Report", "Execution failed", kind="execution", target=target)
+    msg = asyncio.run_coroutine_threadsafe(shell.get(), carrier_loop).result(5)
+    assert native == []
+    assert msg["event"] == "notification.posted"
+    assert msg["kind"] == "execution"
+    assert msg["title"] == "Report" and msg["body"] == "Execution failed"
+    assert msg["target"] == target
+    assert isinstance(msg["id"], str) and len(msg["id"]) == 36
+
+
+def test_post_targeted_posts_natively_without_a_shell(monkeypatch, carrier_loop):
+    """§6: no shell subscriber (headless, the UI quit) → the platform notifier,
+    and no event exists — a renderer alone never turns the event on."""
+    import time
+
+    from autowright import notify
+
+    hub = _carrier_hub(monkeypatch, carrier_loop)
+    native = []
+    monkeypatch.setattr(notify, "post", lambda title, body: native.append((title, body)))
+    renderer = hub.subscribe()
+    notify.post_targeted("Dead Job", "Scheduled executions are being missed.", kind="overdue",
+                         target={"page": "automation", "automationId": "a-1"})
+    assert native == [("Dead Job", "Scheduled executions are being missed.")]
+    time.sleep(0.05)  # a stray publish would have landed by now
+    assert renderer.qsize() == 0

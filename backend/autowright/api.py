@@ -928,6 +928,26 @@ def create_auto(body: models.AutomationCreate) -> dict:
     return _auto_json_locked(a)
 
 
+@app.post("/automations/{automation_id}/duplicate", status_code=201,
+          dependencies=[Depends(auth)])
+def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict:
+    """§19 / §5 store-level duplicate. The memory copy runs after the new
+    automation landed, under `memory_ops` and never the store lock; a failed
+    copy keeps the automation (memory empty) and answers 500 saying so."""
+    _auto_or_404(automation_id)
+    a = store.duplicate_automation(automation_id, name=_clean_name(body.name))
+    _publish_auto_changed(a)
+    if body.copyMemory:
+        try:
+            with store.memory_ops:
+                store.copy_memory_into(a, automation_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("duplicate %s: memory copy failed: %s", a["id"], e)
+            raise HTTPException(
+                500, f"Duplicated as '{a['name']}', but its memory could not be copied: {e}") from e
+    return _auto_json_locked(a)
+
+
 @app.post("/automations/{automation_id}/versions", dependencies=[Depends(auth)])
 def save_version(automation_id: str, body: models.VersionSave) -> dict:
     a = _auto_or_404(automation_id)
@@ -3059,12 +3079,15 @@ def set_data_path(body: models.DataPath) -> dict:
 
 # ---------- websocket ----------
 @app.websocket("/ws")
-async def ws(sock: WebSocket, token: str = Query("")) -> None:
+async def ws(sock: WebSocket, token: str = Query(""), role: str = Query("")) -> None:
     if not token_ok(token):
         await sock.close(code=4401)
         return
     await sock.accept()
-    q = hub.subscribe()
+    # §19: `shell` (the Electron main process) is the only meaningful role —
+    # anything else is a renderer. The role only answers the §6 carrier
+    # rule's "is a shell connected?"; every subscriber gets every event.
+    q = hub.subscribe("shell" if role == "shell" else "renderer")
 
     async def pump() -> None:
         while True:

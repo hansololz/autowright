@@ -26,6 +26,8 @@ vi.mock('../src/api', () => ({
     versionDiff: vi.fn(async () => ({ from: 1, to: 2, files: [] })),
     // §9.2 Export… modal
     exportAutomation: vi.fn(async () => new ArrayBuffer(0)),
+    // §9.2 Duplicate… modal
+    duplicateAutomation: vi.fn(async () => ({})),
   },
 }))
 
@@ -162,6 +164,65 @@ describe('§9.2 actions menu', () => {
     fireEvent.click(screen.getByText('Export…'))
     expect(screen.getByText('Export “Job”')).toBeTruthy()
     expect(screen.getByText('Include parameter values')).toBeTruthy()
+  })
+
+  it('the rows read Export…, Duplicate…, Delete automation… in that order', () => {
+    seed(auto())
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    const rows = Array.from(document.querySelectorAll('.ad-menu-row')).map((r) => r.textContent?.trim())
+    const order = ['Export…', 'Duplicate…', 'Delete automation…'].map((label) => rows.indexOf(label))
+    expect(order.every((i) => i >= 0)).toBe(true)
+    expect([...order].sort((x, y) => x - y)).toEqual(order)
+  })
+
+  it('Duplicate… prefills the deduped name, POSTs the body, lands on the copy and toasts', async () => {
+    storeMod.useStore.setState({
+      page: 'automation', automationId: 'a1', executions: [], toast: null,
+      // "job 2" is taken case-insensitively, so the prefill is "Job 3"
+      automations: [auto(), auto({ id: 'a9', name: 'job 2' })],
+    })
+    const created = auto({ id: 'a2', name: 'Job 3' })
+    mockedApi.duplicateAutomation.mockClear()
+    mockedApi.duplicateAutomation.mockResolvedValueOnce(created)
+    mockedApi.getAutomation.mockImplementation(async (id: string) => {
+      if (id === 'a2') return created
+      throw new Error('offline')
+    })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    fireEvent.click(screen.getByText('Duplicate…'))
+    expect(screen.getByRole('dialog', { name: 'Duplicate Job' })).toBeTruthy()
+    expect(screen.getByText('Duplicate “Job”')).toBeTruthy()
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Job 3')
+    expect(screen.getByText('Copy memory')).toBeTruthy()
+    expect(screen.getByText('Triggers start off. Chat, execution history, and snapshots are not copied.')).toBeTruthy()
+    // the toggle starts off; flip it on
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Job' })
+    const toggle = within(dialog).getByRole('switch')
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(toggle)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+    await waitFor(() => expect(storeMod.useStore.getState().automationId).toBe('a2'))
+    expect(mockedApi.duplicateAutomation).toHaveBeenCalledWith('a1', { name: 'Job 3', copyMemory: true })
+    expect(storeMod.useStore.getState().automations.some((a) => a.id === 'a2')).toBe(true)
+    expect(storeMod.useStore.getState().page).toBe('automation')
+    expect(storeMod.useStore.getState().toast).toMatch(/Duplicated as “Job 3”\./)
+    mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
+  })
+
+  it('a failed Duplicate toasts the error and keeps the modal open', async () => {
+    seed(auto())
+    mockedApi.duplicateAutomation.mockRejectedValueOnce(new Error('backend said no'))
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    fireEvent.click(screen.getByText('Duplicate…'))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Job' })
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('Job 2')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toContain('backend said no'))
+    expect(screen.getByRole('dialog', { name: 'Duplicate Job' })).toBeTruthy()
+    expect(storeMod.useStore.getState().automationId).toBe('a1')
   })
 })
 

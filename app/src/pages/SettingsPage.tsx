@@ -256,6 +256,7 @@ export default function SettingsPage() {
                 {([
                   { value: 'attention' as const, label: 'Only when something needs attention' },
                   { value: 'all' as const, label: 'After every execution' },
+                  { value: 'never' as const, label: 'Never' },
                 ]).map((o) => {
                   const on = settings.notifications === o.value
                   return (
@@ -273,6 +274,9 @@ export default function SettingsPage() {
                   )
                 })}
               </div>
+              {settings.notifications === 'never' && (
+                <div style={{ ...rowSub, marginTop: 10 }}>Failures still show on the Automations list and the menu bar.</div>
+              )}
             </div>
           )}
         </div>

@@ -14,22 +14,32 @@ OVERFLOW: dict = {"event": "__overflow__"}
 
 class EventHub:
     def __init__(self) -> None:
-        self._subs: set[asyncio.Queue] = set()
+        # Each subscriber queue maps to its §19 role ("shell" for the
+        # Electron main process, "renderer" otherwise). Roles grant nothing:
+        # every subscriber receives every event; the §6 notification carrier
+        # rule only asks whether a shell is connected.
+        self._subs: dict[asyncio.Queue, str] = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, role: str = "renderer") -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=2000)
         with self._lock:
-            self._subs.add(q)
+            self._subs[q] = role
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         with self._lock:
-            self._subs.discard(q)
+            self._subs.pop(q, None)
+
+    def has_role(self, role: str) -> bool:
+        """Whether any subscriber with `role` is connected right now (§6
+        carrier rule: callable from any thread)."""
+        with self._lock:
+            return role in self._subs.values()
 
     def publish(self, event: str, **payload: Any) -> None:
         """Callable from any thread (engine worker threads publish log lines)."""

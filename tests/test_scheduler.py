@@ -1028,7 +1028,11 @@ def test_overdue_sweep_notifies_after_two_consecutive_sweeps(store, monkeypatch)
     engine, sched = _mk_clocked(store, clock)
     _record_fires(monkeypatch)  # keep ticks from actually executing anything
     posted = []
-    monkeypatch.setattr(notify, "post", lambda title, body: posted.append((title, body)))
+    # §6 carrier rule: the sweep posts through post_targeted with the
+    # automation's detail page as the click target.
+    monkeypatch.setattr(notify, "post_targeted",
+                        lambda title, body, *, kind, target:
+                        posted.append((title, body, kind, target)))
     a = store.create_automation(make_version(), "Dead Job", None, triggers=[
         {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
          "source": "user"}])
@@ -1043,7 +1047,9 @@ def test_overdue_sweep_notifies_after_two_consecutive_sweeps(store, monkeypatch)
     assert posted == []
     clock.now = datetime(2026, 7, 10, 11, 2)
     sched._tick()  # sweep 2: two consecutive observations → one notification
-    assert posted == [("Dead Job", "Scheduled executions are being missed.")]
+    _wait_for(lambda: posted)
+    assert posted == [("Dead Job", "Scheduled executions are being missed.", "overdue",
+                       {"page": "automation", "automationId": a["id"]})]
     clock.now = datetime(2026, 7, 10, 12, 3)
     sched._tick()  # still overdue — never a second notification this stretch
     assert len(posted) == 1
@@ -1054,6 +1060,97 @@ def test_overdue_sweep_notifies_after_two_consecutive_sweeps(store, monkeypatch)
     assert len(posted) == 1
     assert a["id"] not in sched._overdue_streak
     assert a["id"] not in sched._overdue_notified
+
+
+def _wait_for(condition, timeout=5.0):
+    """The overdue post runs on its own thread — poll until it landed."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_overdue_sweep_override_never_posts_nothing_but_still_publishes(store, monkeypatch):
+    """§6/§4.1: an automation whose notifications override is `never` gets no
+    overdue notification, but its automation.changed still goes out (the tray
+    dot and the `overdue` problem are health signals, not notifications)."""
+    from datetime import datetime
+
+    from autowright import notify
+    from autowright import scheduler as sched_mod
+    from conftest import make_version
+
+    clock = _Clock(datetime(2026, 7, 10, 9, 0))
+    engine, sched = _mk_clocked(store, clock)
+    posted = []
+    monkeypatch.setattr(notify, "post_targeted",
+                        lambda *args, **kwargs: posted.append((args, kwargs)))
+    monkeypatch.setattr(notify, "post", lambda title, body: posted.append((title, body)))
+    published = []
+    monkeypatch.setattr(sched_mod.hub, "publish",
+                        lambda event, **payload: published.append((event, payload)))
+    a = store.create_automation(make_version(), "Silenced Job", None, triggers=[
+        {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+         "source": "user"}])
+    store.patch_automation(a, {"notifications": "never"})
+    a["created_at"] = "2026-07-01T08:00:00"
+    a["triggers"][0]["enabledAt"] = datetime(2026, 7, 1, 8, 0).astimezone().isoformat()
+
+    sched._overdue_sweep([a], datetime(2026, 7, 10, 10, 1))  # sweep 1: streak 1
+    sched._overdue_sweep([a], datetime(2026, 7, 10, 11, 2))  # would notify
+    assert posted == []  # no post thread was ever started
+    assert [e for e, payload in published
+            if e == "automation.changed" and payload.get("automationId") == a["id"]]
+    assert a["id"] in sched._overdue_notified  # the stretch is still counted once
+
+
+def test_overdue_sweep_global_never_posts_nothing_unless_overridden(store, monkeypatch):
+    """§6 effective setting: the §4.9 global `never` silences the overdue
+    notification (automation.changed still goes out), and a §4.1 override of
+    `attention` re-enables it for that automation."""
+    from datetime import datetime
+
+    from autowright import notify
+    from autowright import scheduler as sched_mod
+    from conftest import make_version
+
+    clock = _Clock(datetime(2026, 7, 10, 9, 0))
+    engine, sched = _mk_clocked(store, clock)
+    posted = []
+    monkeypatch.setattr(notify, "post_targeted",
+                        lambda *args, **kwargs: posted.append((args, kwargs)))
+    monkeypatch.setattr(notify, "post", lambda title, body: posted.append((title, body)))
+    published = []
+    monkeypatch.setattr(sched_mod.hub, "publish",
+                        lambda event, **payload: published.append((event, payload)))
+    store.settings["notifications"] = "never"
+    a = store.create_automation(make_version(), "Globally Silenced Job", None, triggers=[
+        {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+         "source": "user"}])
+    a["created_at"] = "2026-07-01T08:00:00"
+    a["triggers"][0]["enabledAt"] = datetime(2026, 7, 1, 8, 0).astimezone().isoformat()
+
+    sched._overdue_sweep([a], datetime(2026, 7, 10, 10, 1))  # sweep 1: streak 1
+    sched._overdue_sweep([a], datetime(2026, 7, 10, 11, 2))  # would notify
+    assert posted == []  # no post thread was ever started
+    assert [e for e, payload in published
+            if e == "automation.changed" and payload.get("automationId") == a["id"]]
+    assert a["id"] in sched._overdue_notified
+
+    b = store.create_automation(make_version(), "Overridden Job", None, triggers=[
+        {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",
+         "source": "user"}])
+    store.patch_automation(b, {"notifications": "attention"})
+    b["created_at"] = "2026-07-01T08:00:00"
+    b["triggers"][0]["enabledAt"] = datetime(2026, 7, 1, 8, 0).astimezone().isoformat()
+
+    sched._overdue_sweep([b], datetime(2026, 7, 10, 12, 3))  # sweep 1: streak 1
+    sched._overdue_sweep([b], datetime(2026, 7, 10, 13, 4))  # notifies
+    _wait_for(lambda: posted)
+    assert posted == [(("Overridden Job", "Scheduled executions are being missed."),
+                       {"kind": "overdue",
+                        "target": {"page": "automation", "automationId": b["id"]}})]
 
 
 # ---------- §6 runIfMissed: the wake catch-up opt-out (§4.3) ----------
