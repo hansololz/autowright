@@ -308,12 +308,23 @@ export async function closeApp(h: AppHandle | null): Promise<void> {
  * for the hover-expanded rail to collapse — otherwise the 212px overlay keeps
  * covering later click targets near the left edge. */
 export async function clickNav(page: Page, label: string): Promise<void> {
+  const rail = page.getByTestId('nav-rail')
+  // The collapsed rail is 58px wide and CLIPS its fixed 212px content (§14:
+  // `overflow: clip`, never a scroll container), so a row label sits past the
+  // clip edge and a click at its centre would land on the page content beside
+  // the rail. Do what a user does: hover the icon column so the rail expands
+  // to 212px, then click the label.
+  await rail.hover({ position: { x: 29, y: 20 } })
+  await waitFor(async () => {
+    const w = await rail.evaluate((el) => el.getBoundingClientRect().width)
+    return w > 200
+  }, 5_000, 'nav rail to expand')
   // Scoped to the rail: page text can legitimately repeat a rail label (the
   // editor's back button says "Automations" too).
-  await page.getByTestId('nav-rail').getByText(label, { exact: true }).click()
+  await rail.getByText(label, { exact: true }).click()
   await page.mouse.move(640, 300)
   await waitFor(async () => {
-    const w = await page.getByTestId('nav-rail').evaluate((el) => el.getBoundingClientRect().width)
+    const w = await rail.evaluate((el) => el.getBoundingClientRect().width)
     return w < 60
   }, 5_000, 'nav rail to collapse')
 }
