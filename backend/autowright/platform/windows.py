@@ -247,12 +247,20 @@ _POLL_DEADLINE_S = 5.0
 _POLL_INTERVAL_S = 0.25
 
 
+# §3: every character the PowerShell tokenizer reads as a single quote —
+# ASCII plus the Unicode left/right/low-9/reversed-9 quotes. Doubling only the
+# ASCII one would let a curly apostrophe end the literal.
+_PS_SINGLE_QUOTES = "'\u2018\u2019\u201a\u201b"
+
+
 def _ps_literal(value: str) -> str:
-    """One PowerShell single-quoted literal: no expansion at all, embedded
-    quotes doubled. Every interpolated value goes through here — paths hold
-    spaces, and the scripts below carry no double quotes so Windows
-    command-line quoting has nothing to mangle."""
-    return "'" + str(value).replace("'", "''") + "'"
+    """One PowerShell single-quoted literal: no expansion at all, every
+    embedded single-quote character doubled (ASCII and the Unicode quotes
+    PowerShell treats as the same). Every interpolated value goes through
+    here — paths hold spaces, and the scripts below carry no double quotes so
+    Windows command-line quoting has nothing to mangle."""
+    return "'" + "".join(c * 2 if c in _PS_SINGLE_QUOTES else c
+                         for c in str(value)) + "'"
 
 
 def _powershell(script: str, timeout: float = POWERSHELL_TIMEOUT_S) -> tuple[int, str, str]:

@@ -223,8 +223,9 @@ the update bullets below).
   channel would reintroduce a user-provided Python and version skew between CLI and backend,
   which the one-`VERSION` design excludes by construction). The command is a shim script named
   `autowright`: `#!/bin/sh` with an `# autowright CLI shim` marker line, then
-  `exec "<python>" -m autowright.cli "$@"` (module form per the shebang rule above; `<python>`
-  is the backend's real interpreter). The shim path is written only when it is absent or a
+  `exec '<python>' -m autowright.cli "$@"` (module form per the shebang rule above; `<python>`
+  is the backend's real interpreter, embedded **single-quoted** with any `'` in it written as
+  `'\''` — a path holding `$`, a backtick, `"` or `\` must not expand or break inside the shim). The shim path is written only when it is absent or a
   regular file: a symlink there, dangling or not, is treated as foreign — never written,
   rewritten or chmodded through, since every operation would land wherever the link points
   (every probe uses `lstat`). On Windows (§2 groundwork, defined by `win32.cjs`) the
@@ -325,7 +326,12 @@ the update bullets below).
     Windows requires a Start-menu shortcut carrying it, which the §3 NSIS installer
     creates — so the notifier ships with the packaging step, degrades silently when the
     AUMID isn't registered (dev runs), and `capabilities.notifications` flips true only in
-    the packaged build's environment (probed, not assumed).
+    the packaged build's environment (probed, not assumed). Text reaches PowerShell only as
+    single-quoted literals in which **every** single-quote character is doubled — ASCII `'`
+    and the Unicode quotes U+2018/U+2019/U+201A/U+201B, which the PowerShell tokenizer treats
+    as the same character (a curly apostrophe in scraped text would otherwise end the literal
+    and turn the rest into code); the same literal rule covers every path the service verbs
+    embed.
   - **Semantics that differ from launchd, accepted:** `Stop-ScheduledTask` terminates the
     task's process tree outright — Windows has no SIGTERM-to-the-job analogue — so the
     graceful-shutdown pass (hard-killing live step groups, cancelling drafting jobs,
@@ -507,7 +513,9 @@ the update bullets below).
   "still registered" **tri-state**: a `launchctl print` that timed out (or was skipped by
   an exhausted budget) is *unknown*, never "not registered", so `stop` answers `stop
   failed: launchctl timed out` (exit 1) instead of reporting a stopped job launchd still
-  holds — with `KeepAlive`, one that would respawn the backend right after Quit. `uninstall`
+  holds — with `KeepAlive`, one that would respawn the backend right after Quit. `install`
+  that cannot write the plist (an unwritable `~/Library/LaunchAgents`) answers `install
+  failed: <reason>` (exit 1), like the Linux unit write. `uninstall`
   is `stop` plus removal: it runs the same unload and the same stray sweep, and only after a
   clean verdict (not registered) deletes the plist and removes the shim; a job still held
   answers `uninstall failed: launchd still reports the job`, an unknown one

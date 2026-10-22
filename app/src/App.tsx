@@ -1,6 +1,6 @@
 // App shell (§9): hover-expanding floating nav rail + independently scrolling content,
 // state-driven nav.
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { MARKETPLACE_HIDDEN } from './config'
 import { useStore } from './store'
 import { CountPill, Logo, ScrollArea, Spinner, Toast } from './ui'
@@ -289,6 +289,12 @@ export default function App() {
   // rail gutter — it reads as window chrome around the traffic lights. With
   // no lights at the left (Windows' titleBarOverlay, Linux's native frame),
   // the gutter must match the content pane or it reads as a mismatched strip.
+  // §9: every page navigation opens the page at the top — the shell's one
+  // scroller would otherwise carry a detail page's scroll offset into the
+  // Executions list (landing on page 1's bottom row) or clamp it into Settings.
+  const pageKey = surface === 'create' ? 'create' : page + (automationId ?? '') + (executionId ?? '')
+  const pageScroller = useRef<HTMLDivElement | null>(null)
+  useEffect(() => { if (pageScroller.current) pageScroller.current.scrollTop = 0 }, [pageKey])
   return (
     <div style={{ height: '100vh', display: 'flex', background: platformOs === 'macos' ? 'var(--bg-window)' : 'var(--bg-content)' }}>
       {/* §9: shell drag strips are frameless-chrome only — on Linux the native
@@ -310,7 +316,7 @@ export default function App() {
       <div style={{ width: 58, flex: 'none' }}>
         <Sidebar />
       </div>
-      <ScrollArea wrapStyle={{ flex: 1, minWidth: 0 }} style={{ background: 'var(--bg-content)', position: 'relative' }}>
+      <ScrollArea scrollRef={pageScroller} wrapStyle={{ flex: 1, minWidth: 0 }} style={{ background: 'var(--bg-content)', position: 'relative' }}>
         {/* Pure OS drag surface (§9): pointer-transparent so overlays beneath it
             stay DOM-clickable; must never hold children. */}
         {platformOs !== 'linux' && <div className="ad-drag" style={{ position: 'sticky', top: 0, height: 40, zIndex: 101, pointerEvents: 'none' }} />}
@@ -318,7 +324,7 @@ export default function App() {
             the rest of the shell survive it. Keyed by surface+page+record so
             leaving a broken page, or moving to another record of the same
             page kind, mounts a fresh boundary instead of a latched one. */}
-        <ErrorBoundary key={surface === 'create' ? 'create' : page + (automationId ?? '') + (executionId ?? '')}>
+        <ErrorBoundary key={pageKey}>
           {surface === 'create' ? <CreateFlow /> : <Content />}
         </ErrorBoundary>
       </ScrollArea>

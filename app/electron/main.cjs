@@ -707,6 +707,10 @@ function createWindow(hash) {
   // alive 60 s past its load — a reload that paints and then dies again at
   // once is a repeat, not a new death.
   let rendererAliveTimer = null
+  // §9: set when a renderer that had already loaded (so the window was shown)
+  // died and is being reloaded; that reload's finish leaves the window as the
+  // user has it instead of showing and focusing it like a first load would.
+  let reloadingShownWindow = false
   // §9 watchdog: whatever else goes wrong, the app is never left running with
   // no window at all. Armed with the window, disarmed the moment it shows (or
   // the window closes), and fired below when neither happened in time.
@@ -742,8 +746,11 @@ function createWindow(hash) {
     if (!winLoaded) {
       winLoaded = true
       clearWatchdog()
-      w.show()
-      w.focus()
+      if (reloadingShownWindow) reloadingShownWindow = false
+      else {
+        w.show()
+        w.focus()
+      }
     }
     // §9: a deep link that arrived while the renderer was still coming up has
     // been held since — its `open-target` listener exists only now, so replay
@@ -767,7 +774,14 @@ function createWindow(hash) {
     rendererDeaths += 1
     appLog(`window: renderer process gone (${details?.reason || 'unknown'}) — death ${rendererDeaths}`)
     if (rendererDeaths === 1) {
-      load(w, hash || '/app')
+      // §9: the reload lands on `/app`, never the creation hash (a
+      // notification's target can be hours old), and counts as a fresh load:
+      // clearing winLoaded makes showApp hold a deep link arriving meanwhile
+      // in pendingTarget, which did-finish-load replays once the reloaded
+      // renderer has its `open-target` listener again.
+      reloadingShownWindow = winLoaded
+      winLoaded = false
+      load(w, '/app')
       return
     }
     clearWatchdog()
@@ -1582,7 +1596,19 @@ function stageWithSquirrel(updater) {
 // feed, and emits real progress events — no temp files and no re-implemented
 // percent math here. The check runs first — with autoDownload off it only
 // reads the feed yml — which is what arms downloadUpdate.
-async function downloadUpdate() {
+// Single-flight: a second caller while one download runs gets the same
+// promise (a second click is a no-op), so stageWithSquirrel is never entered
+// twice at once.
+let downloadInFlight = null
+
+function downloadUpdate() {
+  if (!downloadInFlight) {
+    downloadInFlight = runDownloadUpdate().finally(() => { downloadInFlight = null })
+  }
+  return downloadInFlight
+}
+
+async function runDownloadUpdate() {
   try {
     const updater = genericUpdater()
     const result = await updater.checkForUpdates()

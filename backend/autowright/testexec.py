@@ -14,8 +14,8 @@ import shutil
 import threading
 from pathlib import Path
 
-from . import paths, timefmt
-from .engine import Engine, _step_sha
+from . import keychain, paths, timefmt
+from .engine import Engine, _step_sha, build_redactions, redact_text
 from .firing import DATA_PATH_UNREACHABLE
 from .events import hub
 from .storage import exec_version_label, is_test, safe_step_filename, store
@@ -284,8 +284,33 @@ def executions_context(auto: dict | None, current_steps: list[dict],
                 # re-sorted so the section stays newest-first.
                 picked = hs[:EXECUTIONS_CAP - 1] + [f]
                 picked.sort(key=lambda h: h.get("started_at") or "", reverse=True)
+        # §8: the result.md excerpt is redacted like a log line — against
+        # EVERY stored secret, not only the automation's grants: a draft test
+        # runs with the draft's own grants, which this context never sees, and
+        # a value that reached result.md must never reach the model whichever
+        # grant let it in (§1 — redaction must never fail open).
+        names_by_id = {s["id"]: s["name"] for s in store.secrets}
     if not picked:
         return None
+    redaction_cache: dict[str, dict[str, str] | None] = {}
+
+    def redact(text: str) -> str | None:
+        """The text with the granted secret values replaced the way a log line
+        is; None when a value could not be read (fail closed: the caller then
+        leaves the text out). Keychain reads run here, never under store.lock,
+        and only once a result excerpt actually needs them."""
+        if "map" not in redaction_cache:
+            try:
+                values_by_id = {}
+                for secret_id in sorted(names_by_id):
+                    value = keychain.get_secret(secret_id)
+                    if value is not None:
+                        values_by_id[secret_id] = value
+                redaction_cache["map"] = build_redactions(values_by_id, names_by_id)
+            except Exception:  # noqa: BLE001 — a locked/denied keychain read
+                redaction_cache["map"] = None
+        redactions = redaction_cache["map"]
+        return None if redactions is None else redact_text(text, redactions)
     cur_shas = [_step_sha(s) for s in current_steps or []]
     blocks = []
     kept: set[int] = set()  # block indexes the section cap never drops
@@ -294,7 +319,7 @@ def executions_context(auto: dict | None, current_steps: list[dict],
         detail = i == 0 or (execution_id is not None and h["id"] == execution_id)
         if detail:
             kept.add(i)
-        blocks.append(_bounded_execution_block(full, cur_shas, detail))
+        blocks.append(_bounded_execution_block(full, cur_shas, detail, redact))
     # §8: past SECTION_CAP the runs are dropped oldest-first — but never the
     # newest run (block 0) nor the request's `executionId` run, wherever it
     # sorted; with only those left the per-block cap already bounds them.
@@ -307,14 +332,15 @@ def executions_context(auto: dict | None, current_steps: list[dict],
     return "\n\n".join(blocks[i] for i in order)
 
 
-def _bounded_execution_block(h: dict, cur_shas: list[str], detail: bool) -> str:
+def _bounded_execution_block(h: dict, cur_shas: list[str], detail: bool,
+                             redact=None) -> str:
     """§8: one run's block bounded to BLOCK_CAP — while it exceeds the cap,
     the per-step log tails shrink (fewer lines, the last ones kept; the step
     at fault keeps the most) until it fits or no tail line is left."""
     tails: dict[int, list[str]] = {}
     tail_lines = LOG_TAIL
     while True:
-        block = _execution_block(h, cur_shas, detail, tail_lines, tails)
+        block = _execution_block(h, cur_shas, detail, tail_lines, tails, redact)
         if len(block) <= BLOCK_CAP or tail_lines == 0:
             return block
         tail_lines //= 2
@@ -326,10 +352,13 @@ def _last_lines(lines: list[str], count: int) -> list[str]:
 
 def _execution_block(h: dict, cur_shas: list[str], detail: bool,
                      tail_lines: int = LOG_TAIL,
-                     tails: dict[int, list[str]] | None = None) -> str:
+                     tails: dict[int, list[str]] | None = None,
+                     redact=None) -> str:
     """`tail_lines` bounds each earlier step's log tail; the failing step
     keeps twice that (up to LOG_TAIL). `tails` caches the read tails across
-    the shrink passes of `_bounded_execution_block`."""
+    the shrink passes of `_bounded_execution_block`. `redact` is applied to
+    the result.md excerpt (a file the step wrote, never rewritten by the
+    engine); a None from it leaves the excerpt out."""
     if tails is None:
         tails = {}
 
@@ -381,6 +410,10 @@ def _execution_block(h: dict, cur_shas: list[str], detail: bool,
             text = rmd.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             text = ""
+        # §8: redacted before the clip, so a value straddling the cut can't
+        # leave its head in the prompt.
+        if text:
+            text = (redact(text) if redact is not None else text) or ""
         if len(text) > RESULT_EXCERPT:
             text = text[:RESULT_EXCERPT] + "\n… [result.md truncated]"
         if text:

@@ -447,6 +447,45 @@ describe('executions list finished paging (§7)', () => {
     expect(screen.getByText('e-0071')).toBeTruthy()
   })
 
+  it('drops every row of several deletes landing in one batch (§7 execution.deleted)', async () => {
+    const windowRows = finishedRows(50)
+    mockedApi.listExecutions.mockResolvedValue({ executions: finishedRows(50, 50), total: 120 })
+    seed(windowRows, 120)
+    render(<ExecutionsList />)
+
+    fireEvent.click(pagerButton('Next'))
+    await waitFor(() => expect(screen.getByText('e-0070')).toBeTruthy())
+    act(() => {
+      for (const id of ['e-0070', 'e-0071', 'e-0072']) {
+        storeMod.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: id } as never)
+      }
+    })
+    await waitFor(() => expect(screen.queryByText('e-0070')).toBeNull())
+    expect(screen.queryByText('e-0071')).toBeNull()
+    expect(screen.queryByText('e-0072')).toBeNull()
+    expect(screen.getByText('e-0073')).toBeTruthy()
+  })
+
+  it('re-inserts the cursor row a window change trimmed while Next was on the wire (§7)', async () => {
+    const windowRows = finishedRows(50)
+    let land: (v: { executions: Execution[]; total: number }) => void = () => {}
+    mockedApi.listExecutions.mockReturnValue(new Promise((resolve) => { land = resolve }))
+    seed(windowRows, 120)
+    render(<ExecutionsList />)
+
+    fireEvent.click(pagerButton('Next'))
+    // A run finishes mid-fetch: the window gains it and drops e-0049, and the
+    // capped set trims the cursor row past the pages in reach.
+    act(() => {
+      seed([ex('e-new', { startedMs: NOW + 1000, endedMs: NOW + 1000 }), ...finishedRows(49)], 121)
+    })
+    await act(async () => { land({ executions: finishedRows(50, 50), total: 121 }) })
+    await waitFor(() => expect(within(pager()).getByText('51–100 of 121')).toBeTruthy())
+    // page 2 starts at the cursor row - nothing between the pages is skipped
+    expect(screen.getByText('e-0049')).toBeTruthy()
+    expect(screen.getByText('e-0050')).toBeTruthy()
+  })
+
   // §7: under a filter the readout has only the fetches to go by, and the
   // window's own matching rows can outnumber what the server counted — a total
   // under the rows in hand would strand them behind a finished pager.

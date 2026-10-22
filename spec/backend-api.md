@@ -18,8 +18,9 @@ with any port (the §15 renderer-URL dev server), credentials off. One rule in b
 §15 knob changes where the renderer is served from, never the policy.
 
 **Request validation:** every mutating endpoint's request body is validated by a pydantic
-request model (`backend/autowright/models.py`) — a malformed body (missing or mistyped
-fields, wrong shapes: `stepAgents`/`allowedSecrets` must be lists of strings, the settings
+request model (`backend/autowright/models.py`) — a malformed body (missing fields, fields of
+the wrong type — unknown field *names* are ignored, never a 422, so an older client's extra key
+cannot break a newer backend — wrong shapes: `stepAgents`/`allowedSecrets` must be lists of strings, the settings
 booleans must be booleans with `days` an int; a §4.4 draft's `spec` must be a list of
 block objects, `notes` a string, `params` and `packages` lists) answers 422 before any
 handler logic runs — and before any file is written, so a mistyped draft can never leave a
@@ -79,7 +80,9 @@ remain plain dicts (§2).
 - `GET /automations` (the **list shape** — the row every `automation.changed` event carries,
   without the full-record fields; the §20 reference resolution and the §13 tray poll read
   it, so it never serializes version bodies) · `GET /automations/{id}` (the full record) ·
-  `DELETE /automations/{id}` — delete cancels
+  `DELETE /automations/{id}` — a second DELETE for an id whose delete is still in progress
+  answers 409 "already being deleted" (never a second rmtree of the aside tree, which would
+  run under the store lock); delete cancels
   every live execution and queued firing, **and settles the automation's draft work the same
   way a save does** (the §11 draft test is cancelled and its record marked so a landing test
   deletes itself instead of rewriting the removed container; the automation's still-building
@@ -135,7 +138,9 @@ remain plain dicts (§2).
   ignored — a rename can never clear the name; a name another automation already holds,
   compared case-insensitively and excluding the automation itself, answers 422 "an
   automation named X already exists - automation names must be unique" and nothing is
-  stored - §4.1 uniqueness; a case-only rename of the same automation is allowed), description (blank clears it — the description is
+  stored - §4.1 uniqueness, checked up front and **again under the store lock at the write**,
+  so two concurrent renames to one name, or a rename racing a create's dedupe, can never both
+  land; a case-only rename of the same automation is allowed), description (blank clears it — the description is
   optional, §4.1), triggers (the §4.3 list, replaced
   whole; entries keep their `id`, new entries get one assigned;
   cron/interval/time/app_start/discord/imessage
@@ -143,6 +148,7 @@ remain plain dicts (§2).
   interval `every` (§4.3 interval dialect; `timezone` on an interval is ignored, never
   stored), an unknown `timezone`, a
   non-boolean `runIfMissed` (§4.3; ignored on kinds other than cron/interval/time), a
+  non-boolean `enabled` (a string `"false"` must never store a trigger switched on), a
   past `time`, a `time` whose `at` carries a UTC offset (the zone belongs in `timezone`; naive
   local ISO only), a second `app_start`, or a discord/imessage entry failing the §4.3 field
   rules
@@ -363,8 +369,14 @@ remain plain dicts (§2).
   dedupes per §4.1 like create, so the route never 422s on a collision — the landed name is
   in the response. 404 on an unknown id. Publishes one single-row `automation.changed` for the
   new automation (clients insert the row, §19 merge rule for an unknown id). A `copyMemory`
-  failure after the automation landed answers 500 with the automation already created and its
-  memory empty — the response detail says so; the client's follow-up `/state` shows it.
+  request is refused up front with 409 "an execution is in progress" while the source is live
+  (the §6.3 manual-snapshot rule: a mid-execution copy could catch a half-written file) — nothing
+  is created; the copy's commit re-checks the source, and a source that started executing
+  during the copy abandons the memory copy. A memory copy that failed or was abandoned after
+  the automation landed still answers **201** — the automation exists and a retry would make a
+  second copy — with a `warning` string on the automation JSON ("Its memory could not be
+  copied: <reason>" / "Its memory was not copied — an execution started meanwhile"); the
+  client shows the warning instead of an error.
 - `GET /automations/{id}/export?values=0|1` — the §5.1 transfer archive as `application/zip`
   (`Content-Disposition` filename `<name>.autowright`, name sanitized for the filesystem);
   `values=0` omits `param_values` from the manifest (default `1`)
@@ -563,7 +575,9 @@ remain plain dicts (§2).
   still-building job answers 409 — only terminal jobs are consumable). A held record is also dropped when the
   owner's draft settles (the draft-settle endpoints' owner cancel above) and when a new
   `POST /drafts` job starts for the same owner (one held outcome per owner — superseding
-  is consuming). One **building** job per owner is a backend invariant, not a client
+  is consuming). Finished records nothing will ever consume (`cancelled`, and outcomes already
+  consumed) are bounded at the newest 20 and the oldest dropped; a **held** outcome is never
+  dropped by that bound — only its ack, its owner's settle, or a same-owner start consumes it. One **building** job per owner is a backend invariant, not a client
   courtesy: a `POST /drafts` for an owner whose previous job is still building cancels that
   job first (its harness is killed, its record settles `cancelled` and is consumed at once),
   so two agent runs can never write the same draft. Job records live in memory only: a backend restart loses them, and the
@@ -900,7 +914,9 @@ already neutralize. The provider config and
   `stepIndex`/`attempt` — null for execution-level lines — and the per-file `sequence` for
   fetch-vs-stream dedupe), `execution.finished`, `execution.deleted` (`{ executionId }` — a
   §4.5 test record superseded by the next test or removed by its draft settling; clients
-  drop the row and decrement `executionsTotal`; the §6 retention sweep publishes nothing,
+  drop the row and decrement `executionsTotal` — every such row: a draft settling publishes
+  one event per test record in a burst, so a client keeps the set of deleted ids it has not
+  yet pruned, never only the last one; the §6 retention sweep publishes nothing,
   its rows fall off at the next fetch), `automation.changed`, `agents.changed`,
   `secrets.changed`, `settings.changed`, `marketplace.changed` (§22.4 — after every
   marketplace add, refresh, and remove; no payload), `draft.changed` (the §4.4 pending slot was kept
@@ -934,7 +950,10 @@ already neutralize. The provider config and
   schedules one fresh `GET /executions/{id}` so a full record still arrives - otherwise an
   execution page opened mid-run whose `finished` event outraces its first GET holds the
   header alone and renders permanently with zero steps. A §7 in-place retry legitimately returns a finished record to
-  `executing`, but it announces that through `execution.started`, which this rule leaves alone. `automation.changed` carries `automationId` plus
+  `executing`, but it announces that through `execution.started`, which this rule leaves alone —
+  and symmetrically a fetched **terminal** body never overwrites a header the socket has since
+  moved to `executing` (the finish-triggered GET of a failed record landing after the user's
+  Retry started it again): the stale body is dropped and the live header stands. `automation.changed` carries `automationId` plus
   `automation` — the changed automation in list shape, or `null` when it was deleted —
   whenever exactly one automation changed; clients patch that one row in place by **merging**
   it over the stored record, never replacing it — and when the client holds the **full**
@@ -960,7 +979,8 @@ already neutralize. The provider config and
   older response resolving later (a finish-triggered refetch slowed by the memory walk,
   overtaken by a PATCH's refetch) is dropped rather than regressing `paramValues`,
   triggers, or versions. Every renderer request carries a **client timeout** (30 s;
-  660 s for the install/import/delete routes and for the §22 marketplace routes that read
+  660 s for the install/import/delete routes, for `POST /automations/{id}/duplicate` (its
+  `copyMemory` copies the whole memory directory, like the memory routes), and for the §22 marketplace routes that read
   the network or a slow disk — add, per-source refresh, refresh-all, the entry archive,
   catalog create and save — like the §20 CLI; 90 s for marketplace images, whose backend
   slot wait plus fetch can reach that) — a wedged-but-listening
@@ -986,7 +1006,9 @@ already neutralize. The provider config and
   reconnect (a client page holding a *full* automation record — one the client fetched
   through `GET /automations/{id}` itself, tracked as a set of ids and never inferred from
   the row's fields, since `/state` rows carry the full fields too — the §9.2 detail page, the
-  §11 editor — also re-`GET`s that record on reconnect: the snapshot's list rows carry no
+  §11 editor — also re-`GET`s that record on reconnect, and the §22 marketplace page
+  refetches its table on reconnect too, since a `marketplace.changed` missed while the socket
+  was down is never replayed: the snapshot's list rows carry no
   steps/spec/versions, and an `automation.changed` missed while the socket was down would
   otherwise leave the page showing a new version number over old bodies until navigation), and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
   the client's disconnect, so a dropped client ends the handler immediately — an idle open

@@ -3438,15 +3438,15 @@ def test_chat_classify_malformed_blocker_envelope_is_invalid():
 
 
 def test_draft_jobs_get_unknown_and_terminal_tail_trim(monkeypatch):
-    # §19: an unknown job id polls as None; terminal jobs hold full draft
-    # payloads, so start() keeps only a recent tail of them (the backstop for
-    # clients that never ack).
+    # §19: an unknown job id polls as None; finished records nothing will
+    # ever consume (`cancelled`) are bounded at the newest 20 by start() (a
+    # held outcome never is - test_audit_1021_sched covers that side).
     from autowright import drafting as d
 
     jobs = d.DraftJobs()
     assert jobs.get("never-existed") is None
     for i in range(25):
-        jobs.jobs[f"t{i}"] = {"id": f"t{i}", "status": "done", "_cancel": False,
+        jobs.jobs[f"t{i}"] = {"id": f"t{i}", "status": "cancelled", "_cancel": False,
                               "_proc": {}, "_owner": f"auto-{i}", "mode": "chat"}
     monkeypatch.setattr(d.threading.Thread, "start", lambda self: None)
     jid = jobs.start("chat", {"harness": "claude"}, "hi", None, {},

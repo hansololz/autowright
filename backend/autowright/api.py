@@ -26,8 +26,8 @@ from .engine import CapacityError, Engine, kill_orphan_agent_group, kill_orphan_
 from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
-from .storage import (AutomationGoneError, LiveExecutionError, StoreUnwritableError,
-                      _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
+from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
+                      NameTakenError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
                       size_label, store, strip_param_values)
 from . import testexec, versions_diff
 
@@ -289,6 +289,30 @@ async def _automation_gone_handler(request: Request, exc: AutomationGoneError):
     return JSONResponse(status_code=404, content={"detail": "automation not found"})
 
 
+def _name_taken_detail(name: str) -> str:
+    """§4.1/§19: the one rename-collision text — the up-front check and the
+    store's at-the-write re-check answer the same 422."""
+    return f"an automation named {name!r} already exists - automation names must be unique"
+
+
+# §19: a rename whose name another automation took between the up-front check
+# and the write — the store re-checked under its lock and refused the write.
+@app.exception_handler(NameTakenError)
+async def _name_taken_handler(request: Request, exc: NameTakenError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=422, content={"detail": _name_taken_detail(exc.name)})
+
+
+# §5 lenient version read: a version whose step script is missing on disk is
+# never written back as an empty script — the restore answers 409.
+@app.exception_handler(MissingStepScriptError)
+async def _missing_step_script_handler(request: Request, exc: MissingStepScriptError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 def _auto_or_404(automation_id: str) -> dict:
     a = store.autos.get(automation_id)
     if not a:
@@ -361,17 +385,13 @@ def _clean_name(name: str | None) -> str | None:
 
 def _check_automation_name_free(name: str, exclude_id: str | None = None) -> None:
     """§4.1 uniqueness: automation names are unique across automations,
-    case-insensitively — unambiguous display and the §20 exact-name/substring
-    resolution rely on it. Write-time only: duplicates already on disk still
-    load (the §4.7 rule)."""
-    wanted = name.lower()
-    with store.lock:
-        clash = next((o for o in store.autos.values()
-                      if o["id"] != exclude_id and o["name"].strip().lower() == wanted), None)
+    case-insensitively after NFC normalization (`name_key`) — unambiguous
+    display and the §20 exact-name/substring resolution rely on it.
+    Write-time only: duplicates already on disk still load (the §4.7 rule).
+    The up-front half; the store re-checks under its lock at the write."""
+    clash = store.automation_name_clash(name, exclude_id)
     if clash is not None:
-        raise HTTPException(
-            422, f"an automation named {clash['name']!r} already exists - "
-                 "automation names must be unique")
+        raise HTTPException(422, _name_taken_detail(clash["name"]))
 
 
 def _check_grant_name_free(agent: dict, exclude_id: str | None = None) -> None:
@@ -789,6 +809,10 @@ def triggers_preview(body: models.TriggersPreview) -> dict:
 def delete_auto(automation_id: str) -> dict:
     a = _auto_or_404(automation_id)
     with store.lock:
+        if a.get("_deleting"):
+            # §19: a second DELETE while the first is still running — the
+            # first owns the teardown (and the flag's rollback on failure).
+            raise HTTPException(409, "already being deleted")
         # §19: close the admission window first — the automation stays in
         # store.autos until the last line, so a scheduler tick, listener
         # dispatch, or app-start firing admitted mid-delete would escape the
@@ -932,20 +956,32 @@ def create_auto(body: models.AutomationCreate) -> dict:
           dependencies=[Depends(auth)])
 def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict:
     """§19 / §5 store-level duplicate. The memory copy runs after the new
-    automation landed, under `memory_ops` and never the store lock; a failed
-    copy keeps the automation (memory empty) and answers 500 saying so."""
-    _auto_or_404(automation_id)
+    automation landed, under `memory_ops` and never the store lock; a copy
+    that failed or was abandoned keeps the automation (memory empty) and
+    answers 201 with a `warning` saying so — never a 500."""
+    source = _auto_or_404(automation_id)
+    if body.copyMemory:
+        with store.lock:
+            # §19: a live source's memory is mid-write — refused before
+            # anything is created (copy_memory_into re-checks at its commit).
+            if source.get("_live"):
+                raise HTTPException(409, "an execution is in progress")
     a = store.duplicate_automation(automation_id, name=_clean_name(body.name))
     _publish_auto_changed(a)
+    warning = None
     if body.copyMemory:
         try:
             with store.memory_ops:
                 store.copy_memory_into(a, automation_id)
+        except LiveExecutionError:
+            warning = "Its memory was not copied - an execution started meanwhile"
         except Exception as e:  # noqa: BLE001
             log.warning("duplicate %s: memory copy failed: %s", a["id"], e)
-            raise HTTPException(
-                500, f"Duplicated as '{a['name']}', but its memory could not be copied: {e}") from e
-    return _auto_json_locked(a)
+            warning = f"Its memory could not be copied: {e}"
+    out = _auto_json_locked(a)
+    if warning is not None:
+        out["warning"] = warning  # this response only, never part of auto_json
+    return out
 
 
 @app.post("/automations/{automation_id}/versions", dependencies=[Depends(auth)])
@@ -987,6 +1023,10 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
         # §4.4 operational-only save: unchanged versioned content mints no
         # version — the triggers/values/grants patch below still applies.
         cur = a["versions"].get(a["current_version"]) or {}
+        if sent.get("name") and sent["name"] != a["name"]:
+            # §19: uniqueness re-checked under the lock before anything lands —
+            # a name taken since the up-front check mints no version either.
+            store.require_name_free(sent["name"], exclude_id=a["id"])
         minted = _version_content(ver) != _version_content(cur)
         n = store.save_new_version(a, ver) if minted else a["current_version"]
         patch = {k: sent[k] for k in ("agentId", "stepAgents", "allowedSecrets", "name") if k in sent}
@@ -1686,13 +1726,19 @@ def create_snapshot(automation_id: str, body: models.SnapshotCreate | None = Non
         staged = store.stage_snapshot(a, "manual")
         if staged is None:
             raise HTTPException(422, "memory is empty")
-        with store.lock:
-            # §6: no rmtree under the lock — a raced copy is discarded after
-            # the hold ends.
-            raced = bool(a.get("_live"))
-            if not raced:
-                meta = store.commit_snapshot(a, staged, "manual",
-                                             name=((body.name if body else None) or "").strip() or None)
+        try:
+            with store.lock:
+                # §6: no rmtree under the lock — a raced copy is discarded
+                # after the hold ends.
+                raced = bool(a.get("_live"))
+                if not raced:
+                    meta = store.commit_snapshot(a, staged, "manual",
+                                                 name=((body.name if body else None) or "").strip() or None)
+        except BaseException:
+            # §6.3: a staged copy never leaks — a failed commit discards it,
+            # after the hold like the raced path.
+            store.discard_snapshot(staged[0])
+            raise
         if raced:
             store.discard_snapshot(staged[0])
             raise HTTPException(409, "an execution is in progress")
@@ -2584,7 +2630,9 @@ def create_secret(body: models.SecretCreate) -> dict:
         if any(s["name"] == name for s in store.secrets):
             raise HTTPException(422, f"a secret named {name} already exists")
     secret_id = new_id()  # §4.8: the minted id is the reference identity — it also keys the Keychain
-    if body.value:
+    # §4.8: blank means empty or whitespace-only — a placeholder, no Keychain write.
+    has_value = bool(body.value and body.value.strip())
+    if has_value:
         # Keychain IPC can block for seconds (locked keychain, consent prompt) —
         # never hold store.lock across it; the engine would stall mid-execution.
         try:
@@ -2599,7 +2647,7 @@ def create_secret(body: models.SecretCreate) -> dict:
         save_error: Exception | None = None
         if not lost_race:
             entry = {"id": secret_id, "name": name, "description": body.description or "",
-                     "set": bool(body.value)}
+                     "set": has_value}
             # §5 disk-first: build, write, then assign — a failed write leaves
             # no row in memory.
             secrets = [*store.secrets, entry]
@@ -2613,7 +2661,7 @@ def create_secret(body: models.SecretCreate) -> dict:
     if save_error is not None:
         # §5: the row never landed, so the fresh Keychain value must not
         # outlive it — undone outside the lock (blocking IPC, see above).
-        if body.value:
+        if has_value:
             try:
                 keychain.delete_secret(secret_id)
             except Exception:  # noqa: BLE001 — keyring's error zoo is open-ended
@@ -2623,7 +2671,7 @@ def create_secret(body: models.SecretCreate) -> dict:
         # Undo the fresh Keychain entry outside the lock — the delete is the
         # same blocking IPC the set was, and a failed undo leaves an orphaned
         # item nothing references, never a failed request.
-        if body.value:
+        if has_value:
             try:
                 keychain.delete_secret(secret_id)
             except Exception:  # noqa: BLE001 — keyring's error zoo is open-ended
@@ -2640,7 +2688,9 @@ def put_secret(secret_id: str, body: models.SecretPut) -> dict:
         if not any(s["id"] == secret_id for s in store.secrets):
             raise HTTPException(404, "no such secret")
     sent = body.model_dump(exclude_unset=True)
-    if body.value:
+    # §4.8: a blank value (empty or whitespace-only) keeps the stored state.
+    has_value = bool(body.value and body.value.strip())
+    if has_value:
         # Keychain IPC outside the lock — see create_secret.
         try:
             keychain.set_secret(secret_id, body.value)
@@ -2654,7 +2704,7 @@ def put_secret(secret_id: str, body: models.SecretPut) -> dict:
         # §5 disk-first: the updated row is built as a copy, written, and
         # only then swapped into memory.
         updated = dict(existing)
-        if body.value:
+        if has_value:
             updated["set"] = True
         if "description" in sent:
             updated["description"] = body.description or ""

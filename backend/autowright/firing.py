@@ -295,10 +295,13 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
                     # restore/rollback). The entry can never execute — end it
                     # rather than blocking the queue behind it forever.
                     pass
-                except RuntimeError:
+                except Exception as e:  # noqa: BLE001 — any promotion failure
                     # Slot taken under us — but if the failure landed after
-                    # the entry was already promoted (a §7 launch failure),
-                    # the record must not stay `executing` with no thread.
+                    # the entry was already promoted (a §7 launch failure, a
+                    # disk error writing the promoted record), the record must
+                    # not stay `executing` with no thread.
+                    if not isinstance(e, RuntimeError):
+                        log.warning("queue promotion failed: %s", e)
                     if head["status"] == "executing" and not engine.is_live(head["id"]):
                         finish_never_ran(store, head, "the execution couldn't be started",
                                          finished_at=timefmt.now_iso(),

@@ -26,7 +26,8 @@ import yaml
 from . import __version__, harness, packages as pkglib, paths, timefmt, triggers as triggerlib
 from .drafting import STEP_FILE_RE
 from .specmd import blocks_to_md, md_to_blocks
-from .storage import AGENT_REF_RE, SECRET_REF_RE, Store, new_id, strip_param_values
+from .storage import (AGENT_REF_RE, SECRET_REF_RE, MissingStepScriptError, Store, new_id,
+                      strip_param_values)
 
 FORMAT_VERSION = 2
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -328,6 +329,15 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
         ]
         if (ver.get("notes") or "").strip():
             files.append(("automation/notes.md", ver["notes"].strip() + "\n"))
+        # §5: the lenient version read loads a missing step script as "" - an
+        # export refuses it rather than writing an empty script that would
+        # "succeed" on the importing Mac. Checked by path, since the loaded
+        # version can't tell a missing file from an empty one.
+        version_dir = store.auto_dir(a) / "versions" / f"v{a['current_version']}"
+        for i, s in enumerate(ver["steps"], 1):
+            if not (s.get("file") and (version_dir / s["file"]).is_file()):
+                # The §19 restore refusal, mapped to 409 by the API like it.
+                raise MissingStepScriptError(s.get("file") or f"step {i}")
         for s in ver["steps"]:
             # §5.1: the code's id subscripts travel in ref form.
             files.append((f"automation/{s['file']}", refs.code(s.get("code", ""))))
@@ -1434,7 +1444,10 @@ def fetch_archive(url: str) -> tuple[bytes, str]:
             # threadpool worker the backend needs back.
             deadline = time.monotonic() + FETCH_DEADLINE_S
             chunks, total = [], 0
-            while chunk := r.read(_FETCH_CHUNK):
+            # read1, never read: read() fills its whole buffer, so a server
+            # trickling one byte per read-timeout could hold it open past the
+            # deadline; read1 returns as soon as any bytes arrive.
+            while chunk := r.read1(_FETCH_CHUNK):
                 if time.monotonic() > deadline:
                     raise TransferError(
                         f"the download timed out after {FETCH_DEADLINE_S // 60} minutes")

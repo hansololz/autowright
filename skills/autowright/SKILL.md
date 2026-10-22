@@ -145,6 +145,7 @@ since v3 (file by file, `--to vN` for another pair), and `autowright automation 
 ```
 autowright automation execute <name> -f            # run now, stream logs
 autowright automation execute <name> --version v2  # or "draft"
+autowright automation execute <name> --queue       # if it's busy, wait for a free slot instead of refusing
 autowright execution list [-n 20] [--automation <name>]... [--status failed]... [--since 2026-09-01] [--until 2026-09-06T18:00]
 autowright execution show [<id>]                   # steps, error, result files (default: latest)
 autowright execution tail [<id>]                   # full logs (streams while live)
@@ -155,7 +156,8 @@ autowright execution cancel|retry|skip [<id>]
 `execute -f` and `tail` exit **2** when the execution ends other than succeeded — branch on
 the exit code. To debug a failure: `execution show` for the failing step and error (often
 with a diagnosed reason), `execution tail` for the log lead-up, then fix via pull/push and
-`execution retry -f` or a fresh execute.
+`execution retry -f` or a fresh execute. `execution cancel` on an execution that had already
+ended prints `too late - it had already finished` and exits 1 (nothing was cancelled).
 
 ## Parameters, triggers, secrets
 
@@ -169,11 +171,14 @@ autowright automation trigger add <name> "0 8 * * *" [--timezone Asia/Tokyo]
 autowright automation trigger add <name> --every PT6H              # interval, since the last run
 autowright automation trigger add <name> --at 2026-08-01T09:00     # one-shot
 autowright automation trigger add <name> --app-start
+    # with a cron schedule, --every or --at: --no-run-if-missed skips a time slept
+    # through instead of running once on wake
 autowright automation trigger add <name> --discord <channel> --secret NAME
     [--pattern TEXT] [--mention] [--author ID,ID…]
 autowright automation trigger add <name> --imessage <from> [--pattern TEXT]
 autowright automation trigger on|off|remove <name> <index>
 autowright secret list · secret set NAME [--stdin] · secret delete NAME
+autowright secret delete --all --yes               # every stored secret (takes no name)
 autowright agent list · agent check <name>        # AI agents available to agent: true steps
 ```
 
@@ -200,7 +205,9 @@ autowright agent list · agent check <name>        # AI agents available to agen
 - `automation duplicate <name> [--name NEW] [--copy-memory] [--json]` makes a same-machine
   copy for a variant ("same job, different URL"): the current version becomes the copy's
   v1, grants and param values carry over, triggers arrive off, memory starts empty unless
-  `--copy-memory`. Prefer it over export then import on one machine.
+  `--copy-memory`. Prefer it over export then import on one machine. If the copy landed but
+  its memory couldn't be copied, a `warning: <text>` line follows on stderr and the exit is
+  still 0 - the copy exists, so don't retry (that would make a second copy).
 - `automation set <name> KEY=VALUE…` changes the per-automation settings that have no file in
   the workdir: `notifications=inherit|attention|all|never` (an override of the app-wide
   setting; `never` silences that automation entirely), `maxParallel=<n>`, `maxQueued=<n>`.
@@ -218,7 +225,9 @@ autowright agent list · agent check <name>        # AI agents available to agen
   content can be read before an install.
 - `marketplace create [<folder>]` creates a catalog (in a folder on this machine, or kept by
   Autowright without one) and adds it; `marketplace catalog add <name>
-  <automation-or-.autowright-file> [--export-to DIR]` exports an automation (no parameter
+  <automation-or-.autowright-file> [--title TEXT] [--description TEXT] [--export-to DIR]`
+  (the title and description people see default to the automation's own, or the file's
+  name) exports an automation (no parameter
   values) beside the catalog, or into DIR for a catalog kept by Autowright, or lists an existing
   archive where it is (catalog entries are absolute paths or https links, never relative; a
   marketplace never stores archives itself); `marketplace catalog set <name> name=…

@@ -259,15 +259,31 @@ def _wall_to_local(wall: datetime, zone: ZoneInfo, after: datetime | None) -> da
         # pre-transition offset, i.e. the occurrence fires shifted forward by
         # the gap width ("2:30" fires at 3:30) — §4.3, and the renderer's
         # cron.ts + the shared parity fixture implement the same rule.
-        loc = d0.astimezone().replace(tzinfo=None)
-        return loc if after is None or loc > after else None
+        loc = _local_reading(d0)
+        return loc if after is None or _instant(loc) > _instant(after) else None
     readings = sorted({d.timestamp(): d for d in (d0, d1)}.values(),
                       key=lambda d: d.timestamp())
     for d in readings:
-        loc = d.astimezone().replace(tzinfo=None)
-        if after is None or loc > after:
+        # §4.3: compared as instants — the naive local reading keeps `fold`
+        # for the second pass of a local fall-back hour, but a naive `>`
+        # ignores it and would read that occurrence an hour early.
+        loc = _local_reading(d)
+        if after is None or _instant(loc) > _instant(after):
             return loc
     return None
+
+
+def _local_reading(d: datetime) -> datetime:
+    """An aware instant as the local naive reading WITH its `fold` set (1 in
+    the second pass of a local fall-back hour). `astimezone()` alone yields a
+    fixed-offset datetime, and dropping its tzinfo loses the fold."""
+    return datetime.fromtimestamp(d.timestamp())
+
+
+def _instant(d: datetime) -> datetime:
+    """A naive local reading (its `fold` honoured) or an aware datetime as an
+    aware instant, so the two compare by the moment they name."""
+    return d.astimezone()
 
 
 def _local_gap_fix(d: datetime, after: datetime | None) -> datetime | None:
@@ -331,6 +347,9 @@ def normalize_authors(raw: list) -> list[str]:
 
 RUN_IF_MISSED = "runIfMissed"  # §4.3: cron/interval/time only, stored only when false
 RUN_IF_MISSED_ERROR = "run if missed must be true or false"
+# §19: a non-boolean `enabled` is a 422 on every kind — a string "false"
+# must never store a trigger switched on.
+ENABLED_ERROR = "enabled must be true or false"
 
 
 def run_if_missed(t: dict) -> bool:
@@ -347,6 +366,8 @@ def validate_trigger(t: dict, allow_past: bool = False) -> str | None:
     kind = t.get("kind")
     if kind in RESERVED_KINDS:
         return f"{kind} triggers are coming soon"
+    if "enabled" in t and not isinstance(t["enabled"], bool):
+        return ENABLED_ERROR
     if kind == "app_start":
         return None
     if kind == "discord":
@@ -642,9 +663,12 @@ def trigger_next(t: dict, after: datetime | None = None,
         return None
     at = datetime.fromisoformat(t["at"])
     if zone:
+        # §4.3: a zoned moment is compared as the instant it converts to —
+        # inside the local fall-back fold the naive reading cannot tell the
+        # two passes apart.
         at = _to_local(at, zone)
-    else:
-        at = _local_gap_fix(at, None) or at
+        return at if _instant(at) > _instant(base) else None
+    at = _local_gap_fix(at, None) or at
     return at if at > base else None
 
 
@@ -662,11 +686,11 @@ def time_elapsed(t: dict, now: datetime | None = None) -> bool:
         return False
     zone = zone_of(t)
     if zone:
-        at = _to_local(at, zone)
-    else:
-        # Same gap reading as trigger_next — the two must agree about a
-        # one-shot whose wall time falls in the local spring-forward gap.
-        at = _local_gap_fix(at, None) or at
+        # §4.3: as an instant, the same reading trigger_next uses.
+        return _instant(_to_local(at, zone)) <= _instant(now or datetime.now())
+    # Same gap reading as trigger_next — the two must agree about a
+    # one-shot whose wall time falls in the local spring-forward gap.
+    at = _local_gap_fix(at, None) or at
     return at <= (now or datetime.now())
 
 

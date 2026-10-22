@@ -239,6 +239,7 @@ export default function AutomationsList() {
   const slotJobId = useStore((s) => s.draftJobs.find((j) => j.owner === 'pending')?.jobId)
   const hasSlotJob = !!slotJobId
   const refresh = useStore((s) => s.refresh)
+  const showToast = useStore((s) => s.showToast)
   const [confirmFresh, setConfirmFresh] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [imported, setImported] = useState<{ name: string; automationId: string; summary: ImportSummary } | null>(null)
@@ -255,7 +256,12 @@ export default function AutomationsList() {
       if (slotJobId) await api.cancelDraftJob(slotJobId)
       await api.deleteDraft('pending')
       await api.putChat('pending', [])
-    } catch { /* backend restarting */ }
+    } catch (err) {
+      // A discard that did not complete must not open the editor: it would
+      // re-attach the job or draft the user just chose to throw away.
+      showToast((err as Error).message)
+      return
+    }
     setSurface('create', 'app')
   }
 

@@ -15,7 +15,7 @@ vi.mock('../src/api', () => ({
 }))
 
 import { api } from '../src/api'
-import { Markdown, ResultSection } from '../src/result'
+import { labelBytes, Markdown, ResultSection } from '../src/result'
 
 const f = (name: string, size = '1 KB'): ResultFile => ({ name, size })
 const resp = (text: string) =>
@@ -172,5 +172,41 @@ describe('FILES rows — text preview (§7 caps) and load failure', () => {
     view.rerender(body('succeeded'))
     expect(await screen.findByText('Done')).toBeTruthy()
     expect(screen.queryByText(/Couldn’t load/)).toBeNull()
+  })
+})
+
+describe('render cap (§7: markdown and HTML stop at 1 MB)', () => {
+  const NOTE = 'Too large to render here - use Show in Finder for the full file.'
+
+  it('a listed size past the cap shows the note and never fetches', async () => {
+    section([f('result.md', '50.0 MB'), f('page.html', '1.2 MB')])
+    expect(await screen.findAllByText(NOTE)).toHaveLength(2)
+    expect(vi.mocked(api.resultFile)).not.toHaveBeenCalled()
+  })
+
+  it('the compact LATEST RESULT card refuses an oversize result.md the same way', async () => {
+    section([f('result.md', '3.0 MB')], { compact: true })
+    expect(await screen.findByText(NOTE)).toBeTruthy()
+    expect(vi.mocked(api.resultFile)).not.toHaveBeenCalled()
+  })
+
+  it('a fetched body past the cap shows the note instead of the render', async () => {
+    vi.mocked(api.resultFile).mockResolvedValue(resp('#'.repeat(1_000_001)))
+    section([f('result.md', '1 KB')])
+    expect(await screen.findByText(NOTE)).toBeTruthy()
+  })
+
+  it('a body under the cap still renders', async () => {
+    vi.mocked(api.resultFile).mockResolvedValue(resp('# Small'))
+    section([f('result.md', '976.0 KB')])
+    expect(await screen.findByText('Small')).toBeTruthy()
+    expect(screen.queryByText(NOTE)).toBeNull()
+  })
+
+  it('labelBytes reads the backend size label back into bytes', () => {
+    expect(labelBytes('12 B')).toBe(12)
+    expect(labelBytes('1.0 KB')).toBe(1024)
+    expect(labelBytes('2.0 MB')).toBe(2 * 1024 * 1024)
+    expect(Number.isNaN(labelBytes('computing'))).toBe(true)
   })
 })

@@ -235,7 +235,9 @@ class Scheduler:
                     instant = triggerlib.interval_instant(t, after_utc, run_baseline_utc)
                     return instant.astimezone().replace(tzinfo=None), instant <= now_utc
                 nxt = triggerlib.trigger_next(t, after=after, run_baseline=run_baseline)
-                return nxt, nxt is not None and nxt <= now
+                # §4.3: compared as the instant — a naive reading inside the
+                # fall-back fold ignores `fold` and would fire an hour early.
+                return nxt, nxt is not None and nxt.astimezone() <= now_utc
 
             occ, occ_due = occurrence(base, self._baseline_utc[key])
             if occ and occ_due:
@@ -247,6 +249,14 @@ class Scheduler:
                     # is dropped, never fired late.
                     fresh, fresh_due = occurrence(now - timedelta(seconds=GRACE_S),
                                                   now_utc - timedelta(seconds=GRACE_S))
+                    if (fresh is None or not fresh_due) and \
+                            occ.astimezone() >= now_utc - timedelta(seconds=GRACE_S):
+                        # §4.3 gap rule: an occurrence shifted forward by a
+                        # spring-forward gap ("2:30 fires at 3:30") landed
+                        # within the grace window as an instant even though
+                        # its wall reading sits before `now − grace` — the
+                        # Mac was awake for it, so it fires, never dropped.
+                        fresh, fresh_due = occ, True
                     if fresh is None or not fresh_due:
                         dropped.append(t)
                         if t["kind"] == "time":
@@ -364,7 +374,6 @@ class Scheduler:
                     with self.store.lock:
                         if self.store.autos.get(aid) is not a:
                             continue  # §19: deleted mid-sweep — nobody to notify about
-                    self._overdue_notified.add(aid)
                     # §6: attention-class — posts under `attention` and `all`,
                     # exactly like a failed execution's end notification, unless
                     # the effective setting (the §4.1 override, else the §4.9
@@ -375,13 +384,21 @@ class Scheduler:
                     # 10 s, and several automations going overdue in one sweep
                     # would stall the scheduler tick for the sum of them.
                     if effective_notifications(self.store.settings, a) != "never":
+                        # §6: marked only when a notification actually posts —
+                        # an automation overdue under `never` is notified by the
+                        # first sweep after its setting turns to attention/all.
+                        self._overdue_notified.add(aid)
                         threading.Thread(
                             target=notify.post_targeted,
                             args=(a["name"], "Scheduled executions are being missed."),
                             kwargs={"kind": "overdue",
                                     "target": {"page": "automation", "automationId": aid}},
                             daemon=True).start()
-                    self._publish_changed(a)
+                    # The change event goes out once per overdue stretch (the
+                    # sweep the streak reaches 2), whatever the setting — not
+                    # every hour an automation sits overdue under `never`.
+                    if self._overdue_streak[aid] == 2:
+                        self._publish_changed(a)
             else:
                 self._overdue_streak.pop(aid, None)
                 self._overdue_notified.discard(aid)

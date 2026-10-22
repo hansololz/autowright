@@ -499,7 +499,9 @@ Fix-with-AI entry — regardless of age) additionally carries full detail: per-s
 and durations, the §4.5 error (message + reason), the failing step's log tail plus earlier
 steps' log tails (the cause is often upstream), and on success the result chip plus a
 clipped `result.md` excerpt and the result-file list. Log lines are the already-redacted
-execution output (§6); secret values never travel. The section is bounded: each log-tail
+execution output (§6), and the `result.md` excerpt — a file the step wrote directly, which the
+engine never rewrites — is redacted like a log line (the automation's granted secret values, the
+§6 redaction set) before it enters the prompt; secret values never travel. The section is bounded: each log-tail
 line is clipped to 2,000 characters (marker `… [clipped]`), each run's block to 24 K
 characters (its per-step tails shrink — fewer lines per step, the last lines kept — until
 it fits; the §4.5 error message is itself capped at 4,000 characters, so no block exceeds
@@ -1094,7 +1096,9 @@ accepted-name document on disk the watcher never polled, so a stop whose join ti
 can't lose one; every document, polled or not, is size-checked by `stat` before it is
 read, so the output cap holds for one that grew past it after its last poll too. Only §8 response-document names count -
 `spec.md`, `notes.md`, `manifest.yaml`, `actions.yaml`, and
-`NN-name.py` step files - as flat regular files (never directories or symlinks), so
+`NN-name.py` step files - as flat regular files (never directories or symlinks — a name that
+became a symlink after it was first seen is dropped too, never read through), a UTF-8 BOM at
+the start of a document stripped before validation (PowerShell writers add one), so
 residue an agent leaves behind (`__pycache__`, helper scripts) is ignored. The call's
 reply is then **recombined** into the ordinary envelope so validation, repair, logging,
 and the §5 audit framing all see one canonical text: a line-anchored `===BLOCKED===` on

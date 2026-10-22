@@ -76,7 +76,10 @@ what separates success from failure. Every other show path — the deep-link/sec
 `showApp`, the dock/tray `activate` reopen — defers to that first load: a still-loading or
 failed window is never shown blank. Two guards keep that rule from stranding a live app
 behind no window at all. A renderer process that dies (`render-process-gone` - out of
-memory, a crash in the bundle) is logged to `app.log` and reloaded once — the count resets
+memory, a crash in the bundle) is logged to `app.log` and reloaded once (onto `/app`, never
+the hash the window was created with — a notification's target hours old; and the reload
+counts as a fresh load, so a deep link arriving during it is held and replayed like a first
+load) — the count resets
 only once the reloaded renderer has **stayed alive 60 s past its load** (a timer armed
 by the load, cleared by a death), so two unrelated deaths days apart in one long-lived
 window each get their reload; a second death inside that window — before the reload has
@@ -268,11 +271,19 @@ center x ≈ 29: nav-group 10 px padding + row 11 px padding + 16 px icon slot; 
 only mechanism, identical in the app shell and the create/edit shell. The panel sits below the
 two drag strips in z-order but both are pointer-transparent, and it starts below their rects
 (y 46 > 40), so it needs no `no-drag` handling (on Linux both strips are absent, so the
-12 px top needs none either). Navigation is state-driven (`surface` → `page` → detail ids); browser/OS back works,
+12 px top needs none either). Navigation is state-driven (`surface` → `page` → detail ids); every navigation to a
+different page or record opens it **at the top** (the shell's one content scroller resets its
+offset on the page key — a detail page's scroll offset must never carry into the Executions list
+or clamp into Settings); browser/OS back works,
 but once past onboarding back never re-enters it, and while any modal is open back/forward
 are inert (the history entry is pushed back): a modal's `guardClose` (§14) covers Escape and
 the backdrop, and an unmount-by-navigation would bypass it and drop the doc editor's typed
-text without its discard confirm. Page navigation (`go()`) always lands in the app
+text without its discard confirm. A §13 deep link (`open-target`) that arrives while a modal is
+open, or before boot has finished, is **held** and applied once the last modal closes (its
+`guardClose` runs first) or once boot lands in the app shell — dropped if boot lands in
+onboarding, and replaced by a newer link that arrives meanwhile. A modal whose request is in
+flight (the §5.2 import confirm, the §22.7 catalog save) keeps Escape and the backdrop inert
+until it lands, so a result the user waited for is never lost to an early close. Page navigation (`go()`) always lands in the app
 shell: if the create/edit surface is active, it exits back to `surface: app` — so sidebar tabs work
 while editing an automation. Popovers close on outside mousedown **and on Escape** (every menu goes through the shared `usePopover`, whose capture-phase Escape closes the menu and stops the key there, so a modal behind an open menu stays open — one Escape per layer). Modals render through a React portal on
 `document.body`: page containers animate `transform` (`.ad-anim-page`, fill
@@ -491,7 +502,10 @@ footer note "Triggers start off. Chat, execution history, and snapshots are not 
 accent Duplicate / quiet Cancel. Duplicate POSTs §19 `/automations/{id}/duplicate` (the
 button disables with busy feedback, §9 commit rule), then loads the new automation into the
 store (insert), navigates to its detail page, and toasts "Duplicated as "`<landed name>`"."
-A failed request toasts the error and keeps the modal open. The copy is the §5 store-level
+A failed request toasts the error and keeps the modal open — except a 201 carrying `warning`
+(§19: the copy landed, its memory wasn't copied), which closes the modal, navigates to the copy,
+and toasts the warning, so a retry never makes a second copy; the request runs with the 660 s
+client timeout (§19), the copy can be gigabytes. The copy is the §5 store-level
 duplicate — current version only, the draft ignored; a source with a draft shows nothing
 extra, the footer note covers it. Export… opens a small modal — "Export "`<name>`"" with one toggle row,
 "Include parameter values" (on; help: "Your saved parameter values travel with the file — turn
@@ -798,7 +812,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   14 px accent check column (the `MenuItemRow` convention). Picking a row PATCHes
   `notifications` immediately like the concurrency rows — no version, no AI; the button keeps
   showing the committed label through the round-trip and only a failed PATCH reverts it
-  alongside the error toast. Under the row, while the value is `never`, a quiet caption:
+  alongside the error toast (two quick picks are request-counted: the first PATCH landing
+  never clears the pending state of the second). Under the row, while the value is `never`, a quiet caption:
   "Failures still show on the Automations list and the menu bar." (the §13 dot and the
   §4.1 problems are not notifications).
 - **RECENT EXECUTIONS** — the automation's 5 newest execution history rows (status badge,
@@ -1787,7 +1802,8 @@ With no main window, the window is created loading that hash and the renderer's 
 `automation=<id>` to land on the automation's detail page. With an existing window, main pushes the
 target over IPC (`open-target`) and the renderer navigates in place — never a page reload,
 which would drop the WebSocket and all renderer state. The footer link sends plain `'/app'`
-(focus only). Deep links are ignored while onboarding hasn't completed. Two target forms
+(focus only). Deep links are ignored while onboarding hasn't completed (one that arrives
+during the boot splash is held until boot decides — §9 modal rule — then applied or dropped). Two target forms
 exist: `automation=<uuid>` (the §9.2 detail page) and `execution=<uuid>` (the §7 execution
 page — `go('execution', { executionId })`, which needs no automation id; an execution the
 §6 retention sweep has since removed lands on the page's own not-found state). Both are

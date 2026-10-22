@@ -120,7 +120,7 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // the app.
     expect(src).not.toContain('autowright.cli')
     const shimForms = [
-      'exec "${python}" -m autowright.cli "$@"', // POSIX shim (darwin/fallback)
+      'exec ${quoted} -m autowright.cli "$@"', // POSIX shim (darwin/linux/fallback, §3 single-quoted path)
       '"${python}" -m autowright.cli %*', // Windows .cmd shim (win32)
     ]
     const lines = union.split('\n').filter((l) => l.includes('autowright.cli'))

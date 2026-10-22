@@ -360,6 +360,9 @@ def test_url_import_times_out_on_a_trickling_server(client, monkeypatch):
         def read(self, _n):
             return b"x"
 
+        def read1(self, _n):
+            return b"x"
+
     monkeypatch.setattr(transfer, "resolve_url", lambda url: "https://example.test/pack.autowright")
     monkeypatch.setattr(transfer, "open_https_only",
                         lambda req, timeout, refuse: _Trickle())

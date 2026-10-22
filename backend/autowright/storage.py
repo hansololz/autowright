@@ -20,6 +20,7 @@ import sqlite3
 import stat
 import threading
 import time
+import unicodedata
 import uuid
 from collections import deque
 from datetime import UTC, datetime
@@ -423,6 +424,35 @@ class LiveExecutionError(RuntimeError):
     copy outside store.lock — the operation is abandoned, nothing landed."""
 
 
+class NameTakenError(ValueError):
+    """§4.1/§19: a rename's name was taken by another automation between the
+    API's up-front check and the write — re-checked under store.lock, so two
+    racing renames can never both land the same name. `name` is the clashing
+    automation's stored name; the API answers the same 422 as its pre-check."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.name = name
+
+
+class MissingStepScriptError(RuntimeError):
+    """§5 lenient version read: a version whose step script is missing on disk
+    loads with an empty script, but a §19 restore of it is refused rather than
+    rewriting the empty script as a version that would "succeed"."""
+
+    def __init__(self, file: str) -> None:
+        super().__init__(f"step script `{file}` is missing on disk")
+        self.file = file
+
+
+def name_key(name: str) -> str:
+    """§4.1 automation-name identity: trimmed, Unicode NFC-normalized and
+    casefolded — "Café" typed with a combining accent is the same name as the
+    precomposed one. Every uniqueness check and exact-name lookup compares
+    through this one key."""
+    return unicodedata.normalize("NFC", (name or "").strip()).casefold()
+
+
 class Store:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -630,13 +660,21 @@ class Store:
         root isn't a mapping loads as its default with a warning, and
         null-valued keys fall back to their defaults. A file that exists but
         can't be read at all is remembered as unreadable, making it read-only
-        for the session (§5 — never overwrite a corrupt file with the default)."""
-        raw, ok = load_yaml_checked(path, {})
-        raw = raw or {}
+        for the session (§5 — never overwrite a corrupt file with the default).
+        A readable file whose root isn't a mapping, or that exists but is
+        empty, counts as failed too; only an absent file is a fresh install."""
+        raw, ok = load_yaml_checked(path, None)
         if not ok:
             self._unreadable.add(str(path))
+            return {}
+        if raw is None:
+            if path.exists():
+                log.warning("%s is empty — using the defaults", path)
+                self._unreadable.add(str(path))
+            return {}
         if not isinstance(raw, dict):
             log.warning("%s doesn't hold a mapping — using the defaults", path)
+            self._unreadable.add(str(path))
             return {}
         return {k: v for k, v in raw.items() if v is not None}
 
@@ -665,14 +703,15 @@ class Store:
             return ("absent",)
         return (st.st_mtime_ns, st.st_size)
 
-    @staticmethod
-    def _toplevel_entries(doc: dict, path: Path, key: str) -> list[dict]:
+    def _toplevel_entries(self, doc: dict, path: Path, key: str) -> list[dict]:
         """The entry list under `key` of an already-parsed top-level mapping —
         the half of `_load_toplevel_list` a caller that needs two keys off one
-        file (agents.yaml: `agents` + `default_agent`) reuses."""
+        file (agents.yaml: `agents` + `default_agent`) reuses. A non-list
+        value counts as a failed load (§5 read-only degradation)."""
         raw = doc.get(key, [])
         if not isinstance(raw, list):
             log.warning("%s: %r isn't a list — using the default", path, key)
+            self._unreadable.add(str(path))
             return []
         return [x for x in raw if isinstance(x, dict)]
 
@@ -757,7 +796,15 @@ class Store:
         indexed = self.execs[ed.name]
         if all(indexed.get(k) == v for k, v in h.items()):
             return
-        self.execdb.upsert(h)
+        try:
+            self.execdb.upsert(h)
+        except Exception as e:  # noqa: BLE001
+            # §5: the twin of the new-row adoption below — a hand-damaged
+            # execution.yaml (a non-string `error`, a null `status`) whose
+            # header the index rejects never bricks startup.
+            log.warning("execution %s has an unusable execution.yaml (%s) — keeping its index row",
+                        ed.name, e)
+            return
         self.execs[ed.name] = h
         log.warning("execution %s's index row was behind its execution.yaml — refreshed", ed.name)
 
@@ -1340,16 +1387,32 @@ class Store:
         """§4.1 dedupe for the paths whose incoming name the user didn't just
         type (§19 create, §5.1 import): trim, then append the smallest integer
         ≥ 2 that frees the name ("Name 2") — these paths never fail on a
-        collision. Comparison is case-insensitive, like the §19 rename 422."""
+        collision. Comparison goes through `name_key`, like the §19 rename 422."""
         with self.lock:
             name = name.strip() or "New automation"
-            taken = {a["name"].strip().lower() for a in self.autos.values()}
-            if name.lower() not in taken:
+            taken = {name_key(a["name"]) for a in self.autos.values()}
+            if name_key(name) not in taken:
                 return name
             n = 2
-            while f"{name} {n}".lower() in taken:
+            while name_key(f"{name} {n}") in taken:
                 n += 1
             return f"{name} {n}"
+
+    def automation_name_clash(self, name: str, exclude_id: str | None = None) -> dict | None:
+        """§4.1 uniqueness: the automation (other than `exclude_id`) whose name
+        is the same as `name` under `name_key`, or None."""
+        wanted = name_key(name)
+        with self.lock:
+            return next((o for o in self.autos.values()
+                         if o["id"] != exclude_id and name_key(o["name"]) == wanted), None)
+
+    def require_name_free(self, name: str, exclude_id: str | None = None) -> None:
+        """§19: the at-the-write half of the rename uniqueness check — the
+        caller holds self.lock across this and the write, so a name taken
+        after the API's up-front check still refuses the write."""
+        clash = self.automation_name_clash(name, exclude_id)
+        if clash is not None:
+            raise NameTakenError(clash["name"])
 
     def create_automation(self, ver: dict, name: str, agent_id: str | None,
                           triggers: list[dict] | None = None,
@@ -1512,6 +1575,10 @@ class Store:
                 abandoned = e
             if abandoned is None and target.get("_live"):
                 abandoned = LiveExecutionError("an execution is in progress")
+            if abandoned is None and source.get("_live"):
+                # §5: an execution of the SOURCE started while the copy staged
+                # — the copy may hold its memory mid-write, so it never lands.
+                abandoned = LiveExecutionError("an execution is in progress")
             if abandoned is None:
                 if mem.exists():
                     self._remove_tree(mem)
@@ -1624,6 +1691,15 @@ class Store:
             while n in a["versions"] or (self.auto_dir(a) / "versions" / f"v{n}").exists():
                 n += 1
             dst = self.auto_dir(a) / "versions" / f"v{n}"
+            # §5 lenient version read: a step script missing on disk loaded as
+            # an empty script — restoring it would write that empty script as
+            # a version that "succeeds", so the restore is refused instead.
+            src = self.auto_dir(a) / "versions" / f"v{v}"
+            for i, step in enumerate(a["versions"][v].get("steps") or [], 1):
+                file = step.get("file")
+                if not (isinstance(file, str) and file and (src / file).is_file()):
+                    raise MissingStepScriptError(
+                        file if isinstance(file, str) and file else (step.get("name") or f"step {i}"))
             # §5: restore writes through the version-folder writer from vX's
             # loaded content — never a tree copy — so the manifest lands last
             # as the commit point and a crash mid-restore leaves no adoptable
@@ -1903,6 +1979,10 @@ class Store:
         """User-owned fields only (§19 PATCH)."""
         with self.lock:
             self._still_registered(a)
+            if "name" in patch and (n := (patch["name"] or "").strip()) and n != a["name"]:
+                # §19: uniqueness re-checked under the lock at the write —
+                # the API's up-front check can be overtaken by another rename.
+                self.require_name_free(n, exclude_id=a["id"])
             self._commit_toplevel(a, lambda: self._apply_patch(a, patch))
 
     def _apply_patch(self, a: dict, patch: dict) -> None:
@@ -2137,9 +2217,21 @@ class Store:
                 # as does a §6 queue promotion
                 if a:
                     a["_live"].add(h["id"])
-                    a["_latest"] = h
-                    a["_last_status"] = "executing"
-                    a["_last_exec_at"] = h["started_at"]
+                    # §4.3 run baseline: the latest by `started_at` — a retry
+                    # of an older record keeps its original stamp, so it never
+                    # moves `_latest` or the baseline backwards. Compared as
+                    # parsed instants, like `_latest_exec`.
+                    mine = lenient_local(h["started_at"]) if h.get("started_at") else None
+                    held = a.get("_latest")
+                    held_at = (lenient_local(held["started_at"])
+                               if held is not None and held.get("started_at") else None)
+                    if held is None or held.get("id") == h["id"] or held_at is None \
+                            or (mine is not None and mine >= held_at):
+                        a["_latest"] = h
+                        a["_last_status"] = "executing"
+                    current = lenient_local(a["_last_exec_at"]) if a.get("_last_exec_at") else None
+                    if current is None or (mine is not None and mine > current):
+                        a["_last_exec_at"] = h["started_at"]
             else:
                 if a:
                     a["_live"].discard(h["id"])

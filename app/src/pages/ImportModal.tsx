@@ -96,8 +96,16 @@ export default function ImportModal({ onDone, onClose, initial }: {
     </div>
   )
 
+  // §9 commit rule: while the confirm is in flight Escape and the backdrop are
+  // inert - the imported automation the user waited for is never lost to an
+  // early close.
+  const busyRef = useRef(busy)
+  busyRef.current = busy
   return (
-    <Modal onClose={() => (done.current ? onDone(done.current) : onClose())} width={460}>
+    <Modal
+      onClose={() => (done.current ? onDone(done.current) : onClose())} width={460}
+      guardClose={() => busyRef.current !== 'confirm'}
+    >
       {(close) => {
         const confirm = async () => {
           if (!pv || busy) return

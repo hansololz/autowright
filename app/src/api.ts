@@ -101,7 +101,7 @@ export const LONG_REQUEST_TIMEOUT_MS = 660_000
 // import leg (file upload, URL fetch, confirm, and the §22.3 marketplace
 // entry preview that downloads the archive), automation delete (waits for
 // cancelled engine threads), and the memory operations that copy the whole
-// memory directory (clear, snapshot create, snapshot restore), plus the §22
+// memory directory (duplicate, clear, snapshot create, snapshot restore), plus the §22
 // marketplace routes that read the network or a slow disk (add, per-source
 // refresh, refresh-all, the entry archive, catalog create and save).
 // Marketplace images get 90 s: the backend's slot wait plus the fetch can
@@ -120,6 +120,7 @@ export function requestTimeoutMs(method: string, path: string): number {
     || route === '/marketplace/sources' || route === '/marketplace/refresh'
     || route === '/marketplace/catalogs'
     || /^\/marketplace\/sources\/[^/]+\/refresh$/.test(route)
+    || /^\/automations\/[^/]+\/duplicate$/.test(route)
     || /^\/automations\/[^/]+\/memory\/clear$/.test(route)
     || /^\/automations\/[^/]+\/memory\/snapshots$/.test(route)
     || /^\/automations\/[^/]+\/memory\/snapshots\/[^/]+\/restore$/.test(route)))
@@ -268,7 +269,7 @@ export const api = {
   // §5 store-level duplicate: current version as v1, triggers off, memory only
   // with copyMemory; the server dedupes the name (§4.1), the landed one is in the answer
   duplicateAutomation: (automationId: string, body: { name?: string; copyMemory?: boolean }) =>
-    req<import('./types').Automation>('POST', `/automations/${automationId}/duplicate`, body),
+    req<import('./types').DuplicateResponse>('POST', `/automations/${automationId}/duplicate`, body),
   saveVersion: (automationId: string, body: Record<string, unknown>) =>
     req<{ version: number }>('POST', `/automations/${automationId}/versions`, body),
   // §19 version diff: the backend diffs, the §9.2 modal only renders

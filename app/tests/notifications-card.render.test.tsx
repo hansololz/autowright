@@ -4,7 +4,7 @@
 // back to inherit), the revert on failure, and the `never` caption. The card
 // renders for real (happy-dom) against the real store with the api mocked.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Automation, Settings } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -108,6 +108,24 @@ describe('§9.2 NOTIFICATIONS card', () => {
     // The committed label holds through the round-trip.
     expect(screen.getByRole('button', { name: 'Notify me' }).textContent).toBe('Never for this automation')
     await waitFor(() => expect(mockedApi.patchAutomation).toHaveBeenCalledWith('a1', { notifications: 'never' }))
+  })
+
+  it('two quick picks: an older PATCH landing never clears the newer pick', async () => {
+    const lands: ((v: unknown) => void)[] = []
+    mockedApi.patchAutomation.mockImplementation(() => new Promise((resolve) => { lands.push(resolve) }))
+    render(<NotificationsCard auto={auto()} showToast={showToast} />)
+    const button = () => screen.getByRole('button', { name: 'Notify me' })
+    fireEvent.click(button())
+    fireEvent.click(screen.getByText('Never for this automation'))
+    fireEvent.click(button())
+    fireEvent.click(screen.getByText('After every execution', { selector: '.ad-menu-row span span' }))
+    expect(button().textContent).toBe('After every execution')
+    expect(lands).toHaveLength(2)
+    // the first pick's PATCH (and its refresh) settles while the second is out
+    await act(async () => { lands[0]({}); await new Promise((r) => setTimeout(r, 10)) })
+    expect(button().textContent).toBe('After every execution')
+    await act(async () => { lands[1]({}); await new Promise((r) => setTimeout(r, 10)) })
+    mockedApi.patchAutomation.mockImplementation(async () => ({}))
   })
 
   it('picking inherit sends null to clear the override', async () => {

@@ -32,7 +32,10 @@ function RequestsPane() {
   useEffect(() => {
     let alive = true
     const poll = async () => {
-      const list = (await window.autowright?.listRequestLogs()) ?? []
+      // A rejecting bridge (main mid-restart) just skips this tick - never an
+      // unhandled rejection once a second.
+      let list: string[]
+      try { list = (await window.autowright?.listRequestLogs()) ?? [] } catch { return }
       if (!alive) return
       setNames(list)
       setSel((s) => (s && list.includes(s) ? s : null))
@@ -45,7 +48,7 @@ function RequestsPane() {
   useEffect(() => {
     if (!sel) { setText(''); return }
     let alive = true
-    void window.autowright?.readRequestLog(sel).then((t) => { if (alive) setText(t ?? '') })
+    void window.autowright?.readRequestLog(sel).then((t) => { if (alive) setText(t ?? '') }).catch(() => {})
     return () => { alive = false }
   }, [sel])
 
@@ -127,7 +130,8 @@ export default function DevLogOverlay() {
     if (!open) { setTails(null); setTab(null); followRef.current = true; return }
     let alive = true
     const poll = async () => {
-      const r = await window.autowright?.tailLogs()
+      // A rejecting bridge just skips this tick - never an unhandled rejection.
+      const r = await window.autowright?.tailLogs()?.catch(() => null)
       if (alive && r) setTails(r)
     }
     void poll()

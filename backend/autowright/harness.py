@@ -134,11 +134,17 @@ def defuse_read_end(f) -> None:
         pass  # AttributeError: an in-memory stand-in with no fd at all
 
 
+# §7 drain grace: what a defused read end may still hand back from the pipe
+# before it reports EOF.
+DEFUSE_DRAIN_CAP = 1024 * 1024
+
+
 class _WakeableRaw(io.RawIOBase):
     """Raw read end of a child's pipe that `defuse()` can release from any
     thread: each read waits on the pipe *and* an in-process wakeup pipe, so
-    a one-byte write ends a blocked read with EOF at once — no lock is
-    taken, and EOF from the child is never required. The child's fd is
+    a one-byte write ends a blocked read with EOF once what the pipe already
+    holds is drained (bounded, never blocking) — no lock is taken, and EOF
+    from the child is never required. The child's fd is
     borrowed, never closed here (the Popen pipe object owns it)."""
 
     def __init__(self, fd: int):
@@ -153,6 +159,7 @@ class _WakeableRaw(io.RawIOBase):
         self._poll.register(fd, select.POLLIN)
         self._poll.register(self._wake_r, select.POLLIN)
         self.defused = False
+        self._drained = 0  # bytes handed back since the defuse (§7 drain cap)
 
     def readable(self) -> bool:
         return True
@@ -163,7 +170,7 @@ class _WakeableRaw(io.RawIOBase):
     def readinto(self, b) -> int:
         while True:
             if self.defused:
-                return 0
+                return self._drain_into(b)
             for fd, _events in self._poll.poll():
                 # POLLHUP/POLLERR arrive unrequested: the read then returns
                 # b"" (EOF) or raises, exactly as a plain blocking read would.
@@ -173,6 +180,28 @@ class _WakeableRaw(io.RawIOBase):
                     b[:n] = data
                     return n
             # Only the wakeup fired: the flag check at the top ends the read.
+
+    def _drain_into(self, b) -> int:
+        """§7 drain grace: once defused, hand back only what the pipe holds
+        RIGHT NOW (a zero-timeout poll, never a blocking read), bounded at
+        DEFUSE_DRAIN_CAP bytes in total, then EOF — the executor's own last
+        lines are never lost to a reader that fell behind, and a writer that
+        keeps the pipe readable forever can't hold the read loop open."""
+        room = DEFUSE_DRAIN_CAP - self._drained
+        if room <= 0 or len(b) == 0:
+            return 0
+        try:
+            probe = select.poll()
+            probe.register(self._fd, select.POLLIN)
+            if not probe.poll(0):
+                return 0
+            data = os.read(self._fd, min(len(b), room))
+        except OSError:
+            return 0
+        n = len(data)
+        b[:n] = data
+        self._drained += n
+        return n
 
     def defuse(self) -> None:
         self.defused = True
@@ -1037,9 +1066,14 @@ class _ScratchWatcher:
             log.exception("scratch watcher poll failed")
 
     def _read(self, name: str) -> str:
+        """§8: a name that became a symlink is never read through, and a
+        leading UTF-8 BOM (PowerShell writers add one) is stripped before
+        validation (`utf-8-sig`)."""
+        path = self._scratch / name
         try:
-            return (self._scratch / name).read_text(encoding="utf-8",
-                                                    errors="replace")
+            if path.is_symlink():
+                return ""
+            return path.read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             return ""
 
@@ -1107,7 +1141,9 @@ class _ScratchWatcher:
         for name in names:
             path = self._scratch / name
             try:
-                if not path.is_file():
+                # §8: a name that became a symlink after it was first seen
+                # is dropped, never read through.
+                if path.is_symlink() or not path.is_file():
                     continue
                 size = path.stat().st_size
             except OSError:

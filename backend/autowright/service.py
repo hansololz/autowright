@@ -46,8 +46,12 @@ def shim_paths() -> list[Path]:
 def shim_text() -> str:
     """Shim contents for this interpreter, module form (pip's bin/ entry
     scripts carry staging-path shebangs)."""
+    # §3: the interpreter is embedded single-quoted, any `'` written as
+    # `'\''`, so a path holding `$`, a backtick, `"` or `\` neither expands
+    # nor breaks the line. Byte-identical with the Electron shell's twin.
+    quoted = "'" + sys.executable.replace("'", "'\\''") + "'"
     return (f'#!/bin/sh\n{SHIM_MARKER}\n'
-            f'exec "{sys.executable}" -m autowright.cli "$@"\n')
+            f'exec {quoted} -m autowright.cli "$@"\n')
 
 
 def _heal_one(p: Path) -> str | None:
@@ -234,10 +238,15 @@ def install() -> str:
     }
     paths.logs_dir().mkdir(parents=True, exist_ok=True)  # launchd won't create it for the log paths
     p = plist_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # §5: every write is temp-write + rename — a crash mid-write must never
-    # leave launchd a half-written plist it will refuse at the next logon.
-    atomic_write_text(p, plistlib.dumps(plist).decode("utf-8"), mode=0o644)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # §5: every write is temp-write + rename — a crash mid-write must never
+        # leave launchd a half-written plist it will refuse at the next logon.
+        atomic_write_text(p, plistlib.dumps(plist).decode("utf-8"), mode=0o644)
+    except OSError as e:
+        # §3: an unwritable ~/Library/LaunchAgents is a result line (exit 1),
+        # never a traceback — the same answer as the Linux unit write.
+        return f"install failed: couldn't write {p} ({e})"
     _unload(p)
     if err := _load(p):
         return f"install failed: {err}"

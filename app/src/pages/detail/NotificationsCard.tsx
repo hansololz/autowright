@@ -1,5 +1,5 @@
 // §4.1 per-automation notification override (§9.2 NOTIFICATIONS card).
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { api } from '../../api'
 import { useStore } from '../../store'
 import type { Automation, AutomationNotifications } from '../../types'
@@ -32,6 +32,10 @@ export function NotificationsCard({ auto, showToast }: { auto: Automation; showT
   // The committed choice while its PATCH (and the store refresh) is in flight;
   // `undefined` means nothing is pending and the record's value shows.
   const [pending, setPending] = useState<AutomationNotifications | null | undefined>(undefined)
+  // §9.2: picks are request-counted - only the newest pick settles `pending`,
+  // so an older PATCH landing never flips the button back while a newer one
+  // is still in flight.
+  const pickSequence = useRef(0)
 
   if (!notificationsOn) return null
 
@@ -41,6 +45,7 @@ export function NotificationsCard({ auto, showToast }: { auto: Automation; showT
   const pick = async (next: AutomationNotifications | null) => {
     setOpen(false)
     if (next === value) return
+    const sequence = ++pickSequence.current
     setPending(next)
     try {
       await api.patchAutomation(auto.id, { notifications: next })
@@ -50,7 +55,7 @@ export function NotificationsCard({ auto, showToast }: { auto: Automation; showT
     } catch (err) {
       showToast((err as Error).message)
     } finally {
-      setPending(undefined)
+      if (sequence === pickSequence.current) setPending(undefined)
     }
   }
 

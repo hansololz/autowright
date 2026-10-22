@@ -339,7 +339,9 @@ one off** (`enabled: false`, no `enabledAt`; `runIfMissed` and `source` kept) �
 import rule, so a duplicated cron or chat trigger can never double-fire beside its original
 before the user has changed anything. `memory/` starts empty unless the caller asked to copy
 it, in which case the source's memory tree is copied into the new automation **after** the
-automation exists, under the `memory_ops` lock and never the store lock (the §5 lock-order
+automation exists (the request is refused with 409 while the source is executing — §19 — and
+the copy's commit re-checks the source: a source that started executing during the copy
+abandons it, the §6.3 raced-copy rule), under the `memory_ops` lock and never the store lock (the §5 lock-order
 rule: `memory_ops` is never taken while `store.lock` is held) — a failed memory copy leaves
 the automation in place with empty memory and surfaces the error. Never copied: `chat.jsonl`,
 `draft/`, `memory-snapshots/`, executions. The write order is the create path's: the version
@@ -512,7 +514,9 @@ never a path a hand-edited id points at. A version folder whose manifest is unre
 (the automation skips at startup when that was its current version, per the versions rule
 above) — never loaded as an empty version that would run zero steps and "succeed". For the three top-level
 store files (`settings.yaml`, `agents.yaml`, `secrets.yaml`) the degradation is **read-only**:
-a file that failed to load (corrupt YAML, bad encoding, unreadable — a merely *absent* file is
+a file that failed to load (corrupt YAML, bad encoding, unreadable; a readable file whose root
+isn't a mapping, whose list key — `agents`, `secrets` — isn't a list, or that is **empty** counts
+as failed too, the §22 table rule — a merely *absent* file is
 not a failure, it is a fresh install) is never saved back for the rest of the session. Any
 mutation that would rewrite it fails with an error naming the path ("`<path>` is unreadable
 on disk — fix or remove the file, then restart Autowright.", §19 409), so a damaged file is
@@ -600,7 +604,9 @@ Rules:
   at load with a warning (a hand-edited `packages: [requests]` would otherwise crash every
   `/state` through the §4.1 problems audit); a step whose `file` isn't a string reads as
   having no script file (same as an absent key: the automation still loads, and the step
-  fails at execution like any missing script); and a
+  fails at execution like any missing script; a §19 restore or a §5.1 export of a version
+  whose step script is missing on disk is refused — 409 / "step script `<file>` is missing on
+  disk" — never rewritten as an empty script that would "succeed"); and a
   version folder that fails to load for any other reason is skipped with a warning instead
   of dropping the whole automation — the draft already had that guard, versions get it too.
 - **Derived execution state agrees across paths.** The boot-time derived pass picks each
@@ -913,7 +919,8 @@ only matched records are granted.
   resolves against that release's assets. Public repos only — no token ever travels.
 - Download: `User-Agent: autowright/<version>`, 30-second per-read timeout plus a 10-minute
   whole-download deadline (a server trickling bytes must not pin a threadpool worker for
-  hours), streamed with the §5.1
+  hours — so every read returns as soon as any bytes arrive, `read1`, never a buffer-filling
+  read that a one-byte-per-25-s server could hold open past the deadline), streamed with the §5.1
   64 MB archive cap enforced during the read — an oversized or non-archive download is a 422,
   and the §5.1 decompression caps still apply after (member count, member size, decompressed
   total, **and no duplicate member names**: a zip may hold several members of one name, and

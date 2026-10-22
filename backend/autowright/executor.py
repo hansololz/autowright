@@ -165,6 +165,11 @@ class Memory:
             raise
 
 
+# §6: the largest AUTOWRIGHT_TRIGGER_PAYLOAD (UTF-8 bytes of its JSON) the
+# executor exports into the environment.
+TRIGGER_PAYLOAD_ENV_CAP = 65536
+
+
 class Execution:
     """§6.1 read-only execution metadata: which automation/execution/step this is."""
 
@@ -545,6 +550,13 @@ def main() -> int:
     # child processes a step spawns can self-identify without plumbing. The
     # executor itself never reads these back — stdin JSON stays the only input.
     exec_meta = ctx.get("execution", {})
+    payload_json = (json.dumps(exec_meta["trigger_payload"], ensure_ascii=False)
+                    if exec_meta.get("trigger_payload") else None)
+    if payload_json is not None and len(payload_json.encode("utf-8")) > TRIGGER_PAYLOAD_ENV_CAP:
+        # §6: a larger payload would push every subprocess the step spawns
+        # past the OS environment limit (E2BIG) — it stays reachable through
+        # `execution.trigger_payload`, which never rides the environment.
+        payload_json = None
     for key, value in {
         "AUTOWRIGHT_AUTOMATION_ID": exec_meta.get("automation_id"),
         "AUTOWRIGHT_AUTOMATION_NAME": exec_meta.get("automation_name"),
@@ -552,8 +564,7 @@ def main() -> int:
         "AUTOWRIGHT_STEP_INDEX": exec_meta.get("step_index"),
         "AUTOWRIGHT_STEP_NAME": exec_meta.get("step_name"),
         "AUTOWRIGHT_TRIGGER": exec_meta.get("trigger"),
-        "AUTOWRIGHT_TRIGGER_PAYLOAD": (json.dumps(exec_meta["trigger_payload"], ensure_ascii=False)
-                                       if exec_meta.get("trigger_payload") else None),
+        "AUTOWRIGHT_TRIGGER_PAYLOAD": payload_json,
         "AUTOWRIGHT_WORKSPACE": str(workspace),
         "AUTOWRIGHT_MEMORY_DIR": ctx["memory_dir"],
         "AUTOWRIGHT_RESULT_DIR": ctx["result_dir"],

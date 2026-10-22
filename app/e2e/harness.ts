@@ -245,11 +245,69 @@ export interface AppHandle {
   page: Page
 }
 
+// §15: every app launchApp started and closeApp has not ended yet. The
+// harness's own signal handler ends these the same way teardown does.
+const liveApps = new Set<AppHandle>()
+let signalHandlersInstalled = false
+let ownSignalHandler: ((signal: NodeJS.Signals) => void) | null = null
+const HANDLED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+/** §15: playwright-core's Electron launcher hardcodes its own SIGINT/SIGTERM/
+ * SIGHUP handlers (no launch option turns them off), and those handlers end the
+ * app through app.close() → app.quit() — the quit-for-good path. Electron is
+ * spawned detached, so a terminal Ctrl+C reaches only this process: the only
+ * handlers that may answer it are the harness's own. Called after every launch,
+ * since the launcher adds its listeners per launched process. */
+function stripForeignSignalListeners(): void {
+  for (const signal of HANDLED_SIGNALS) {
+    for (const listener of process.listeners(signal)) {
+      if (listener !== ownSignalHandler) process.removeListener(signal, listener)
+    }
+  }
+}
+
+/** End one app's UI without ever routing through app.quit(): §3 quit means quit
+ * for good, and main.cjs answers app.quit() (Playwright's close(), its default
+ * signal handlers) with `service stop` against the REAL launchd job plus a sweep
+ * of every `-m autowright.` process on this machine. app.exit(0) skips
+ * before-quit entirely; SIGKILL then makes sure the process is gone. */
+async function endApp(h: AppHandle): Promise<void> {
+  liveApps.delete(h)
+  const proc = h.app.process()
+  try {
+    await Promise.race([
+      h.app.evaluate(({ app }) => app.exit(0)).catch(() => {}),
+      new Promise((r) => setTimeout(r, 5000)),
+    ])
+  } finally {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      const exited = new Promise((r) => proc.once('exit', r))
+      try { proc.kill('SIGKILL') } catch { /* already gone */ }
+      await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))])
+    }
+  }
+}
+
+/** §15: installed once, ends every live app through endApp and then exits
+ * with the signal's conventional code (128 + its number). */
+function installSignalHandlers(): void {
+  if (signalHandlersInstalled) return
+  signalHandlersInstalled = true
+  const onSignal = (signal: NodeJS.Signals) => {
+    void Promise.allSettled([...liveApps].map((h) => endApp(h))).then(() => {
+      process.exit(128 + (os.constants.signals[signal] ?? 0))
+    })
+  }
+  ownSignalHandler = onSignal
+  for (const signal of HANDLED_SIGNALS) process.once(signal, onSignal)
+}
+
 /** Launch the built app against `home`'s backend.json and pin the renderer's
  * `ad-onboarded` flag. The profile lives inside the tmp home (§15), so a fresh
  * home starts clean — pinning just keeps each test's precondition explicit. */
 export async function launchApp(home: string, onboarded: boolean): Promise<AppHandle> {
   const require = createRequire(import.meta.url)
+  installSignalHandlers()
   const app = await _electron.launch({
     // The throttling switches keep renderer timers full-speed even when the
     // window is occluded (screen lock/overlap) — long suite runs otherwise
@@ -270,7 +328,11 @@ export async function launchApp(home: string, onboarded: boolean): Promise<AppHa
       AUTOWRIGHT_SHIM: `${home}/bin/autowright`,
     } as Record<string, string>,
   })
+  stripForeignSignalListeners()
+  const handle: AppHandle = { app, page: null as unknown as Page }
+  liveApps.add(handle)
   const page = await app.firstWindow()
+  handle.page = page
   await page.waitForLoadState('domcontentloaded')
   // §9.4: the renderer silently pins ad-last-seen-version at boot; seed it to
   // the app's own version so the tracked localStorage state is deterministic.
@@ -284,24 +346,13 @@ export async function launchApp(home: string, onboarded: boolean): Promise<AppHa
   }, { flag: onboarded, version })
   await page.reload()
   await page.waitForLoadState('domcontentloaded')
-  return { app, page }
+  return handle
 }
 
+/** §15 teardown: never Playwright's close(), not even as a fallback (endApp). */
 export async function closeApp(h: AppHandle | null): Promise<void> {
   if (!h) return
-  try {
-    // §3 quit means quit for good: playwright's close() quits through
-    // app.quit(), which main.cjs now intercepts as the user's Quit and answers
-    // with `service stop` against the REAL launchd job plus a sweep of every
-    // `-m autowright.` process on this machine. End the UI outright instead.
-    await Promise.race([
-      h.app.evaluate(({ app }) => app.exit(0)).catch(() => {}),
-      new Promise((r) => setTimeout(r, 5000)),
-    ])
-    await Promise.race([h.app.close(), new Promise((r) => setTimeout(r, 5000))])
-  } finally {
-    try { h.app.process().kill('SIGKILL') } catch { /* already gone */ }
-  }
+  await endApp(h)
 }
 
 /** Click a §9 nav-rail row, then park the mouse over the content area and wait

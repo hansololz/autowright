@@ -107,7 +107,9 @@ entries:                             # required list, may be empty, max 200 entr
   most **16 MB of text in total** per archive (members past the running total are served
   with `text` null, like a non-UTF-8 member — the §5.1 guards alone would allow 1,000
   one-MB members, a quarter-gigabyte JSON answer for one Audit click). Link fetches use the §5.2 headers
-  (`User-Agent: autowright/<version>`), a 30-second per-read timeout, and a 60-second
+  (`User-Agent: autowright/<version>`), a 30-second per-read timeout (each read returning as
+  soon as any bytes arrive — the §5.2 `read1` rule — so the deadline below is checked between
+  trickled bytes, not after a buffer fills), and a 60-second
   whole-download deadline for catalogs and images (they are small; the §5.2 10-minute
   deadline is for archives), HTTPS only with redirects **refused before they are followed**
   (a redirect handler rejects any non-https hop, so a `302` to an `http://` or LAN address
@@ -257,8 +259,9 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   §22.1 concurrency slot with the lock held, behind a page of slow image reads).
 - **Auto refresh: once a day.** A row with `auto_refresh` true and a location is
   refreshed on its own **at most once every 24 hours**: it is **due** when its
-  `refreshed_at` is `null` or at least 24 hours in the past (an unparseable stamp counts
-  as `null`). The backend **checks** for due rows at startup (30 s after the store loads,
+  `refreshed_at` is `null`, at least 24 hours in the past, or in the **future** (a clock that
+  was ahead when it stamped must not block the refresh until it catches up; an unparseable
+  stamp counts as `null`). The backend **checks** for due rows at startup (30 s after the store loads,
   off the boot path) and **every hour** after that, and refreshes the due ones, in table
   order, through the same refresh; a check with nothing due reads nothing and publishes
   nothing. Because a manual Refresh stamps `refreshed_at` too, it counts as that day's

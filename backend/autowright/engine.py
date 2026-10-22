@@ -193,14 +193,40 @@ def build_redactions(values_by_id: dict[str, str],
 
     Both maps are keyed by secret ID, never by name: two stored secrets may
     carry the SAME name, and a name-keyed input collapses them so one of the
-    values would never be redacted (§1 — redaction must never fail open)."""
+    values would never be redacted (§1 — redaction must never fail open).
+
+    §6.1: beside each value, its JSON-escaped forms (`ensure_ascii` on and
+    off) and its `repr` form whenever they differ from the value (a
+    `print(repr(v))`, a `json.dumps`, a `KeyError` message), plus the value
+    without its trailing newline(s) — a pasted value ending in a newline never
+    matches a single log line whole. A variant never overrides another
+    value's whole-value entry."""
     redactions = {v: names_by_id.get(i, i) for i, v in values_by_id.items()}
     for i, v in values_by_id.items():
+        for variant in (json.dumps(v)[1:-1], json.dumps(v, ensure_ascii=False)[1:-1],
+                        repr(v)[1:-1], v.rstrip("\r\n")):
+            if variant and variant != v:
+                redactions.setdefault(variant, names_by_id.get(i, i))
         if "\n" in v:
             for part in v.splitlines():
                 if substantive_probe(part):
                     redactions.setdefault(part, names_by_id.get(i, i))
     return redactions
+
+
+def redact_text(text: str, redactions: dict[str, str],
+                hit_names: list[str] | None = None) -> str:
+    """§4.8 log-line redaction over a `build_redactions` map: every value in
+    the text becomes `•••`; the name of each secret that matched is appended
+    to `hit_names` (once). Longer values first — a value that is a prefix of
+    another secret's value must not replace the head and leave the tail
+    behind. Shared by executions and the §8 RECENT EXECUTIONS excerpt."""
+    for val, name in sorted(redactions.items(), key=lambda kv: -len(kv[0])):
+        if val and val in text:
+            text = text.replace(val, "•••")
+            if hit_names is not None and name not in hit_names:
+                hit_names.append(name)
+    return text
 
 
 def agents_for_step(agents: dict[str, dict], enabled: list, s: dict) -> list[dict]:
@@ -401,7 +427,9 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
             child left behind (an `&` job, a spawned server, a grandchild that
             traps the cancel's SIGTERM) neither holds the step "executing"
             until the watchdog nor survives as an orphan — and the read end is
-            defused if the loop is still blocked on it."""
+            defused if the loop is still blocked on it (the defused reader
+            still hands back what the pipe already holds, up to 1 MiB, so the
+            executor's own last lines survive a reader that fell behind)."""
             try:
                 proc.wait()
             except Exception:  # noqa: BLE001 — the teardown reaps it either way
@@ -604,6 +632,12 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         _close_pipe(proc.stdin)
         state["proc"] = None
         state.pop("hard_kill", None)
+        # A cancel/skip racing this teardown may have armed its grace timer
+        # after the pop above the reader close: popped again now that
+        # `hard_kill` is gone (`_term_then_kill` checks it after storing).
+        grace = state.pop("grace_timer", None)
+        if grace is not None:
+            grace.cancel()
         # §7: the executor is gone, so its agent calls are over — a group still
         # listed here always means a call was in flight when it died (a normal
         # return retracts it), so the harness CLI in its own session is killed
@@ -748,6 +782,15 @@ class Engine:
         itself happens on the worker thread (`_take_pre_version`)."""
         if kind != "version":
             return False
+        # §6.3: a version whose snapshot is still owed (a record cancelled
+        # before step 1, or one whose own copy failed) — in-memory only.
+        owed = self.store.autos.get(auto["id"], auto).get("_pre_version_owed")
+        if owed and version in owed:
+            # Consumed here, in the admission critical section, so two parallel
+            # admissions can never both take the owed copy; the worker re-owes
+            # it if its copy is skipped or fails.
+            owed.discard(version)
+            return True
         if any(x["automation_id"] == auto["id"] and x.get("kind") == "version"
                and x.get("version") == version
                and not self.store.never_ran(x)
@@ -782,12 +825,16 @@ class Engine:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         with self.store.lock:
-            if _seeded():
-                shutil.rmtree(staging, ignore_errors=True)  # lost the race
-                return False
-            if dmem.exists():
-                dmem.rmdir()  # empty by the check above
-            staging.rename(dmem)
+            lost_race = _seeded()
+            if not lost_race:
+                if dmem.exists():
+                    dmem.rmdir()  # empty by the check above
+                staging.rename(dmem)
+        if lost_race:
+            # §6: no rmtree ever runs under the lock — the loser's copy is
+            # removed after the hold ends.
+            shutil.rmtree(staging, ignore_errors=True)
+            return False
         return True
 
     def _take_pre_version(self, auto: dict, h: dict) -> None:
@@ -803,7 +850,30 @@ class Engine:
         with self.store.memory_ops:
             staged = self.store.stage_snapshot(auto, "pre-version")
             if staged is not None:
-                self.store.commit_snapshot(auto, staged, "pre-version", version=label)
+                try:
+                    self.store.commit_snapshot(auto, staged, "pre-version", version=label)
+                except BaseException:
+                    # §6.3: a staged copy never leaks — a failed commit
+                    # discards it (outside store.lock: no rmtree under it).
+                    self.store.discard_snapshot(staged[0])
+                    raise
+        self._set_pre_version_owed(h, False)
+
+    def _set_pre_version_owed(self, h: dict, owed: bool) -> None:
+        """§6.3 owed mark: the version whose pre-version snapshot this record
+        skipped or failed stays owed to the next execution (in-memory only,
+        on the stored automation — never a shadow copy)."""
+        version = h.get("version")
+        if version is None:
+            return
+        with self.store.lock:
+            a = self.store.autos.get(h["automation_id"])
+            if a is None:
+                return
+            if owed:
+                a.setdefault("_pre_version_owed", set()).add(version)
+            elif a.get("_pre_version_owed"):
+                a["_pre_version_owed"].discard(version)
 
     def retry(self, auto: dict, h: dict) -> dict:
         """§7 in-place retry: the same execution record re-executes from the
@@ -938,8 +1008,15 @@ class Engine:
             return
         t = threading.Timer(cls.KILL_GRACE, hard_kill)
         t.daemon = True
-        t.start()
         state["grace_timer"] = t
+        # The step's teardown may have run meanwhile: it pops `hard_kill`
+        # and then the grace timer, so a timer stored after that second pop
+        # is caught here — it must never fire `_hard_kill` on a reaped pid.
+        if state.get("hard_kill") is not hard_kill:
+            if state.get("grace_timer") is t:
+                state.pop("grace_timer", None)
+            return
+        t.start()
 
     def cancel(self, execution_id: str) -> bool:
         """§7 cancel for a running execution; §6 queue-leave for a waiting one.
@@ -967,6 +1044,9 @@ class Engine:
         state["cancel"] = True
         proc = state.get("proc")
         if proc and proc.poll() is None:
+            # §7 per-step rule: only a step the cancel actually signalled (or
+            # one that exited non-zero) reads `cancelled`.
+            state["cancel_signalled"] = True
             self._term_then_kill(proc, state)
         return True
 
@@ -1054,14 +1134,7 @@ class Engine:
         return base / "draft" / "memory" if kind == "draft" else base / "memory"
 
     def _redact(self, h: dict, text: str, redactions: dict[str, str]) -> str:
-        # §4.8: longer values first — a value that is a prefix of another
-        # secret's value must not replace the head and leave the tail behind.
-        for val, name in sorted(redactions.items(), key=lambda kv: -len(kv[0])):
-            if val and val in text:
-                text = text.replace(val, "•••")
-                if name not in h["redacted_secrets"]:
-                    h["redacted_secrets"].append(name)
-        return text
+        return redact_text(text, redactions, h["redacted_secrets"])
 
     def _log(self, h: dict, kind: str, text: str, redactions: dict[str, str],
              cur: dict | None = _CUR_NOW) -> None:
@@ -1190,8 +1263,18 @@ class Engine:
             # landed (§7): a multi-gigabyte copy must never run for an
             # execution nobody wants. The step loop below then marks every
             # step cancelled exactly as it does today.
-            if not _stopped(state):
-                self._take_pre_version(auto, h)
+            if h.get("_pre_snapshot"):
+                if _stopped(state):
+                    # §6.3: skipped, so the snapshot stays owed to the next
+                    # execution of this version.
+                    h.pop("_pre_snapshot", None)
+                    self._set_pre_version_owed(h, True)
+                else:
+                    try:
+                        self._take_pre_version(auto, h)
+                    except BaseException:
+                        self._set_pre_version_owed(h, True)
+                        raise
             # §6: a missing secret stops the execution before any step —
             # declared (`secrets` entry ids in the manifest) and the
             # code-referenced secrets["<id>"] literals alike. Ids are the
@@ -1341,8 +1424,12 @@ class Engine:
                         # §7: the shutdown sweep killed the step — the user
                         # pressed nothing, so no "cancelled by you" line.
                         status = "interrupted"
-                    elif state["cancel"]:
+                    elif state["cancel"] and (rc != 0 or state.get("cancel_signalled")):
+                        # §7 per-step rule: a cancel that landed after this
+                        # step already exited 0 unsignalled leaves it
+                        # `succeeded` — the queued steps are what it cancels.
                         status = "cancelled"
+                        state["cancel_logged"] = True
                         self._log(h, "sys", "execution cancelled by you — nothing else will happen", redactions)
                     elif rc == 0:
                         status = "succeeded"
@@ -1395,6 +1482,7 @@ class Engine:
                                 # record would finish `succeeded`.
                                 step["status"] = "cancelled"
                                 attempt["status"] = "cancelled"
+                                state["cancel_logged"] = True
                                 self._log(h, "sys",
                                           "execution cancelled by you — nothing else will happen",
                                           redactions)
@@ -1449,6 +1537,10 @@ class Engine:
                 self._log(h, "sys", "backend stopped mid-execution", redactions)
             elif cancelled:
                 h["status"] = "cancelled"
+                if not state.get("cancel_logged"):
+                    # §7: the cancel landed after the executing step had already
+                    # exited 0 — no step logged the line, the record still does.
+                    self._log(h, "sys", "execution cancelled by you — nothing else will happen", redactions)
             elif failed:
                 h["status"] = "failed"
                 self._log(h, "sys", f"execution failed — see the step above", redactions)
@@ -1536,9 +1628,13 @@ class Engine:
             # summed it already, and this call is idempotent.
             self._sum_pass(h, state)
             release_power()
-            with self._lock:
-                self._live.pop(h["id"], None)
             with self.store.lock:
+                # §6 maxParallel: the engine slot and the automation's `_live`
+                # entry are released in one store.lock hold (lock order
+                # store.lock → engine._lock, as cancel/retry take them), so an
+                # admission can never see one freed while the other is held.
+                with self._lock:
+                    self._live.pop(h["id"], None)
                 # Belt and braces: even if update_execution failed above, the
                 # automation must never stay pinned "executing" in memory. A
                 # BaseException escape (interpreter shutdown aside) can reach

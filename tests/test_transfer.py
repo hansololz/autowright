@@ -1703,6 +1703,9 @@ class _FakeResp:
     def read(self, n=-1):
         return self._buf.read(n)
 
+    def read1(self, n=-1):
+        return self._buf.read1(n)
+
     def geturl(self):
         return self._url
 

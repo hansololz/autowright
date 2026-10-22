@@ -474,13 +474,16 @@ class Listeners:
         # dict here can raise mid-shutdown, before backend.json is unlinked.
         # Flag and snapshot are taken under the lock a creation holds, so a
         # connection either made the snapshot or is never started.
+        # The iMessage watcher is closed under the same lock its creation and
+        # tick hold, so a reconcile in flight can neither create one after this
+        # nor query the database closed here.
         with self._conns_lock:
             self._stop.set()
             conns = list(self._conns.values())
+            if self._imsg is not None:
+                self._imsg.close()
         for c in conns:
             c.stop()
-        if self._imsg is not None:
-            self._imsg.close()
 
     def _loop(self) -> None:
         while not self._stop.wait(LISTEN_TICK_S):
@@ -532,16 +535,22 @@ class Listeners:
         # and the watcher closes when the last trigger goes.
         # §2 platform layer: the whole watcher is capability-gated — on an OS
         # without iMessage nothing ever touches chat.db or osascript.
-        if (senders and self._imsg is None and not self._stop.is_set()
-                and platform.current().capabilities.imessage):
-            self._imsg = _ImsgWatcher(self)
-        elif not senders and self._imsg is not None:
-            self._imsg.close()
-            self._imsg = None
-            with self.store.lock:
-                self.store.listener_status.pop(IMSG_KEY, None)
-        if self._imsg is not None:
-            self._imsg.tick(senders)
+        # Created, replaced, read, and ticked under the lock stop() holds while
+        # it closes the watcher (same rule as the Discord creation above): a
+        # stop can never miss a watcher made here, and a tick never queries a
+        # database stop() just closed.
+        with self._conns_lock:
+            if self._stop.is_set():
+                return
+            if senders and self._imsg is None and platform.current().capabilities.imessage:
+                self._imsg = _ImsgWatcher(self)
+            elif not senders and self._imsg is not None:
+                self._imsg.close()
+                self._imsg = None
+                with self.store.lock:
+                    self.store.listener_status.pop(IMSG_KEY, None)
+            if self._imsg is not None:
+                self._imsg.tick(senders)
 
     def set_status(self, key: str, state: str, error: str | None = None) -> None:
         """Push a listener's §4.3 `connection` state; on change,

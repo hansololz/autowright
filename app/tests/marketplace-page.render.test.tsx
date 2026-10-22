@@ -255,6 +255,7 @@ beforeEach(() => {
     connected: true, surface: 'app', page: 'automations', automations: [],
     executions: [], agents: [], secrets: [], settings: { ...SETTINGS },
     updateAvailable: null, reportOpen: false, version: '0.3.0', marketplaceVersion: 0,
+    reconnects: 0,
   })
 })
 afterEach(() => { cleanup(); storeMod.useStore.getState().disconnect() })
@@ -600,6 +601,17 @@ describe('§22.2 built-in catalog', () => {
     expect(await screen.findByText("Couldn't load: the server did not answer.")).toBeTruthy()
     expect(screen.queryByTestId('marketplace-pending')).toBeNull()
     expect(screen.getByText('This marketplace lists no automations yet.')).toBeTruthy()
+  })
+})
+
+describe('§19 reconnect refetch', () => {
+  it('a socket reconnect refetches the table - a missed marketplace.changed is never replayed', async () => {
+    marketplaceList.mockResolvedValue({ sources: [] })
+    render(<MarketplacePage />)
+    await waitFor(() => expect(marketplaceList).toHaveBeenCalled())
+    const before = marketplaceList.mock.calls.length
+    act(() => { storeMod.useStore.setState({ reconnects: 1 }) })
+    await waitFor(() => expect(marketplaceList.mock.calls.length).toBe(before + 1))
   })
 })
 
@@ -1175,6 +1187,21 @@ describe('§22.7 catalog authoring', () => {
     // §22.7: a message naming an entry views it, and the editor stays open.
     expect(screen.getByTestId('catalog-entry-title')).toBeTruthy()
     expect(screen.getByTestId('catalog-editor')).toBeTruthy()
+  })
+
+  it('Escape and the backdrop are inert while the save is in flight (§9 commit rule)', async () => {
+    let land: (v: unknown) => void = () => {}
+    marketplaceCatalogSave.mockReturnValue(new Promise((resolve) => { land = resolve }))
+    await openEditor()
+    fireEvent.click(screen.getByTestId('catalog-save'))
+    await waitFor(() => expect(marketplaceCatalogSave).toHaveBeenCalled())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.mouseDown(screen.getByTestId('catalog-editor').closest('[role="dialog"]')!.parentElement!)
+    await act(async () => { await new Promise((r) => setTimeout(r, 250)) })
+    expect(screen.getByTestId('catalog-editor')).toBeTruthy()
+    expect(screen.queryByText('Discard your catalog edits?')).toBeNull()
+    await act(async () => { land(fileSource({ name: 'Shelf' })) })
+    await waitFor(() => expect(screen.queryByTestId('catalog-editor')).toBeNull(), { timeout: 3000 })
   })
 
   it('Escape with unsaved edits raises the discard confirm', async () => {

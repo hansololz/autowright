@@ -521,11 +521,34 @@ def test_each_admission_publishes_its_own_exec_queued(store, monkeypatch):
     assert len(store.queued_execs(a["id"])) == 2
 
 
-def test_dst_fall_back_hour_fires_once(store, monkeypatch):
+@pytest.fixture
+def new_york_tz():
+    """Pin the process zone to America/New_York for the duration of a test —
+    §4.3 occurrences are compared as instants via the process zone, so a fake
+    local/UTC clock pair written for New York needs the process to agree."""
+    import os
+    import time
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("POSIX-only tzset")
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def test_dst_fall_back_hour_fires_once(store, monkeypatch, new_york_tz):
     """§4.3: an hour repeated by a DST fall-back fires once. The local wall
     clock rewinds an hour with no clock step at all, so the backward-step guard
     must not mistake it for one and re-evaluate the whole repeated hour."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     from conftest import make_version
 
     # 2026-11-01 America/New_York: 01:00-01:59 EDT runs, then repeats as EST.
@@ -540,20 +563,23 @@ def test_dst_fall_back_hour_fires_once(store, monkeypatch):
     store.create_automation(make_version(), "Nightly", None, triggers=[
         {"id": "t1", "kind": "cron", "enabled": True, "expression": "30 1 * * *"}])
 
-    # walk local time through the repeated hour; UTC only ever moves forward
-    for local_now in [datetime(2026, 11, 1, 0, 55),   # baseline, EDT
-                      datetime(2026, 11, 1, 1, 35),   # 01:30 EDT — the firing
-                      datetime(2026, 11, 1, 1, 5),    # clock fell back to EST
-                      datetime(2026, 11, 1, 1, 35),   # 01:30 again, now EST
-                      datetime(2026, 11, 1, 2, 5)]:
+    # walk local time through the repeated hour; UTC only ever moves forward.
+    # Each local reading is the real one for its UTC instant (fold=1 on the
+    # second pass, as datetime.now() reports it) — §4.3 compares instants.
+    for local_now, utc_now in [
+            (datetime(2026, 11, 1, 0, 55), datetime(2026, 11, 1, 4, 55)),          # baseline, EDT
+            (datetime(2026, 11, 1, 1, 35), datetime(2026, 11, 1, 5, 35)),          # 01:30 EDT — the firing
+            (datetime(2026, 11, 1, 1, 5, fold=1), datetime(2026, 11, 1, 6, 5)),    # fell back to EST
+            (datetime(2026, 11, 1, 1, 35, fold=1), datetime(2026, 11, 1, 6, 35)),  # 01:30 again, now EST
+            (datetime(2026, 11, 1, 2, 5), datetime(2026, 11, 1, 7, 5))]:
         local.now = local_now
+        utc.now = utc_now.replace(tzinfo=timezone.utc)
         sched._tick()
-        utc.now += timedelta(minutes=30)
 
     assert len(fires) == 1, f"the repeated hour must fire once, fired {len(fires)}"
 
 
-def test_backward_clock_step_still_recovers(store, monkeypatch):
+def test_backward_clock_step_still_recovers(store, monkeypatch, new_york_tz):
     """§6: a genuine backward step (NTP) must not silence a trigger until the
     wall clock re-reaches the old baseline — UTC moves back too, unlike DST."""
     from datetime import datetime, timedelta, timezone
@@ -1102,7 +1128,9 @@ def test_overdue_sweep_override_never_posts_nothing_but_still_publishes(store, m
     assert posted == []  # no post thread was ever started
     assert [e for e, payload in published
             if e == "automation.changed" and payload.get("automationId") == a["id"]]
-    assert a["id"] in sched._overdue_notified  # the stretch is still counted once
+    # §6: marked only when a notification actually posts — a later turn to
+    # attention/all must still notify this stretch.
+    assert a["id"] not in sched._overdue_notified
 
 
 def test_overdue_sweep_global_never_posts_nothing_unless_overridden(store, monkeypatch):
@@ -1136,7 +1164,7 @@ def test_overdue_sweep_global_never_posts_nothing_unless_overridden(store, monke
     assert posted == []  # no post thread was ever started
     assert [e for e, payload in published
             if e == "automation.changed" and payload.get("automationId") == a["id"]]
-    assert a["id"] in sched._overdue_notified
+    assert a["id"] not in sched._overdue_notified
 
     b = store.create_automation(make_version(), "Overridden Job", None, triggers=[
         {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *",

@@ -250,14 +250,17 @@ export default function ExecutionsList() {
     // re-run this one.
   }, [executions]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // §7 execution.deleted: the accumulated deeper pages drop the deleted id as
+  // §7 execution.deleted: the accumulated deeper pages drop the deleted ids as
   // well - the absorption prune above only reaches rows inside the window's
-  // span, so a deleted row past it would otherwise stay on its page.
+  // span, so a deleted row past it would otherwise stay on its page. Every id
+  // in the store's ring drops (several deletes can land in one render batch),
+  // and dropping by membership is idempotent.
   const executionDeletedSeq = useStore((s) => s.executionDeletedSeq)
   useEffect(() => {
-    const deletedId = useStore.getState().lastDeletedExecutionId
-    if (executionDeletedSeq === 0 || !deletedId) return
-    setFetched((f) => (f.some((e) => e.id === deletedId) ? f.filter((e) => e.id !== deletedId) : f))
+    if (executionDeletedSeq === 0) return
+    const deleted = new Set(useStore.getState().deletedExecutionIds)
+    if (deleted.size === 0) return
+    setFetched((f) => (f.some((e) => deleted.has(e.id)) ? f.filter((e) => !deleted.has(e.id)) : f))
   }, [executionDeletedSeq])
 
   // §7: the QUEUED FOR column counts up — each cell ticks itself (QueuedFor),
@@ -304,7 +307,10 @@ export default function ExecutionsList() {
       before: { startedMs: last.startedMs, id: last.id },
     }).then((r) => {
       if (n !== fetchSeq.current) return
-      setFetched((f) => [...f, ...r.executions])
+      // §7: a window change while the fetch was out can trim the cursor row
+      // from the set (a finish pushed it past the cap) - re-insert it ahead of
+      // the landed page, or the row between the two pages is skipped.
+      setFetched((f) => (f.some((e) => e.id === last.id) ? [...f, ...r.executions] : [...f, last, ...r.executions]))
       setServerTotal(r.total)
       if (r.executions.length > 0) setPage(target)
     }, (err: Error) => { if (n === fetchSeq.current) showToast(err.message) })

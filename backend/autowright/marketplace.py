@@ -415,7 +415,10 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
             # worker the backend needs back.
             deadline = time.monotonic() + deadline_s
             chunks, total = [], 0
-            while chunk := response.read(_FETCH_CHUNK):
+            # read1, not read: read(n) blocks until n bytes (or EOF) arrive,
+            # so a trickle would never reach the deadline check; read1 returns
+            # whatever arrived, and the check runs between trickled bytes.
+            while chunk := response.read1(_FETCH_CHUNK):
                 if time.monotonic() > deadline:
                     raise MarketplaceError(
                         f"the download timed out after {deadline_s} seconds")
@@ -889,12 +892,21 @@ class MarketplaceStore:
         On failure nothing in the copy changes, `refreshed_at` keeps its old
         value, and `error` records the message - the page keeps showing the
         last good copy with the error beside it."""
+        return self._refresh(source_id)  # no stop event: never abandoned
+
+    def _refresh(self, source_id: str,
+                 stop: threading.Event | None = None) -> dict | None:
+        """`refresh`, abandoned with nothing written (answering None) when
+        `stop` is set by the time the download returns — the §22.2 rule that
+        a stopped sweeper writes nothing."""
         self._require_writable()
         with self.lock:
             location = self._find(source_id)["location"]
             if location is None:
                 raise MarketplaceNotRefreshable(NOT_REFRESHABLE)
         text, error = self._fetch_catalog(location)
+        if stop is not None and stop.is_set():
+            return None
         with self.lock:
             # Removed while it downloaded: the KeyError is the route's 404 and
             # nothing is written.
@@ -958,7 +970,10 @@ class MarketplaceStore:
         if last.tzinfo is None:
             last = last.astimezone()
         now = now or datetime.now(timezone.utc)
-        return (now - last).total_seconds() >= AUTO_REFRESH_MIN_AGE_S
+        age = (now - last).total_seconds()
+        # §22.2: a stamp in the future (clock moved back, hand edit) counts as
+        # due — otherwise the row would sit unread until the clock caught up.
+        return age < 0 or age >= AUTO_REFRESH_MIN_AGE_S
 
     def auto_refresh_sweep(self) -> list[str]:
         """§22.2 auto refresh: every row flagged `auto_refresh` with a location
@@ -1030,7 +1045,10 @@ class MarketplaceStore:
             if self._auto_stop.is_set():
                 break
             try:
-                self.refresh(source_id)
+                # A stop that lands during the download: nothing is written
+                # (the sweep's rule — a stopped sweeper writes nothing).
+                if self._refresh(source_id, stop=self._auto_stop) is None:
+                    break
             except (MarketplaceError, KeyError):
                 # A row removed while this ran, or a table that can't be
                 # written: the refresh path itself recorded what it could.

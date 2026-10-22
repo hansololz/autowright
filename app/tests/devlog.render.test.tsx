@@ -151,3 +151,22 @@ describe('developer log overlay (§9.3)', () => {
     expect(tailLogs.mock.calls.length).toBe(polls)
   })
 })
+
+describe('developer log overlay polls a rejecting bridge (§9.3)', () => {
+  it('a rejecting tail/list bridge produces no unhandled rejection', async () => {
+    tailLogs.mockReset().mockRejectedValue(new Error('main restarting'))
+    listRequestLogs.mockReset().mockRejectedValue(new Error('main restarting'))
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      render(<DevLogOverlay />)
+      act(() => { backquote() })
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+      expect(tailLogs).toHaveBeenCalled()
+      expect(listRequestLogs).toHaveBeenCalled()
+      expect(unhandled).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
+  })
+})

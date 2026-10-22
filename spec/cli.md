@@ -32,7 +32,7 @@ autowright execution <verb> …           list · show · tail · cancel · retr
 autowright secret list|set|delete
 autowright agent list|check
 autowright settings show|set
-autowright marketplace list|add|set|refresh|remove|install|create|catalog set|add|remove   (§22.5, §22.7)
+autowright marketplace list|add|set|refresh|remove|install|audit|create|catalog set|add|remove   (§22.5, §22.7)
 autowright service install|uninstall|status|restart|stop   (§3 — the only group that needs no backend)
 ```
 
@@ -55,14 +55,17 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   empty one (`execution cancel "$ID"` with `$ID` unset) is the usage error, never the
   newest record cancelled or retried — and `marketplace refresh ""` is a usage error, not
   refresh-all. The
-  `--grant-agent` / `--grant-secret` names resolve by the same rule: a name two records
+  `--grant-agent` / `--grant-secret` names resolve by the same rule, and so does
+  `agent check NAME`: a name two records
   share (duplicates already on disk still load) exits with the candidate list, never the
   first match.
 - **`--json`** on every read verb (`status`, `instructions`, `automation list|show|diff`,
   `param list`, `trigger list`, `memory show`, `snapshot list`, `execution list|show`,
   `secret list`, `agent list|check`, `settings show`) prints the raw API JSON instead of the human
   columns — the machine mode agents parse. (`marketplace list`, §22.5, has no `--json` yet —
-  deferred until the §22 design settles.) `execution list --json` prints the §19 envelope
+  deferred until the §22 design settles.) `status --json` is the one composite: no single
+  endpoint answers it, so the CLI prints its own object `{version, backend, automations,
+  executions, agents, secrets, pendingDraft}` assembled from `/health` and `/state`. `execution list --json` prints the §19 envelope
   `{executions, total}` — the one list verb whose payload is an envelope, because the total
   sizes the readout; every other list verb prints the bare array. `agent check` prints
   `ready` or `needs setup` followed by the §19 `detail` line in human mode.
@@ -88,7 +91,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   `--until` are usage errors named with the flags' own words, never a server 422 quoting
   wire parameter names — while reference resolution still reads the uncapped list (§19;
   the bare no-reference form of `execution show|tail|cancel|retry|skip|result` means "the
-  newest" and reads `limit=1`), `settings set` lists its keys with
+  newest" and reads `limit=1`; `execution cancel` on a record that had already finished —
+  the API's `ok: false` — prints `too late - it had already finished` and exits 1, never a
+  claimed cancel), `settings set` lists its keys with
   each one's value form (`settings set` applies the ordinary keys first, in one PATCH, and
   `dataPath=` after: a refused data path leaves the ordinary keys applied and says so, a
   refused ordinary key leaves the data path untouched — never a switched data path behind
@@ -97,7 +102,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   `set location=` —
   zsh doesn't expand `~` after `=` in an ordinary argument, so without the expansion
   `dataPath=~/Data` would land in a folder literally named `~` under the current directory; the backend refuses a relative path with 422,
-  since it would resolve against the backend's own cwd) (and, after setting one of the shell-owned keys `login` or
+  since it would resolve against the backend's own cwd; an **empty** `dataPath=` — an unset
+  shell variable — is the usage error "dataPath can't be empty", never the current directory
+  made absolute and adopted as the data location) (and, after setting one of the shell-owned keys `login` or
   `menuBarIcon`, prints one extra line "takes effect when the app next syncs, within a
   minute" — the OS side of those two is the Electron main process's §3 poll, not the
   backend's, and headless there is no app to apply it at all), and `param set` lists the per-kind value forms. Every `<automation>`
@@ -117,7 +124,8 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   descriptions the ordinary way while leaving those example blocks line-for-line as written —
   argparse's own raw formatter is all-or-nothing and would leave the prose unwrapped too, and
   `_fill_text` is the single hook both run through, so the `Examples:` opener every example
-  epilog carries is what tells them apart. Descriptions are written as **paragraphs**: the
+  epilog carries is what tells them apart (a `Keys:` opener — `automation set`'s key list —
+  is kept verbatim the same way; both are line-for-line reference blocks). Descriptions are written as **paragraphs**: the
   first one says what the command does and is what listings print, the ones after it carry the
   detail, caveats, and what happens next. `_fill_text` wraps each paragraph separately rather
   than collapsing them into one block.
@@ -203,7 +211,8 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   that legitimately take long — package install (the §6.2 ensure runs pip), import (the
   URL fetch, the file upload, *and* the confirm that lands the archive — a large archive
   landing on a slow volume must never report "backend isn't reachable" while it succeeds),
-  automation delete (§19 waits for cancelled engine threads), and the three memory
+  automation delete (§19 waits for cancelled engine threads), `automation duplicate` (its
+  `--copy-memory` copies the whole memory directory), and the three memory
   operations `memory clear`, `snapshot create`, and `snapshot restore` (each copies the
   whole memory directory, which can be gigabytes — a 30 s timeout would report "backend
   isn't reachable … restart it" while the copy is still running, and following that advice
@@ -328,7 +337,10 @@ learns about an install failure at build time, not when a trigger fires.
 triggers off` (the landed name is the server's §4.1 deduped one, so it may carry a suffix the
 user didn't type); `--copy-memory` forwards `copyMemory: true`; `--json` prints the new
 automation's JSON instead (the one create-like verb with a machine mode, so a script gets the
-new id without scraping). Exit 0 on success, 1 on any error.
+new id without scraping). A §19 `warning` on the answer (the copy landed, its memory wasn't
+copied) prints `warning: <text>` on stderr after the success line — exit 0, the automation
+exists and a retry would copy it twice; `--json` carries the field. The request runs with the
+660 s timeout (§20 HTTP timeouts). Exit 0 on success, 1 on any error.
 
 **`automation set <automation> KEY=VALUE…`** PATCHes the §4.1 operational settings that have
 no file in the §20 workdir: `notifications=inherit|attention|all|never` (`inherit` sends
@@ -407,12 +419,14 @@ schedules survive later syncs and pushes).
 
 **Param values** — `param set <ref> NAME=VALUE …` PATCHes `paramValues`, parsed by the
 definition's kind: toggle `on|off|true|false` → bool · number → int · text → string · list →
-JSON array or comma-separated · kv → JSON object or `k=v,k=v`. An unknown name or unparseable
+JSON array or comma-separated · kv → JSON object or `k=v,k=v` (a JSON object's values are
+stored as their JSON text — `null`, `true`, a nested object — never a Python repr). An unknown name or unparseable
 value exits 1 naming the expected form.
 
 **Secret values never ride argv** — `secret set NAME` takes no value argument: it prompts
 (`getpass`, no echo), or reads the **whole** of stdin with `--stdin` for scripted use (a multi-line value such as
-a PEM key lands intact; exactly one trailing newline is trimmed, never a run of them). The
+a PEM key lands intact; exactly one trailing newline is trimmed, never a run of them; stdin
+that isn't valid UTF-8 exits 1 with "stdin isn't valid UTF-8", never a traceback). The
 name is validated (§4.8 form) before the prompt or the stdin read, so a lowercase name never
 asks for a value it will then refuse. A value
 passed as an argument would land in shell history and in every local process's view of the

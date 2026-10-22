@@ -239,6 +239,11 @@ export interface Automation {
   draft?: DraftPayload | null
 }
 
+// §19 POST /automations/{id}/duplicate: the new automation, plus `warning`
+// when the automation landed but its memory copy failed or was abandoned -
+// the client shows it instead of an error (a retry would make a second copy).
+export type DuplicateResponse = Automation & { warning?: string }
+
 // §6.3 automatic-snapshot toggles — one per automatic reason, all default true
 export interface SnapshotSettings {
   preVersion: boolean

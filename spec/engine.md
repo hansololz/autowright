@@ -269,7 +269,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   execution's — except when the automation's **effective** setting (§4.1 override, else §4.9
   global) is `never`, which silences this notification too (the §13 tray dot and the §4.1
   `overdue` problem still show it: those are health signals, not notifications).
-  Re-notification only after the automation leaves and re-enters overdue; the
+  Re-notification only after the automation leaves and re-enters overdue — but the
+  notified mark is set only when a notification actually posts, so an automation that sat
+  overdue under an effective `never` is notified by the first sweep after its effective
+  setting turns to `attention` or `all`; the
   observed/notified state is in-memory only (derived-not-stored, §4.1), so a backend
   restart may re-notify once — acceptable, the condition is still true.
 - **Secrets & Keychain** — scripts reference secrets by id subscript (`secrets["<id>"]  # NAME`,
@@ -381,7 +384,11 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   `secrets.NAME` raises. Reading a missing/un-allowed
   secret raises and fails the execution (the missing-secret pre-check in §6 catches known references
   before step 1); error copy names the secret (id-resolved), never the raw id alone. Values
-  never repr/print unredacted — the engine scans all log lines.
+  never repr/print unredacted — the engine scans all log lines, and the redaction set holds,
+  beside each value, its JSON-escaped forms (`ensure_ascii` on and off) and its `repr` form
+  whenever those differ from the value (a `print(repr(v))`, a `json.dumps`, a `KeyError`
+  message), plus the value without its trailing newline(s) (a pasted value ending in a
+  newline never matches a single log line whole).
   Only the step's own declared/referenced secrets are exposed on `secrets`. The full
   automation-wide value map the outbound scans need (`agent.ask`, `reply`) is taken off the
   step context before the SDK is built and passed to those two call sites explicitly, so an
@@ -485,7 +492,10 @@ values, paths, agent config, execution metadata) arrives as JSON on stdin — ne
 environment. The executor does export the non-secret pieces back out as env vars so child
 processes a step spawns can self-identify: `AUTOWRIGHT_AUTOMATION_ID`, `AUTOWRIGHT_AUTOMATION_NAME`,
 `AUTOWRIGHT_EXECUTION_ID`, `AUTOWRIGHT_STEP_INDEX`, `AUTOWRIGHT_STEP_NAME`, `AUTOWRIGHT_TRIGGER`,
-`AUTOWRIGHT_TRIGGER_PAYLOAD` (the §4.5 payload as JSON, only on message-trigger executions),
+`AUTOWRIGHT_TRIGGER_PAYLOAD` (the §4.5 payload as JSON, only on message-trigger executions and
+only when that JSON is at most 64 KiB — a larger payload would exceed the OS argument/environment
+limits and make every subprocess the step spawns fail with E2BIG, so it is reachable only through
+the SDK's `execution.trigger_payload`, which never rides the environment),
 `AUTOWRIGHT_WORKSPACE`, `AUTOWRIGHT_MEMORY_DIR`, `AUTOWRIGHT_RESULT_DIR`. Param values, secret values,
 and agent config never enter the environment; the executor never reads env as input.
 `sys.exit()` in a step follows the CPython convention: no code / `0` is an ordinary early exit
@@ -665,6 +675,13 @@ destructive moments recoverable.
   first-execution admitted into another `maxParallel` slot meanwhile can already be writing
   `memory/` while the copy runs: in that one case the pre-version image is best-effort; it is
   exact whenever a version's first execution runs alone (the default `maxParallel` 1).
+  Only an execution that started at least one step attempt counts as the version's
+  "recorded execution" for this decision: a record cancelled or interrupted before step 1,
+  or one whose own pre-version copy failed, leaves the snapshot still **owed** to the next
+  execution — an in-memory owed mark on the automation, set by the worker that skipped or
+  failed the copy and cleared when a copy lands (a backend restart in between loses the mark
+  and the recorded-execution rule decides again — accepted: no stored shape changes for it);
+  a safety net that evaporated on a cancelled first run would be no net.
 - **Retention** — at each creation, unnamed snapshots beyond the newest 5 are pruned. Named
   snapshots are never auto-deleted — naming pins one until the user deletes it (or the
   automation is deleted). Renaming to empty returns a snapshot to the unnamed pool. Every

@@ -20,6 +20,9 @@ const FINISHED_WINDOW = 50
 // §7 live rows: never trimmed out of the window — the §9 Executing / Queued
 // sections read them straight out of it.
 const isLive = (status: string) => status === 'queued' || status === 'executing'
+// §7 execution.deleted ring: how many recent deleted ids the store remembers
+// for the Executions page's accumulated set.
+const DELETED_RING = 200
 
 // §12 agent status badge — cached for the app session so the Agents page
 // doesn't re-check on every visit.
@@ -54,10 +57,12 @@ interface Model {
   // holds, not just the window.
   executionsTotal: number
   // §7 execution.deleted: bumped (and the id recorded) by every delete event -
-  // the Executions page drops the id from its accumulated deeper pages, which
-  // live on the page, not here.
+  // the Executions page drops every recorded id from its accumulated deeper
+  // pages, which live on the page, not here. A ring of the newest
+  // DELETED_RING ids, so several deletes in one render batch all reach the
+  // page (dropping by membership is idempotent).
   executionDeletedSeq: number
-  lastDeletedExecutionId: string | null
+  deletedExecutionIds: string[]
   agents: Agent[]
   secrets: SecretMeta[]
   settings: Settings | null
@@ -94,6 +99,11 @@ interface Model {
   platformCapabilities: PlatformCapabilities
 
   surface: Surface
+  // §9/§13: true once boot has landed (surface decided). A deep link that
+  // arrives before it, or while a modal is open, waits in `heldTarget`.
+  booted: boolean
+  // §9 held deep link: the newest open-target hash not yet applied.
+  heldTarget: string | null
   page: Page
   automationId: string | null
   executionId: string | null
@@ -328,7 +338,7 @@ export const useStore = create<Model>((set, get) => ({
   executions: [],
   executionsTotal: 0,
   executionDeletedSeq: 0,
-  lastDeletedExecutionId: null,
+  deletedExecutionIds: [],
   agents: [],
   secrets: [],
   settings: null,
@@ -342,6 +352,8 @@ export const useStore = create<Model>((set, get) => ({
   platformOs: '',
   platformCapabilities: MAC_CAPABILITIES,
   surface: 'app',
+  booted: false,
+  heldTarget: null,
   page: 'automations',
   automationId: null,
   executionId: null,
@@ -427,6 +439,13 @@ export const useStore = create<Model>((set, get) => ({
         } : {}),
       })
       if (onboarded) passedOnboard = true
+      // §9/§13: boot has decided the surface. A deep link held during boot is
+      // applied now (after the boot hash above, so the newer link wins) when
+      // boot landed in the app shell, and dropped when it landed in
+      // onboarding or the menubar.
+      set({ booted: true })
+      if (get().surface === 'app') applyHeldTarget()
+      else set({ heldTarget: null })
       // §3 one-shot first-run CLI install — fire-and-forget off the freshly
       // fetched snapshot (not the store: a stale boot yields its snapshot set).
       void ensureCliFirstRun(s.settings)
@@ -636,7 +655,8 @@ export const useStore = create<Model>((set, get) => ({
         executions: m.executions.filter((e) => e.id !== executionId),
         executionsTotal: Math.max(0, m.executionsTotal - 1),
         executionDeletedSeq: m.executionDeletedSeq + 1,
-        lastDeletedExecutionId: executionId,
+        deletedExecutionIds: [...m.deletedExecutionIds.filter((x) => x !== executionId), executionId]
+          .slice(-DELETED_RING),
         executionFull,
         execLogs,
         // §11: the tracked test is exactly this record — leaving it tracked
@@ -850,6 +870,14 @@ export const useStore = create<Model>((set, get) => ({
         // scheduled refetch is still on the wire.
         return 'ok'
       }
+      // §19 symmetric rule: a terminal body must not overwrite a record the
+      // socket has since moved back to live (a §7 Retry's execution.started
+      // landing while the finish-triggered GET was on the wire). Only a held
+      // full record counts: that started event already scheduled the fresh
+      // GET. With no full record, a terminal body racing its own finished
+      // event is the real body and lands below.
+      const held = get().executionFull[executionId]
+      if (held && isLive(held.status) && !isLive(e.status)) return 'ok'
       executionRefetched.delete(executionId)
       set({ executionFull: { ...get().executionFull, [executionId]: e } })
       return 'ok'
@@ -1054,10 +1082,33 @@ window.addEventListener('popstate', (e) => {
 
 // §13: main pushes the menu-bar row's target here when the window already
 // exists (a reload would drop the WS); fresh windows carry it in the hash.
-window.autowright?.onOpenTarget?.((hash) => {
+window.autowright?.onOpenTarget?.((hash) => applyTarget(hash))
+
+function navigateToTarget(hash: string) {
   const m = useStore.getState()
-  if (m.surface === 'onboard' || m.surface === 'menubar') return
   const deepLink = deepLinkFromHash(hash)
   if (deepLink?.page === 'automation') m.go('automation', { automationId: deepLink.automationId })
   else if (deepLink?.page === 'execution') m.go('execution', { executionId: deepLink.executionId })
-})
+}
+
+/** §9/§13: apply an open-target hash, or hold it (newest wins) while boot has
+ * not landed or a modal is open. Ignored on the menubar surface and once boot
+ * has landed in onboarding. */
+export function applyTarget(hash: string) {
+  const m = useStore.getState()
+  if (m.surface === 'menubar') return
+  if (!m.booted || anyModalOpen()) { useStore.setState({ heldTarget: hash }); return }
+  if (m.surface === 'onboard') return
+  navigateToTarget(hash)
+}
+
+/** §9: apply the held deep link, if any, once nothing holds it any longer —
+ * called when boot lands and when the last modal closes. */
+export function applyHeldTarget() {
+  const m = useStore.getState()
+  if (m.heldTarget === null || !m.booted || anyModalOpen()) return
+  const hash = m.heldTarget
+  useStore.setState({ heldTarget: null })
+  if (m.surface === 'onboard' || m.surface === 'menubar') return
+  navigateToTarget(hash)
+}

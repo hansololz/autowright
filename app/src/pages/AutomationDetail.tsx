@@ -546,10 +546,13 @@ export default function AutomationDetail() {
       )}
 
       {/* §6 concurrency — manual executions can queue too, so every automation gets it */}
-      <ConcurrencyCard auto={auto} showToast={showToast} />
+      {/* keyed by automation like TriggersCard: pending/draft state must not
+          carry across a detail → detail navigation (prefixed - sibling keys
+          must stay distinct) */}
+      <ConcurrencyCard key={`concurrency:${auto.id}`} auto={auto} showToast={showToast} />
 
       {/* §4.1 notification override — renders only where OS notifications exist */}
-      <NotificationsCard auto={auto} showToast={showToast} />
+      <NotificationsCard key={`notifications:${auto.id}`} auto={auto} showToast={showToast} />
 
       {/* recent executions */}
       <RecentExecutions execs={recentExecs} />
@@ -680,7 +683,9 @@ export default function AutomationDetail() {
                 await loadAuto(created.id, { insert: true })
                 close()
                 go('automation', { automationId: created.id })
-                showToast(`Duplicated as “${created.name}”.`)
+                // §19: a 201 with `warning` landed the copy without its memory -
+                // the warning replaces the success line, never an error.
+                showToast(created.warning ?? `Duplicated as “${created.name}”.`)
               } catch (e) {
                 showToast((e as Error).message)
               } finally {

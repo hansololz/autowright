@@ -19,6 +19,21 @@ const TEXT_EXT = ['csv', 'json', 'txt', 'yaml', 'yml', 'log', 'tsv', 'xml']
 // §7 text preview caps — a multi-MB CSV must not freeze the renderer.
 const TEXT_MAX_BYTES = 200_000
 const TEXT_MAX_LINES = 2000
+// §7 render cap: markdown and HTML renders (the execution page and the §9.2
+// LATEST RESULT card) stop at 1 MB - a huge report must never freeze the
+// renderer parsing it.
+const RENDER_MAX_BYTES = 1_000_000
+
+// The listed size is the backend's humanized label ("12.3 KB", "4.0 MB") -
+// read back into bytes so an oversize render is refused before any fetch.
+// An unreadable label is NaN, which never trips the cap (the fetched text's
+// own length still does).
+export function labelBytes(label: string): number {
+  const m = label.trim().match(/^([\d.]+)\s*(B|KB|MB|GB)$/i)
+  if (!m) return NaN
+  const unit = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }[m[2].toUpperCase() as 'B' | 'KB' | 'MB' | 'GB']
+  return parseFloat(m[1]) * unit
+}
 
 // The name §6.1 tells steps to write, and the only file the §9.2 compact card
 // promotes into its single top view slot.
@@ -218,6 +233,12 @@ function TextView({ text }: { text: string }) {
 function FileBody({ executionId, file, kind, stamp }: {
   executionId: string; file: ResultFile; kind: 'md' | 'html' | 'img' | 'text'; stamp?: string
 }) {
+  // §9 per-OS copy rule: the reveal action the too-large note points at.
+  const copy = usePlatformCopy()
+  const rendered = kind === 'md' || kind === 'html'
+  // §7 render cap, decided off the listed size so a 50 MB report is never
+  // fetched at all.
+  const listedTooLarge = rendered && labelBytes(file.size) > RENDER_MAX_BYTES
   const [text, setText] = useState<string | null>(null)
   const [imgUrl, setImgUrl] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -229,6 +250,7 @@ function FileBody({ executionId, file, kind, stamp }: {
     setErr(null)
     setImgUrl(null)
     setText(null)
+    if (listedTooLarge) return
     void api.resultFile(executionId, file.name)
       .then(async (r) => (kind === 'img' ? URL.createObjectURL(await r.blob()) : r.text()))
       .then((v) => {
@@ -240,7 +262,14 @@ function FileBody({ executionId, file, kind, stamp }: {
     // `stamp`/size in the deps: a §7 in-place retry reuses the same executionId and
     // result dir, and a mid-run mount can catch a half-written file — the view
     // must refetch when the execution settles, not keep the stale bytes.
-  }, [executionId, file.name, file.size, stamp])
+  }, [executionId, file.name, file.size, stamp, listedTooLarge])
+  if (rendered && (listedTooLarge || (text !== null && text.length > RENDER_MAX_BYTES))) {
+    return (
+      <div style={{ padding: '2px 18px 16px', fontSize: 11.5, color: 'var(--text-faint)' }}>
+        Too large to render here - use {copy.reveal} for the full file.
+      </div>
+    )
+  }
   if (err) {
     return (
       <div style={{ padding: '0 18px 14px', fontSize: 12.5, color: 'var(--red-text)' }}>

@@ -4760,9 +4760,10 @@ def test_duplicate_route_404_and_memory_failure_keeps_the_copy(client, monkeypat
         raise OSError("disk full")
     monkeypatch.setattr(store, "copy_memory_into", broken)
     r = client.post(f"/automations/{a['id']}/duplicate", json={"copyMemory": True})
-    assert r.status_code == 500
-    assert r.json()["detail"] == ("Duplicated as 'Report 2', but its memory could not be "
-                                  "copied: disk full")
+    # §19: a failed memory copy keeps the copy and answers 201 with a warning.
+    assert r.status_code == 201
+    assert r.json()["name"] == "Report 2"
+    assert r.json()["warning"] == "Its memory could not be copied: disk full"
     assert any(x["name"] == "Report 2" for x in store.autos.values())
 
 

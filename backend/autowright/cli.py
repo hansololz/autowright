@@ -835,12 +835,18 @@ def cmd_automation_duplicate(c: Client, args) -> None:
         body["name"] = args.name
     if args.copy_memory:
         body["copyMemory"] = True
-    r = c.req("POST", f"/automations/{a['id']}/duplicate", body)
+    # §20: the copy runs under the 660 s timeout, like the memory routes - a
+    # large memory copy must not be reported as "backend isn't reachable".
+    r = c.req("POST", f"/automations/{a['id']}/duplicate", body, timeout=660)
     if args.json:
         _pjson(r)
         return
     # §20: the landed name is the server's §4.1 deduped one.
     print(f"duplicated {a['name']!r} as {r['name']!r} [{r['id'][:8]}] — triggers off")
+    # §20: a §19 `warning` (the copy landed, its memory wasn't copied) goes to
+    # stderr after the success line - still exit 0, the automation exists.
+    if r.get("warning"):
+        print(f"warning: {r['warning']}", file=sys.stderr)
 
 
 # §20 `automation set`: the §4.1 operational settings with no workdir file.
@@ -1123,7 +1129,10 @@ def parse_param_value(p: dict, raw: str):
                 sys.exit(f"param {p['name']}: bad JSON object — {e}")
             if not isinstance(v, dict):
                 sys.exit(f"param {p['name']}: expected a JSON object")
-            return [{"key": k, "value": str(x)} for k, x in v.items()]
+            # §20: a non-string value is stored as its JSON text (`null`,
+            # `true`, a nested object), never a Python repr.
+            return [{"key": k, "value": x if isinstance(x, str) else json.dumps(x)}
+                    for k, x in v.items()]
         rows = []
         for pair in raw.split(","):
             if pair.strip():
@@ -1510,7 +1519,11 @@ def cmd_execution_tail(c: Client, args) -> None:
 
 def cmd_execution_cancel(c: Client, args) -> None:
     e = find_execution(c, args.execution)
-    c.req("POST", f"/executions/{e['id']}/cancel")
+    r = c.req("POST", f"/executions/{e['id']}/cancel")
+    # §20: the API's `ok: false` means the record had already finished - never
+    # a claimed cancel.
+    if isinstance(r, dict) and r.get("ok") is False:
+        sys.exit("too late - it had already finished")
     print(f"cancelled {e['id'][:8]}")
 
 
@@ -1594,7 +1607,10 @@ def cmd_secret_set(c: Client, args) -> None:
     # lands intact; exactly one trailing newline (`\n` or `\r\n`) is trimmed,
     # never a run of them.
     if args.stdin:
-        value = sys.stdin.read()
+        try:
+            value = sys.stdin.read()
+        except UnicodeDecodeError:
+            sys.exit("stdin isn't valid UTF-8")
         if value.endswith("\r\n"):
             value = value[:-2]
         elif value.endswith("\n"):
@@ -1662,6 +1678,9 @@ def cmd_agent_check(c: Client, args) -> None:
     if not match:
         sys.exit(f"no agent named {args.agent!r} — have: "
                  f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
+    # §20: a name two agents share exits with the candidate list, the way the
+    # grant flags resolve - never the first match.
+    _exit_if_ambiguous(args.agent, match, lambda a: a.get("name") or a["harness"])
     r = c.req("POST", f"/agents/{match[0]['id']}/check")
     if args.json:
         _pjson(r)
@@ -2014,7 +2033,11 @@ def cmd_settings_set(c: Client, args) -> None:
             # §20: made absolute against the current directory before it
             # travels — the backend would resolve a relative path against its
             # own cwd, so it refuses one with 422. Tilde-expanded first: zsh
-            # leaves `~` after `=` alone in an ordinary argument.
+            # leaves `~` after `=` alone in an ordinary argument. An empty
+            # value (an unset shell variable) is a usage error, never the
+            # current directory made absolute.
+            if not raw:
+                sys.exit("dataPath can't be empty")
             data_path = os.path.abspath(os.path.expanduser(raw))
             continue
         if k not in SETTINGS_KEYS:
@@ -2125,10 +2148,11 @@ class Help(argparse.HelpFormatter):
     but leave an epilog's example block line-for-line as written. argparse's own
     RawDescriptionHelpFormatter is all-or-nothing — it would leave the prose
     unwrapped too — and `_fill_text` is the one hook they all run through, so the
-    `Examples:` opener every example epilog carries is what tells them apart."""
+    `Examples:` opener every example epilog carries is what tells them apart. A
+    `Keys:` opener (`automation set`'s key list) is kept verbatim the same way."""
 
     def _fill_text(self, text: str, width: int, indent: str) -> str:
-        if text.startswith("Examples:"):
+        if text.startswith(("Examples:", "Keys:")):
             return "\n".join(indent + line for line in text.splitlines())
         fill = super()._fill_text
         return "\n\n".join(fill(p, width, indent) for p in text.split("\n\n"))

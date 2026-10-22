@@ -242,7 +242,7 @@ def test_install_heals_existing_shim(svc):
     assert f"CLI at {svc.shim}" in out
     text = svc.shim.read_text()
     assert text == svc.mod.shim_text()
-    assert f'exec "{sys.executable}" -m autowright.cli "$@"' in text
+    assert f"exec '{sys.executable}' -m autowright.cli \"$@\"" in text
     assert svc.shim.stat().st_mode & 0o111  # executable
 
 

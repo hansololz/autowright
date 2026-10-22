@@ -166,7 +166,7 @@ describe('client request timeout (§19)', () => {
       ['POST', '/marketplace/sources'], ['POST', '/marketplace/sources/s1/refresh'],
       ['POST', '/marketplace/refresh'], ['GET', '/marketplace/sources/s1/entries/3/archive'],
       ['POST', '/marketplace/catalogs'], ['PUT', '/marketplace/sources/s1/catalog'],
-      ['DELETE', '/automations/a1'],
+      ['DELETE', '/automations/a1'], ['POST', '/automations/a1/duplicate'],
       ['POST', '/automations/a1/memory/clear'], ['POST', '/automations/a1/memory/snapshots'],
       ['POST', '/automations/a1/memory/snapshots/s1/restore'],
     ]

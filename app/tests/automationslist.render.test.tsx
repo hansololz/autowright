@@ -335,6 +335,30 @@ describe('§9.1 start fresh', () => {
     expect(storeMod.useStore.getState().surface).toBe('create')
   })
 
+  it('a failed discard toasts the error and never opens the editor', async () => {
+    seed([])
+    storeMod.useStore.setState({ pendingDraft: { name: 'Weekly report', updatedAt: null }, toast: null, surface: 'app' })
+    mockedApi.deleteDraft.mockRejectedValueOnce(new Error('backend said no'))
+    render(<AutomationsList />)
+    fireEvent.click(screen.getByText('New automation'))
+    fireEvent.click(screen.getByText('Discard and start new'))
+    finishModalAnim('Start a new automation?')
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('backend said no'))
+    expect(storeMod.useStore.getState().surface).toBe('app')
+  })
+
+  it('a failed thread clear toasts the error and never opens the editor', async () => {
+    seed([])
+    storeMod.useStore.setState({ pendingDraft: { name: 'Weekly report', updatedAt: null }, toast: null, surface: 'app' })
+    mockedApi.putChat.mockRejectedValueOnce(new Error('thread busy'))
+    render(<AutomationsList />)
+    fireEvent.click(screen.getByText('New automation'))
+    fireEvent.click(screen.getByText('Discard and start new'))
+    finishModalAnim('Start a new automation?')
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toBe('thread busy'))
+    expect(storeMod.useStore.getState().surface).toBe('app')
+  })
+
   it('starts the create flow straight away when there is no kept draft', () => {
     seed([])
     render(<AutomationsList />)

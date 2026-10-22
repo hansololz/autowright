@@ -281,7 +281,15 @@ over a tmp `AUTOWRIGHT_HOME` (fake `claude` from `tests/bin` on PATH, plus any �
 test hands its backend through `Backend.start(env)` — configuration only, never a different
 code path), then the real Electron
 binary via playwright-core `_electron.launch` loading `app/dist` — real preload bridge, real
-`backend.json` discovery, real windows on screen. Teardown stops the backend **gracefully**
+`backend.json` discovery, real windows on screen — with Playwright's own SIGINT/SIGTERM/SIGHUP
+listeners **removed right after every launch** (its Electron launcher hardcodes them; no launch
+option turns them off, and Electron is spawned detached so a terminal Ctrl+C reaches only the
+test process): that default handler quits the app through `app.close()` → `app.quit()`, which
+main.cjs treats as the user's Quit and answers with `service stop` against this machine's
+**real** launchd job (`service.py` is not scoped by `AUTOWRIGHT_HOME`). The harness installs its
+own handler, registered first, that ends every live UI with `app.exit(0)` (which bypasses
+`before-quit`) and kills the process, and teardown never calls Playwright's `close()` either,
+not even as a fallback. Teardown stops the backend **gracefully**
 (SIGTERM, a bounded wait, then SIGKILL only if it has not exited) so the backend's lifespan
 cleanup runs and reaps the live step and drafting process groups before the tmp home is
 deleted; a hard SIGKILL with no warning is reserved for the crash-simulation restart below,

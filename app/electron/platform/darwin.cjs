@@ -73,8 +73,11 @@ function defaultShimPath() {
   return path.join(os.homedir(), '.local', 'bin', 'autowright')
 }
 
+// §3: the interpreter path is single-quoted, any ' inside written as '\'':
+// a path holding $, a backtick, " or \ must not expand or break the shim.
 function shimText(python) {
-  return `#!/bin/sh\n${SHIM_MARKER}\nexec "${python}" -m autowright.cli "$@"\n`
+  const quoted = `'${python.replace(/'/g, "'\\''")}'`
+  return `#!/bin/sh\n${SHIM_MARKER}\nexec ${quoted} -m autowright.cli "$@"\n`
 }
 
 // §2 spawn policy: never show a console window for a shell child, and cap

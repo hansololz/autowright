@@ -211,6 +211,26 @@ describe('§9.2 actions menu', () => {
     mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
   })
 
+  it('a 201 carrying `warning` lands on the copy and toasts the warning instead (§19)', async () => {
+    seed(auto())
+    const created = { ...auto({ id: 'a2', name: 'Job 2' }), warning: 'Its memory could not be copied: disk full' }
+    mockedApi.duplicateAutomation.mockResolvedValueOnce(created)
+    mockedApi.getAutomation.mockImplementation(async (id: string) => {
+      if (id === 'a2') return auto({ id: 'a2', name: 'Job 2' })
+      throw new Error('offline')
+    })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    fireEvent.click(screen.getByText('Duplicate…'))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Job' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+    await waitFor(() => expect(storeMod.useStore.getState().automationId).toBe('a2'))
+    expect(storeMod.useStore.getState().automations.some((a) => a.id === 'a2')).toBe(true)
+    expect(storeMod.useStore.getState().toast).toBe('Its memory could not be copied: disk full')
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Duplicate Job' })).toBeNull(), { timeout: 3000 })
+    mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
+  })
+
   it('a failed Duplicate toasts the error and keeps the modal open', async () => {
     seed(auto())
     mockedApi.duplicateAutomation.mockRejectedValueOnce(new Error('backend said no'))

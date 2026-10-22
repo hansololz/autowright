@@ -4,7 +4,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ParamDef, Status, Step } from './types'
-import { useStore } from './store'
+import { applyHeldTarget, useStore } from './store'
 import { devlogOverlayOpen } from './devlog'
 import awMark from '../electron/icon/icon.svg'
 
@@ -1053,6 +1053,10 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
       const i = modalStack.indexOf(entry)
       if (i >= 0) modalStack.splice(i, 1)
       document.removeEventListener('keydown', onKey)
+      // §9: the last modal closing releases a held deep link. Deferred a
+      // microtask so a re-registration (a zIndex change, the StrictMode
+      // remount) that re-pushes in the same commit never counts as a close.
+      if (modalStack.length === 0) queueMicrotask(() => { if (modalStack.length === 0) applyHeldTarget() })
     }
     // The stack entry captures `zIndex`: a card that changes it re-registers,
     // or Escape and the Tab trap would keep ranking it by the z it opened with.

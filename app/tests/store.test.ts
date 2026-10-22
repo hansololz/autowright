@@ -77,6 +77,7 @@ describe('logKey', () => {
 })
 
 describe('autoIdFromHash (via the onOpenTarget deep link)', () => {
+  beforeEach(() => store.useStore.setState({ booted: true }))
   it('a valid 36-char uuid in the hash navigates to the automation', () => {
     expect(openTarget).toBeTypeOf('function')
     openTarget!('#/app?automation=123e4567-e89b-12d3-a456-426614174000')
@@ -504,7 +505,17 @@ describe('applyEvent', () => {
     const before = store.useStore.getState().executionDeletedSeq
     store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: 'gone-1' } as never)
     expect(store.useStore.getState().executionDeletedSeq).toBe(before + 1)
-    expect(store.useStore.getState().lastDeletedExecutionId).toBe('gone-1')
+    expect(store.useStore.getState().deletedExecutionIds).toEqual(['gone-1'])
+  })
+
+  it('execution.deleted keeps every recent id, newest last, capped at 200 (§7)', () => {
+    for (let i = 0; i < 205; i++) {
+      store.useStore.getState().applyEvent({ event: 'execution.deleted', executionId: `gone-${i}` } as never)
+    }
+    const ids = store.useStore.getState().deletedExecutionIds
+    expect(ids).toHaveLength(200)
+    expect(ids[0]).toBe('gone-5')
+    expect(ids[199]).toBe('gone-204')
   })
 })
 
@@ -1153,6 +1164,7 @@ describe('history restore (popstate, §9)', () => {
 })
 
 describe('onOpenTarget surface guard (§13)', () => {
+  beforeEach(() => store.useStore.setState({ booted: true }))
   it('deep links are ignored on the menubar surface', () => {
     store.useStore.setState({ surface: 'menubar' })
     openTarget!('#/app?automation=123e4567-e89b-12d3-a456-426614174000')
@@ -1173,6 +1185,7 @@ describe('onOpenTarget surface guard (§13)', () => {
 
 describe('execution deep link (§13 two target forms)', () => {
   const EXECUTION_ID = '9b2f4c1e-7a3d-4e5f-8a6b-1c2d3e4f5a6b'
+  beforeEach(() => store.useStore.setState({ booted: true }))
 
   it('open-target with execution=<uuid> lands on the execution page', () => {
     store.useStore.setState({ surface: 'app' })
@@ -1223,6 +1236,93 @@ describe('execution deep link (§13 two target forms)', () => {
     const m = store.useStore.getState()
     expect(m.page).toBe('automation')
     expect(m.automationId).toBe('123e4567-e89b-12d3-a456-426614174000')
+  })
+})
+
+describe('held deep links (§9 modal rule, §13)', () => {
+  const AUTOMATION_ID = '123e4567-e89b-12d3-a456-426614174000'
+  const EXECUTION_ID = '9b2f4c1e-7a3d-4e5f-8a6b-1c2d3e4f5a6b'
+
+  const bootTo = async (onboarded: boolean, onState?: () => void) => {
+    const backing = new Map<string, string>(onboarded ? [['ad-onboarded', '1']] : [])
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => backing.set(k, v),
+    })
+    const savedHash = location.hash
+    vi.mocked(apiMod.connectInfo).mockResolvedValueOnce(true)
+    vi.mocked(apiMod.api.state).mockImplementationOnce(async () => {
+      // the link arrives while /state is on the wire - boot has not landed
+      onState?.()
+      return {
+        version: 'v', automations: [], executions: [], executionsTotal: 0, agents: [], secrets: [],
+        settings: { cliEnabled: false }, pendingDraft: null,
+      } as never
+    })
+    try {
+      location.hash = '#/app'
+      await store.useStore.getState().boot()
+    } finally {
+      location.hash = savedHash
+      vi.unstubAllGlobals()
+    }
+  }
+
+  it('a link that arrives during boot is applied once boot lands in the app shell', async () => {
+    await bootTo(true, () => {
+      openTarget!(`#/app?automation=${AUTOMATION_ID}`)
+      expect(store.useStore.getState().page).toBe('automations')
+      // a newer link replaces the held one
+      openTarget!(`#/app?execution=${EXECUTION_ID}`)
+      expect(store.useStore.getState().heldTarget).toBe(`#/app?execution=${EXECUTION_ID}`)
+    })
+    const m = store.useStore.getState()
+    expect(m.booted).toBe(true)
+    expect(m.page).toBe('execution')
+    expect(m.executionId).toBe(EXECUTION_ID)
+    expect(m.heldTarget).toBeNull()
+  })
+
+  it('a link that arrives during boot is dropped when boot lands in onboarding', async () => {
+    await bootTo(false, () => { openTarget!(`#/app?automation=${AUTOMATION_ID}`) })
+    const m = store.useStore.getState()
+    expect(m.surface).toBe('onboard')
+    expect(m.page).toBe('automations')
+    expect(m.automationId).toBeNull()
+    expect(m.heldTarget).toBeNull()
+  })
+
+  it('a link that arrives while a modal is open is applied when it closes', async () => {
+    const { Modal } = await import('../src/ui')
+    store.useStore.setState({ booted: true, surface: 'app' })
+    const view = render(createElement(Modal, { onClose: () => {}, width: 300, children: () => 'card' }))
+    openTarget!(`#/app?automation=${AUTOMATION_ID}`)
+    expect(store.useStore.getState().page).toBe('automations')
+    expect(store.useStore.getState().heldTarget).toBe(`#/app?automation=${AUTOMATION_ID}`)
+    view.unmount()
+    await act(async () => { await Promise.resolve() })
+    const m = store.useStore.getState()
+    expect(m.page).toBe('automation')
+    expect(m.automationId).toBe(AUTOMATION_ID)
+    expect(m.heldTarget).toBeNull()
+    cleanup()
+  })
+})
+
+describe('loadExecution - a terminal body never overwrites a retried live record (§19)', () => {
+  it('drops the stale terminal body while the held record is executing again', async () => {
+    const live = ex('r1', 1000, { status: 'executing' })
+    store.useStore.setState({ executions: [live], executionFull: { r1: live } })
+    vi.mocked(apiMod.api.getExecution).mockResolvedValueOnce(ex('r1', 1000, { status: 'failed' }) as never)
+    expect(await store.useStore.getState().loadExecution('r1')).toBe('ok')
+    expect(store.useStore.getState().executionFull.r1.status).toBe('executing')
+  })
+
+  it('still lands a terminal body when no full record is held', async () => {
+    store.useStore.setState({ executions: [ex('r2', 1000, { status: 'executing' })], executionFull: {} })
+    vi.mocked(apiMod.api.getExecution).mockResolvedValueOnce(ex('r2', 1000, { status: 'succeeded' }) as never)
+    await store.useStore.getState().loadExecution('r2')
+    expect(store.useStore.getState().executionFull.r2.status).toBe('succeeded')
   })
 })
 

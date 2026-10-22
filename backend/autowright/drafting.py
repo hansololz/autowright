@@ -1604,11 +1604,14 @@ class DraftJobs:
             for k, v in list(self.jobs.items()):
                 if v["status"] != "building" and v.get("_owner") == owner_id:
                     superseded.append(self.jobs.pop(k))
-            # Terminal jobs hold full draft payloads (all step code) — keep only
-            # a recent tail so the process doesn't grow for its whole lifetime
-            # (a backstop for clients that never ack, e.g. a died CLI).
-            terminal = [k for k, v in self.jobs.items() if v["status"] != "building"]
-            for k in terminal[:-20]:
+            # Finished records nothing will ever consume (`cancelled`) are
+            # bounded at the newest 20 so the process doesn't grow for its
+            # whole lifetime. §19: a HELD outcome is never dropped by that
+            # bound — only its ack, its owner's settle, or a same-owner start
+            # consumes it (one held outcome per owner bounds those already).
+            finished = [k for k, v in self.jobs.items()
+                        if v["status"] != "building" and v["status"] not in _HELD_STATUSES]
+            for k in finished[:-20]:
                 superseded.append(self.jobs.pop(k))
             self.jobs[job_id] = job
         # Outside the lock: the harness kill (and its term-then-kill thread)

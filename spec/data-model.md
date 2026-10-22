@@ -31,7 +31,9 @@ name, description: strings — both are user-owned identity (§5: top-level auto
   ignored (never cleared); a blank description clears it (description is optional).
   Names store **trimmed** (surrounding whitespace stripped at every write path; a
   whitespace-only name is a blank name) and are **unique** across automations, compared
-  case-insensitively (the §4.7/§4.8 rule):
+  case-insensitively after Unicode NFC normalization (the §4.7/§4.8 rule; "Café" typed with a
+  combining accent is the same name as the precomposed one, so an exact-name lookup from a
+  terminal always finds it):
   the §19 rename paths reject a collision with 422 ("an automation named X already exists -
   automation names must be unique"), while the paths whose incoming name the user didn't just
   type - §19 create and §5.1 import - dedupe it by appending the smallest integer ≥ 2 that
@@ -378,7 +380,10 @@ compat shim; an unreadable value reads as absent.
 triggers (never on `interval` — a duration has no wall clock; sent on one, it is ignored and
 never stored, like on the other kinds). Absent → the machine's local time (labels unchanged). Present → `expression` matches and
 `at` reads as wall clock **in that zone** (DST rules below apply in that zone); occurrences
-convert to local time for `nextAtMs`, countdowns, and the scheduler. An unknown zone name is
+convert to local time for `nextAtMs`, countdowns, and the scheduler — compared **as
+instants**: an occurrence that converts into the second pass of the local fall-back hour is
+due at that second-pass instant, never an hour early (a naive local reading alone cannot tell
+the two passes apart, so the scheduler and `nextAtMs` compare the instant, the fold kept). An unknown zone name is
 rejected at the API (422), never stored. When `timezone` is set, both display strings append the
 zone's city — the last `/` segment of the IANA name, `_` → space — in parentheses:
 "Daily at 8:00 (Tokyo)" / "Daily 8:00 (Tokyo)"; the raw-expression fallback and one-shot
@@ -448,7 +453,9 @@ fall-back fold.
 not on a wall-clock grid. Each enabled interval trigger has an **anchor**: the later of
 its §4.3 `enabledAt` stamp and the automation's **run baseline** — the start of the
 latest real execution (the §4.1 `lastStatus` population: `skipped`, `queued`, and test
-records excluded; a run in progress counts; the run's trigger doesn't matter — a manual
+records excluded; a run in progress counts — the latest by `started_at`, so a §7 in-place
+retry of an older record, which keeps that record's original `started_at`, never moves the
+baseline backwards while it runs; the run's trigger doesn't matter — a manual
 start, another trigger's firing, or this trigger's own last firing all reset the cadence),
 falling back to the automation's `created_at` if it never ran; a trigger stored without the
 stamp (hand-edited disk) anchors at the run baseline alone, like the §4.1 overdue rule. The
@@ -1060,7 +1067,9 @@ boolean in `secrets.yaml`: creating a secret (§19 `POST /secrets`) with a blank
 a **placeholder**
 (`set: false`) — the name and description exist, no Keychain entry does; the Secrets page and
 grant surfaces show an amber "Not set" tag until a value is saved. Writing any nonblank value
-stores it in the Keychain and flips `set` to true; editing a secret (§19 `PUT /secrets/{id}`)
+stores it in the Keychain and flips `set` to true (blank means empty **or whitespace-only**: a
+value of spaces is a blank value, never a stored secret that would redact every space in every
+log line); editing a secret (§19 `PUT /secrets/{id}`)
 with a blank value
 keeps the stored state (a set secret keeps its value, an unset one stays unset) and updates only
 the description. An execution needing an unset secret fails before any step with "secret `NAME`

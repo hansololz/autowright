@@ -102,6 +102,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   one step was actually cancelled or left non-terminal** — a cancel that lands after the
   last step already succeeded changes nothing and the record finishes `succeeded`: the
   status reports what happened to the steps, not that a button was pressed too late.
+  The same rule holds per step: a cancel that lands after the executing step's process
+  has already exited 0 (the engine sent it no signal) leaves that step `succeeded` — the
+  remaining queued steps are what the cancel cancels; a step reads `cancelled` only when the
+  cancel actually signalled it or it exited non-zero.
   A **backend shutdown** (§3 quit, `service stop`, an update restart) is not a cancel: the
   shutdown sweep hard-kills every live step group and marks the live records with a
   shutdown flag, and the engine thread that then observes the EOF finalizes them
@@ -123,7 +127,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   that outlived it is still in the group and still holds the pipe. It runs at **every step
   end**, a normal exit included: once the executor process has exited, the engine gives the
   log pipe a short drain grace (2 s) for the trailing lines, then kills the group and
-  defuses the pipe's read end regardless — a background child a step left behind (a
+  defuses the pipe's read end regardless (the defuse first drains what the pipe already
+  holds — bounded at 1 MiB, never a blocking read — so the executor's own last lines, a
+  traceback or the `error` op itself, are never lost to a reader that fell 2 s behind) — a background child a step left behind (a
   server it spawned, an `&` shell job) neither holds the step "executing" until the
   watchdog fires nor survives as an orphan — and a cancel's TERM→KILL escalation is never
   cancelled while the group may still have members. The read loop therefore ends on EOF
@@ -470,7 +476,10 @@ in Finder. Rows are name + size, and a **previewable** file's row is itself expa
 at the left, the file's content rendering inline below it when opened. Previewable covers the
 three renderable kinds plus **text** (`csv json txt yaml yml log tsv xml`), shown as mono plain
 text, horizontally scrollable, capped at 200 KB / 2000 lines with a trailing "Truncated — use
-Show in Finder for the full file." note. Anything else (zip, pdf, xlsx, …) gets no chevron and a
+Show in Finder for the full file." note. The markdown and HTML renders (here and on the §9.2
+LATEST RESULT card) are capped at **1 MB**: a larger file renders nothing but the note "Too large
+to render here — use Show in Finder for the full file.", so a step that writes a huge report
+never freezes the renderer parsing it. Anything else (zip, pdf, xlsx, …) gets no chevron and a
 faint `no preview` `MetaChip`. Every row body starts **collapsed** regardless of the surface, and its
 bytes are fetched lazily on first open — expanding the footer itself costs no requests.
 Files present but none renderable → the section is just the footer, **expanded** (the only surface
@@ -633,7 +642,10 @@ advances only when it lands. A failed
 page fetch surfaces the standard error toast and stays on the current page, pager in place.
 An execution finishing mid-view lands at the top of Finished via its §19 event and can push the
 current slice's rows down by one - the canonical order shared by window, keyset, and index
-keeps the pages seamless either way. The accumulated set also **absorbs** the window's
+keeps the pages seamless either way. A Next fetch whose cursor row a window change trimmed
+from the set meanwhile (the set is capped at the pages in reach, and a finish pushed that row
+past the cap) re-inserts the cursor row ahead of the landed page, so a run finishing mid-fetch
+never skips a row. The accumulated set also **absorbs** the window's
 finished rows on every window change — only the rows that match the active filter (the
 window is unfiltered; under a filter its non-matching rows never enter the set, which is
 capped at the larger of the absorbed window rows and the pages in reach, so a filtered page

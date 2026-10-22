@@ -293,7 +293,13 @@ export default function CatalogEditorModal({ source, onClose, onSaved }: {
       setError(msg); setBusy(false)
     }
   }
+  // §9 commit rule: while the save is in flight Escape and the backdrop are
+  // inert - the saved catalog the user waited for is never lost to an early
+  // close.
+  const busyRef = useRef(busy)
+  busyRef.current = busy
   const guardClose = () => {
+    if (busyRef.current) return false
     if (!dirtyRef.current) return true
     setConfirm(true)
     return false

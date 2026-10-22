@@ -420,6 +420,9 @@ export default function MarketplacePage() {
   // §22.4 marketplace.changed - a §20 CLI change or an auto refresh shows
   // without a reload.
   const marketplaceVersion = useStore((s) => s.marketplaceVersion)
+  // §19 reconnect rule: a marketplace.changed missed while the socket was
+  // down is never replayed - the table refetches on every reconnect too.
+  const reconnects = useStore((s) => s.reconnects)
   // §9 per-OS copy rule: the machine noun this page names.
   const copy = usePlatformCopy()
   // null until the first §19 answer lands - the page shows PageLoading.
@@ -461,14 +464,15 @@ export default function MarketplacePage() {
     }
   }
 
-  // §22.3: on mount, and again whenever a marketplace.changed event lands.
+  // §22.3: on mount, and again whenever a marketplace.changed event lands or
+  // the socket reconnects.
   // The page's own actions also refetch directly (a reconnecting socket may
   // miss the event); load()'s sequence guard makes the overlap harmless.
   useEffect(() => {
     alive.current = true
     void load()
     return () => { alive.current = false }
-  }, [marketplaceVersion])
+  }, [marketplaceVersion, reconnects])
 
   // §22.3: every blob URL this page made dies with it, and the generation bump
   // sends the ones still in flight the same way. The image queue empties with

@@ -2,7 +2,7 @@
 // over the 64 MB cap) or throw, and the modal must say so on its own error
 // line instead of sitting there looking dead. A cancel stays silent.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { Automation } from '../src/types'
 
 vi.mock('../src/api', () => ({
@@ -18,6 +18,7 @@ vi.mock('../src/api', () => ({
 }))
 
 let storeMod: typeof import('../src/store')
+let apiMod: typeof import('../src/api')
 let AutomationsList: typeof import('../src/pages/AutomationsList').default
 
 const openArchive = vi.fn()
@@ -29,6 +30,7 @@ beforeAll(async () => {
     openArchive,
   }
   storeMod = await import('../src/store')
+  apiMod = await import('../src/api')
   AutomationsList = (await import('../src/pages/AutomationsList')).default
 })
 
@@ -74,5 +76,34 @@ describe('§9.1 import from a file, failed picks', () => {
     await waitFor(() => expect(openArchive).toHaveBeenCalled())
     expect(screen.queryByText(/larger than 64 MB/)).toBeNull()
     expect(screen.getByText(/Choose an \.autowright file/)).toBeTruthy()
+  })
+})
+
+describe('§9 commit rule: the import confirm in flight', () => {
+  it('Escape and the backdrop are inert until the confirm lands', async () => {
+    openArchive.mockResolvedValueOnce({ name: 'job.autowright', data: new ArrayBuffer(8) })
+    vi.mocked(apiMod.api.importPreview).mockResolvedValueOnce({
+      token: 't1',
+      preview: {
+        name: 'Shared job', landsAs: 'Shared job', description: '', steps: [], params: [], triggers: [],
+        packages: [], agents: [], secrets: [], os: null, osMismatch: false,
+      },
+    } as never)
+    let land: (v: unknown) => void = () => {}
+    vi.mocked(apiMod.api.importConfirm).mockReturnValueOnce(new Promise((resolve) => { land = resolve }) as never)
+    pickFile()
+    await screen.findByText('Shared job')
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Import'))
+    expect(await screen.findByText('Importing…')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    const backdrop = screen.getByRole('dialog').parentElement!
+    fireEvent.mouseDown(backdrop)
+    await act(async () => { await new Promise((r) => setTimeout(r, 250)) })
+    expect(screen.getByText('Shared job')).toBeTruthy()
+    // the confirm landing still closes the modal on its own
+    await act(async () => {
+      land({ automation: { ...auto(), id: 'a2', name: 'Shared job' }, summary: {} })
+    })
+    await waitFor(() => expect(screen.queryByText('Importing…')).toBeNull(), { timeout: 3000 })
   })
 })
