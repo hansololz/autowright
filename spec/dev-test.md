@@ -125,7 +125,14 @@ checks and gone-automation chips, the list's start-fresh discard and execute-fro
 409, the detail page's trigger status text and delete confirm, the editor's sync-mode
 re-attach, backend-side cancel, identity PATCH from chat, and packages card, the test
 modal's blank-From guard and failed-test chip, onboarding's local-piece install queue,
-skip-for-now, and prior-data paths, and the menu-bar attention count. Full
+skip-for-now, and prior-data paths, and the menu-bar attention count. The shell's
+boot transition is covered here too (2026-10-25): `App` rendered from the splash
+(`connected` null) through to the app shell in one component instance, which pins the
+rule that every shell hook is declared ahead of the splash/menubar/onboarding
+early-returns — two hooks that landed after them made the shell's first render call
+more hooks than the splash render had (React #310), so every e2e scenario died at its
+first shell assertion while the unit tier, which seeded `connected: true` before
+rendering, stayed green. Full
 journeys stay e2e; all other component rendering is exercised by the playwright-driven
 Electron path, never by DOM unit tests.
 Both suites carry guards for the §2 CLI-leaf invariant: a pytest scan asserts no backend

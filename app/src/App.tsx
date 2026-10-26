@@ -271,6 +271,17 @@ export default function App() {
       ?.catch(() => useStore.getState().showToast('Some settings could not be applied'))
   }, [login, menuBarIcon, automaticUpdateCheck])
 
+  // §9: every page navigation opens the page at the top — the shell's one
+  // scroller would otherwise carry a detail page's scroll offset into the
+  // Executions list (landing on page 1's bottom row) or clamp it into Settings.
+  // Declared here, ahead of the surface early-returns below: the first render
+  // is always the boot splash, so a hook placed after those returns would run
+  // only once `connected` flips and React would see more hooks than before
+  // (React #310 — the shell crashed into its page boundary on every boot).
+  const pageKey = surface === 'create' ? 'create' : page + (automationId ?? '') + (executionId ?? '')
+  const pageScroller = useRef<HTMLDivElement | null>(null)
+  useEffect(() => { if (pageScroller.current) pageScroller.current.scrollTop = 0 }, [pageKey])
+
   // §3/§9: the boot splash is a loaded main window too — a Cmd+Q while
   // ensure-backend is still installing shows the quit overlay and its outcome
   // rather than running natively with no feedback. The toast rides here too:
@@ -289,12 +300,6 @@ export default function App() {
   // rail gutter — it reads as window chrome around the traffic lights. With
   // no lights at the left (Windows' titleBarOverlay, Linux's native frame),
   // the gutter must match the content pane or it reads as a mismatched strip.
-  // §9: every page navigation opens the page at the top — the shell's one
-  // scroller would otherwise carry a detail page's scroll offset into the
-  // Executions list (landing on page 1's bottom row) or clamp it into Settings.
-  const pageKey = surface === 'create' ? 'create' : page + (automationId ?? '') + (executionId ?? '')
-  const pageScroller = useRef<HTMLDivElement | null>(null)
-  useEffect(() => { if (pageScroller.current) pageScroller.current.scrollTop = 0 }, [pageKey])
   return (
     <div style={{ height: '100vh', display: 'flex', background: platformOs === 'macos' ? 'var(--bg-window)' : 'var(--bg-content)' }}>
       {/* §9: shell drag strips are frameless-chrome only — on Linux the native
