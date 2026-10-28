@@ -439,7 +439,11 @@ user saves), **CURRENT concurrency** — the §4.1 `maxParallel`/`maxQueued` pai
 else the stored automation's; create mode without one shows the defaults 1/0), headed
 that edits go through the `concurrency` action below and are staged until the user
 saves, every
-current step (file, name, code — the same rendering the sync call's CURRENT sections use),
+current step (file, name, code — the same rendering the sync call's CURRENT sections use;
+a §4.1 locked step is headed "locked by the user — a sync keeps it byte for byte" and a
+user-written one "written by the user", so a chat answer never promises a change a sync
+cannot make, and a request that needs a locked step changed is answered with a
+`constraint` blocker, never a `sync`),
 the closing **USER REQUEST** (the message text), and a TASK directive stating the response
 contract:
 
@@ -661,7 +665,8 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
 2. **TASK directive** — build the automation that implements the SPEC: derive the triggers,
    every parameter (each with a default), and the steps from the spec — adding any trigger or
    parameter the agent judges the automation is missing (rule 9's detail rule caps triggers);
-   return `manifest.yaml` plus one file block per step, no `spec.md`. Includes a **short
+   return `manifest.yaml` plus one file block per step (per *unlocked* step when the
+   draft holds locked ones — the Locked steps section below), no `spec.md`. Includes a **short
    manifest skeleton** — one example line per key, with pointers to the framework file's
    Manifest, Triggers, Parameters, Timeouts, and Retries sections for the key-by-key rules
    (the skeleton shows the shape; the framework reference is the source of truth for every
@@ -714,15 +719,32 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    previous build or test already disproved.
 7. **Current implementation (reference)** — the draft's current param definitions and step
    scripts, when it holds any ("rewrite them to match the SPEC, changing no more than the
-   spec demands" — a fresh draft's first build holds none and simply omits them), along
+   spec demands" — a fresh draft's first build holds none and simply omits them; a step
+   with §4.1 `authoredBy: user` is headed "written by the user — keep it unless the SPEC
+   requires a change, and say so in notes when you change it"), along
    with the automation's current trigger list rendered
    in the rule-9 dialect (`off` state and one-shot `time` entries marked — reference only), so
    the agent sees what already exists before judging a trigger missing (§19: the editor's
    `current.triggers` wins; absent that, the backend attaches the stored list).
-8. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
+8. **Locked steps** — present when the draft holds any §4.1 `locked` step: each one's
+   name, description, manifest entry, and full script, headed with the **lock contract**:
+   these steps are frozen by the user; list each in `steps` at the position the pipeline
+   needs it as `{ file: NN-<its stored file suffix>, name: <its name>, locked: true }` and
+   nothing else (every other key is filled from the stored step), and return **no file
+   block** for it; the rest of the steps must be written to work with the locked ones
+   exactly as they are (their inputs, outputs, files, and memory keys are facts). When
+   the SPEC cannot be implemented without changing, dropping, or duplicating a locked
+   step — or without breaking a rule the SPEC states under `## Build rules` — do not
+   build around it quietly and do not return steps: return a **constraint blocker** (the
+   blocker response below, `kind: constraint`) naming the step or the rule, explaining
+   why, and proposing the best workaround that keeps the constraint. The user then
+   decides: accept the workaround, or lift the constraint. Mere inconvenience is not a
+   constraint blocker — a locked step that still works with the spec is simply kept.
+9. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
    BUILD INSTRUCTIONS above wherever it says otherwise.
-9. **Closing envelope reminder** — one final line restating the response shape (return
-   `manifest.yaml` plus one file block per step, no `spec.md`, end with `===END===`), so the
+10. **Closing envelope reminder** — one final line restating the response shape (return
+   `manifest.yaml` plus one file block per unlocked step — none for a locked one — no
+   `spec.md`, end with `===END===`), so the
    format sits at the end of the prompt as well as in the TASK directive near the top.
 
 The sync call may additionally return one optional `notes.md` block — the full updated §4.1 notes
@@ -769,6 +791,22 @@ notes rewrite (§11).
    an unknown name is a validation error feeding the repair round. Values ride the draft
    payload as `testValues` untouched; the editor coerces them per the §4.2 kind with the
    same tolerance as the chat call's `test_values` (§11 owns the seeding and the test run).
+   **Locked steps** (§4.1): with the draft's locked steps as the reference set, every
+   locked step's name must appear exactly once in `steps`, with `locked: true`; a step
+   missing from the manifest ("locked step `X` is missing — keep it, or return a constraint
+   blocker explaining why the spec can't be met with it"), listed twice, or returned
+   without `locked: true` is a validation error; `locked: true` on any name that is not a
+   stored locked step is a validation error ("only the user can lock a step"); a file block
+   returned for a locked step is accepted when identical to the stored script (up to the
+   envelope parser's leading/trailing-newline trim) and is
+   a validation error otherwise ("step `X` is locked — do not return its file"). After
+   validation the backend **splices** each locked step in: the stored step's name,
+   description, code, manifest fields, `authoredBy` and `locked` replace the entry whole,
+   the `file` keeps the agent's `NN-` position prefix with the stored suffix, and the
+   spliced code is what the import, grant, and ordering rules below check. The guarantee
+   is by construction — the agent never gets to rewrite a locked script, whatever it
+   returns. Unlocked steps in the output are `authoredBy: agent`, except the §4.1
+   keep-`user` rule for a byte-identical same-named step.
 4. Every step file passes `ast.parse`; imports ⊆ stdlib + curated packages + `autowright` + the
    manifest's declared package imports (§6.2).
 5. `packages` is optional: a list of `{ pip, import, why }` entries — `pip` a bare distribution
@@ -901,12 +939,23 @@ blockers:
     details: Optional longer explanation (markdown).
     kind: user-action   # optional; only when the fix is something the USER does on
                         # their Mac — omit for a true impossibility
+  - reason: One sentence naming what the SPEC asks that the constraint forbids.
+    fix: What lifting the constraint would allow (markdown).
+    kind: constraint    # the SPEC conflicts with a locked step or a stated build rule
+    step: Fetch page    # the locked step's name — exactly one of step / rule
+    rule: retry the fetch three times   # the build rule's text, quoted from the SPEC
+    workaround: Optional — the best build that keeps the constraint (markdown);
+                # omit when none exists
 ===END===
 ```
 
 Validation: YAML with a nonempty `blockers` list; every entry carries a nonempty `reason` and
-`fix` (`details` optional); `kind`, when present, must be the literal `user-action` —
-anything else is a validation error feeding the repair round; no file blocks alongside it,
+`fix` (`details` optional); `kind`, when present, must be the literal `user-action` or
+`constraint` — anything else is a validation error feeding the repair round; a
+`constraint` entry carries exactly one of a nonempty `step` (naming a step the draft holds
+locked — any other name is a validation error) or a nonempty `rule`, plus an optional
+nonempty `workaround`; `step`, `rule`, and `workaround` on any other kind are validation
+errors; no file blocks alongside it,
 with one exception: the response may carry one optional `notes.md` block **after** the
 envelope's `===END===` — the full updated §4.1 notes document (validated only as present
 text, like the sync call's success-path notes), so what the agent learned before hitting the
@@ -916,12 +965,17 @@ restart it. Any other file block beside a blocker envelope stays a validation er
 notes ride the job payload inside `draft` (`draft.notes`) and the editor applies them exactly like a chat notes rewrite ("Notes
 updated." chip, never out-of-sync); the spec and every other document stay untouched — a
 blocker can never rewrite them.
-`fix` and `details` are markdown — §11 renders them through the shared renderer, so
-download links are clickable. A `kind: user-action` blocker says the automation is fine
+`fix`, `details` and `workaround` are markdown — §11 renders them through the shared renderer, so
+download links are clickable. A `kind: constraint` blocker (the §4.1 lock contract's
+push-back) says the spec and a user constraint cannot both hold: the agent returns it
+instead of quietly building something the spec didn't ask for or quietly changing what the
+user froze, and the §11 entry offers the user the choice the agent cannot make — use the
+workaround, or unlock the step / remove the rule. A `kind: user-action` blocker says the automation is fine
 but the Mac isn't ready: its text names what to install or start, says why the automation
 needs it, carries a markdown download link when one exists, and closes by offering
 step-by-step install instructions. `framework-instructions.md` tells the
-agent to use the envelope only for genuine impossibility or needed user action (never mere
+agent to use the envelope only for genuine impossibility, a real constraint conflict, or
+needed user action (never mere
 uncertainty, and never `user-action` for anything a declared pip package solves), to
 report **all**
 blockers in one response, and to write plain words. A valid blocker envelope ends the job in

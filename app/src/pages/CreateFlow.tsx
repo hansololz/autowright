@@ -12,17 +12,18 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
-import type { Agent, ChatEntry } from '../types'
+import type { Agent, Blocker, ChatEntry, Step } from '../types'
+import type { StepEditEffect, StepEditing } from '../steps'
 import {
   BackLink, BtnPrimary, ConfirmModal, HeaderActions, MenuItemRow, Notice, PageLoading, PageTitle,
   PopMenu, ScrollArea, Spinner, usePopover,
 } from '../ui'
 import { nextTriggerShort, useTriggerPreview } from '../triggers'
 import {
-  type Rev, amendSpec, analyzeTestMessage, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
+  type Rev, amendSpec, analyzeTestMessage, appendBuildRule, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
   jobStageTitle, loadVersionInto,
-  newEntry, persistChat, secretRefsOf, seedEmpty, seedFromAuto, seedFromPayload, serializeDraft,
-  stepsFingerprint, testOutcomeStale,
+  newEntry, persistChat, removeRuleBlock, secretRefsOf, seedEmpty, seedFromAuto, seedFromPayload, serializeDraft,
+  stepsFingerprint, testOutcomeStale, workaroundBlocker,
 } from './createflow/model'
 import { VersionDiffModal } from '../versiondiff'
 import { useDraftJob } from './createflow/useDraftJob'
@@ -810,7 +811,8 @@ export default function CreateFlow() {
   // skipped — the Mac isn't ready, there is nothing to amend.
   const applyBlockersEntry = (entry: ChatEntry) => {
     if (!rev) return
-    const blockers = (entry.blockers ?? []).filter((b) => b.kind !== 'user-action')
+    // §11: constraint blockers carry their own resolution rows
+    const blockers = (entry.blockers ?? []).filter((b) => b.kind !== 'user-action' && b.kind !== 'constraint')
     if (!blockers.length) return
     // §11: starting a sync under an unsaved manual edit asks first
     guardManualEdit(() => {
@@ -821,6 +823,81 @@ export default function CreateFlow() {
       }))
       void jobs.runSync(amendSpec(rev.spec, blockers))
     })
+  }
+
+  // §11 constraint blocker "Use the workaround": the workaround lands under
+  // "Constraints & resolutions" exactly as Apply does, then the sync runs.
+  const applyWorkaround = (entry: ChatEntry, blocker: Blocker) => {
+    if (!rev || anyJobBusy || viewingOld || !(blocker.workaround ?? '').trim()) return
+    const resolution = workaroundBlocker(blocker)
+    guardManualEdit(() => {
+      setRev((r) => r && ({
+        ...r,
+        resolved: [...r.resolved, blockerLine(resolution)],
+        chat: r.chat.map((e) => (e.id === entry.id ? { ...e, dismissed: true } : e)),
+      }))
+      void jobs.runSync(amendSpec(rev.spec, [resolution]))
+    })
+  }
+  // §11 constraint blocker "Unlock": clears `locked` on the named draft step
+  // (a manual edit — touched, undo snapshot cleared), then syncs.
+  const unlockConstraintStep = (blocker: Blocker) => {
+    if (!rev || anyJobBusy || viewingOld || !blocker.step) return
+    guardManualEdit(() => {
+      const at = rev.steps.findIndex((s) => s.name === blocker.step && s.locked)
+      const steps: Step[] = at < 0 ? rev.steps : rev.steps.map((s, j) => {
+        if (j !== at) return s
+        const { locked: _locked, ...rest } = s
+        return rest
+      })
+      if (at >= 0) {
+        setRev((r) => r && ({
+          ...r, steps, touched: true, undo: null,
+          chat: [...r.chat, newEntry({ kind: 'system', icon: 'fa-lock-open', text: `Step '${blocker.step}' unlocked.` })],
+        }))
+      }
+      void jobs.runSync(undefined, steps)
+    })
+  }
+  // §11 constraint blocker "Remove the rule": deletes the first spec bullet
+  // quoting the rule, then syncs; none matching leaves the spec alone.
+  const removeConstraintRule = (blocker: Blocker) => {
+    if (!rev || anyJobBusy || viewingOld || !blocker.rule) return
+    const spec = removeRuleBlock(rev.spec, blocker.rule)
+    if (!spec) { showToast('Rule not found — edit the spec by hand'); return }
+    guardManualEdit(() => {
+      appendEntry({ kind: 'system', icon: 'fa-file-pen', text: 'Spec updated.' })
+      void jobs.runSync(spec)
+    })
+  }
+
+  // §11 step editing: hand edits to the draft's steps. None marks the
+  // workflow out of sync — they change the implementation, not the spec —
+  // each marks the draft touched and clears the Draft-undo snapshot (a
+  // manual edit, like the documents' saves). A remembered edit adds its
+  // build rule to the spec without dirtying it either.
+  const commitStepEdit = (steps: Step[], effect: StepEditEffect) => {
+    const chips: ChatEntry[] = []
+    if (effect.kind === 'save' && effect.rule) {
+      chips.push(newEntry({ kind: 'system', icon: 'fa-list-check', text: 'Build rule added.' }))
+    }
+    if (effect.kind === 'lock') {
+      chips.push(newEntry({
+        kind: 'system', icon: effect.locked ? 'fa-lock' : 'fa-lock-open',
+        text: `Step '${effect.name}' ${effect.locked ? 'locked' : 'unlocked'}.`,
+      }))
+    }
+    setRev((r) => r && ({
+      ...r, steps, touched: true, undo: null,
+      ...(effect.kind === 'save' && effect.rule ? { spec: appendBuildRule(r.spec, effect.rule.name, effect.rule.text) } : {}),
+      ...(chips.length ? { chat: [...r.chat, ...chips] } : {}),
+    }))
+  }
+  const stepEditing: StepEditing = {
+    disabled: anyJobBusy || viewingOld,
+    // §19 POST /validate-steps: the draft as it would be after the edit
+    validate: async (steps) => (rev ? (await api.validateSteps(serializeDraft({ ...rev, steps }))).errors : []),
+    commit: commitStepEdit,
   }
 
   // §7/§9.2 Fix with AI: the editor opened from a failed execution seeds the
@@ -1129,6 +1206,9 @@ export default function CreateFlow() {
             analyzeFailure={analyzeFailure}
             patchEntry={patchEntry}
             applyBlockersEntry={applyBlockersEntry}
+            applyWorkaround={applyWorkaround}
+            unlockConstraintStep={unlockConstraintStep}
+            removeConstraintRule={removeConstraintRule}
             clearChat={clearChat}
             cancelChat={jobs.cancelChat}
             cancelSync={jobs.cancelSync}
@@ -1438,6 +1518,7 @@ export default function CreateFlow() {
                   secrets={secrets}
                   unresolvedReferences={unresolvedRefs}
                   stepHistory={stepHistory}
+                  stepEditing={stepEditing}
                   pkgSecOpenEff={pkgSecOpenEff}
                   updatePkgs={(pips) => void updatePkgs(pips)}
                   installPkgs={() => void installPkgs()}
@@ -1452,7 +1533,7 @@ export default function CreateFlow() {
       {diffFrom !== null && auto && (
         <VersionDiffModal
           automationId={auto.id}
-          versions={[{ version: auto.version, when: '', note: null }, ...(auto.versions ?? [])]}
+          versions={[{ version: auto.version, when: '', note: null, steps: auto.steps }, ...(auto.versions ?? [])]}
           current={auto.version}
           from={diffFrom}
           onClose={() => setDiffFrom(null)}

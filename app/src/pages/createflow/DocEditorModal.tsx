@@ -8,7 +8,9 @@
 // unchanged and raise the discard confirm otherwise (the Modal's guardClose);
 // every path plays the §14 exit before the caller's state changes.
 import React, { useEffect, useRef, useState } from 'react'
-import { ConfirmModal, Eyebrow, Modal, isTopModal, useOverlayThumb } from '../../ui'
+import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, Modal, docLineCount, isTopModal, useOverlayThumb } from '../../ui'
+
+export { docLineCount }
 
 export type DocKind = 'spec' | 'notes'
 
@@ -35,12 +37,6 @@ const TOOLBAR = 44
 const FOOTER = 36
 const LINE = 12 * 1.65
 const PAD_Y = 14 + 20
-
-/** "<n> lines" for the editor's current text: a trailing final newline is not
- * counted, and an empty editor holds 0 lines. */
-export function docLineCount(text: string): number {
-  return text === '' ? 0 : text.replace(/\n$/, '').split('\n').length
-}
 
 /** The card's fixed height for the life of the open modal: the opened text at
  * the editor's rhythm plus six spare lines, floored at 440px and capped at
@@ -149,18 +145,11 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
                 placeholder={meta.placeholder}
                 spellCheck={false}
                 className="ad-scrollhide"
-                style={{
-                  flex: 1, minHeight: 0, width: '100%', background: 'transparent', border: 'none', outline: 'none',
-                  color: 'var(--text-2)', font: "400 12px/1.65 var(--mono)", padding: '14px 28px 20px 20px',
-                  resize: 'none', display: 'block', overflowY: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
-                }}
+                style={DOC_TEXTAREA_STYLE}
               />
               {thumb.node}
             </div>
-            <div style={{
-              height: FOOTER, flex: 'none', display: 'flex', alignItems: 'center', padding: '0 20px',
-              borderTop: '1px solid var(--hairline)', font: "400 11.5px/1.5 var(--sans)", color: 'var(--text-muted)',
-            }}>
+            <div style={DOC_FOOTER_STYLE}>
               {meta.footer}
             </div>
             {confirm && (

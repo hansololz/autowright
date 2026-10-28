@@ -7,13 +7,13 @@
 import { useEffect, useRef } from 'react'
 import { api } from '../../api'
 import { useStore } from '../../store'
-import type { Automation, Blocker, ChatEntry, DraftPayload, SpecBlock } from '../../types'
+import type { Automation, Blocker, ChatEntry, DraftPayload, SpecBlock, Step } from '../../types'
 import type { ComposerText } from './ChatPanel'
 import {
   type Rev, TRIGGER_SETUP_TEXT, answerHeader, applyTriggerOps, chatSinceBoundary, coerceParamValue, jobStageTitle,
   mergeDraftTriggers,
   needsMessageTriggerSetup, newEntry, persistChat,
-  sameTriggerList, serializeDraft, stageDisplayTitle, stageDoingBullet,
+  sameTriggerList, serializeDraft, stageDisplayTitle, stageDoingBullet, userStepSyncChips,
 } from './model'
 
 interface PollHandlers {
@@ -669,6 +669,9 @@ export function useDraftJob(d: DraftJobDeps) {
           .filter(([n]) => !stale.includes(n))
           .map(([n, v]) => [n, coerceParamValue(params.find((p) => p.name === n)!, v)]))
         const syncedEntry = newEntry({ kind: 'system', icon: 'fa-rotate', text: 'Steps synced with the spec.' })
+        // §11: a hand-written step the sync rewrote or dropped never
+        // disappears silently
+        const userStepEntries = userStepSyncChips(r.steps, steps)
         const notesEntry = dft.notes != null && dft.notes !== r.notes
           ? newEntry({ kind: 'system' as const, icon: 'fa-note-sticky', text: 'Notes updated.' }) : null
         const dropEntries = stale.map((n) => newEntry({
@@ -698,6 +701,7 @@ export function useDraftJob(d: DraftJobDeps) {
           chat: [
             ...r.chat.map((e) => (e.kind === 'blockers' && !e.dismissed ? { ...e, dismissed: true } : e)),
             syncedEntry,
+            ...userStepEntries,
             ...(notesEntry ? [notesEntry] : []),
             ...held,
             ...dropEntries,
@@ -744,7 +748,9 @@ export function useDraftJob(d: DraftJobDeps) {
 
   // §11: a blocked sync lands as a thread blockers entry (source: sync);
   // applying amends the in-editor spec (specOverride) and repeats the sync with it.
-  const runSync = async (specOverride?: SpecBlock[]) => {
+  // `stepsOverride` carries steps the caller changed in the same tick (the
+  // §11 constraint blocker's Unlock), which `rev` doesn't hold yet.
+  const runSync = async (specOverride?: SpecBlock[], stepsOverride?: Step[]) => {
     // §11 rewrites-lock: nothing rewrites the workflow under a running test
     if (!rev || anyJobBusy || busyNow() || testLive) return
     // A cancel must return the panel to the state it was in (§11) — a sync
@@ -763,7 +769,7 @@ export function useDraftJob(d: DraftJobDeps) {
     try {
       await startJob({
         mode: 'sync', ...(isEdit && auto ? { automationId: auto.id } : {}),
-        agentId, current: { ...serializeDraft(rev), spec: specOverride ?? rev.spec },
+        agentId, current: { ...serializeDraft(rev), spec: specOverride ?? rev.spec, steps: stepsOverride ?? rev.steps },
         enabledAgents: rev.enabledAgents, allowedSecrets: rev.allowedSecrets,
       }, makeSyncHandlers())
     } catch (e) {

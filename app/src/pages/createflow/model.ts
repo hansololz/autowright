@@ -26,16 +26,58 @@ export function textToSpec(text: string): SpecBlock[] {
 // a "Constraints & resolutions" section — the resolution lives in the document
 // itself, so it survives later edits and syncs and versions like any spec text.
 const CONSTRAINTS_TITLE = 'Constraints & resolutions'
-export function amendSpec(spec: SpecBlock[], blockers: Blocker[]): SpecBlock[] {
-  const items: SpecBlock[] = blockers.map((b) => ({ kind: 'li', text: `${b.reason.trim()} — ${b.fix.trim()}` }))
-  const at = spec.findIndex((b) => b.kind === 'h2' && b.text.trim().toLowerCase() === CONSTRAINTS_TITLE.toLowerCase())
-  if (at < 0) return [...spec, { kind: 'h2', text: CONSTRAINTS_TITLE }, ...items]
+// Appends bullets at the end of the spec's `## <title>` section, creating the
+// section at the end of the spec when absent.
+function appendUnderSection(spec: SpecBlock[], title: string, items: SpecBlock[]): SpecBlock[] {
+  const at = spec.findIndex((b) => b.kind === 'h2' && b.text.trim().toLowerCase() === title.toLowerCase())
+  if (at < 0) return [...spec, { kind: 'h2', text: title }, ...items]
   let end = at + 1
   while (end < spec.length && spec[end].kind !== 'h2' && spec[end].kind !== 'h1') end++
   return [...spec.slice(0, end), ...items, ...spec.slice(end)]
 }
+export function amendSpec(spec: SpecBlock[], blockers: Blocker[]): SpecBlock[] {
+  return appendUnderSection(spec, CONSTRAINTS_TITLE, blockers.map((b) => ({ kind: 'li', text: blockerLine(b) })))
+}
 
 export const blockerLine = (b: Blocker) => `${b.reason.trim()} — ${b.fix.trim()}`
+
+// §11 constraint blocker "Use the workaround": the blocker's resolution line
+// is its reason with the workaround in the fix's place.
+export const workaroundBlocker = (b: Blocker): Blocker => ({ ...b, fix: b.workaround ?? '' })
+
+// §11 step editing "Remember this edit as a build rule": one bullet under the
+// spec's `## Build rules` section (created at the end of the spec when absent).
+const BUILD_RULES_TITLE = 'Build rules'
+export function appendBuildRule(spec: SpecBlock[], stepName: string, text: string): SpecBlock[] {
+  return appendUnderSection(spec, BUILD_RULES_TITLE, [{ kind: 'li', text: `Step "${stepName}": ${text}` }])
+}
+
+// §11 constraint blocker "Remove the rule": the spec without its first `li`
+// block containing the rule text (case-insensitive) — null when none does.
+export function removeRuleBlock(spec: SpecBlock[], rule: string): SpecBlock[] | null {
+  const needle = rule.trim().toLowerCase()
+  if (!needle) return null
+  const at = spec.findIndex((b) => b.kind === 'li' && b.text.toLowerCase().includes(needle))
+  return at < 0 ? null : [...spec.slice(0, at), ...spec.slice(at + 1)]
+}
+
+// §11 "A sync keeps the user informed": for each previous unlocked
+// user-written step, a chip when the settled sync rewrote its script or
+// dropped it. Steps match by name (the k-th of a name against the k-th of the
+// same name); locked steps need no chip — the §8 splice guarantees them.
+export function userStepSyncChips(prev: Step[], next: Step[]): ChatEntry[] {
+  const seen = new Map<string, number>()
+  const chips: ChatEntry[] = []
+  for (const s of prev) {
+    const k = seen.get(s.name) ?? 0
+    seen.set(s.name, k + 1)
+    if (s.locked || s.authoredBy !== 'user') continue
+    const match = next.filter((n) => n.name === s.name)[k]
+    if (!match) chips.push(newEntry({ kind: 'system', icon: 'fa-pen', text: `Your step '${s.name}' was removed.` }))
+    else if ((match.code ?? '') !== (s.code ?? '')) chips.push(newEntry({ kind: 'system', icon: 'fa-pen', text: `Your step '${s.name}' was rewritten.` }))
+  }
+  return chips
+}
 
 // §11 thread entries — persisted through §19 /chat/{owner} (§4.4 thread
 // lifetime: the thread outlives the draft; §5 chat.jsonl at the container

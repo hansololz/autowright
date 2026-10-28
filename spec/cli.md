@@ -23,7 +23,7 @@ way it edits any code. The §17 `skills/autowright/` agent skill is the primary 
 ```
 autowright status                       backend health, version, entity counts
 autowright instructions                 §8 framework + build instruction files, verbatim
-autowright automation <verb> …          list · show · pull · push · create · duplicate · delete · restore ·
+autowright automation <verb> …          list · show · pull · push · validate · create · duplicate · delete · restore ·
                                         diff --from vN [--to vN] · execute [--version vN|draft] [--queue] ·
                                         export · import · set KEY=VALUE… ·
                                         param list|set · trigger list|add|on|off|remove ·
@@ -169,7 +169,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   `needs fixing` marker, after the status column and immediately before the result chip,
   when an automation's `problems` list is non-empty, and
   `automation show` prints a `needs fixing:` block — one indented line per problem label,
-  in §4.1 order. `--json` carries the serialized `problems` field as always.
+  in §4.1 order. `--json` carries the serialized `problems` field as always. Its step
+  rows end with a ` locked` marker on a §4.1 locked step and ` user-written` on an
+  unlocked `authoredBy: user` step (`--json` carries the fields themselves).
 - **Version diff** (`automation diff <ref> --from vN [--to vN]`): the §9.2 version diff
   modal's CLI parity, straight from §19 `GET .../diff` (`--to` defaults to the current
   version; a `from` that is not `vN` exits with "version must be vN", and the API's 404 /
@@ -261,8 +263,12 @@ whatever the user is drafting in the app. Files:
   defaults, **value fields stripped** — values are user-owned operational state, set via
   `param set`, never round-tripped through versions), `packages`, `steps` (file, name, description,
   `agent`/`why`/`agents`, `secrets`, `packages`, `timeout`/`no_timeout`,
-  `retries`/`infinite_retries`: the per-step §4.1 keys, snake_case where the API spells
-  them camelCase, written by `pull` and accepted by `push`).
+  `retries`/`infinite_retries`, `authored_by`/`locked`: the per-step §4.1 keys, snake_case where the API spells
+  them camelCase, written by `pull` (the authorship and lock keys only when set) and
+  accepted by `push`; the version folder's `sha` seal is never written or read here).
+  A step whose script the user changed in the workdir is pushed as `authored_by: user`
+  (push compares each file's bytes against the pulled version's; a byte-identical script
+  keeps its stored authorship) — unless the manifest states `authored_by` explicitly.
 - `NN-name.py` — one file per step, matching `steps[].file`.
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
 
@@ -270,6 +276,20 @@ There is no `instructions.md`: build rules are the app's §8 `build-instructions
 rule an automation needs changed is stated in its `spec.md` (§8). `push` and `create`
 ignore an `instructions.md` a workdir still holds from an older CLI (it is not a managed
 file, so `pull` leaves it alone too).
+
+**Locks on push.** `push` takes repeatable `--lock NAME` / `--unlock NAME` flags (a step's
+exact name as the manifest spells it; an unknown name exits 1 listing the workdir's step
+names; the same name in both exits 1): each sets or clears that step's §4.1 `locked` key on
+the manifest in memory before validation, so the flag and a hand edit of `locked:` in the
+manifest are one path. A locked step's lock rides the version like any step field; the
+next §8 sync (from the app) keeps it byte for byte. `pull` writes `locked: true` on locked
+steps so the lock is visible in the workdir and survives a round trip.
+
+**`automation validate <dir>`** runs the same validators push runs (below) over a workdir
+and writes nothing: prints `ok` and exits 0 when clean, otherwise one error per line and
+exit 1 — the developer loop's check before a push. It needs the backend only for the
+existence context (agents and secrets), through `POST /validate-steps` (§19), so its
+errors match the server's word for word.
 
 `pull` owns the workdir's managed files: it rewrites every file above and removes the
 managed files it did not write this time — a `notes.md` the version no

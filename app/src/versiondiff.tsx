@@ -8,12 +8,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { StepKeys } from './steps'
-import type { DiffFile, DiffRow, VersionDiff } from './types'
+import type { DiffFile, DiffRow, Step, VersionDiff } from './types'
 import { Eyebrow, MenuItemRow, Modal, Notice, PageLoading, PopMenu, ScrollArea, highlightPythonLines, usePopover } from './ui'
 
 // A stored version as the picker lists it: the current one plus the §4.1
 // `versions` history (the pages assemble the list from the automation record).
-export interface DiffVersionRef { version: number; when: string; note: string | null }
+// `steps` (when the record carries them) feeds the navigator's §4.1 lock glyph
+// — the diff payload itself carries no step fields.
+export interface DiffVersionRef { version: number; when: string; note: string | null; steps?: Step[] }
 
 // §9.2: a run of same rows longer than COLLAPSE_OVER collapses, keeping
 // CONTEXT rows on each side (the §20 CLI applies the same numbers).
@@ -79,7 +81,19 @@ function ChangeTag({ file, faint }: { file: DiffFile; faint?: boolean }) {
   return <span style={{ ...mono, color: faint && file.status === 'unchanged' ? 'var(--text-deco)' : color }} data-testid="diff-tag">{label}</span>
 }
 
-function FileNavRow({ file, viewed, onNav }: { file: DiffFile; viewed: boolean; onNav: () => void }) {
+// §9.2: which step files are locked (§4.1) on the newer side — matched by
+// name, the k-th file of a name against the k-th step of that name.
+export function lockedOnNewer(files: DiffFile[], newerSteps: Step[] | undefined): boolean[] {
+  const seen = new Map<string, number>()
+  return files.map((f) => {
+    if (f.kind !== 'step' || f.status === 'removed' || !newerSteps) return false
+    const k = seen.get(f.name) ?? 0
+    seen.set(f.name, k + 1)
+    return !!newerSteps.filter((s) => s.name === f.name)[k]?.locked
+  })
+}
+
+function FileNavRow({ file, viewed, locked, onNav }: { file: DiffFile; viewed: boolean; locked?: boolean; onNav: () => void }) {
   // §9.2: the viewed row is a plain, unfocusable block; the others are buttons
   // (the step navigator's rule, so no focus ring lingers after a flip).
   const Row: 'div' | 'button' = viewed ? 'div' : 'button'
@@ -108,7 +122,14 @@ function FileNavRow({ file, viewed, onNav }: { file: DiffFile; viewed: boolean; 
           {file.file || 'script'}
         </div>
       </div>
-      <span style={{ lineHeight: '18px', display: 'flex' }}><ChangeTag file={file} faint /></span>
+      <span style={{ lineHeight: '18px', display: 'flex', alignItems: 'center', gap: 6 }}>
+        {locked && (
+          <span title="Locked — a sync keeps this step byte for byte" data-testid="diff-lock" style={{ color: 'var(--text-deco)', display: 'inline-flex' }}>
+            <i className="fa-solid fa-lock" style={{ fontSize: 10 }} />
+          </span>
+        )}
+        <ChangeTag file={file} faint />
+      </span>
     </Row>
   )
 }
@@ -224,6 +245,8 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
   }, [automationId, x, y])
 
   const files = diff?.files ?? []
+  const newerSteps = versions.find((v) => v.version === y)?.steps
+  const locks = useMemo(() => lockedOnNewer(files, newerSteps), [files, newerSteps])
   const file = files[viewed]
   const frame = diff ? diffModalFrame(files) : 'clamp(440px, 60vh, 82vh)'
   const label = (v: number) => `v${v}${v === current ? ' · current' : ''}`
@@ -259,7 +282,7 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
             <ScrollArea wrapStyle={{ flex: 1, minHeight: 0 }}>
               <div style={{ paddingBottom: 12 }}>
                 {files.map((f, j) => (
-                  <FileNavRow key={`${f.kind}:${f.file ?? f.name}:${j}`} file={f} viewed={j === viewed} onNav={() => onNav(j)} />
+                  <FileNavRow key={`${f.kind}:${f.file ?? f.name}:${j}`} file={f} viewed={j === viewed} locked={locks[j]} onNav={() => onNav(j)} />
                 ))}
               </div>
             </ScrollArea>

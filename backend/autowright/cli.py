@@ -327,12 +327,25 @@ def _all_grants(agents: list[dict], secrets: list[dict]) -> dict:
             "secrets": [{"id": s["id"], "name": s["name"]} for s in secrets]}
 
 
-def validate_workdir(d: Path, agents: list[dict], secrets: list[dict]) -> dict:
+def _exit_invalid(d: Path, errors: list[str]) -> None:
+    """§20: a workdir that doesn't validate prints every error, one per line,
+    and exits 1 with nothing written."""
+    print(f"{d} doesn't validate:", file=sys.stderr)
+    for e in errors:
+        print(f"  - {e}", file=sys.stderr)
+    sys.exit(1)
+
+
+def validate_workdir(d: Path, agents: list[dict], secrets: list[dict],
+                     files: dict[str, str] | None = None) -> dict:
     """§8 validation of a workdir; prints every error and exits 1 on failure.
-    Returns the draft payload (spec blocks + steps/params/packages/triggers)."""
+    Returns the draft payload (spec blocks + steps/params/packages/triggers).
+    `files` is the workdir as `read_workdir` returned it, when the caller has
+    already read (and, for `push --lock`, edited) it."""
     from . import drafting
 
-    files = read_workdir(d)
+    if files is None:
+        files = read_workdir(d)
     errors: list[str] = []
     spec: dict = {}
     if "spec.md" in files:
@@ -353,10 +366,7 @@ def validate_workdir(d: Path, agents: list[dict], secrets: list[dict]) -> dict:
         if _schedule_key(t) in opted_out:
             t["runIfMissed"] = False
     if errors:
-        print(f"{d} doesn't validate:", file=sys.stderr)
-        for e in errors:
-            print(f"  - {e}", file=sys.stderr)
-        sys.exit(1)
+        _exit_invalid(d, errors)
     draft["spec"] = spec["blocks"]
     # §20: the workdir manifest carries `name`/`description` (unlike the §8
     # sync manifest, where the validator ignores them) - read them here.
@@ -452,6 +462,11 @@ def _manifest_step(s: dict) -> dict:
         e["retries"] = s["retries"]
     if s.get("infiniteRetries"):
         e["infinite_retries"] = True
+    # §4.1 authorship and lock: written only when set (absent = agent / unlocked)
+    if s.get("authoredBy") == "user":
+        e["authored_by"] = "user"
+    if s.get("locked") is True:
+        e["locked"] = True
     return e
 
 
@@ -738,6 +753,12 @@ def cmd_automation_show(c: Client, args) -> None:
             (" [secrets: "
              + ", ".join(secret_names.get(e["id"], f"{e['id'][:8]}…") for e in s["secrets"])
              + "]") if s.get("secrets") else ""])
+        # §20: a locked step ends ` locked`; an unlocked user-written one
+        # ends ` user-written` (§4.1 authorship and lock).
+        if s.get("locked") is True:
+            tags += " locked"
+        elif s.get("authoredBy") == "user":
+            tags += " user-written"
         print(f"step {i}: {s['name']}{tags}")
     vs = [f"v{v['version']}" for v in full.get("versions") or []]
     if vs:
@@ -766,7 +787,12 @@ def cmd_automation_push(c: Client, args) -> None:
         sys.exit(f"{full['name']!r} has an unsaved draft in the app - pass "
                  "--discard-draft to replace it")
     agents, secrets = _grant_stores(c)
-    draft = validate_workdir(Path(args.dir), agents, secrets)
+    d = Path(args.dir)
+    files = read_workdir(d)
+    _apply_lock_flags(files, getattr(args, "lock", None) or [],
+                      getattr(args, "unlock", None) or [])
+    draft = validate_workdir(d, agents, secrets, files=files)
+    _apply_step_authorship(draft, files, full.get("steps") or [])
     if args.note:
         draft["note"] = args.note
     draft["triggers"] = merge_draft_triggers(full.get("triggers") or [], draft["triggers"])
@@ -797,6 +823,104 @@ def cmd_automation_push(c: Client, args) -> None:
     if description and description != (full.get("description") or ""):
         c.req("PATCH", f"/automations/{a['id']}", {"description": description})
     ensure_packages(c, draft.get("packages") or [])
+
+
+def _manifest_step_entries(files: dict[str, str]) -> list[dict]:
+    """The workdir manifest's step entries that are mappings, or [] when the
+    manifest is absent or doesn't parse — the validator reports that."""
+    import yaml
+
+    try:
+        manifest = yaml.safe_load(files.get("manifest.yaml") or "")
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return []
+    steps = manifest.get("steps") if isinstance(manifest, dict) else None
+    return [s for s in steps if isinstance(s, dict)] if isinstance(steps, list) else []
+
+
+def _apply_lock_flags(files: dict[str, str], lock: list[str], unlock: list[str]) -> None:
+    """§20 `push --lock NAME` / `--unlock NAME`: set or clear the named steps'
+    §4.1 `locked` key on the manifest in memory, before validation, so a flag
+    and a hand edit of `locked:` are one path. NAME is the step's exact
+    manifest name; an unknown name, or one name in both lists, exits 1."""
+    import yaml
+
+    if not lock and not unlock:
+        return
+    both = sorted(set(lock) & set(unlock))
+    if both:
+        sys.exit(f"--lock and --unlock both name {', '.join(repr(n) for n in both)}")
+    try:
+        manifest = yaml.safe_load(files.get("manifest.yaml") or "")
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return  # the validator reports the parse error
+    steps = manifest.get("steps") if isinstance(manifest, dict) else None
+    if not isinstance(steps, list):
+        return  # the validator reports the malformed steps list
+    entries = [s for s in steps if isinstance(s, dict)]
+    names = [str(s.get("name")) for s in entries if s.get("name") is not None]
+    unknown = [n for n in [*lock, *unlock] if n not in names]
+    if unknown:
+        sys.exit(f"no step named {unknown[0]!r} in the workdir - have: "
+                 f"{', '.join(names) or '(none)'}")
+    for s in entries:
+        if s.get("name") is None:
+            continue
+        name = str(s["name"])
+        if name in lock:
+            s["locked"] = True
+        elif name in unlock:
+            s.pop("locked", None)
+    files["manifest.yaml"] = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True)
+
+
+def _apply_step_authorship(draft: dict, files: dict[str, str],
+                           stored_steps: list[dict] | None) -> None:
+    """§20/§4.1: stamp each draft step's `authoredBy`/`locked` in the API
+    spelling. An explicit manifest `authored_by` wins; otherwise (push only,
+    when `stored_steps` is the current version's steps) a step whose script
+    differs byte for byte from the stored same-named step's, or that has no
+    stored same-named step, is `user`, and an identical one keeps its stored
+    authorship. `locked` follows the manifest (after any --lock/--unlock)."""
+    entries = {s.get("file"): s for s in _manifest_step_entries(files)}
+    stored = {s.get("name"): s for s in stored_steps or []}
+    for step in draft.get("steps") or []:
+        entry = entries.get(step.get("file")) or {}
+        step.pop("authored_by", None)
+        step.pop("authoredBy", None)
+        if "authored_by" in entry:
+            user = entry["authored_by"] == "user"
+        elif stored_steps is not None:
+            previous = stored.get(step.get("name"))
+            user = (previous is None
+                    or (step.get("code") or "").encode("utf-8")
+                    != (previous.get("code") or "").encode("utf-8")
+                    or previous.get("authoredBy") == "user")
+        else:
+            user = False
+        if user:
+            step["authoredBy"] = "user"
+        if entry.get("locked") is True:
+            step["locked"] = True
+        else:
+            step.pop("locked", None)
+
+
+def cmd_automation_validate(c: Client, args) -> None:
+    """§20 `automation validate <dir>`: the push validators over a workdir,
+    nothing written. The local spec and manifest checks build the draft push
+    would send; `POST /validate-steps` then answers with the server's own
+    error lines, so they match a refused save word for word."""
+    d = Path(args.dir)
+    agents, secrets = _grant_stores(c)
+    files = read_workdir(d)
+    draft = validate_workdir(d, agents, secrets, files=files)
+    _apply_step_authorship(draft, files, None)
+    r = c.req("POST", "/validate-steps", {"draft": draft})
+    errors = r.get("errors") or []
+    if errors:
+        _exit_invalid(d, errors)
+    print("ok")
 
 
 def cmd_automation_create(c: Client, args) -> None:
@@ -2502,7 +2626,24 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                    help="a short note describing this version, shown in the version history")
     p.add_argument("--discard-draft", action="store_true",
                    help="replace an unsaved draft the automation has in the app")
+    p.add_argument("--lock", action="append", default=[], metavar="NAME",
+                   help="lock the step with this exact manifest name, so the app's "
+                        "automation builder keeps it byte for byte (repeatable)")
+    p.add_argument("--unlock", action="append", default=[], metavar="NAME",
+                   help="unlock the step with this exact manifest name (repeatable)")
     _grant_flags(p)
+    p = _sub(ag, "validate", cmd_automation_validate,
+             "check a directory the way a push would, saving nothing",
+             description="Run the checks `automation push` runs over a workdir and write "
+                         "nothing: spec shape, parameter kinds and defaults, one step file "
+                         "per declared step in order, Python that parses, only allowed "
+                         "imports, timeout and trigger rules, and the agents and secrets "
+                         "the steps name. Prints ok when the directory would save; "
+                         "otherwise prints the problems one per line and exits 1, the same "
+                         "lines a refused push would print.",
+             epilog="Examples:\n"
+                    "  autowright automation validate ./report")
+    p.add_argument("dir", help="the workdir to check")
     p = _sub(ag, "create", cmd_automation_create, "create a new automation from a directory",
              description="Validate a workdir and create a new automation from it, as version "
                          "1. The same checks `automation push` runs apply, and the same "

@@ -1849,3 +1849,39 @@ def test_the_archive_viewer_serves_at_most_the_total_text_cap(monkeypatch):
     assert [(f["path"], f["text"]) for f in files] == [
         ("a.txt", "1234"), ("b.bin", None), ("c.txt", "5678"), ("d.txt", None),
         ("e.txt", "34"), ("f.txt", None)]
+
+
+def test_authorship_and_lock_travel_and_sha_never_does(store):
+    """§5.1 / §21.4 2026-10-27: authored_by and locked ride the archive
+    (written only when set); the version folder's `sha` seal never does; a
+    bogus value is a 422-class TransferError naming the step."""
+    ver = {"description": "", "params": [],
+           "steps": [{"name": "Mine", "description": "", "code": "print('x')\n",
+                      "authored_by": "user", "locked": True},
+                     {"name": "Theirs", "description": "", "code": "print('y')\n"}],
+           "spec": [{"kind": "h1", "text": "T"}]}
+    a = store.create_automation(ver, name="Owned", agent_id=None, triggers=[])
+    data = transfer.export_automation(store, a)
+    meta = yaml.safe_load(zipfile.ZipFile(io.BytesIO(data)).read("automation/automation.yaml"))
+    assert meta["steps"][0]["authored_by"] == "user" and meta["steps"][0]["locked"] is True
+    assert "authored_by" not in meta["steps"][1] and "locked" not in meta["steps"][1]
+    assert all("sha" not in s for s in meta["steps"])
+
+    b, _ = transfer.import_automation(store, data)
+    landed = [store.step_json(s) for s in b["versions"][1]["steps"]]
+    assert landed[0]["authoredBy"] == "user" and landed[0]["locked"] is True
+    assert "authoredBy" not in landed[1] and "locked" not in landed[1]
+
+    def bogus(meta):
+        meta["steps"][0]["authored_by"] = "bogus"
+        return meta
+
+    with pytest.raises(transfer.TransferError, match="Mine"):
+        transfer.import_automation(store, _rezip_meta(data, bogus))
+
+    def bad_lock(meta):
+        meta["steps"][1]["locked"] = "yes"
+        return meta
+
+    with pytest.raises(transfer.TransferError, match="Theirs"):
+        transfer.import_automation(store, _rezip_meta(data, bad_lock))

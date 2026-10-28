@@ -68,6 +68,23 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-10-27 - `authored_by`, `locked`, and `sha` added to version-manifest steps
+  (§4.1 authorship and lock, §5 `versions/vN/automation.yaml`).** Each step entry may
+  carry `authored_by: user`, `locked: true`, and `sha: <16 hex>`; the draft container's
+  `draft/automation/automation.yaml`, the §5.1 archive and the §20 workdir manifest carry
+  the first two (never `sha`). Additive: an absent `authored_by` reads as `agent`, an
+  absent `locked` as `false`, an absent `sha` as "unsealed" (the §4.1 `step-modified`
+  audit never flags it), which is exactly today's behavior, so no data rewrite exists and
+  recognition is structural (absent keys). The version writer stamps `sha` on every step
+  of every version it writes from this release on; folders written earlier stay unsealed
+  forever (versions are immutable, §5). Loading stays §5 lenient: a non-string
+  `authored_by`, a value outside `agent | user`, or a non-bool `locked` reads as the
+  default with a warning. Downgrade note (outside the forward-only promise): an earlier
+  release ignores the three keys and its version writer would drop them from a *new*
+  version it writes, so a lock set here is lost on the first save after a downgrade; the
+  stored folders themselves keep the keys. First version writing the new shape: the next
+  release after 2026-10-27; oldest shape still read: v0.6.0 (keys absent). Fixture test:
+  `tests/test_storage.py::test_version_without_authorship_keys_loads_as_agent_unlocked`.
 - **2026-10-18 - `never` added to the §4.9 `notifications` setting (`settings.yaml`).**
   The app-wide value set grows from `attention | all` to `attention | all | never`. Additive
   vocabulary, not a shape change: every file an earlier release wrote still holds one of the

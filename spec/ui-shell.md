@@ -863,7 +863,10 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   - "Before restoring a snapshot" — "Saves a copy of the current memory right before a
     restore replaces it, so a restore can be undone." (pre-restore)
   Edits apply immediately (§19 PATCH `snapshotSettings`) — no version, no AI.
-- **STEPS** card — read-only step rows (number, name, description, tags; the whole row is a
+- **STEPS** card — read-only step rows (number, name, description, tags — plus, on a §4.1
+  `locked` step, a faint `fa-lock` glyph before the tags with the tooltip "Locked — a
+  sync keeps this step byte for byte", and on an unlocked `authoredBy: user` step a
+  pen-icon "Written by you" tag; the whole row is a
   click target whose only right-edge affordance is an expand glyph (`fa-expand`): no
   "view script" text label, so narrow windows don't crush the row's middle column, and the
   glyph carries a "View script" `title` tooltip; the §11 editor's rows drop the glyph
@@ -898,7 +901,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   bar down its left edge and a faint fill, and expands beneath its name to hold the
   step's description (11.5 muted — the §14 list-row sub-line) and its **tag row**: the same §14 `Tag` chips the step
   row carries (same variant colors, red states, and tooltip bubbles; agents, secrets,
-  packages, time limit, retries), wrapping freely, and then the step's **fact list**: labeled sections
+  packages, time limit, retries, and the §4.1 lock / "Written by you" marks as chips —
+  "Locked" with the lock tooltip above), wrapping freely, and then the step's **fact list**: labeled sections
   derived from a literal-only scan of the script — the same kind of scan the secret and
   import tags use — so users can see what a step reaches and touches without reading the
   code. Each section is an `Eyebrow` (the §14 primitive — 10 px/600 mono, `.09em`, `--text-faint`) over
@@ -1063,7 +1067,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   documents), and at its right a change tag in mono: "+`<a>` −`<r>`" (added / removed line
   counts, green / red `--text` on the digits, the sign faint) for a changed file, "New" for a
   file only the newer version has, "Removed" for one only the older has, "Unchanged"
-  (faint) for an identical one. Every file is listed, unchanged ones included, so the
+  (faint) for an identical one; a step locked (§4.1) on the newer side carries a faint
+  `fa-lock` glyph before its change tag. Every file is listed, unchanged ones included, so the
   navigator reads as the whole version folder with the changes marked. The viewed row
   carries the 2 px accent bar and faint fill of the step navigator; the unviewed rows are
   buttons, the viewed row a plain block, and ↑ / ↓ or ← / → flip files with the same

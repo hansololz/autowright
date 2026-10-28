@@ -10,7 +10,7 @@ import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
-import { Eyebrow, MiniBadge, Modal, ScrollArea, Tag, Toggle, agName, dispModel, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, validUrl } from './ui'
+import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, useOverlayThumb, validUrl } from './ui'
 
 // §4.1/§6.1 code-reference scan: literal quoted uuid subscripts only.
 const SECRET_REF_RE = /\bsecrets\[\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']\s*\]/g
@@ -253,6 +253,93 @@ export type { CodeMatch } from './find'
 
 // ---------- step rows + step-script modal ----------
 
+// §4.1/§9.2/§11 lock and authorship tooltips, shared by the row marks, the
+// modal's chips and the editor's lock toggle.
+export const STEP_LOCKED_TITLE = 'Locked — a sync keeps this step byte for byte'
+export const STEP_AUTHORED_TITLE = 'Written by you — the agent keeps it unless the spec requires a change'
+export const STEP_LOCK_TOGGLE_TITLE = 'A locked step is kept byte for byte by every sync — the agent builds the other steps around it'
+
+// ---------- §11 step editing (editor variant) ----------
+
+// The §8 `NN-` filename prefix for a 0-based position.
+const filePrefix = (i: number) => String(i + 1).padStart(2, '0')
+
+/** Re-stamps every step file's `NN-` prefix from its position (§8 step-file
+ * ordering) — the rest of the name, and so its suffix, is kept. */
+export function renumberStepFiles(steps: Step[]): Step[] {
+  return steps.map((s, i) => {
+    if (!s.file) return s
+    const file = /^\d+-/.test(s.file) ? s.file.replace(/^\d+-/, `${filePrefix(i)}-`) : `${filePrefix(i)}-${s.file}`
+    return file === s.file ? s : { ...s, file }
+  })
+}
+
+/** "New step", or "New step 2", "New step 3", … when the name is taken. */
+export function newStepName(steps: Step[]): string {
+  const taken = new Set(steps.map((s) => s.name))
+  if (!taken.has('New step')) return 'New step'
+  let n = 2
+  while (taken.has(`New step ${n}`)) n++
+  return `New step ${n}`
+}
+
+/** The §11 Add step template: the §6.1 SDK import line under a two-line
+ * comment header naming the step and pointing at the Build instructions card. */
+export function newStepCode(name: string): string {
+  return `# ${name}\n# Step SDK: see the Build instructions card, or \`autowright instructions\`.\nfrom autowright import params, log, result\n`
+}
+
+/** The draft's steps with one user-written step appended (§11 Add step). */
+export function appendNewStep(steps: Step[]): Step[] {
+  const name = newStepName(steps)
+  return [...steps, {
+    name, description: '', file: `${filePrefix(steps.length)}-new-step.py`,
+    code: newStepCode(name), authoredBy: 'user',
+  }]
+}
+
+// What a hand edit did, so the editor page lands the matching thread chip
+// (and, for a remembered edit, the spec's build rule).
+export type StepEditEffect =
+  | { kind: 'add' }
+  | { kind: 'save'; rule: { name: string; text: string } | null }
+  | { kind: 'lock'; name: string; locked: boolean }
+  | { kind: 'remove' }
+
+// §11 step editing wiring from the editor page: `disabled` while a §8 job is
+// in flight or an old version is viewed; `validate` asks the backend's §8
+// step validators about the draft as it would be (POST /validate-steps);
+// `commit` writes the new steps into the draft (touched, undo snapshot
+// cleared — never out of sync). `addRef` receives the Add step action for
+// the STEPS card's footer button.
+export type StepEditing = {
+  disabled: boolean
+  validate: (steps: Step[]) => Promise<string[]>
+  commit: (steps: Step[], effect: StepEditEffect) => void
+  addRef?: React.MutableRefObject<(() => void) | null>
+}
+
+// The edit-mode working copy of the viewed step.
+export type StepEdit = {
+  code: string
+  name: string
+  description: string
+  orig: { code: string; name: string; description: string }
+  remember: boolean
+  rule: string
+  errors: string[]
+  saving: boolean
+}
+const beginEdit = (s: Step): StepEdit => {
+  const orig = { code: s.code || '', name: s.name, description: s.description || '' }
+  return { ...orig, orig, remember: false, rule: '', errors: [], saving: false }
+}
+const stepEditDirty = (e: StepEdit) =>
+  e.code !== e.orig.code || e.name !== e.orig.name || e.description !== e.orig.description
+
+const DISCARD_SCRIPT_TITLE = 'Discard your script edits?'
+const DISCARD_SCRIPT_BODY = 'The changes you typed into the script editor will be lost.'
+
 // One descriptor per step fact, shared by the row's Tag chips and the
 // step-script modal's tag row — both render the same chips with the same
 // tooltip sentences, so row and modal can never drift. `rowHidden` marks
@@ -283,6 +370,14 @@ function stepTagDescs(props: StepListProps, step: Step, copy: ReturnType<typeof 
   // archive record's name with the imported-file sentence.
   const unresAgent = (id: string) => (unres?.[id]?.kind === 'agent' ? unres[id] : null)
   const descs: StepTagDesc[] = []
+  // §4.1 lock / authorship marks: a locked step shows the "Locked" chip in the
+  // modal's tag row (its row draws the faint lock glyph instead); an unlocked
+  // user-written step carries the "Written by you" tag in both places.
+  if (step.locked) {
+    descs.push({ key: 'locked', icon: 'fa-lock', label: 'Locked', title: STEP_LOCKED_TITLE, tone: 'plain', rowHidden: true })
+  } else if (step.authoredBy === 'user') {
+    descs.push({ key: 'authored', icon: 'fa-pen', label: 'Written by you', title: STEP_AUTHORED_TITLE, tone: 'plain' })
+  }
   if (props.variant === 'editor' && step.agent) {
     // §4.1: one tag per entry in the step's `agents` list, resolved BY ID to
     // the live agent (a rename updates the tag); an empty list falls
@@ -392,6 +487,11 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 13, fontWeight: 600 }}>{step.name}</span>
+            {step.locked && (
+              <span title={STEP_LOCKED_TITLE} aria-label={STEP_LOCKED_TITLE} data-testid="step-lock-glyph" style={{ color: 'var(--text-deco)', display: 'inline-flex' }}>
+                <i className="fa-solid fa-lock" style={{ fontSize: 10.5 }} />
+              </span>
+            )}
             {tagNodes}
           </div>
           <div style={{ fontSize: 11.5, lineHeight: 1.45, color: 'var(--text-muted)', marginTop: 1 }}>{step.description}</div>
@@ -464,8 +564,13 @@ export function StepKeys({ i, count, closing, paused, onNav, onFind }: {
 // script in its own scroll pane. Only the code pane remounts through the §14
 // keyed fade (resetting its scroll) when the step switches; the navigator and
 // the toolbar stay put, so nothing under the pointer flashes.
-function StepNavRow({ step, j, viewed, editor, tags, facts, onNav }: {
+function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, edit, setEdit }: {
   step: Step; j: number; viewed: boolean; editor: boolean; tags: StepTagDesc[]; facts: StepFactSection[]; onNav: () => void
+  // §11 edit mode: unviewed rows stop flipping, and the viewed row shows the
+  // step's name and description as fields
+  navDisabled?: boolean
+  edit?: StepEdit | null
+  setEdit?: (fn: (e: StepEdit | null) => StepEdit | null) => void
 }) {
   // §9.2: the viewed row is a plain, text-selectable, unfocusable block — a
   // button would stop the user from dragging over its description, chips and
@@ -473,14 +578,16 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav }: {
   // clicked button row unmounts as it becomes this block, so no focus ring
   // can linger on a step no longer viewed.
   const Row: 'div' | 'button' = viewed ? 'div' : 'button'
+  const editing = viewed && !!edit && !!setEdit
   return (
     <Row
       className={viewed ? undefined : 'ad-btn-bare ad-hover-row ad-focus-inset'}
       aria-current={viewed ? 'step' : undefined}
       onClick={viewed ? undefined : onNav}
+      disabled={viewed ? undefined : navDisabled}
       style={{
         display: 'flex', alignItems: 'flex-start', gap: 10, padding: '9px 18px',
-        cursor: viewed ? 'text' : 'pointer',
+        cursor: viewed ? 'text' : navDisabled ? 'default' : 'pointer',
         // §14 selected row: the --bg-active wash plus an inset accent bar —
         // never a border-left with asymmetric padding
         ...(viewed
@@ -493,12 +600,34 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav }: {
     >
       <span style={{ font: "500 11px/18px var(--mono)", color: 'var(--text-faint)', width: 16, flex: 'none' }}>{j + 1}</span>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ font: `${viewed ? 600 : 500} 13px/18px var(--sans)`, color: viewed ? 'var(--text)' : 'var(--text-muted)' }}>
-          {step.name}
-        </div>
+        {editing ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <input
+              className="ad-input compact"
+              aria-label="Step name"
+              value={edit.name}
+              onChange={(e) => { const name = e.target.value; setEdit((x) => x && { ...x, name }) }}
+              style={{ width: '100%' }}
+            />
+            {!edit.name.trim() && (
+              <div style={{ font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>Give the step a name</div>
+            )}
+            <input
+              className="ad-input compact"
+              aria-label="Step description"
+              value={edit.description}
+              onChange={(e) => { const description = e.target.value; setEdit((x) => x && { ...x, description }) }}
+              style={{ width: '100%' }}
+            />
+          </div>
+        ) : (
+          <div style={{ font: `${viewed ? 600 : 500} 13px/18px var(--sans)`, color: viewed ? 'var(--text)' : 'var(--text-muted)' }}>
+            {step.name}
+          </div>
+        )}
         {viewed && (
           <>
-            {step.description && (
+            {!editing && step.description && (
               <div style={{ font: "400 11.5px/1.45 var(--sans)", color: 'var(--text-muted)', marginTop: 4 }}>{step.description}</div>
             )}
             {/* §9.2 tag row: the same chips the step row carries (tooltips
@@ -544,29 +673,108 @@ export function stepModalFrame(steps: Step[]): string {
   return `clamp(440px, ${Math.ceil(44 + 38 + longest * 12 * 1.65)}px, 82vh)`
 }
 
-function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose }: {
+function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, editing, edit, setEdit, onStartEdit, onCancelEdit, onSave, onToggleLock, onRemove }: {
   steps: Step[]; i: number; editor: boolean; tagsByStep: StepTagDesc[][]; factsByStep: StepFactSection[][]
   onNav: (i: number) => void; onClose: () => void
+  // §11 step editing — present on the editor page only
+  editing?: StepEditing
+  edit: StepEdit | null
+  setEdit: (fn: (e: StepEdit | null) => StepEdit | null) => void
+  onStartEdit: () => void
+  onCancelEdit: () => void
+  onSave: () => void
+  onToggleLock: () => void
+  onRemove: () => void
 }) {
   const step = steps[i]
   // A script's single trailing final newline is neither rendered nor counted —
   // it would show as a blank last line and count one line too many (§9.2).
   const code = (editor ? (step.code || '# script not written yet') : step.code || '').replace(/\n$/, '')
   const lines = useMemo(() => highlightPythonLines(code), [code])
-  const lineCount = lines.length
-  const frame = stepModalFrame(steps)
+  const lineCount = edit ? docLineCount(edit.code) : lines.length
+  // §9.2: the height is fixed for the life of the open modal — a hand edit
+  // that lengthens the longest script never resizes the frame
+  const frame = useRef(stepModalFrame(steps)).current
   // §9.2 find in script (find.tsx): the bar and its query survive step
   // flips; the current match resets to the first on a new query or a new step.
   const scroller = useRef<HTMLDivElement | null>(null)
   const find = useFind(lines, scroller, i)
+  const thumb = useOverlayThumb()
+  const editActive = !!edit
+  const dirty = !!edit && stepEditDirty(edit)
+  const dirtyRef = useRef(dirty)
+  dirtyRef.current = dirty
+  const canSave = !!edit && dirty && !!edit.name.trim() && !edit.saving
+  // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
+  // backdrop close the modal) and the Remove step confirm
+  const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
+  const [removeAsk, setRemoveAsk] = useState(false)
+  const closeRef = useRef<() => void>(() => {})
+  const saveRef = useRef<() => void>(() => {})
+  saveRef.current = () => { if (canSave) onSave() }
+  const ta = useRef<HTMLTextAreaElement | null>(null)
+  // §11 edit mode: the textarea takes focus with the caret at the end
+  useEffect(() => {
+    if (!editActive) return
+    const el = ta.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [editActive, i])
+  // ⌘S / Ctrl+S saves while editing (swallowed while Save is disabled); it
+  // yields to a card stacked above this one, like the Modal's Escape.
+  useEffect(() => {
+    if (!editActive) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!isTopModal()) return
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveRef.current() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [editActive])
+  // §14 close guard: Escape and the backdrop ask before dropping an unsaved edit
+  const guardClose = () => {
+    if (!dirtyRef.current) return true
+    setDiscardAsk('close')
+    return false
+  }
+  const cancelEdit = () => { if (dirtyRef.current) setDiscardAsk('cancel'); else onCancelEdit() }
+  const startEdit = () => { find.close(); onStartEdit() }
+  const handsOff = !editing || editing.disabled
+  const controls = editing ? (
+    <span data-testid="step-controls" style={{ display: 'contents' }}>
+      <button
+        className="ad-btn-icon"
+        aria-label={step.locked ? 'Unlock step' : 'Lock step'}
+        title={STEP_LOCK_TOGGLE_TITLE}
+        aria-pressed={!!step.locked}
+        disabled={handsOff || editActive}
+        onClick={onToggleLock}
+      >
+        <i className={`fa-solid ${step.locked ? 'fa-lock' : 'fa-lock-open'}`} />
+      </button>
+      <button
+        className="ad-btn-icon danger"
+        aria-label="Remove step"
+        title="Remove step"
+        disabled={handsOff || editActive}
+        onClick={() => setRemoveAsk(true)}
+      >
+        <i className="fa-solid fa-trash" />
+      </button>
+    </span>
+  ) : null
   return (
     <Modal
-      onClose={onClose} width={1120} ariaLabel={`Step ${i + 1} of ${steps.length}: ${step.name}`}
+      onClose={onClose} width={1120} ariaLabel={`Step ${i + 1} of ${steps.length}: ${step.name}`} guardClose={guardClose}
       cardStyle={{ padding: 0, width: 'min(1120px, 92vw)', overflow: 'hidden' }}
     >
-      {(close, closing) => (
+      {(close, closing) => {
+        closeRef.current = close
+        return (
         <div className="ad-stepmodal" style={{ height: frame, display: 'flex', minWidth: 0 }}>
-          <StepKeys i={i} count={steps.length} closing={closing} onNav={onNav} onFind={find.show} />
+          {/* §11 edit mode: flipping and ⌘F are inert */}
+          <StepKeys i={i} count={steps.length} closing={closing} paused={editActive} onNav={onNav} onFind={find.show} />
           {/* step navigator */}
           <div className="ad-stepnav" style={{
             width: 280, flex: 'none', minHeight: 0, display: 'flex', flexDirection: 'column',
@@ -581,7 +789,10 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose }
             <ScrollArea wrapStyle={{ flex: 1, minHeight: 0 }}>
               <div style={{ paddingBottom: 12 }}>
                 {steps.map((s, j) => (
-                  <StepNavRow key={j} step={s} j={j} viewed={j === i} editor={editor} tags={tagsByStep[j]} facts={factsByStep[j]} onNav={() => onNav(j)} />
+                  <StepNavRow
+                    key={j} step={s} j={j} viewed={j === i} editor={editor} tags={tagsByStep[j]} facts={factsByStep[j]} onNav={() => onNav(j)}
+                    navDisabled={editActive} edit={j === i ? edit : null} setEdit={setEdit}
+                  />
                 ))}
               </div>
             </ScrollArea>
@@ -599,43 +810,138 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose }
               }}>
                 {step.file || 'script'}
               </span>
-              <span style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)', flex: 'none' }}>
+              <span data-testid="step-lines" style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)', flex: 'none' }}>
                 {lineCount} {lineCount === 1 ? 'line' : 'lines'}
               </span>
+              {editActive && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 6 }}>
+                  <button className="ad-btn-text dim small ad-focus-inset" onClick={cancelEdit}>
+                    Cancel
+                  </button>
+                  <button className="ad-btn-link small ad-focus-inset" disabled={!canSave} onClick={() => saveRef.current()}>
+                    Save
+                  </button>
+                </div>
+              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', marginLeft: 4 }}>
-                <button className="ad-btn-icon" aria-label="Find in script" aria-pressed={find.open} onClick={find.show}>
+                {editing && !editActive && (
+                  <button className="ad-btn-icon" aria-label="Edit script" title="Edit script" disabled={editing.disabled} onClick={startEdit}>
+                    <i className="fa-solid fa-pen" />
+                  </button>
+                )}
+                {controls}
+                <button className="ad-btn-icon" aria-label="Find in script" aria-pressed={find.open} disabled={editActive} onClick={find.show}>
                   <i className="fa-solid fa-magnifying-glass" />
                 </button>
-                <button className="ad-btn-icon" aria-label="Previous step" disabled={i === 0} onClick={() => onNav(i - 1)}>
+                <button className="ad-btn-icon" aria-label="Previous step" disabled={editActive || i === 0} onClick={() => onNav(i - 1)}>
                   <i className="fa-solid fa-chevron-left" />
                 </button>
-                <button className="ad-btn-icon" aria-label="Next step" disabled={i === steps.length - 1} onClick={() => onNav(i + 1)}>
+                <button className="ad-btn-icon" aria-label="Next step" disabled={editActive || i === steps.length - 1} onClick={() => onNav(i + 1)}>
                   <i className="fa-solid fa-chevron-right" />
                 </button>
-                <button className="ad-btn-icon" aria-label="Close" onClick={close}>
+                <button className="ad-btn-icon" aria-label="Close" onClick={() => { if (dirtyRef.current) setDiscardAsk('close'); else close() }}>
                   <i className="fa-solid fa-xmark" />
                 </button>
               </div>
             </div>
-            {find.open && <FindBar find={find} label="Find in script" />}
-            <ScrollArea key={i} className="ad-anim-fade" wrapStyle={{ flex: 1, minHeight: 0 }} scrollRef={scroller}>
-              <div style={{
-                // 28px right padding keeps the longest line clear of the overlay thumb
-                display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', padding: '14px 28px 24px 0',
-                font: "400 12px/1.65 var(--mono)", color: 'var(--code-text)',
-              }}>
-                {find.marked.map((ln, n) => (
-                  <React.Fragment key={n}>
-                    <span style={{ textAlign: 'right', padding: '0 16px 0 18px', color: 'var(--text-deco)', userSelect: 'none' }}>{n + 1}</span>
-                    {/* an empty line carries a newline so a copied selection keeps its blank lines */}
-                    <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{ln.length ? ln : '\n'}</span>
-                  </React.Fragment>
-                ))}
-              </div>
-            </ScrollArea>
+            {edit ? (
+              <>
+                {/* §11: validation errors between the toolbar and the textarea, one line each */}
+                {edit.errors.length > 0 && (
+                  <Notice tone="red" testId="step-edit-errors" style={{ borderRadius: 0, borderLeft: 'none', borderRight: 'none', borderTop: 'none', flex: 'none' }}>
+                    {edit.errors.map((err, k) => <div key={k}>{err}</div>)}
+                  </Notice>
+                )}
+                <div className="ad-scrollwrap" style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+                  <textarea
+                    ref={(el) => { ta.current = el; thumb.attach(el) }}
+                    data-testid="step-editor"
+                    aria-label="Step script"
+                    value={edit.code}
+                    onChange={(e) => { const value = e.target.value; setEdit((x) => x && { ...x, code: value }) }}
+                    onScroll={thumb.onScroll}
+                    spellCheck={false}
+                    className="ad-scrollhide"
+                    style={DOC_TEXTAREA_STYLE}
+                  />
+                  {thumb.node}
+                </div>
+                <div style={{ ...DOC_FOOTER_STYLE, gap: 12 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none', cursor: 'pointer', color: 'var(--text-2)' }}>
+                    <input
+                      type="checkbox"
+                      checked={edit.remember}
+                      onChange={(e) => { const remember = e.target.checked; setEdit((x) => x && { ...x, remember }) }}
+                    />
+                    Remember this edit as a build rule
+                  </label>
+                  {edit.remember ? (
+                    <input
+                      className="ad-input compact"
+                      aria-label="Build rule"
+                      placeholder="What every future sync must keep — one line"
+                      value={edit.rule}
+                      onChange={(e) => { const rule = e.target.value; setEdit((x) => x && { ...x, rule }) }}
+                      style={{ flex: 1, minWidth: 0, padding: '4px 9px' }}
+                    />
+                  ) : (
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      Saving keeps the workflow in sync — a hand edit changes the steps, not the spec.
+                    </span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                {find.open && <FindBar find={find} label="Find in script" />}
+                <ScrollArea key={i} className="ad-anim-fade" wrapStyle={{ flex: 1, minHeight: 0 }} scrollRef={scroller}>
+                  <div style={{
+                    // 28px right padding keeps the longest line clear of the overlay thumb
+                    display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', padding: '14px 28px 24px 0',
+                    font: "400 12px/1.65 var(--mono)", color: 'var(--code-text)',
+                  }}>
+                    {find.marked.map((ln, n) => (
+                      <React.Fragment key={n}>
+                        <span style={{ textAlign: 'right', padding: '0 16px 0 18px', color: 'var(--text-deco)', userSelect: 'none' }}>{n + 1}</span>
+                        {/* an empty line carries a newline so a copied selection keeps its blank lines */}
+                        <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{ln.length ? ln : '\n'}</span>
+                      </React.Fragment>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </>
+            )}
           </div>
+          {discardAsk && (
+            <ConfirmModal
+              title={DISCARD_SCRIPT_TITLE}
+              body={DISCARD_SCRIPT_BODY}
+              confirmLabel="Discard edits"
+              danger
+              onConfirm={() => {
+                const ask = discardAsk
+                setDiscardAsk(null)
+                if (ask === 'close') close()
+                else onCancelEdit()
+              }}
+              onCancel={() => setDiscardAsk(null)}
+            />
+          )}
+          {removeAsk && (
+            <ConfirmModal
+              title={`Remove step ${i + 1}, '${step.name}'?`}
+              body={!step.locked && step.authoredBy !== 'user'
+                ? 'The script is deleted from the draft. The next sync may write it again unless the spec says otherwise.'
+                : 'The script is deleted from the draft.'}
+              confirmLabel="Remove step"
+              danger
+              onConfirm={() => { setRemoveAsk(false); onRemove() }}
+              onCancel={() => setRemoveAsk(false)}
+            />
+          )}
         </div>
-      )}
+        )
+      }}
     </Modal>
   )
 }
@@ -649,7 +955,7 @@ export type StepListProps = {
   history?: StepHistory[]; viewing?: number | 'draft'
   params?: ParamDef[] // §4.2 definitions, labeling the "Uses the … parameter" fact
 } & (
-  | { variant: 'editor'; availAgents: Agent[]; allAgents: Agent[] }
+  | { variant: 'editor'; availAgents: Agent[]; allAgents: Agent[]; editing?: StepEditing }
   | { variant: 'detail'; agents: Agent[]; fallbackAgent: string }
 )
 
@@ -658,11 +964,40 @@ export function StepList(props: StepListProps) {
   // §9 per-OS copy rule: the secret-store name in the secret fact sentences.
   const copy = usePlatformCopy()
   const [viewing, setViewing] = useState<number | null>(null)
-  // §11: a sync/undo that swaps the steps closes the editor's modal — the
-  // index would no longer name the same step. The detail page's modal stays
-  // open across store refreshes.
   const editor = props.variant === 'editor'
-  useEffect(() => { if (editor) setViewing(null) }, [steps]) // eslint-disable-line react-hooks/exhaustive-deps
+  const editing = props.variant === 'editor' ? props.editing : undefined
+  // §11 step editing: the edit-mode working copy, and the discard confirm a
+  // steps swap raises over an unsaved edit
+  const [edit, setEditState] = useState<StepEdit | null>(null)
+  const [swapAsk, setSwapAsk] = useState(false)
+  const editRef = useRef(edit)
+  editRef.current = edit
+  const stepsRef = useRef(steps)
+  stepsRef.current = steps
+  // Bumped whenever an edit is dropped, so a Save whose validation answers
+  // after the edit was cancelled or closed never applies.
+  const editSeq = useRef(0)
+  const setEdit = (fn: (e: StepEdit | null) => StepEdit | null) => setEditState(fn)
+  const dropEdit = () => { editSeq.current++; setEditState(null) }
+  // The view a hand edit's own steps change lands on (and whether it opens
+  // in edit mode) — consumed by the swap effect below, so the list can tell
+  // its own commits from a sync/undo/restore.
+  const ownChange = useRef<{ view: number | null; edit: boolean } | null>(null)
+  // §11: a sync/undo that swaps the steps closes the editor's modal — the
+  // index would no longer name the same step — asking first over an unsaved
+  // edit. A hand edit's own change keeps the modal on its step instead. The
+  // detail page's modal stays open across store refreshes.
+  useEffect(() => {
+    if (!editor) return
+    // A hand edit's own change already applied its view and edit state in
+    // `commit` (below) — this passive effect may land after the user's next
+    // click, so it only consumes the marker here, never re-applies it.
+    if (ownChange.current) { ownChange.current = null; return }
+    const e = editRef.current
+    if (e && stepEditDirty(e)) { setSwapAsk(true); return }
+    if (e) dropEdit()
+    setViewing(null)
+  }, [steps]) // eslint-disable-line react-hooks/exhaustive-deps
   const current = viewing !== null && viewing < steps.length ? viewing : null
   // Deriving the facts scans every script for secret references and package
   // imports, so it only reruns when the steps or the records they resolve
@@ -685,6 +1020,70 @@ export function StepList(props: StepListProps) {
     () => steps.map((_, i) => stepFacts(steps, i, revision, history, params)),
     [steps, history, revision, params],
   )
+  // ---- §11 hand edits: each commits the whole new steps list ----
+  const commit = (next: Step[], view: number | null, openEdit: boolean, effect: StepEditEffect) => {
+    if (!editing) return
+    ownChange.current = { view, edit: openEdit }
+    // Apply the view (and an Add step's edit mode) now, synchronously with
+    // the commit: `current` range-guards the index until the parent's steps
+    // land, and the swap effect above only consumes the marker.
+    setViewing(view)
+    editSeq.current++
+    setEditState(openEdit && view !== null ? beginEdit(next[view]) : null)
+    editing.commit(next, effect)
+  }
+  const add = () => {
+    if (!editing || editing.disabled) return
+    const next = appendNewStep(stepsRef.current)
+    commit(next, next.length - 1, true, { kind: 'add' })
+  }
+  if (editing?.addRef) editing.addRef.current = add
+  const saveEdit = async () => {
+    const e = editRef.current
+    if (!editing || current === null || !e || !stepEditDirty(e) || !e.name.trim() || e.saving) return
+    const at = current
+    const base = stepsRef.current
+    const name = e.name.trim()
+    // §4.1: the file keeps its name — a rename never renames the script;
+    // `locked` is unchanged
+    const edited: Step = { ...base[at], code: e.code, name, description: e.description.trim(), authoredBy: 'user' }
+    const next = base.map((s, j) => (j === at ? edited : s))
+    const seq = ++editSeq.current
+    setEditState((x) => x && { ...x, saving: true })
+    let errors: string[]
+    try {
+      errors = await editing.validate(next)
+    } catch (err) {
+      errors = [(err as Error).message]
+    }
+    // dropped meanwhile (cancel, close, a swap) — never apply
+    if (seq !== editSeq.current || stepsRef.current !== base) {
+      if (seq === editSeq.current) setEditState((x) => x && { ...x, saving: false })
+      return
+    }
+    if (errors.length) {
+      setEditState((x) => x && { ...x, saving: false, errors })
+      return
+    }
+    const rule = e.remember && e.rule.trim() ? { name, text: e.rule.trim() } : null
+    commit(next, at, false, { kind: 'save', rule })
+  }
+  const toggleLock = () => {
+    if (!editing || editing.disabled || current === null) return
+    const at = current
+    const s = stepsRef.current[at]
+    const { locked: _wasLocked, ...rest } = s
+    const nextStep: Step = s.locked ? rest : { ...s, locked: true }
+    commit(stepsRef.current.map((x, j) => (j === at ? nextStep : x)), at, false, { kind: 'lock', name: s.name, locked: !s.locked })
+  }
+  const removeStep = () => {
+    if (!editing || editing.disabled || current === null) return
+    const at = current
+    const next = renumberStepFiles(stepsRef.current.filter((_, j) => j !== at))
+    // §11: view the next step, the previous at the end, or close when none is left
+    const view = next.length === 0 ? null : at < next.length ? at : at - 1
+    commit(next, view, false, { kind: 'remove' })
+  }
   return (
     <>
       {steps.map((s, i) => (
@@ -693,7 +1092,7 @@ export function StepList(props: StepListProps) {
           last={i === steps.length - 1}
           editor={editor}
           tags={tagsByStep[i]}
-          onOpen={() => setViewing(i)}
+          onOpen={() => { dropEdit(); setViewing(i) }}
         />
       ))}
       {current !== null && (
@@ -702,7 +1101,25 @@ export function StepList(props: StepListProps) {
           tagsByStep={tagsByStep}
           factsByStep={factsByStep}
           onNav={setViewing}
-          onClose={() => setViewing(null)}
+          onClose={() => { dropEdit(); setViewing(null) }}
+          editing={editing}
+          edit={edit}
+          setEdit={setEdit}
+          onStartEdit={() => { if (editing && !editing.disabled) { editSeq.current++; setEditState(beginEdit(steps[current])) } }}
+          onCancelEdit={dropEdit}
+          onSave={() => { void saveEdit() }}
+          onToggleLock={toggleLock}
+          onRemove={removeStep}
+        />
+      )}
+      {swapAsk && (
+        <ConfirmModal
+          title={DISCARD_SCRIPT_TITLE}
+          body={DISCARD_SCRIPT_BODY}
+          confirmLabel="Discard edits"
+          danger
+          onConfirm={() => { setSwapAsk(false); dropEdit(); setViewing(null) }}
+          onCancel={() => setSwapAsk(false)}
         />
       )}
     </>

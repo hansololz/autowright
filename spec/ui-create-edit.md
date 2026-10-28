@@ -670,11 +670,14 @@ headline. Headline:
 `diagnosed: true` (§8 build-diagnosis blockers — the build failed validation rather than
 the agent refusing) instead headlines "The build failed — your AI suggests these fixes";
 an entry whose blockers are all §8 `kind: user-action` instead headlines "Your AI needs
-you to do something first".
+you to do something first"; one whose blockers are all `kind: constraint` headlines
+"Your AI can't build this within your constraints".
 Beneath it an explanatory line at the body scale, flush left (a message-block
 paragraph, never indented under the header), by source:
 chat — "Reply below — your answer is sent back and the spec is rewritten."; sync —
-"It couldn't sync the steps with the spec." (user-action entries drop the source explainer —
+"It couldn't sync the steps with the spec."; an all-constraint entry — "The spec asks for
+something a locked step or a build rule forbids. Use the workaround, or lift the
+constraint and sync again." (user-action entries drop the source explainer —
 the blocker text itself says what to do; entries persisted by the removed create pipeline —
 source `spec` or `steps` — render with the chat and sync explainers respectively). The blockers themselves render as **agent output, not editable cards**:
 per blocker, the **Reason** / **How to fix** / **Details** texts render through the
@@ -704,6 +707,22 @@ from the turn action row's pill styling) — a quiet **Dismiss** plus, by source
   version like any spec text. If the rebuild blocks again the new entry carries a muted
   "Previously resolved" list of this session's earlier resolutions, so a fix that didn't
   take is visible.
+- **Any blocker with §8 `kind: constraint`** — the agent's push-back on a lock or a build
+  rule. Its body renders **Reason**, **What lifting it allows** (the `fix`), **Workaround**
+  (when sent) and **Details**, and carries its **own resolution row** beneath the body
+  (per blocker — each names a different constraint): **Use the workaround** (primary,
+  present only with a `workaround`; writes "`reason` — `workaround`" under `##
+  Constraints & resolutions` exactly as "Apply to the spec & sync" does, then syncs),
+  and the lifting button — **Unlock "<step>"** for a `step` blocker (clears `locked` on
+  the named draft step with the "Step '<name>' unlocked." chip, then syncs) or **Remove
+  the rule** for a `rule` blocker (deletes the first `li` block of the in-editor spec whose
+  text contains the quoted rule, case-insensitive; none matching → the toast "Rule not
+  found — edit the spec by hand" and no sync; else the "Spec updated." system chip
+  (`fa-file-pen`, not a `rewrite` entry — no request text exists to send the agent), then
+  syncs). Use the workaround dismisses the entry and records its line under "Previously
+  resolved" exactly as Apply does; Unlock is a manual edit (undo snapshot cleared).
+  Both are disabled under the Apply button's gating. The entry-level row keeps Dismiss
+  (and, in a mixed entry, the source's primary for the ordinary blockers only).
 - **Any blocker with §8 `kind: user-action`** — the Mac isn't ready, the automation is
   fine: the entry offers **Dismiss only** (never "Apply to the spec & sync", even on a
   sync block — there is nothing to amend). The blocker body carries the agent's
@@ -950,6 +969,82 @@ editors enter with
   test." With no notes, the body above the footer is the in-card empty state "No notes
   yet." Notes
   version with the automation and ride drafts and §5.1 archives like the spec.
+- **Step editing (editor only; 2026-10-27)** — the user owns the scripts too. The editor's
+  step rows gain two display-only marks beside the tags: a faint `fa-lock` glyph on a §4.1
+  `locked` step (tooltip "Locked — a sync keeps this step byte for byte") and a
+  pen-icon `Tag` reading "Written by you" on an unlocked `authoredBy: user` step (tooltip
+  "Written by you — the agent keeps it unless the spec requires a change"). The card's
+  footer carries an **Add step** ghost button (`fa-plus`; disabled while a §8 job is in
+  flight or an old version is viewed): it appends a step `{ name: "New step" ("New step
+  2", … when the name is taken), description: "", file: NN-new-step.py, code: the
+  §6.1 SDK import line `from autowright import params, log, result` under the two
+  comment lines `# <name>` and `# Step SDK: see the Build instructions card, or
+  \`autowright instructions\`.`, authoredBy: user }` and opens the step-script modal on it **in
+  edit mode**. Add step is a manual edit like lock and remove below (draft touched, undo
+  snapshot cleared). The card's eyebrow reads "STEPS · GENERATED" only while every step is
+  agent-written and unlocked; once any step is locked or user-written it reads plain
+  "STEPS" — the steps are no longer purely generated. The editor variant of the §9.2 step-script modal is where every hand edit
+  happens:
+  - Its toolbar cluster (top right of the code pane) gains three `.ad-btn-icon` buttons
+    before the find button, in order: **Edit** (`fa-pen`, "Edit script"), the **lock
+    toggle** (`fa-lock` when locked / `fa-lock-open` when not, `aria-pressed` = locked,
+    aria-label "Unlock step" / "Lock step", tooltip "A locked step is kept byte for byte
+    by every sync — the agent builds the other steps around it") and **Remove step**
+    (`fa-trash`, the `.danger` icon variant — muted at rest, red on hover; aria-label and
+    tooltip "Remove step"). The navigator's viewed row carries no controls — it stays
+    the read-only table of contents. All three are disabled while a §8 job is in flight
+    or an old version is viewed.
+  - **Edit mode**: the code pane's body becomes the document-editor modal's textarea
+    (same rhythm, padding, inset, focus-on-open with the caret at the end); the find bar
+    closes and ⌘F is inert; flipping steps (chevrons, arrow keys, navigator rows) is
+    disabled; the toolbar's right side shows the live line count and **Cancel** / **Save**
+    (accent link, disabled while nothing changed), ⌘S / Ctrl+S saves; ✕, Escape and the
+    backdrop go through the §14 close guard ("Discard your script edits?", body "The
+    changes you typed into the script editor will be lost.", confirm "Discard edits"),
+    while Cancel returns to view mode through the same guard. In edit mode the find and
+    chevron buttons stay visible but disabled, Edit is hidden, and the lock toggle and
+    Remove step stay visible but disabled (their commit would end the edit and drop the
+    typed text).
+    The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
+    **description** as two `.ad-input.compact` fields in edit mode (name required — a
+    blank name disables Save with the inline hint "Give the step a name"). Beneath the
+    textarea a 36 px footer (the doc modal's hint style) carries a checkbox **Remember
+    this edit as a build rule** and, enabled by it, a text field (placeholder "What every
+    future sync must keep — one line"); unchecked, the footer reads "Saving keeps the
+    workflow in sync — a hand edit changes the steps, not the spec."
+  - **Save** first asks the backend (`POST /validate-steps`, §19) with the draft's steps as
+    they would be after the edit; validation errors render as a red `Notice` strip between
+    the toolbar and the textarea, one line each, with the text intact and the modal open.
+    On a clean pass it applies `code`, `name` and `description` to the draft step (the
+    `file` keeps its suffix — a rename never renames the script), sets `authoredBy: user`
+    (`locked` unchanged), marks the draft touched, clears the Draft-undo snapshot (a manual
+    save, like the documents'), and returns the pane to view mode on the same step. A
+    checked remember box appends `- Step "<name>": <text>` to the spec's `## Build rules`
+    section (created at the end of the spec when absent) **without** marking the workflow
+    out of sync — the rule describes what the steps already do — and lands the system chip
+    "Build rule added." (`fa-list-check`). The remembered rule is binding on every later
+    sync by the §8 three-layer rule, and the user prunes it in the spec editor like any
+    spec text.
+  - **Lock toggle** flips the draft step's `locked` (the toolbar glyph swaps and the
+    navigator's "Locked" chip appears or goes) and lands the chip "Step '<name>'
+    locked." / "… unlocked." (`fa-lock` / `fa-lock-open`). **Remove step** confirms
+    ("Remove step N, '<name>'?", body "The script is deleted from the draft." plus, for an
+    unlocked agent-written step, "The next sync may write it again unless the spec says
+    otherwise."; confirm label "Remove step"), then drops the step, renumbers the `NN-`
+    prefixes, views the next step (the previous at the end) or closes the modal when none
+    is left. Both are manual edits: draft touched, undo snapshot cleared.
+  - **Never out of sync.** Editing, adding, removing and locking steps change the
+    implementation, not the spec: none of them marks the workflow out of sync (Dirty
+    gating below), the draft saves directly (the §19 save validators are the gate), and
+    the last test goes stale by the fingerprint rule as after any steps change.
+  - **A sync keeps the user informed.** When a settled sync replaces the steps, the
+    editor compares them with the previous draft: for each previous unlocked
+    `authoredBy: user` step whose script changed it lands the chip "Your step '<name>'
+    was rewritten." and for one that vanished "Your step '<name>' was removed."
+    (`fa-pen`), so a hand edit never disappears silently; locked steps need no chip — the
+    §8 splice guarantees them. A sync, undo or restore that swaps the steps closes an open
+    modal as before; under an unsaved edit the swap has already happened, so the guard asks
+    afterwards and a cancelled guard keeps the edit open on the new steps at the same index.
 - **Document-editor modal** — the one editing surface for the two documents. Pressing Edit
   on the Spec or Notes card opens it over the page; the card stays in
   its view state behind the backdrop, and no card body ever turns into a textarea. It is the
@@ -991,7 +1086,9 @@ editors enter with
   `notesDraft`) remain editor state, never serialized into the §4.4 draft.
 - **Dirty gating** — any spec/chat-rewrite change marks the workflow out of sync and
   **blocks saving** until the BUILD card's "Sync now" button makes one §8 `sync` call
-  regenerating the steps ("Steps synced with the spec — review them, then save."). The
+  regenerating the steps ("Steps synced with the spec — review them, then save."). Hand
+  edits to the steps (Step editing above) and the build rules the step editor's remember
+  control writes never do — they describe the implementation the steps already have. The
   out-of-sync state persists with the draft (§4.4 `outOfSync`) and is restored on resume —
   keeping a locked draft and reopening it must not unlock Save around the gate. Grant
   toggles (agent enablement, secret allowance) never mark the workflow out of sync by

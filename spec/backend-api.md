@@ -277,6 +277,12 @@ remain plain dicts (§2).
   (`step_json`, the manifest entry builder, the version diff, restore) read those fields
   leniently, so a hand-edited stored version with `timeout: abc` degrades to the default
   instead of a 500.
+- `POST /validate-steps` `{ draft }` — the §8 step validators (the same pass the save
+  endpoints run, below) over a draft-shaped body, answering **200** `{ errors: string[] }`
+  — an empty list means it would save; validation failures are the response body, never
+  a 422, because the caller is asking, not saving. It writes nothing. Backs the §11 step
+  editor's Save (which shows the lines inline) and the §20 `automation validate` verb; the
+  step keys `authoredBy` / `locked` ride the body like every other step field (§4.1).
 - **Server-side step validation** — `POST /automations` and `POST /automations/{id}/versions`
   run the §8 step validators (`ast.parse`, the §6.2 import allowlist, manifest schema and
   step-file ordering, the timeout/retry rules, the §8 rule-6/7 id checks — step `agents:` /
@@ -330,7 +336,11 @@ remain plain dicts (§2).
   feeds a running execution). The §4.4 boundary markers are appended by the settle
   endpoints themselves (save, create, draft DELETE), never through this surface
 - `POST /automations/{id}/restore` `{ version }` — restore vX as vN+1, written through the
-  §5 version-folder writer (manifest last as the commit point — never a tree copy)
+  §5 version-folder writer (manifest last as the commit point — never a tree copy). The
+  restored steps go through the same server-side step validation as a save (below) and a
+  failure answers 422 with the errors: a stored folder whose script was edited on disk
+  (§4.1 `step-modified`) must not become a validated-looking new version by way of a
+  restore
 - `GET /automations/{id}/diff?from=vX&to=vY`: the §9.2 version diff, what changed between
   two stored versions, computed here (stdlib `difflib`, `versions_diff.py`) so the UI and
   the §20 CLI render one result and neither diffs. `from` / `to` are "vN" labels
@@ -557,7 +567,8 @@ remain plain dicts (§2).
   the §8 manifest's snake_case never reaches a client, so the §11 editor applies a settled
   sync's steps unchanged and the §9.2 clock / retry tags read them directly); a `blocked` job's state is
   `blocked` and it carries the §8 `blockers` list — each entry `{ reason, fix, details?,
-  kind? }`, `kind` only ever `user-action` (§8) — plus `blockedAt: steps | chat` (`steps`
+  kind?, step?, rule?, workaround? }`, `kind` `user-action` or `constraint` (§8; the last
+  three only with `constraint`) — plus `blockedAt: steps | chat` (`steps`
   on a sync call; a blocker response's optional `notes.md` — §8 — rides the payload as
   `draft.notes`, applied by the editor like a chat notes rewrite); a `blocked` job whose blockers came from the §8 build-diagnosis call
   (or its deterministic fallback) additionally carries `diagnosed: true`, and `failed` is

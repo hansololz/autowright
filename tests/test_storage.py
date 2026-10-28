@@ -2815,3 +2815,137 @@ def test_copy_memory_into_copies_the_source_tree(store, home):
     assert (dst / "seen.json").read_text() == '["a"]'
     assert (dst / "nested" / "deep.txt").read_text() == "deep"
     assert (src / "seen.json").exists()  # the source keeps its memory
+
+
+# ---------- §4.1 authorship and lock, §5 manifest `sha` (§21.4 2026-10-27) ----------
+
+def test_version_without_authorship_keys_loads_as_agent_unlocked(store, home):
+    """§21.4 fixture: a v0.6.0-shaped manifest (no authored_by / locked / sha)
+    loads as agent-written and unlocked, never flags step-modified, and the
+    next version written stamps `sha` on every step and the two keys only
+    when set."""
+    from autowright.storage import Store, step_script_sha
+    from autowright.yamlio import load_yaml, save_yaml
+
+    a = store.create_automation(make_version(), "Old shape", None)
+    vd = home / "automations" / a["id"] / "versions" / "v1"
+    data = load_yaml(vd / "automation.yaml")
+    for entry in data["steps"]:
+        for key in ("authored_by", "locked", "sha"):
+            entry.pop(key, None)
+    save_yaml(vd / "automation.yaml", data)
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    for s in b["versions"][1]["steps"]:
+        assert "modifiedOnDisk" not in s
+        js = s2.step_json(s)
+        assert "authoredBy" not in js and "locked" not in js
+    assert s2.auto_json(b)["problems"] == []
+
+    ver = make_version(note="Second")
+    ver["steps"][1]["authored_by"] = "user"
+    ver["steps"][1]["locked"] = True
+    n = s2.save_new_version(b, ver)
+    written = load_yaml(home / "automations" / a["id"] / "versions" / f"v{n}" / "automation.yaml")
+    for entry in written["steps"]:
+        code = (home / "automations" / a["id"] / "versions" / f"v{n}" / entry["file"]).read_bytes()
+        assert entry["sha"] == step_script_sha(code)
+    assert "authored_by" not in written["steps"][0] and "locked" not in written["steps"][0]
+    assert written["steps"][1]["authored_by"] == "user" and written["steps"][1]["locked"] is True
+
+
+def test_hand_edited_sealed_step_loads_with_step_modified_problem(store, home):
+    from autowright.storage import Store
+
+    a = store.create_automation(make_version(), "Sealed", None)
+    vd = home / "automations" / a["id"] / "versions" / "v1"
+    (vd / "02-finish.py").write_text("print('hand edit')\n", encoding="utf-8")
+
+    s2 = Store()
+    s2.load_all()
+    b = s2.autos[a["id"]]
+    steps = b["versions"][1]["steps"]
+    assert steps[1]["modifiedOnDisk"] is True and "modifiedOnDisk" not in steps[0]
+    assert "modifiedOnDisk" not in s2.step_json(steps[1])
+    assert s2.auto_json(b)["problems"] == [
+        {"kind": "step-modified",
+         "label": "Step Finish was edited on disk after v1 was saved — pull and push it "
+                  "to make it a validated version."}]
+    # The in-memory mark is never written back to the manifest.
+    manifest = (vd / "automation.yaml").read_text(encoding="utf-8")
+    assert "modifiedOnDisk" not in manifest
+
+
+def test_authorship_and_lock_round_trip_through_a_version(store, home):
+    from autowright.storage import Store
+
+    ver = make_version()
+    ver["steps"][0]["authored_by"] = "user"
+    ver["steps"][0]["locked"] = True
+    a = store.create_automation(ver, "Locked", None)
+
+    s2 = Store()
+    s2.load_all()
+    js = [s2.step_json(s) for s in s2.autos[a["id"]]["versions"][1]["steps"]]
+    assert js[0]["locked"] is True and js[0]["authoredBy"] == "user"
+    assert "locked" not in js[1] and "authoredBy" not in js[1]
+
+
+def test_damaged_authorship_keys_read_as_defaults(store, home, caplog):
+    """§21.4 lenient load: a value outside agent | user or a non-bool locked
+    reads as the default with a warning."""
+    from autowright.storage import Store
+    from autowright.yamlio import load_yaml, save_yaml
+
+    a = store.create_automation(make_version(), "Damaged", None)
+    y = home / "automations" / a["id"] / "versions" / "v1" / "automation.yaml"
+    data = load_yaml(y)
+    data["steps"][0]["authored_by"] = "bogus"
+    data["steps"][0]["locked"] = "yes"
+    data["steps"][1]["authored_by"] = 5
+    save_yaml(y, data)
+
+    s2 = Store()
+    s2.load_all()
+    steps = s2.autos[a["id"]]["versions"][1]["steps"]
+    for s in steps:
+        assert "authored_by" not in s and "locked" not in s
+    assert "isn't agent or user" in caplog.text and "isn't a boolean" in caplog.text
+
+
+def test_draft_container_is_never_sealed(store, home):
+    from autowright.yamlio import load_yaml
+
+    a = store.create_automation(make_version(), "Drafty", None)
+    ver = make_version()
+    ver["steps"][0]["locked"] = True
+    store.save_draft(a, ver)
+    manifest = load_yaml(store.draft_dir(a) / "automation" / "automation.yaml")
+    assert all("sha" not in s for s in manifest["steps"])
+    assert manifest["steps"][0]["locked"] is True
+
+
+def test_duplicate_reseals_a_hand_edited_source(store, home):
+    """§5 duplicate: the copy's seals are stamped from the bytes actually
+    copied — a hand-edited source keeps its step-modified problem, the copy
+    has none."""
+    from autowright.storage import Store, step_script_sha
+    from autowright.yamlio import load_yaml
+
+    a = store.create_automation(make_version(), "Original", None)
+    vd = home / "automations" / a["id"] / "versions" / "v1"
+    (vd / "02-finish.py").write_text("print('hand edit')\n", encoding="utf-8")
+    s2 = Store()
+    s2.load_all()
+    source = s2.autos[a["id"]]
+    assert [p["kind"] for p in s2.auto_json(source)["problems"]] == ["step-modified"]
+
+    copy = s2.duplicate_automation(a["id"])
+    copied = home / "automations" / copy["id"] / "versions" / "v1"
+    assert (copied / "02-finish.py").read_bytes() == b"print('hand edit')\n"
+    for entry in load_yaml(copied / "automation.yaml")["steps"]:
+        assert entry["sha"] == step_script_sha((copied / entry["file"]).read_bytes())
+    assert s2.auto_json(copy)["problems"] == []
+    assert [p["kind"] for p in s2.auto_json(source)["problems"]] == ["step-modified"]

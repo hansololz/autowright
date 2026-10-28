@@ -201,9 +201,21 @@ automations/<uuid>/
     automation.yaml            # when, note, param definitions (§4.2: name, kind,
                                # label, help, default, …) + ordered steps manifest:
                                # steps: [{file, name, description, agent?, why?, agents?, secrets?,
-                               #          packages?, timeout?, no_timeout?, retries?, infinite_retries?}]
+                               #          packages?, timeout?, no_timeout?, retries?, infinite_retries?,
+                               #          authored_by?, locked?, sha?}]
                                #          (§4.1 per-step time limits and retry pair — both
-                               #          also travel in §5.1 archives; agents entries are
+                               #          also travel in §5.1 archives; `authored_by: user` and
+                               #          `locked: true` are the §4.1 authorship and lock keys,
+                               #          written only when set, carried by §5.1 archives and the
+                               #          §20 workdir manifest; `sha` is the first 16 hex chars
+                               #          of SHA-256 over the step's script bytes as written,
+                               #          stamped by the version writer on every step (never by
+                               #          the §20 workdir or §5.1 archive — it is this folder's
+                               #          own seal) and compared at load: a mismatch marks the
+                               #          loaded step `modifiedOnDisk` (in-memory only, never
+                               #          stored) and drives the §4.1 `step-modified` problem;
+                               #          the file on disk is still what loads and executes;
+                               #          agents entries are
                                #          {id, why?} — §4.7 agent uuids — and secrets entries
                                #          {id, why} — §4.8 secret uuids; the whys are the
                                #          §4.1 per-agent role notes and per-use secret notes)
@@ -325,7 +337,11 @@ definitions); the top-level `automation.yaml` holds **what the user owns and ope
 §5.1 archive drops concurrency, the snapshot toggles, one-shot triggers and user-sourced
 schedule provenance, rebuilds the grants from references (a copy could end up granted
 something the original was not), and refuses an automation with unresolved references, so
-it is the wrong tool for a same-machine copy. The copy gets a fresh uuid and a name
+it is the wrong tool for a same-machine copy. The copied version folders are re-sealed
+from the copied bytes: each manifest step's `sha` (§4.1) is re-stamped over the file as
+copied, so a hand-edited source yields a copy whose files and seals agree and the
+`step-modified` problem stays on the original alone (the manifest `sha` keys are, with
+`when` and `note` below, the one exception to the byte-for-byte copy). The copy gets a fresh uuid and a name
 deduped by the §4.1 create rule (the smallest free "Name n" suffix, applied to the name the
 user typed or the source name — never a 422). Copied verbatim from the source's top-level
 file: `description`, `agent_id`, `enabled_agents`, `allowed_secrets`, `memory_snapshots`,
@@ -333,8 +349,8 @@ file: `description`, `agent_id`, `enabled_agents`, `allowed_secrets`, `memory_sn
 needs-fixing original duplicates into a needs-fixing copy — the honest outcome), and
 `param_values` filtered to the current version's param names. The **current version only**
 becomes the copy's `versions/v1/` — every file of the source's `v<current>` folder copied
-byte for byte except the manifest's `when` (now) and `note` ("Duplicated from <source name>
-v<N>"); the source's draft, if any, is ignored. Triggers are copied with **fresh ids and every
+byte for byte except the manifest's `when` (now), `note` ("Duplicated from <source name>
+v<N>") and the per-step `sha` seals (re-stamped, above); the source's draft, if any, is ignored. Triggers are copied with **fresh ids and every
 one off** (`enabled: false`, no `enabledAt`; `runIfMissed` and `source` kept) — the §5.1
 import rule, so a duplicated cron or chat trigger can never double-fire beside its original
 before the user has changed anything. `memory/` starts empty unless the caller asked to copy

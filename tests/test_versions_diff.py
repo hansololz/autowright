@@ -149,15 +149,18 @@ def test_manifest_text_carries_packages_only_when_declared():
 
 def test_manifest_text_matches_the_on_disk_manifest(store, home):
     """§19: the manifest side reads as the on-disk automation.yaml would, minus its
-    when / note lines."""
+    when / note lines and the per-step `sha` seal."""
     from autowright import versions_diff
 
     a = store.create_automation(make_version(), "Manifested", "agent-1")
     disk = (home / "automations" / a["id"] / "versions" / "v1"
             / "automation.yaml").read_text(encoding="utf-8")
-    kept = "\n".join(ln for ln in disk.splitlines()
-                     if not ln.startswith(("when:", "note:")))
-    assert yaml.safe_load(kept) == yaml.safe_load(versions_diff.manifest_text(a["versions"][1]))
+    kept = yaml.safe_load("\n".join(ln for ln in disk.splitlines()
+                                    if not ln.startswith(("when:", "note:"))))
+    # §5 `sha` is the folder's own seal, not a versioned field the diff shows.
+    for step in kept["steps"]:
+        assert step.pop("sha")
+    assert kept == yaml.safe_load(versions_diff.manifest_text(a["versions"][1]))
 
 
 # ---------------------------------------------------------------- notes + line rules

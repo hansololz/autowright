@@ -10,6 +10,7 @@ rows the list surfaces need.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -111,7 +112,19 @@ def manifest_step_entry(s: dict, fname: str) -> dict[str, Any]:
         entry["retries"] = lenient_int(s.get("retries"))
     if s.get("infinite_retries"):
         entry["infinite_retries"] = True
+    # §4.1 authorship and lock — written only when set (absent = agent /
+    # unlocked). `sha` is not this function's: the version writer stamps it.
+    if s.get("authored_by") == "user":
+        entry["authored_by"] = "user"
+    if s.get("locked") is True:
+        entry["locked"] = True
     return entry
+
+
+def step_script_sha(data: bytes) -> str:
+    """§5 version-manifest `sha`: the first 16 hex chars of SHA-256 over a
+    step script's bytes — the same formula as the engine's per-step sha."""
+    return hashlib.sha256(data).hexdigest()[:16]
 
 
 def manifest_packages(ver: dict) -> list[dict]:
@@ -175,6 +188,12 @@ def step_json(s: dict) -> dict:
         out["retries"] = lenient_int(s["retries"])
     if s.get("infinite_retries"):
         out["infiniteRetries"] = True
+    # §4.1 authorship and lock — omitted at their defaults. The in-memory
+    # `modifiedOnDisk` mark is never serialized (it surfaces as a problem).
+    if s.get("authored_by") == "user":
+        out["authoredBy"] = "user"
+    if s.get("locked") is True:
+        out["locked"] = True
     return out
 
 
@@ -1117,6 +1136,24 @@ class Store:
             for key in ("secrets", "agents"):
                 if key in s:
                     s[key] = self._mapping_entries(s[key], vd, f"step {key}")
+            # §4.1 authorship and lock, §21.4 (2026-10-27): absent keys are
+            # the defaults (agent, unlocked); a damaged value reads as the
+            # default with a warning, never a load failure.
+            if "authored_by" in s and s["authored_by"] not in ("agent", "user"):
+                log.warning("version folder %s: step authored_by %r isn't agent or user — "
+                            "reading it as agent", vd, s["authored_by"])
+                s.pop("authored_by")
+            if s.get("authored_by") == "agent":
+                s.pop("authored_by")
+            if "locked" in s and not isinstance(s["locked"], bool):
+                log.warning("version folder %s: step locked %r isn't a boolean — "
+                            "reading it as unlocked", vd, s["locked"])
+                s.pop("locked")
+            if s.get("locked") is False:
+                s.pop("locked")
+            # §5 `sha` is this folder's own seal — consumed here, never carried
+            # in memory (so no writer can copy a stale one forward).
+            sealed_sha = s.pop("sha", None)
             code = ""
             f = vd / (s.get("file") or "")
             # is_file(): a missing/empty `file` key resolves to the version dir
@@ -1127,6 +1164,11 @@ class Store:
                 # another encoding loads with the bad bytes replaced rather
                 # than making the whole version unreadable.
                 code = f.read_text(encoding="utf-8", errors="replace")
+                # §4.1 `step-modified`: the script on disk no longer matches
+                # the seal the version writer recorded. In-memory only.
+                if isinstance(sealed_sha, str) and sealed_sha \
+                        and step_script_sha(f.read_bytes()) != sealed_sha:
+                    s["modifiedOnDisk"] = True
             steps.append({**s, "code": code})
         notes = ""
         if (vd / "notes.md").exists():
@@ -1328,9 +1370,12 @@ class Store:
             "updated_at": a["updated_at"],
         })
 
-    def _write_version_folder(self, vd: Path, ver: dict, extra: dict | None = None) -> None:
+    def _write_version_folder(self, vd: Path, ver: dict, extra: dict | None = None,
+                              *, seal: bool = True) -> None:
         """`extra` merges additional keys into automation.yaml — used by the
-        §4.4 pending create-mode slot for its identity fields.
+        §4.4 pending create-mode slot for its identity fields. `seal` stamps
+        each manifest step with the §5 `sha` of its script as written — every
+        real version; the draft container's working copy passes False.
 
         Crash-safe by write order (§5): step scripts and spec land first, the
         manifest (automation.yaml) last — it is the commit point (`_load_automation`
@@ -1346,10 +1391,15 @@ class Store:
         manifest_steps = []
         for i, s in enumerate(ver["steps"], 1):
             fname = safe_step_filename(s.get("file"), i, s.get("name"), keep)
-            manifest_steps.append(manifest_step_entry(s, fname))
+            entry = manifest_step_entry(s, fname)
+            manifest_steps.append(entry)
             keep.add(fname)
             code = s.get("code")
             atomic_write_text(vd / fname, code if isinstance(code, str) else "")
+            if seal:
+                # Over the bytes exactly as they landed (text-mode newline
+                # translation included), so the load-time compare is exact.
+                entry["sha"] = step_script_sha((vd / fname).read_bytes())
         atomic_write_text(vd / "spec.md", blocks_to_md(ver.get("spec", [])))
         # §4.1 notes — the agent-owned working-knowledge doc; absent when empty
         if (ver.get("notes") or "").strip():
@@ -1533,6 +1583,16 @@ class Store:
                     or (Path(directory) == source_vd and n == "automation.yaml")])
             manifest["when"] = now
             manifest["note"] = f"Duplicated from {source['name']} v{source_number}"
+            # §5 re-seal: each step's `sha` is stamped from the bytes actually
+            # copied, so a hand-edited source yields a copy whose files and
+            # seals agree (the step-modified problem stays on the original).
+            for entry in manifest.get("steps") or []:
+                if not isinstance(entry, dict):
+                    continue
+                entry.pop("sha", None)
+                file = entry.get("file")
+                if isinstance(file, str) and file and (vd / file).is_file():
+                    entry["sha"] = step_script_sha((vd / file).read_bytes())
             save_yaml(vd / "automation.yaml", manifest)
             (self.auto_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
             loaded = self._load_version_folder(vd)
@@ -1789,9 +1849,9 @@ class Store:
                     "name": name, "description": ver.get("description", ""), "agent_id": agent_id,
                     "triggers": triggers or [],
                     "created_at": prev.get("created_at") or now, "updated_at": now,
-                })
+                }, seal=False)
             else:
-                self._write_version_folder(new, ver)
+                self._write_version_folder(new, ver, seal=False)
             if dd.exists():
                 dd.rename(old)
             new.rename(dd)
@@ -3479,6 +3539,13 @@ class Store:
             out.append({"kind": "os-mismatch",
                         "label": f"Built on {display} — its steps may need rewriting "
                                  f"before they run on this {paths.machine_noun()}."})
+        # §4.1 `step-modified`: one entry per sealed step whose script was
+        # hand-edited on disk after the version was written, in step order.
+        out += [{"kind": "step-modified",
+                 "label": f"Step {s.get('name', '')} was edited on disk after "
+                          f"v{a['current_version']} was saved — pull and push it "
+                          "to make it a validated version."}
+                for s in cur.get("steps", []) or [] if s.get("modifiedOnDisk")]
         return out
 
     def auto_json(self, a: dict, full: bool = True) -> dict:

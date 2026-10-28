@@ -311,6 +311,12 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
                     raise TransferError(f"step {s['file']!r} combines retries and "
                                         "infinite_retries — repair the automation first")
                 entry["infinite_retries"] = True
+            # §4.1 authorship and lock travel, written only when set; the §5
+            # `sha` never does (it is the version folder's own seal).
+            if s.get("authored_by") == "user":
+                entry["authored_by"] = "user"
+            if s.get("locked") is True:
+                entry["locked"] = True
             steps.append(entry)
         meta["steps"] = steps
         agents = [{"ref": refs.agent_ref_by_id[aid],
@@ -724,6 +730,22 @@ def _validate(z: zipfile.ZipFile) -> dict:
             if r is not None:
                 raise TransferError("a step can't combine retries and infinite_retries")
             entry["infinite_retries"] = True
+        # §4.1 authorship and lock (§21.4 2026-10-27): absent is the default;
+        # a present value must be one a save could have written.
+        authored_by = s.get("authored_by")
+        if authored_by is not None:
+            if authored_by not in ("agent", "user"):
+                raise TransferError(f"step {s['name']!r} authored_by must be agent or user, "
+                                    f"not {authored_by!r}")
+            if authored_by == "user":
+                entry["authored_by"] = "user"
+        locked = s.get("locked")
+        if locked is not None:
+            if not isinstance(locked, bool):
+                raise TransferError(f"step {s['name']!r} locked must be true or false, "
+                                    f"not {locked!r}")
+            if locked:
+                entry["locked"] = True
         steps.append(entry)
 
     agents = _yaml_or_reject(z, "agents.yaml", required=False).get("agents") or []

@@ -3483,3 +3483,245 @@ def test_concurrent_starts_for_one_owner_leave_exactly_one_building_job(monkeypa
             assert len(building) == 1
     finally:
         release.set()
+
+
+# ---------- §4.1 user-owned steps: the §8 lock contract ----------
+
+LOCKED_CODE = 'from autowright import log\nlog("stored")\n'
+LOCKED_STEP = {"file": "01-fetch-page.py", "name": "Fetch page", "description": "stored desc",
+               "code": LOCKED_CODE, "timeout": 90, "retries": 2,
+               "authoredBy": "user", "locked": True}
+
+LOCKED_SYNC = """===FILE: manifest.yaml===
+note: n
+steps:
+  - { file: 01-a.py, name: A, description: d }
+  - { file: 02-fetch-page.py, name: Fetch page, locked: true }
+===FILE: 01-a.py===
+from autowright import log
+log("a")
+===END===
+"""
+
+
+def _locked_validate(text, locked=(LOCKED_STEP,), current=None):
+    locked = [dict(s) for s in locked]
+    return validate_steps(parse_envelope(text), GRANTS, locked_steps=locked,
+                          current_steps=current if current is not None else locked)
+
+
+def test_locked_step_spliced_with_stored_code_and_agent_position():
+    # §8 rule 3: the locked entry is replaced whole by the stored step — code,
+    # description, manifest fields, authorship, lock — keeping the agent's
+    # NN- prefix with the stored file's suffix
+    draft, errors = _locked_validate(LOCKED_SYNC)
+    assert errors == []
+    a, fetch = draft["steps"]
+    assert fetch == {"file": "02-fetch-page.py", "name": "Fetch page",
+                     "description": "stored desc", "agent": False, "why": "",
+                     "agents": [], "secrets": [], "packages": [], "timeout": 90,
+                     "retries": 2, "authored_by": "user", "locked": True,
+                     "code": LOCKED_CODE}
+    assert "authored_by" not in a and "locked" not in a
+
+
+def test_locked_step_keeps_stored_suffix_when_agent_renames_file():
+    text = LOCKED_SYNC.replace("02-fetch-page.py", "02-other.py")
+    draft, errors = _locked_validate(text)
+    assert errors == []
+    assert draft["steps"][1]["file"] == "02-fetch-page.py"
+
+
+def test_locked_step_missing_is_an_error():
+    text = LOCKED_SYNC.replace("  - { file: 02-fetch-page.py, name: Fetch page, locked: true }\n", "")
+    _, errors = _locked_validate(text)
+    assert ("locked step `Fetch page` is missing — keep it, or return a constraint "
+            "blocker explaining why the spec can't be met with it") in errors
+
+
+def test_locked_step_listed_twice_is_an_error():
+    text = LOCKED_SYNC.replace(
+        "  - { file: 02-fetch-page.py, name: Fetch page, locked: true }\n",
+        "  - { file: 02-fetch-page.py, name: Fetch page, locked: true }\n"
+        "  - { file: 03-fetch-page.py, name: Fetch page, locked: true }\n")
+    _, errors = _locked_validate(text)
+    assert any("`Fetch page` is listed twice" in e for e in errors)
+
+
+def test_locked_step_without_locked_flag_is_an_error():
+    _, errors = _locked_validate(LOCKED_SYNC.replace(", locked: true }", " }"))
+    assert any("`Fetch page` is locked" in e and "locked: true" in e for e in errors)
+
+
+def test_locked_step_identical_file_block_is_accepted():
+    text = LOCKED_SYNC.replace("===END===", "===FILE: 02-fetch-page.py===\n"
+                               + LOCKED_CODE + "===END===")
+    draft, errors = _locked_validate(text)
+    assert errors == []
+    assert draft["steps"][1]["code"] == LOCKED_CODE
+
+
+def test_locked_step_different_file_block_is_rejected():
+    text = LOCKED_SYNC.replace("===END===", "===FILE: 02-fetch-page.py===\n"
+                               "from autowright import log\nlog(\"rewritten\")\n===END===")
+    _, errors = _locked_validate(text)
+    assert "step `Fetch page` is locked — do not return its file" in errors
+
+
+def test_only_the_user_can_lock_a_step():
+    text = LOCKED_SYNC.replace("{ file: 01-a.py, name: A, description: d }",
+                               "{ file: 01-a.py, name: A, description: d, locked: true }")
+    _, errors = _locked_validate(text)
+    assert any("only the user can lock a step" in e for e in errors)
+    # a sync with no locked steps still refuses an agent-set lock
+    _, errors = _locked_validate(text.replace(
+        "  - { file: 02-fetch-page.py, name: Fetch page, locked: true }\n", ""), locked=())
+    assert any("`A`: only the user can lock a step" in e for e in errors)
+
+
+def test_locked_splice_runs_the_import_rules_on_stored_code():
+    # §4.1: a lock freezes the script against the agent, never against policy
+    bad = dict(LOCKED_STEP, code="import notarealmodule\n")
+    _, errors = _locked_validate(LOCKED_SYNC, locked=(bad,))
+    assert any("import notarealmodule isn't allowed" in e for e in errors)
+
+
+def test_manifest_authorship_and_lock_pass_through_outside_a_sync():
+    # §8: the save gate / CLI pass no reference set — the keys ride through
+    files = parse_envelope(GOOD_STEPS.replace(
+        "{ file: 01-a.py, name: A, description: d }",
+        "{ file: 01-a.py, name: A, description: d, authored_by: user, locked: true }"))
+    draft, errors = validate_steps(files)
+    assert errors == []
+    assert draft["steps"][0]["authored_by"] == "user"
+    assert draft["steps"][0]["locked"] is True
+    assert "authored_by" not in draft["steps"][1] and "locked" not in draft["steps"][1]
+
+
+def test_manifest_authorship_and_lock_are_type_checked():
+    files = parse_envelope(GOOD_STEPS.replace(
+        "{ file: 01-a.py, name: A, description: d }",
+        "{ file: 01-a.py, name: A, description: d, authored_by: me, locked: yes please }"))
+    _, errors = validate_steps(files)
+    assert "step 1: `authored_by` must be agent or user" in errors
+    assert "step 1: `locked` must be true or false" in errors
+
+
+def test_sync_authorship_keeps_user_only_for_identical_code():
+    # §4.1: unlocked sync output is agent-written, except a same-named step
+    # whose code is byte-identical to a user-written one keeps `user`
+    current = [{"file": "01-a.py", "name": "A", "code": 'from autowright import log\nlog("a")',
+                "authoredBy": "user"},
+               {"file": "02-b.py", "name": "B", "code": "old", "authoredBy": "user"}]
+    files = parse_envelope(GOOD_STEPS.replace(
+        "agent: true, why: needs judgment }",
+        "agent: true, why: needs judgment, authored_by: user }"))
+    draft, errors = validate_steps(files, GRANTS, locked_steps=[], current_steps=current)
+    assert errors == []
+    assert draft["steps"][0].get("authored_by") == "user"
+    assert "authored_by" not in draft["steps"][1]
+
+
+CONSTRAINT = """===BLOCKED===
+blockers:
+  - reason: The spec wants a retry the locked fetch doesn't do.
+    fix: Unlock Fetch page.
+    kind: constraint
+    step: Fetch page
+    workaround: Retry in a wrapper step.
+===END===
+"""
+
+
+def test_constraint_blocker_parses_step_and_workaround():
+    bl, _ = parse_blockers(CONSTRAINT, {"Fetch page"})
+    assert bl == [{"reason": "The spec wants a retry the locked fetch doesn't do.",
+                   "fix": "Unlock Fetch page.", "details": "", "kind": "constraint",
+                   "step": "Fetch page", "workaround": "Retry in a wrapper step."}]
+
+
+def test_constraint_blocker_parses_rule():
+    bl, _ = parse_blockers(CONSTRAINT.replace("    step: Fetch page\n",
+                                              "    rule: never use the network\n"), set())
+    assert bl[0]["rule"] == "never use the network" and "step" not in bl[0]
+
+
+def test_constraint_blocker_needs_exactly_one_of_step_or_rule():
+    both = CONSTRAINT.replace("    step: Fetch page\n",
+                              "    step: Fetch page\n    rule: never use the network\n")
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_blockers(both, {"Fetch page"})
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_blockers(CONSTRAINT.replace("    step: Fetch page\n", ""), {"Fetch page"})
+
+
+def test_constraint_blocker_step_must_name_a_locked_step():
+    with pytest.raises(ValueError, match="must name a locked step"):
+        parse_blockers(CONSTRAINT, {"Other step"})
+    # unknown reference set → the check is skipped
+    assert parse_blockers(CONSTRAINT)[0][0]["step"] == "Fetch page"
+
+
+def test_constraint_keys_rejected_on_other_kinds():
+    with pytest.raises(ValueError, match="only valid on a `kind: constraint`"):
+        parse_blockers(CONSTRAINT.replace("kind: constraint", "kind: user-action")
+                       .replace("    step: Fetch page\n", ""))
+    with pytest.raises(ValueError, match="only valid on a `kind: constraint`"):
+        parse_blockers(BLOCKED.replace("    details:", "    rule: r\n    details:"))
+
+
+def test_sync_prompt_carries_locked_steps_section_and_annotations():
+    cur = {"spec": "# T\n\nBody.", "params": [],
+           "steps": [{"file": "01-a.py", "name": "A", "code": "a = 1\n", "authoredBy": "user"},
+                     dict(LOCKED_STEP, file="02-fetch-page.py")]}
+    p = build_steps_prompt("# T\n\nBody.", cur, GRANTS)
+    assert ("=== CURRENT step 01-a.py (A): written by the user — keep it unless the SPEC "
+            "requires a change, and say so in notes when you change it ===") in p
+    assert "=== LOCKED STEPS (frozen by the user) ===" in p
+    assert "locked: true }` and nothing else" in p
+    assert "Mere inconvenience is not a constraint blocker" in p
+    section = p.split("=== LOCKED step 02-fetch-page.py (Fetch page) ===", 1)[1]
+    assert "name: Fetch page" in section and "description: stored desc" in section
+    assert "locked: true" in section and 'log("stored")' in section
+    assert p.index("=== LOCKED STEPS") < p.index("=== SPEC (spec.md")
+    # no locked step → no section
+    plain = build_steps_prompt("# T\n\nBody.", {**cur, "steps": cur["steps"][:1]}, GRANTS)
+    assert "=== LOCKED STEPS" not in plain
+
+
+def test_chat_prompt_annotates_locked_and_user_steps():
+    cur = {"spec": "# T\n\nBody.", "params": [],
+           "steps": [{"file": "01-a.py", "name": "A", "code": "a = 1\n", "authoredBy": "user"},
+                     dict(LOCKED_STEP, file="02-fetch-page.py"),
+                     {"file": "03-c.py", "name": "C", "code": "c = 1\n"}]}
+    chat = [{"kind": "blockers", "blockers": [
+        {"reason": "Spec wants retries.", "fix": "Unlock it.", "kind": "constraint",
+         "step": "Fetch page"}]}]
+    p = build_chat_prompt("x", cur, GRANTS, chat)
+    assert "=== CURRENT step 01-a.py (A): written by the user ===" in p
+    assert ("=== CURRENT step 02-fetch-page.py (Fetch page, timeout: 90s, retries: 2): "
+            "locked by the user — a sync keeps it byte for byte ===") in p
+    assert "=== CURRENT step 03-c.py (C) ===" in p
+    assert "(constraint) Spec wants retries. — Unlock it." in p
+    assert "`kind: constraint` blocker naming that step" in p.split("=== TASK ===")[-1]
+
+
+def test_sync_job_splices_locked_step_and_blocks_on_constraint(monkeypatch):
+    # §8 end to end: the pipeline passes the draft's locked steps to the
+    # validator (splice) and the blocker parser (constraint `step` check)
+    from autowright import harness
+
+    cur = {"spec": "# T\n\nBody.", "params": [], "steps": [dict(LOCKED_STEP)]}
+    monkeypatch.setattr(harness, "invoke", lambda agent, prompt, **kw: LOCKED_SYNC)
+    j = _run_job(DraftJobs(), "sync", {"harness": "Claude Code"}, None, cur, GRANTS)
+    assert j["status"] == "done", j
+    assert j["draft"]["steps"][1]["code"] == LOCKED_CODE
+    assert j["draft"]["steps"][1]["locked"] is True
+    assert j["draft"]["steps"][1]["authoredBy"] == "user"   # step_json's API spelling
+    assert "authoredBy" not in j["draft"]["steps"][0]
+
+    monkeypatch.setattr(harness, "invoke", lambda agent, prompt, **kw: CONSTRAINT)
+    j = _run_job(DraftJobs(), "sync", {"harness": "Claude Code"}, None, cur, GRANTS)
+    assert j["status"] == "blocked", j
+    assert j["blockers"][0]["kind"] == "constraint"
+    assert j["blockers"][0]["step"] == "Fetch page"

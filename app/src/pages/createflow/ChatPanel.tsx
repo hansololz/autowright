@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { usePlatformCopy } from '../../platformCopy'
 import { useStore } from '../../store'
-import type { Agent, ChatEntry } from '../../types'
+import type { Agent, Blocker, ChatEntry } from '../../types'
 import { BtnGhost, BtnPrimary, ConfirmModal, Eyebrow, MenuItemRow, PopMenu, ScrollArea, Spinner, agName, anyModalOpen, dispModel, durationLabel, usePopover, waitedLabel } from '../../ui'
 import { devlogOverlayOpen } from '../../devlog'
 import { Markdown } from '../../result'
@@ -263,6 +263,10 @@ export interface ChatPanelProps {
   analyzeFailure: (() => void) | null
   patchEntry: (id: string, patch: Partial<ChatEntry>) => void
   applyBlockersEntry: (entry: ChatEntry) => void
+  // §11 constraint blockers' own resolution rows
+  applyWorkaround: (entry: ChatEntry, blocker: Blocker) => void
+  unlockConstraintStep: (blocker: Blocker) => void
+  removeConstraintRule: (blocker: Blocker) => void
   clearChat: () => void
   cancelChat: () => void
   cancelSync: () => void
@@ -276,7 +280,8 @@ export function ChatPanel({
   testLive, viewingOld, inputDisabled, outOfSync, syncDisabled,
   lastRewriteId, composer, sendMessage,
   undoDraft, runSync, runDraftTest, analyzeFailure, patchEntry,
-  applyBlockersEntry, clearChat, cancelChat, cancelSync, setAgentId, up, showToast,
+  applyBlockersEntry, applyWorkaround, unlockConstraintStep, removeConstraintRule,
+  clearChat, cancelChat, cancelSync, setAgentId, up, showToast,
 }: ChatPanelProps) {
   // §9 per-OS copy rule: the machine noun the create empty state names.
   const copy = usePlatformCopy()
@@ -386,12 +391,16 @@ export function ChatPanel({
     const bl = e.blockers ?? []
     // §8 kind: user-action — the Mac isn't ready, the automation is fine
     if (bl.length > 0 && bl.every((b) => b.kind === 'user-action')) return 'Your AI needs you to do something first'
+    // §8 kind: constraint — the spec conflicts with a locked step or a build rule
+    if (bl.length > 0 && bl.every((b) => b.kind === 'constraint')) return 'Your AI can’t build this within your constraints'
     if (e.diagnosed) return 'The build failed — your AI suggests these fixes'
     return bl.length > 1 ? `Your AI hit ${bl.length} blockers` : 'Your AI hit a blocker'
   }
   // §11: two sources — chat (clarification) and sync.
   const blockersExplainer = (e: ChatEntry) =>
-    e.source === 'chat'
+    (e.blockers ?? []).length > 0 && (e.blockers ?? []).every((b) => b.kind === 'constraint')
+      ? 'The spec asks for something a locked step or a build rule forbids. Use the workaround, or lift the constraint and sync again.'
+      : e.source === 'chat'
       ? 'Reply below — your answer is sent back and the spec is rewritten.'
       : 'It couldn’t sync the steps with the spec.'
 
@@ -567,7 +576,9 @@ export function ChatPanel({
             // §11: a mixed entry keeps the source's primary button — it applies
             // only the ordinary blockers' resolutions; a pure user-action entry
             // offers Dismiss only (there is nothing to amend)
-            const ordinary = blockers.filter((b) => b.kind !== 'user-action')
+            // §11: constraint blockers resolve through their own rows, so the
+            // entry's primary applies only the ordinary ones
+            const ordinary = blockers.filter((b) => b.kind !== 'user-action' && b.kind !== 'constraint')
             const mdBody = (text: string) => (
               <div style={{ margin: '3px 0 8px' }}>
                 <Markdown small text={text} />
@@ -591,13 +602,39 @@ export function ChatPanel({
                       )}
                       <Eyebrow>REASON</Eyebrow>
                       {mdBody(b.reason)}
-                      <Eyebrow>HOW TO FIX</Eyebrow>
+                      <Eyebrow>{b.kind === 'constraint' ? 'WHAT LIFTING IT ALLOWS' : 'HOW TO FIX'}</Eyebrow>
                       {mdBody(b.fix)}
+                      {b.kind === 'constraint' && (b.workaround ?? '').trim() && (
+                        <>
+                          <Eyebrow>WORKAROUND</Eyebrow>
+                          {mdBody(b.workaround!)}
+                        </>
+                      )}
                       {(b.details ?? '').trim() && (
                         <>
                           <Eyebrow>DETAILS</Eyebrow>
                           {mdBody(b.details!)}
                         </>
+                      )}
+                      {/* §11: each constraint names a different lock or rule,
+                          so each carries its own resolution row */}
+                      {b.kind === 'constraint' && (
+                        <ActionRow style={{ marginTop: 4, marginBottom: 6 }}>
+                          {(b.workaround ?? '').trim() && (
+                            <BtnPrimary disabled={anyJobBusy || viewingOld} onClick={() => applyWorkaround(e, b)}>
+                              Use the workaround
+                            </BtnPrimary>
+                          )}
+                          {b.step ? (
+                            <BtnGhost disabled={anyJobBusy || viewingOld} onClick={() => unlockConstraintStep(b)}>
+                              Unlock "{b.step}"
+                            </BtnGhost>
+                          ) : b.rule ? (
+                            <BtnGhost disabled={anyJobBusy || viewingOld} onClick={() => removeConstraintRule(b)}>
+                              Remove the rule
+                            </BtnGhost>
+                          ) : null}
+                        </ActionRow>
                       )}
                     </div>
                   ))}

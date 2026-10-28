@@ -4788,3 +4788,75 @@ def test_ws_role_shell_registers_a_shell_subscriber(client):
             assert api.hub.has_role("shell") is False
     finally:
         api.hub._loop = None
+
+
+# ---------- §19 POST /validate-steps, §4.1 authorship and lock ----------
+
+def test_validate_steps_answers_200_with_the_errors(client):
+    from autowright.storage import store
+
+    before = set(store.autos)
+    r = client.post("/validate-steps", json={"draft": make_version()})
+    assert r.status_code == 200 and r.json() == {"errors": []}
+
+    broken = make_version()
+    broken["steps"][0]["code"] = "def oops(:\n"
+    r = client.post("/validate-steps", json={"draft": broken})
+    assert r.status_code == 200
+    assert r.json()["errors"]
+    # It writes nothing: no automation, no pending draft container.
+    assert set(store.autos) == before
+    assert not (store.draft_dir(None) / "automation").exists()
+
+
+def test_save_version_carries_authored_by_and_locked(client):
+    from autowright.storage import store
+
+    a = store.create_automation(make_version(), "Owned", "mock")
+    draft = make_version(notes="second")
+    draft["steps"][0]["authoredBy"] = "user"
+    draft["steps"][0]["locked"] = True
+    r = client.post(f"/automations/{a['id']}/versions", json={"draft": draft})
+    assert r.status_code == 200, r.text
+    steps = client.get(f"/automations/{a['id']}").json()["steps"]
+    assert steps[0]["authoredBy"] == "user" and steps[0]["locked"] is True
+    assert "authoredBy" not in steps[1] and "locked" not in steps[1]
+    internal = store.autos[a["id"]]["versions"][r.json()["version"]]["steps"][0]
+    assert internal["authored_by"] == "user" and internal["locked"] is True
+    assert "authoredBy" not in internal
+
+    # A wrongly typed value is a 422 at the request model.
+    bad = make_version(notes="third")
+    bad["steps"][0]["authoredBy"] = "someone"
+    assert client.post(f"/automations/{a['id']}/versions",
+                       json={"draft": bad}).status_code == 422
+
+
+def test_restore_validates_like_a_save(client):
+    """§19: a restore runs the save's step validators — a stored folder whose
+    script was hand-edited on disk into broken Python answers 422 and mints
+    nothing; an unmodified restore still lands, sealed."""
+    from autowright.storage import step_script_sha, store
+    from autowright.yamlio import load_yaml
+
+    a = store.create_automation(make_version(), "Restorer", "mock")
+    store.save_new_version(a, make_version(notes="two"))
+    store.save_new_version(a, make_version(notes="three"))
+    v1 = store.auto_dir(a) / "versions" / "v1"
+    (v1 / "02-finish.py").write_text("def oops(:\n", encoding="utf-8")
+    a["versions"][1] = store._load_version_folder(v1)
+    assert a["versions"][1]["steps"][1]["modifiedOnDisk"] is True
+
+    r = client.post(f"/automations/{a['id']}/restore", json={"version": 1})
+    assert r.status_code == 422, r.text
+    assert "v1 doesn't validate" in r.json()["detail"]
+    assert a["current_version"] == 3
+    assert not (store.auto_dir(a) / "versions" / "v4").exists()
+
+    r = client.post(f"/automations/{a['id']}/restore", json={"version": 2})
+    assert r.status_code == 200, r.text
+    n = r.json()["version"]
+    vd = store.auto_dir(a) / "versions" / f"v{n}"
+    for entry in load_yaml(vd / "automation.yaml")["steps"]:
+        assert entry["sha"] == step_script_sha((vd / entry["file"]).read_bytes())
+    assert r.json()["automation"]["problems"] == []

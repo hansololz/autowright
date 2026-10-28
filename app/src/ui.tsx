@@ -1279,6 +1279,26 @@ export function PyCode({ code, className, style }: {
   return <pre className={className} style={style}>{nodes}</pre>
 }
 
+// §11 document-editor textarea — shared by the document-editor modal and the
+// step-script modal's edit mode (§11 Step editing): the code pane's 12px/1.65
+// mono rhythm on the code ground, full height, the overlay thumb's scroller.
+export const DOC_TEXTAREA_STYLE: React.CSSProperties = {
+  flex: 1, minHeight: 0, width: '100%', background: 'transparent', border: 'none', outline: 'none',
+  color: 'var(--text-2)', font: "400 12px/1.65 var(--mono)", padding: '14px 28px 20px 20px',
+  resize: 'none', display: 'block', overflowY: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+}
+// …and the 36 px hint footer beneath it.
+export const DOC_FOOTER_STYLE: React.CSSProperties = {
+  height: 36, flex: 'none', display: 'flex', alignItems: 'center', padding: '0 20px',
+  borderTop: '1px solid var(--hairline)', font: "400 11.5px/1.5 var(--sans)", color: 'var(--text-muted)',
+}
+
+/** "<n> lines" for an editor's current text: a trailing final newline is not
+ * counted, and an empty editor holds 0 lines. */
+export function docLineCount(text: string): number {
+  return text === '' ? 0 : text.replace(/\n$/, '').split('\n').length
+}
+
 // §14 overlay scrollbar: the scroller hides its native bar (.ad-scrollhide) and
 // the pane draws a thin thumb over the content — no track, no layout space, so
 // content never shifts. The caller wraps scroller + thumb in a position:relative

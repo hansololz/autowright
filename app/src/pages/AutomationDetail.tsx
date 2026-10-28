@@ -735,7 +735,7 @@ export default function AutomationDetail() {
       {diffFrom !== null && (
         <VersionDiffModal
           automationId={auto.id}
-          versions={[{ version: auto.version, when: '', note: null }, ...(auto.versions ?? [])]}
+          versions={[{ version: auto.version, when: '', note: null, steps: auto.steps }, ...(auto.versions ?? [])]}
           current={auto.version}
           from={diffFrom}
           onClose={() => setDiffFrom(null)}

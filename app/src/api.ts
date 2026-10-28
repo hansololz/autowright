@@ -304,6 +304,9 @@ export const api = {
     req<{ packages: import('./types').PackageDep[] }>('POST', '/packages/outdated', { packages }),
   updatePackages: (packages: { pip: string; import: string }[]) =>
     req<{ packages: import('./types').PackageDep[] }>('POST', '/packages/update', { packages }),
+  // §19 the §8 step validators over a draft-shaped body, nothing written —
+  // backs the §11 step editor's Save; an empty list means it would save
+  validateSteps: (draft: unknown) => req<{ errors: string[] }>('POST', '/validate-steps', { draft }),
   postDraftJob: (body: Record<string, unknown>) => req<{ jobId: string }>('POST', '/drafts', body),
   getDraftJob: (jobId: string) => req<DraftJob>('GET', `/drafts/${jobId}`),
   cancelDraftJob: (jobId: string) => req('DELETE', `/drafts/${jobId}`),

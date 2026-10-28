@@ -3,11 +3,11 @@
 // (header row, status-aware collapsed line, body top-hairline). RightCards:
 // the display-only steps / triggers / parameters / packages cards under the
 // BUILD and TEST cards. The page shell wires state and derived gating in.
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { usePlatformCopy } from '../../platformCopy'
 import { SecretModal } from '../../SecretModal'
 import { useTriggerPreview } from '../../triggers'
-import { StepList, type StepHistory } from '../../steps'
+import { StepList, type StepEditing, type StepHistory } from '../../steps'
 import type { Agent, SecretMeta, UnresolvedRefs } from '../../types'
 import { Caret, CheckBox, Collapse, EmptyLine, Eyebrow, MetaChip, MiniBadge, Notice, ScrollArea, agName, dispModel, paramSummary } from '../../ui'
 import { Markdown, SpecMarkdown } from '../../result'
@@ -479,6 +479,7 @@ export function LeftColumn({
 
 export interface RightCardsProps {
   stepHistory?: StepHistory[] // §9.2 change badge: the stored revisions (edit mode only)
+  stepEditing?: StepEditing // §11 step editing: hand edits, the step-script modal's editor
   rev: Rev
   up: (patch: Partial<Rev>) => void
   liveParams?: import('../../types').ParamDef[] // edit mode: the automation's stored values (§16 summary source)
@@ -501,8 +502,11 @@ export interface RightCardsProps {
 export function RightCards({
   rev, up, liveParams, liveConcurrency, drafting, isCreateEmpty, outOfSync, busyRewrite,
   availAgents, agents, secrets, unresolvedReferences, pkgSecOpenEff, updatePkgs, installPkgs,
-  stepHistory,
+  stepHistory, stepEditing,
 }: RightCardsProps) {
+  // §11 Add step: the STEPS card footer's button runs the list's add action
+  const addStepRef = useRef<(() => void) | null>(null)
+  const editing = stepEditing ? { ...stepEditing, addRef: addStepRef } : undefined
   // §19: the §11 draft-trigger chips label through POST /triggers/preview —
   // the renderer keeps no local trigger-math mirror (§4.3)
   const trigPreviews = useTriggerPreview(rev.triggers)
@@ -513,7 +517,7 @@ export function RightCards({
       {/* STEPS */}
       <div className="ad-card" style={{ overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', padding: '12px 18px', borderBottom: '1px solid var(--hairline)' }}>
-          <Eyebrow>STEPS · GENERATED</Eyebrow>
+          <Eyebrow>{rev.steps.some((s) => s.locked || s.authoredBy === 'user') ? 'STEPS' : 'STEPS · GENERATED'}</Eyebrow>
         </div>
         {/* §11 first build on Review: static placeholder — drafting progress
             lives in the thread; also shown on the create empty state */}
@@ -521,8 +525,23 @@ export function RightCards({
           <EmptyLine>Steps appear here once the build finishes.</EmptyLine>
         )}
         <div style={{ display: 'flex', flexDirection: 'column', opacity: outOfSync || busyRewrite ? 0.45 : 1, transition: 'opacity var(--t-hover) var(--ease-enter)' }}>
-          <StepList variant="editor" steps={rev.steps} availAgents={availAgents} allAgents={agents} secrets={secrets} unresolvedReferences={unresolvedReferences} packages={rev.packages} history={stepHistory} viewing={rev.viewing} params={rev.params} />
+          <StepList variant="editor" steps={rev.steps} availAgents={availAgents} allAgents={agents} secrets={secrets} unresolvedReferences={unresolvedReferences} packages={rev.packages} history={stepHistory} viewing={rev.viewing} params={rev.params} editing={editing} />
         </div>
+        {/* §11 step editing: Add step appends a user-written step and opens
+            it in the step-script modal's edit mode */}
+        {editing && (
+          <div style={{ padding: '10px 18px', borderTop: '1px solid var(--hairline-dim)' }}>
+            <button
+              className="ad-btn-ghost"
+              disabled={editing.disabled}
+              onClick={() => addStepRef.current?.()}
+              style={{ padding: '5px 12px', fontSize: 12 }}
+            >
+              <i className="fa-solid fa-plus" style={{ marginRight: 6, fontSize: 10.5 }} />
+              Add step
+            </button>
+          </div>
+        )}
       </div>
 
       {/* TRIGGERS — display-only (§11): what saving stores — drafted crons

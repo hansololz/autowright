@@ -18,6 +18,8 @@ vi.mock('../src/api', () => ({
   api: {
     instructions: vi.fn(async () => ({ framework: '# Framework', build: '- build rules' })),
     postDraftJob: vi.fn(async () => ({ jobId: 'j1' })),
+    // §19 the §11 step editor's Save asks the §8 step validators first
+    validateSteps: vi.fn(async () => ({ errors: [] })),
     patchAutomation: vi.fn(async () => ({})),
     getDraftJob: vi.fn(() => new Promise(() => { /* poll never answers in tests */ })),
     cancelDraftJob: vi.fn(async () => ({})),
@@ -920,6 +922,134 @@ describe('CreateFlow blockers thread entries (§11)', () => {
     expect(screen.queryByText('Apply to the spec & sync')).toBeNull()
     fireEvent.click(screen.getByText('Dismiss'))
     expect(screen.getByText('1 blocker — dismissed')).toBeTruthy()
+  })
+})
+
+describe('CreateFlow step editing (§11)', () => {
+  beforeEach(armPendingPoll)
+
+  it('a remembered hand edit validates the draft, applies, adds the build rule and stays in sync', async () => {
+    render(<CreateFlow />)
+    expect(screen.getByText('In sync with the spec.')).toBeTruthy()
+    fireEvent.click(screen.getAllByText('Fetch pages')[0])
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByTestId('step-editor'), { target: { value: 'log("b")' } })
+    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
+    fireEvent.change(screen.getByPlaceholderText('What every future sync must keep — one line'), { target: { value: 'log b, never a' } })
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Save'))
+    await waitFor(() => expect(screen.getByText('Build rule added.')).toBeTruthy())
+    // §19 POST /validate-steps got the draft as it would be after the edit
+    const sent = (mockedApi.validateSteps as ReturnType<typeof vi.fn>).mock.calls[0][0] as { steps: { code: string; authoredBy?: string }[] }
+    expect(sent.steps[0]).toMatchObject({ code: 'log("b")', authoredBy: 'user' })
+    // the rule lands under a new "## Build rules" section of the spec
+    expect(screen.getAllByText('Build rules').length).toBeGreaterThan(0)
+    expect(bodyLi('Step "Fetch pages": log b, never a')).toBeTruthy()
+    // a hand edit never marks the workflow out of sync, and the row now
+    // carries the Written by you tag
+    expect(screen.queryByText('Out of sync — steps still match the old spec.')).toBeNull()
+    expect(screen.getByText('In sync with the spec.')).toBeTruthy()
+    expect(screen.getAllByText('Written by you').length).toBeGreaterThan(0)
+  })
+
+  it('the STEPS card footer adds a step and opens it in edit mode; locking lands the chip', async () => {
+    render(<CreateFlow />)
+    fireEvent.click(within(cardOf(screen.getByText('STEPS · GENERATED'))).getByText('Add step'))
+    expect(screen.getByRole('dialog').getAttribute('aria-label')).toBe('Step 2 of 2: New step')
+    expect(screen.getByTestId('step-editor')).toBeTruthy()
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Cancel'))
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Lock step'))
+    expect(screen.getByText('Step \'New step\' locked.')).toBeTruthy()
+    expect(screen.queryByText('Out of sync — steps still match the old spec.')).toBeNull()
+  })
+
+  it('a settled sync that rewrites or drops a hand-written step says so', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        steps: [
+          { file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("mine")', authoredBy: 'user' },
+          { file: '02-b.py', name: 'Old', description: '', code: 'log("old")', authoredBy: 'user' },
+          { file: '03-c.py', name: 'Kept', description: '', code: 'log("kept")', authoredBy: 'user', locked: true },
+        ],
+      } as unknown as Automation],
+    })
+    render(<CreateFlow />)
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: 'j1', status: 'done', stage: null, detail: null, error: null, mode: 'sync',
+      draft: {
+        steps: [
+          { file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("agent")' },
+          { file: '02-c.py', name: 'Kept', description: '', code: 'log("kept")', authoredBy: 'user', locked: true },
+        ],
+        packages: [],
+      },
+    })
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(screen.getByText('Steps synced with the spec.')).toBeTruthy(), { timeout: 3000 })
+    expect(screen.getByText('Your step \'Fetch pages\' was rewritten.')).toBeTruthy()
+    expect(screen.getByText('Your step \'Old\' was removed.')).toBeTruthy()
+    expect(screen.queryByText(/Your step 'Kept'/)).toBeNull()
+  })
+
+  it('a constraint blocker offers the workaround and Unlock, which clears the lock and syncs', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        steps: [{ file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("a")', authoredBy: 'user', locked: true }],
+      } as unknown as Automation],
+    })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...BLOCKED_SYNC,
+      blockers: [{
+        kind: 'constraint', step: 'Fetch pages',
+        reason: 'The spec wants JSON, but Fetch pages is locked.', fix: 'Fetch pages could write JSON.',
+        workaround: 'Convert the output in a new step.',
+      }],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(screen.getByText('Your AI can’t build this within your constraints')).toBeTruthy(), { timeout: 3000 })
+    expect(screen.getByText('The spec asks for something a locked step or a build rule forbids. Use the workaround, or lift the constraint and sync again.')).toBeTruthy()
+    expect(screen.getByText('WHAT LIFTING IT ALLOWS')).toBeTruthy()
+    expect(screen.getByText('WORKAROUND')).toBeTruthy()
+    expect(screen.getByText('Use the workaround')).toBeTruthy()
+    // the entry's own primary never applies constraint blockers
+    expect(screen.queryByText('Apply to the spec & sync')).toBeNull()
+    fireEvent.click(screen.getByText('Unlock "Fetch pages"'))
+    expect(screen.getByText('Step \'Fetch pages\' unlocked.')).toBeTruthy()
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(2))
+    const current = draftBody(1).current as { steps: { locked?: boolean }[] }
+    expect(draftBody(1).mode).toBe('sync')
+    expect(current.steps[0].locked).toBeUndefined()
+  })
+
+  it('Remove the rule deletes the quoted spec bullet and syncs; an unmatched rule only toasts', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        spec: [...AUTO.spec, { kind: 'h2', text: 'Build rules' }, { kind: 'li', text: 'Step "Fetch pages": Never use JSON' }],
+      } as unknown as Automation],
+    })
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...BLOCKED_SYNC,
+      blockers: [
+        { kind: 'constraint', rule: 'never use json', reason: 'A rule forbids JSON.', fix: 'Steps could write JSON.' },
+        { kind: 'constraint', rule: 'no such rule', reason: 'Another rule.', fix: 'Something.' },
+      ],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(screen.getAllByText('Remove the rule')).toHaveLength(2), { timeout: 3000 })
+    // no workaround sent → no workaround button
+    expect(screen.queryByText('Use the workaround')).toBeNull()
+    fireEvent.click(screen.getAllByText('Remove the rule')[1])
+    expect(storeMod.useStore.getState().toast).toBe('Rule not found — edit the spec by hand')
+    expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getAllByText('Remove the rule')[0])
+    expect(screen.getByText('Spec updated.')).toBeTruthy()
+    await waitFor(() => expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(2))
+    const spec = (draftBody(1).current as { spec: { text: string }[] }).spec
+    expect(spec.some((b) => b.text.includes('Never use JSON'))).toBe(false)
   })
 })
 

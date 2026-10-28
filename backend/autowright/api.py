@@ -28,7 +28,7 @@ from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, fini
                      fire_trigger, queue_manual)
 from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
                       NameTakenError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
-                      size_label, store, strip_param_values)
+                      manifest_step_entry, size_label, store, strip_param_values)
 from . import testexec, versions_diff
 
 log = logging.getLogger("autowright.api")
@@ -464,6 +464,13 @@ def _version_content(v: dict) -> dict:
 
 
 def _validate_draft_steps(d: dict, a: dict | None = None) -> None:
+    """The save endpoints' 422 form of `_draft_step_errors` (below)."""
+    errors = _draft_step_errors(d, a)
+    if errors:
+        raise HTTPException(422, "the draft doesn't validate: " + "; ".join(errors))
+
+
+def _draft_step_errors(d: dict, a: dict | None = None) -> list[str]:
     """§19 server-side step validation: POST /automations and /versions run
     the §8 step validators (`drafting.validate_steps` — ast.parse, the §6.2
     import allowlist, manifest schema and step-file ordering, the
@@ -497,8 +504,7 @@ def _validate_draft_steps(d: dict, a: dict | None = None) -> None:
                   "secrets": [{"id": s["id"], "name": s["name"]} for s in store.secrets]}
     _, errors = drafting.validate_steps(
         files, grants, unresolved=(a or {}).get("unresolved_references"))
-    if errors:
-        raise HTTPException(422, "the draft doesn't validate: " + "; ".join(errors))
+    return list(errors or [])
 
 
 # The executions tree can be GBs across thousands of directories; the size
@@ -950,6 +956,17 @@ def create_auto(body: models.AutomationCreate) -> dict:
         hub.publish("draft.changed")
     _publish_auto_changed(a)
     return _auto_json_locked(a)
+
+
+@app.post("/validate-steps", dependencies=[Depends(auth)])
+def validate_steps(body: models.StepsValidate) -> dict:
+    """§19: the save endpoints' §8 step validators over a draft-shaped body,
+    answered as 200 `{ errors }` — the caller is asking, not saving, so a
+    failure is the body, never a 422. Writes nothing, touches no draft."""
+    d = body.draft.plain()
+    if not d.get("steps"):
+        return {"errors": ["draft has no steps"]}
+    return {"errors": _draft_step_errors(d)}
 
 
 @app.post("/automations/{automation_id}/duplicate", status_code=201,
@@ -1425,8 +1442,23 @@ def import_confirm(body: models.ImportConfirm) -> dict:
 def restore(automation_id: str, body: models.VersionRestore) -> dict:
     a = _auto_or_404(automation_id)
     v = body.version
-    if v not in a["versions"]:
-        raise HTTPException(404, f"v{v} not found")
+    with store.lock:
+        if v not in a["versions"]:
+            raise HTTPException(404, f"v{v} not found")
+        stored = a["versions"][v]
+        # §19: the restored steps validate like a save's — a folder whose
+        # script was hand-edited on disk (§4.1 step-modified) must not become
+        # a validated-looking new version by way of a restore. Validated is
+        # what the writer will land: the lenient manifest entry (a stored
+        # `timeout: abc` has already degraded to the default) plus the code.
+        d = {"steps": [{**manifest_step_entry(s, s.get("file") or ""),
+                        "code": s.get("code") or ""}
+                       for s in stored.get("steps") or [] if isinstance(s, dict)],
+             "params": stored.get("params") or [],
+             "packages": stored.get("packages") or []}
+    errors = _draft_step_errors(d, a)
+    if errors:
+        raise HTTPException(422, f"v{v} doesn't validate: " + "; ".join(errors))
     n = store.restore_version(a, v)
     _publish_auto_changed(a)
     return {"version": n, "automation": _auto_json_locked(a)}

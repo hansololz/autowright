@@ -192,3 +192,20 @@ describe('VersionDiffModal', () => {
     expect(screen.getByText('v1 → v3')).toBeTruthy()
   })
 })
+
+describe('navigator lock glyph (§9.2/§4.1)', () => {
+  it('a step locked on the newer side carries the faint lock glyph; a removed or unlocked file does not', async () => {
+    mockedApi.versionDiff.mockResolvedValue(DIFF)
+    open({
+      versions: [
+        { version: 3, when: '', note: null, steps: [{ name: 'Fetch', description: '', code: '', locked: true }] },
+        ...VERSIONS.slice(1),
+      ],
+    })
+    await waitFor(() => expect(screen.getByTestId('diff-file-01-fetch.py')).toBeTruthy())
+    const lock = screen.getByTestId('diff-file-01-fetch.py').querySelector('[data-testid="diff-lock"]')!
+    expect(lock.getAttribute('title')).toBe('Locked — a sync keeps this step byte for byte')
+    expect(screen.getAllByTestId('diff-lock')).toHaveLength(1)
+    expect(mod.lockedOnNewer(DIFF.files, undefined).some(Boolean)).toBe(false)
+  })
+})

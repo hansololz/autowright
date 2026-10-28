@@ -747,6 +747,160 @@ def test_push_without_packages_skips_install(tmp_path, capsys):
     assert "package" not in capsys.readouterr().out
 
 
+def _two_step_auto(**first):
+    """FULL_AUTO with a second step; `first` overrides keys on step 1."""
+    auto = copy.deepcopy(FULL_AUTO)
+    auto["steps"][0].update(first)
+    auto["steps"].append({"file": "02-report.py", "name": "Report",
+                          "description": "print the report", "code": "print('report')\n"})
+    return auto
+
+
+def _pushed_steps(c):
+    _, _, body = next(p for p in c.posted if p[1].endswith("/versions"))
+    return body["draft"]["steps"]
+
+
+def test_pull_writes_authorship_and_lock_only_when_set(tmp_path):
+    """§20/§4.1: pull writes `authored_by: user` and `locked: true` on the
+    manifest step entries that carry them, and nothing on agent/unlocked ones."""
+    import yaml
+
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, _two_step_auto(authoredBy="user", locked=True))
+    steps = yaml.safe_load((d / "manifest.yaml").read_text())["steps"]
+    assert steps[0]["authored_by"] == "user" and steps[0]["locked"] is True
+    assert "authored_by" not in steps[1] and "locked" not in steps[1]
+
+
+def test_push_lock_and_unlock_flags_set_the_step_lock(tmp_path):
+    """§20 `push --lock NAME` sends `locked: true` on the named step;
+    `--unlock NAME` clears a lock the manifest carries."""
+    d = tmp_path / "wd"
+    from autowright import cli
+
+    cli.write_workdir(d, _two_step_auto())
+    c = _WorkdirClient(_two_step_auto())
+    _run(c, "automation", "push", "Daily Report", str(d), "--lock", "Report")
+    first, second = _pushed_steps(c)
+    assert second["locked"] is True
+    assert "locked" not in first
+
+    locked = _two_step_auto(locked=True)
+    cli.write_workdir(d, locked)
+    c = _WorkdirClient(locked)
+    _run(c, "automation", "push", "Daily Report", str(d), "--unlock", "Fetch")
+    assert all("locked" not in s for s in _pushed_steps(c))
+
+
+def test_push_lock_flag_refuses_unknown_and_conflicting_names(tmp_path):
+    """§20: an unknown --lock name exits 1 listing the workdir's step names;
+    the same name in --lock and --unlock exits 1. Nothing is saved."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, _two_step_auto())
+    c = _WorkdirClient(_two_step_auto())
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "push", "Daily Report", str(d), "--lock", "Nope")
+    assert "Nope" in str(ei.value.code) and "Fetch, Report" in str(ei.value.code)
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "push", "Daily Report", str(d),
+             "--lock", "Fetch", "--unlock", "Fetch")
+    assert "Fetch" in str(ei.value.code)
+    assert not any(p[1].endswith("/versions") for p in c.posted)
+
+
+def test_push_marks_a_changed_script_user_written(tmp_path):
+    """§20: a step whose workdir bytes differ from the stored step's is pushed
+    `authoredBy: user`; an untouched agent step goes without the key; an
+    untouched user-written step keeps `user`; an explicit manifest
+    `authored_by` wins over the comparison."""
+    from autowright import cli
+
+    auto = _two_step_auto()
+    d = tmp_path / "wd"
+    cli.write_workdir(d, auto)
+    (d / "02-report.py").write_text("print('my report')\n", encoding="utf-8")
+    c = _WorkdirClient(auto)
+    _run(c, "automation", "push", "Daily Report", str(d))
+    first, second = _pushed_steps(c)
+    assert "authoredBy" not in first and "authored_by" not in first
+    assert second["authoredBy"] == "user"
+
+    user_auto = _two_step_auto(authoredBy="user")
+    cli.write_workdir(d, user_auto)
+    manifest = (d / "manifest.yaml").read_text()
+    # drop the pulled key: the stored authorship then decides for the
+    # byte-identical script
+    (d / "manifest.yaml").write_text(manifest.replace("  authored_by: user\n", ""))
+    c = _WorkdirClient(user_auto)
+    _run(c, "automation", "push", "Daily Report", str(d))
+    assert _pushed_steps(c)[0]["authoredBy"] == "user"
+
+    cli.write_workdir(d, auto)
+    (d / "02-report.py").write_text("print('changed')\n", encoding="utf-8")
+    manifest = (d / "manifest.yaml").read_text()
+    (d / "manifest.yaml").write_text(
+        manifest.replace("  description: print the report\n",
+                         "  description: print the report\n  authored_by: agent\n"))
+    c = _WorkdirClient(auto)
+    _run(c, "automation", "push", "Daily Report", str(d))
+    assert "authoredBy" not in _pushed_steps(c)[1]
+
+
+def test_automation_validate_prints_ok_on_a_clean_workdir(tmp_path, capsys):
+    """§20 `automation validate`: a clean workdir posts its draft to
+    `POST /validate-steps`, prints `ok`, and saves nothing."""
+    from autowright import cli
+
+    class _Clean(_WorkdirClient):
+        def req(self, method, path, body=None, timeout=30):
+            if method == "POST" and path == "/validate-steps":
+                self.posted.append((method, path, body))
+                return {"errors": []}
+            return super().req(method, path, body, timeout)
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, FULL_AUTO)
+    c = _Clean()
+    _run(c, "automation", "validate", str(d))
+    assert capsys.readouterr().out.strip() == "ok"
+    assert [p[1] for p in c.posted] == ["/validate-steps"]
+    assert c.posted[0][2]["draft"]["steps"][0]["file"] == "01-fetch.py"
+
+
+def test_automation_validate_prints_errors_and_exits_1(tmp_path, capsys):
+    """§20: a step with a syntax error prints the error lines and exits 1;
+    the server's `errors` list prints the same way."""
+    from autowright import cli
+
+    d = tmp_path / "wd"
+    cli.write_workdir(d, FULL_AUTO)
+    (d / "01-fetch.py").write_text("def broken(:\n", encoding="utf-8")
+    c = _WorkdirClient()
+    with pytest.raises(SystemExit) as ei:
+        _run(c, "automation", "validate", str(d))
+    assert ei.value.code == 1
+    assert "syntax error" in capsys.readouterr().err
+    assert c.posted == []
+
+    class _Refusing(_WorkdirClient):
+        def req(self, method, path, body=None, timeout=30):
+            if method == "POST" and path == "/validate-steps":
+                return {"errors": ["first problem", "second problem"]}
+            return super().req(method, path, body, timeout)
+
+    cli.write_workdir(d, FULL_AUTO)
+    with pytest.raises(SystemExit) as ei:
+        _run(_Refusing(), "automation", "validate", str(d))
+    assert ei.value.code == 1
+    err = capsys.readouterr().err.splitlines()
+    assert "  - first problem" in err and "  - second problem" in err
+
+
 def test_import_installs_declared_packages(tmp_path, capsys):
     """§20: import runs the ensure for the summary's declared packages instead
     of deferring them to the first execution."""
@@ -1619,6 +1773,20 @@ def test_cmd_automation_show_prints_record(capsys):
     assert "step 1: Fetch [secrets: API_TOKEN]" in out
     assert "history: v1, v2" in out
     assert "has an unsaved draft" in out
+
+
+def test_cmd_automation_show_marks_locked_and_user_written_steps(capsys):
+    """§20: a locked step's row ends ` locked`; an unlocked `authoredBy: user`
+    step's row ends ` user-written`; an agent step's row carries neither."""
+    full = dict(_two_step_auto(authoredBy="user", locked=True, secrets=[]),
+                specMeta="v2", lastStatus="succeeded")
+    full["steps"].append({"file": "03-send.py", "name": "Send", "description": "",
+                          "code": "print(1)\n", "authoredBy": "user"})
+    _run(_RouteClient(_auto_gets(full)), "automation", "show", "Daily Report")
+    out = capsys.readouterr().out.splitlines()
+    assert "step 1: Fetch locked" in out
+    assert "step 2: Report" in out
+    assert "step 3: Send user-written" in out
 
 
 def test_cmd_automation_delete_needs_yes(capsys):

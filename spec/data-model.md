@@ -146,7 +146,27 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   pair, both are written by the authoring agent per the §8 retry rule. On disk and in the §8
   manifest the keys are spelled `no_timeout`, `infinite_retries` (§5 yaml is snake_case); the
   API serialization is `noTimeout`, `infiniteRetries` in every payload that carries steps,
-  the §19 draft-job result included
+  the §19 draft-job result included.
+  **Authorship and lock** (2026-10-27, §21 additive): `authoredBy: agent | user` — who wrote
+  the step's current `code`: `agent` (absent = agent) for a §8 sync's output, `user` for a
+  script the user wrote or edited by hand in the §11 step editor or pushed through the §20
+  workdir. A sync's output steps are `agent`, except that a step keeping a user-written
+  step's name AND byte-identical code keeps `user`, so the marker is never lost by a sync
+  that left the script alone. `locked: bool` (absent = false) — a **user-only** lock: a
+  locked step's `code`, `name`, `description`, and manifest fields (`agent`, `why`,
+  `agents`, `secrets`, `packages`, the timeout pair, the retry pair) are frozen for every §8
+  sync — the backend splices the stored step back into the agent's output byte for byte and
+  the §8 validator rejects a sync that drops, duplicates, or alters it; only the step's
+  position (and so its `NN-` filename prefix) may move. Lock state is versioned content
+  (part of the step, so a version records which steps were locked when it was saved); it
+  changes only through the §11 step editor's lock control, the §20 `push --lock` /
+  `--unlock` flags, or a workdir manifest edit — no §8 action can lock or unlock, and a
+  locked step always keeps `authoredBy` as stored. Neither key marks the workflow out of
+  sync (§11): they describe the implementation, not the spec. On disk and in the §8 /
+  §20 manifests the keys are `authored_by` and `locked` (§5 snake_case); the API serializes
+  `authoredBy` / `locked`, both omitted when at their defaults. A locked step is still a
+  step: the §19 save validators (syntax, import allowlist, grants) apply to it unchanged —
+  a lock freezes the script against the agent, never against policy.
 spec: block list [{ kind: h1|h2|p|li, text }] — the human-readable spec. The §5 spec.md
   conversion parses `#`/`##`/`- ` prefixes into h1/h2/li and merges other consecutive
   lines into one `p` - except numbered-list lines (`1. `-style), which each keep their own
@@ -261,6 +281,13 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
     steps may need rewriting before they run on this Mac." (<OS> is the display name:
     macOS / Windows / Linux; an unrecognized stored token shows verbatim and always
     mismatches.)
+  - `step-modified` — a current-version step whose script file on disk no longer matches
+    the `sha` its §5 version manifest recorded when the version was written (an on-disk
+    hand edit of an "immutable" version folder — the one way a script can run without
+    passing the §8/§19 validators; the engine executes the file on disk, §7). One entry
+    per step, sorted by step order. "Step NAME was edited on disk after v<N> was saved —
+    pull and push it to make it a validated version." A manifest written before the key
+    existed (§21) carries no `sha` and never flags.
   A secret or agent yields at most one entry — precedence (unresolved | missing) >
   ungranted > unset, the order the §7 gates fail in; unresolved and missing are one slot,
   told apart by the `unresolvedReferences` map — and entries dedupe per referenced record
@@ -700,8 +727,9 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   description line alone carrying the stage's whole span (§11); entries persisted before the
   field existed carry none and render without durations — additive, §21.4; §11),
   `rewrite` a spec-updated event (text = one-line summary), `blockers` a §8 blocker list —
-  each blocker `{ reason, fix, details?, kind? }`, `kind` only ever the literal
-  `user-action` (§8 blocker response) —
+  each blocker `{ reason, fix, details?, kind?, step?, rule?, workaround? }`, `kind` the
+  literal `user-action` or `constraint` (§8 blocker response; `step` / `rule` /
+  `workaround` travel only with `constraint`) —
   (`source`: chat | sync — which call produced it; `error` entries may carry a `source`
   the same way), `system` a
   quiet status chip, `error` a red failure entry (a failed §8 job's message, §11) — persisted

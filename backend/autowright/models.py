@@ -22,7 +22,7 @@ from .marketplace import MAX_ENTRIES
 
 class StepIn(BaseModel):
     """One draft step. §4.1 spelling boundary: the API spelling of the step
-    flags is camelCase (noTimeout, infiniteRetries); disk and the internal
+    flags is camelCase (noTimeout, infiniteRetries, authoredBy); disk and the internal
     shape are snake_case only. This model is the one place the client spelling
     is accepted — `plain()` emits snake_case, and nothing past this boundary
     reads the camel keys. §19 step field typing: the fields the manifest
@@ -43,6 +43,9 @@ class StepIn(BaseModel):
     retries: StrictInt = None
     no_timeout: bool | None = Field(default=None, alias="noTimeout")
     infinite_retries: bool | None = Field(default=None, alias="infiniteRetries")
+    # §4.1 authorship and lock — camelCase on the wire like the flags above.
+    authored_by: Literal["agent", "user"] = Field(default=None, alias="authoredBy")
+    locked: StrictBool = None
 
     _TYPED_KEYS = ("name", "code", "description", "file", "timeout", "retries")
 
@@ -56,6 +59,11 @@ class StepIn(BaseModel):
             d["no_timeout"] = True
         if self.infinite_retries:
             d["infinite_retries"] = True
+        # Defaults (agent, unlocked) are absence — the §5 written-only-when-set rule.
+        if self.authored_by == "user":
+            d["authored_by"] = "user"
+        if self.locked:
+            d["locked"] = True
         return d
 
 
@@ -164,6 +172,12 @@ class VersionSave(BaseModel):
     allowedSecrets: list[StrictStr] = None
     paramValues: dict[StrictStr, Any] = None  # §4.2 staged values — lenient name+kind match
     concurrency: ConcurrencyIn = None         # §8 staged concurrency — applied like the PATCH
+
+
+class StepsValidate(BaseModel):
+    """POST /validate-steps (§19) — the save endpoints' draft shape."""
+
+    draft: DraftIn
 
 
 class VersionRestore(BaseModel):

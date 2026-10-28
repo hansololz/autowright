@@ -44,6 +44,8 @@ export interface Step {
   noTimeout?: boolean // §4.1 explicit no-limit marker — never combined with timeout
   retries?: number    // §4.1 automatic retry budget per pass (≤ 10); absent → 0
   infiniteRetries?: boolean // §4.1 never-stop marker — never combined with retries
+  authoredBy?: 'agent' | 'user' // §4.1 who wrote the current code; absent → agent
+  locked?: boolean    // §4.1 user-only lock: every §8 sync keeps the step byte for byte
 }
 
 // §6.2 declared package — a bare pip distribution name plus the module it
@@ -540,7 +542,12 @@ export interface Blocker {
   reason: string
   fix: string
   details?: string
-  kind?: 'user-action'
+  kind?: 'user-action' | 'constraint'
+  // §8 constraint blockers only: the locked step's name or the build rule's
+  // text the spec conflicts with, and the best build that keeps it (markdown)
+  step?: string
+  rule?: string
+  workaround?: string
 }
 
 // §8 activity feed entry — one discrete drafting milestone (file started, web
