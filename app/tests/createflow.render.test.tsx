@@ -962,6 +962,32 @@ describe('CreateFlow step editing (§11)', () => {
     expect(screen.queryByText('Out of sync — steps still match the old spec.')).toBeNull()
   })
 
+  it('moving a step lands the chip and offers Remember this order, which writes the order rule', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        steps: [
+          { file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("a")' },
+          { file: '02-b.py', name: 'Second', description: '', code: 'log("b")' },
+        ],
+      } as unknown as Automation],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getAllByText('Fetch pages')[0])
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Move step down'))
+    expect(screen.getByText('Step \'Fetch pages\' moved to position 2.')).toBeTruthy()
+    const pill = within(screen.getByTestId('chat-turn-actions')).getByTestId('chat-remember-order')
+    expect(pill.textContent).toContain('Remember this order')
+    fireEvent.click(pill)
+    await waitFor(() => expect(screen.getByText('Build rule added.')).toBeTruthy())
+    expect(screen.getAllByText('Build rules').length).toBeGreaterThan(0)
+    expect(bodyLi('Step order: "Second", "Fetch pages"')).toBeTruthy()
+    expect(screen.queryByTestId('chat-remember-order')).toBeNull()
+    // a reorder is a hand edit: the workflow never reads out of sync
+    expect(screen.getByText('In sync with the spec.')).toBeTruthy()
+    expect(screen.queryByText('Out of sync — steps still match the old spec.')).toBeNull()
+  })
+
   it('a settled sync that rewrites or drops a hand-written step says so', async () => {
     storeMod.useStore.setState({
       automations: [{
@@ -3184,7 +3210,7 @@ describe('§11 chat thread auto-scroll', () => {
       anyJobBusy={false} busyRewrite={false} testLive={false} viewingOld={false}
       inputDisabled={false} outOfSync={false} syncDisabled={false}
       lastRewriteId={undefined} composer={composer} sendMessage={noop}
-      undoDraft={noop} runSync={noop} runDraftTest={noop} analyzeFailure={null}
+      undoDraft={noop} runSync={noop} runDraftTest={noop} analyzeFailure={null} rememberOrder={null}
       patchEntry={noop} applyBlockersEntry={noop} clearChat={noop} cancelChat={noop}
       cancelSync={noop} setAgentId={noop} up={noop} showToast={noop}
       {...over}

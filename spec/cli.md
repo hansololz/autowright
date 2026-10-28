@@ -176,7 +176,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   modal's CLI parity, straight from §19 `GET .../diff` (`--to` defaults to the current
   version; a `from` that is not `vN` exits with "version must be vN", and the API's 404 /
   400 surface as its detail line). Human output prints, per file in the endpoint's order,
-  a header `== <file> (<status>[, +a -r])` (`unchanged` files are the header alone),
+  a header `== <file> (<status>[, +a -r][, moved from N])` (`unchanged` files are the
+  header alone; `moved from N` names the step's 1-based position in the `from` version
+  when §19 `moved` is set),
   then the rows with a two-character prefix: `  ` same, `- ` del, `+ ` add, a `mod` row as
   its `- ` line then its `+ ` line; in a changed file a run of more than 6 same rows
   collapses to `  … <n> unchanged lines` keeping 3 of context on each side (the modal's

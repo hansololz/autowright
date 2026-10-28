@@ -354,7 +354,11 @@ remain plain dicts (§2).
   (the folder filename: `automation.yaml`, `spec.md`, `notes.md`, the step's `file`),
   status: "unchanged" | "changed" | "new" | "removed", added, removed (line counts), rows:
   [{ kind: "same" | "add" | "del" | "mod", left: { number, text } | null, right: { number,
-  text } | null }] }`. The text compared: for the **manifest**, the versioned manifest
+  text } | null }] }`; a **step** entry also carries `moved: { from, to } | null` — the
+  step's 1-based positions in the `from` and `to` versions when it is matched on both
+  sides and they differ (a §11 reorder), `null` otherwise (and absent on the three
+  documents). `status` is unaffected: a moved step with an identical script stays
+  `unchanged`. The text compared: for the **manifest**, the versioned manifest
   fields the §5 writer emits (`params` definitions, `packages`, the step entries with
   their `file`, `name`, `description`, agent / secrets / packages / time-limit / retry
   fields) dumped as YAML through the same `save_yaml` dump, minus the `when` / `note`

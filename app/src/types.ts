@@ -114,6 +114,9 @@ export interface DiffFile {
   added: number
   removed: number
   rows: DiffRow[]
+  // §19: a step matched on both sides at different 1-based positions (a §11
+  // reorder); null / absent otherwise and on the three documents
+  moved?: { from: number; to: number } | null
 }
 export interface VersionDiff { from: number; to: number; files: DiffFile[] }
 

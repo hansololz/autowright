@@ -89,7 +89,8 @@ def diff_lines(old: list[str], new: list[str]) -> list[dict]:
     return rows
 
 
-def _file(kind: str, name: str, file: str | None, old: str | None, new: str | None) -> dict:
+def _file(kind: str, name: str, file: str | None, old: str | None, new: str | None,
+          moved: dict | None = None) -> dict:
     rows = diff_lines(_lines(old or ""), _lines(new or ""))
     added = sum(r["kind"] in ("add", "mod") for r in rows)
     removed = sum(r["kind"] in ("del", "mod") for r in rows)
@@ -101,8 +102,13 @@ def _file(kind: str, name: str, file: str | None, old: str | None, new: str | No
         status = "removed"
     else:
         status = "changed" if added or removed else "unchanged"
-    return {"kind": kind, "name": name, "file": file, "status": status,
-            "added": added, "removed": removed, "rows": rows}
+    out = {"kind": kind, "name": name, "file": file, "status": status,
+           "added": added, "removed": removed, "rows": rows}
+    if kind == "step":
+        # §19: a step matched on both sides at different positions (a §11
+        # reorder) carries its 1-based positions; status is unaffected.
+        out["moved"] = moved
+    return out
 
 
 def diff_versions(old: dict, new: dict) -> list[dict]:
@@ -115,15 +121,21 @@ def diff_versions(old: dict, new: dict) -> list[dict]:
               blocks_to_md(new.get("spec", []) or [])),
         _file("notes", "Notes", "notes.md", notes_text(old), notes_text(new)),
     ]
-    old_steps = dict(_step_keys(old))
+    old_keyed = _step_keys(old)
+    old_steps = dict(old_keyed)
+    old_pos = {key: n for n, (key, _) in enumerate(old_keyed)}
     new_steps = _step_keys(new)
     matched: set[tuple[str, int]] = set()
-    for key, s in new_steps:
+    for n, (key, s) in enumerate(new_steps):
         o = old_steps.get(key)
+        moved = None
         if o is not None:
             matched.add(key)
+            if old_pos[key] != n:
+                moved = {"from": old_pos[key] + 1, "to": n + 1}
         files.append(_file("step", key[0], s.get("file"),
-                           o.get("code", "") if o is not None else None, s.get("code", "")))
+                           o.get("code", "") if o is not None else None, s.get("code", ""),
+                           moved))
     for key, s in _step_keys(old):
         if key not in matched:
             files.append(_file("step", key[0], s.get("file"), s.get("code", ""), None))

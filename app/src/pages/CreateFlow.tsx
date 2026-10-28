@@ -23,7 +23,7 @@ import {
   type Rev, amendSpec, analyzeTestMessage, appendBuildRule, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
   jobStageTitle, loadVersionInto,
   newEntry, persistChat, removeRuleBlock, secretRefsOf, seedEmpty, seedFromAuto, seedFromPayload, serializeDraft,
-  stepsFingerprint, testOutcomeStale, workaroundBlocker,
+  stepsFingerprint, testOutcomeStale, workaroundBlocker, upsertStepOrderRule,
 } from './createflow/model'
 import { VersionDiffModal } from '../versiondiff'
 import { useDraftJob } from './createflow/useDraftJob'
@@ -876,6 +876,9 @@ export default function CreateFlow() {
   // each marks the draft touched and clears the Draft-undo snapshot (a
   // manual edit, like the documents' saves). A remembered edit adds its
   // build rule to the spec without dirtying it either.
+  // §11 "Remember this order": the id of the move chip the offer hangs on —
+  // page state, never persisted; any later entry (or a reload) retires it.
+  const [orderOffer, setOrderOffer] = useState<string | null>(null)
   const commitStepEdit = (steps: Step[], effect: StepEditEffect) => {
     const chips: ChatEntry[] = []
     if (effect.kind === 'save' && effect.rule) {
@@ -887,12 +890,32 @@ export default function CreateFlow() {
         text: `Step '${effect.name}' ${effect.locked ? 'locked' : 'unlocked'}.`,
       }))
     }
+    if (effect.kind === 'move') {
+      const chip = newEntry({ kind: 'system', icon: 'fa-arrows-up-down', text: `Step '${effect.name}' moved to position ${effect.to}.` })
+      chips.push(chip)
+      setOrderOffer(chip.id)
+    }
     setRev((r) => r && ({
       ...r, steps, touched: true, undo: null,
       ...(effect.kind === 'save' && effect.rule ? { spec: appendBuildRule(r.spec, effect.rule.name, effect.rule.text) } : {}),
       ...(chips.length ? { chat: [...r.chat, ...chips] } : {}),
     }))
   }
+  // The turn action row's Remember this order pill: offered only while the
+  // move chip is the thread's last entry. It writes the current order as the
+  // one `Step order:` build rule (never out of sync) and lands the receipt chip,
+  // which ends the offer.
+  const lastChatId = rev && rev.chat.length ? rev.chat[rev.chat.length - 1].id : null
+  const rememberOrder = orderOffer && lastChatId === orderOffer
+    ? () => {
+        setOrderOffer(null)
+        setRev((r) => r && ({
+          ...r, touched: true, undo: null,
+          spec: upsertStepOrderRule(r.spec, r.steps),
+          chat: [...r.chat, newEntry({ kind: 'system', icon: 'fa-list-check', text: 'Build rule added.' })],
+        }))
+      }
+    : null
   const stepEditing: StepEditing = {
     disabled: anyJobBusy || viewingOld,
     // §19 POST /validate-steps: the draft as it would be after the edit
@@ -1204,6 +1227,7 @@ export default function CreateFlow() {
             runSync={() => guardManualEdit(() => void jobs.runSync())}
             runDraftTest={() => setTestRunSignal((s) => s + 1)}
             analyzeFailure={analyzeFailure}
+            rememberOrder={rememberOrder}
             patchEntry={patchEntry}
             applyBlockersEntry={applyBlockersEntry}
             applyWorkaround={applyWorkaround}

@@ -832,3 +832,52 @@ describe('stepsFingerprint (§11 stale-outcome rule)', () => {
     expect(stepsFingerprint([steps[1], steps[0]])).not.toBe(base)
   })
 })
+
+// ---- §11 "Remember this order": the Step order build rule ----
+import { stepOrderRule, upsertStepOrderRule } from '../src/pages/createflow/model'
+
+describe('upsertStepOrderRule (§11 Remember this order)', () => {
+  const ordered = [step({ name: 'Second' }), step({ name: 'Fetch pages' })]
+
+  it('the rule quotes every step name in draft order', () => {
+    expect(stepOrderRule(ordered)).toBe('Step order: "Second", "Fetch pages"')
+  })
+
+  it('creates ## Build rules at the end of the spec when absent', () => {
+    const spec: SpecBlock[] = [{ kind: 'h1', text: 'T' }, { kind: 'p', text: 'Body' }]
+    expect(upsertStepOrderRule(spec, ordered)).toEqual([
+      ...spec,
+      { kind: 'h2', text: 'Build rules' },
+      { kind: 'li', text: 'Step order: "Second", "Fetch pages"' },
+    ])
+  })
+
+  it('a second call replaces the existing Step order bullet instead of adding one', () => {
+    const once = upsertStepOrderRule([
+      { kind: 'h2', text: 'Build rules' },
+      { kind: 'li', text: 'Step "Fetch pages": keep the log' },
+    ], ordered)
+    const twice = upsertStepOrderRule(once, [step({ name: 'Fetch pages' }), step({ name: 'Second' })])
+    expect(twice).toEqual([
+      { kind: 'h2', text: 'Build rules' },
+      { kind: 'li', text: 'Step "Fetch pages": keep the log' },
+      { kind: 'li', text: 'Step order: "Fetch pages", "Second"' },
+    ])
+    expect(twice.filter((b) => b.text.startsWith('Step order:'))).toHaveLength(1)
+  })
+
+  it('a Step order bullet under a different section is not touched', () => {
+    const spec: SpecBlock[] = [
+      { kind: 'h2', text: 'Notes' },
+      { kind: 'li', text: 'Step order: "Old", "Order"' },
+      { kind: 'h2', text: 'Build rules' },
+      { kind: 'li', text: 'Step "A": keep it' },
+      { kind: 'h2', text: 'Later' },
+    ]
+    expect(upsertStepOrderRule(spec, ordered)).toEqual([
+      spec[0], spec[1], spec[2], spec[3],
+      { kind: 'li', text: 'Step order: "Second", "Fetch pages"' },
+      spec[4],
+    ])
+  })
+})

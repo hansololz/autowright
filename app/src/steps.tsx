@@ -304,6 +304,7 @@ export type StepEditEffect =
   | { kind: 'add' }
   | { kind: 'save'; rule: { name: string; text: string } | null }
   | { kind: 'lock'; name: string; locked: boolean }
+  | { kind: 'move'; name: string; from: number; to: number } // 1-based positions
   | { kind: 'remove' }
 
 // §11 step editing wiring from the editor page: `disabled` while a §8 job is
@@ -518,15 +519,17 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
 // trail the commit by one passive-effect flush, and a key pressed in that gap
 // (right as the diff modal's files arrive, say) would hit the stale closure and
 // be dropped against the old count.
-export function StepKeys({ i, count, closing, paused, onNav, onFind }: {
+export function StepKeys({ i, count, closing, paused, onNav, onFind, onMove }: {
   i: number; count: number; closing: boolean; paused?: boolean; onNav: (i: number) => void; onFind?: () => void
+  // §11 editor: ⌥↑ / ⌥↓ move the viewed step (absent on the detail page)
+  onMove?: (dir: -1 | 1) => void
 }) {
-  const live = useRef({ i, count, onNav, onFind })
-  live.current = { i, count, onNav, onFind }
+  const live = useRef({ i, count, onNav, onFind, onMove })
+  live.current = { i, count, onNav, onFind, onMove }
   useEffect(() => {
     if (closing || paused) return
     const onKey = (e: KeyboardEvent) => {
-      const { i, count, onNav, onFind } = live.current
+      const { i, count, onNav, onFind, onMove } = live.current
       // §9.3: both shortcuts yield to the developer-log overlay above the card
       if (devlogOverlayOpen()) return
       // …and to a card stacked above this one, the way the Modal's own Escape
@@ -534,6 +537,15 @@ export function StepKeys({ i, count, closing, paused, onNav, onFind }: {
       if (!isTopModal()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { if (!onFind) return; e.preventDefault(); onFind(); return }
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable="true"], [role="listbox"], [role="menu"]')) return
+      // §11: ⌥↑ / ⌥↓ move the step in the editor's modal; the plain arrows
+      // keep flipping (and ⌥ with the arrows is inert where nothing can move)
+      if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        if (!onMove) return
+        e.preventDefault()
+        onMove(e.key === 'ArrowUp' ? -1 : 1)
+        return
+      }
+      if (e.altKey) return
       const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp'
       const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown'
       const flip = back ? (i > 0 ? i - 1 : null) : forward ? (i < count - 1 ? i + 1 : null) : null
@@ -673,7 +685,7 @@ export function stepModalFrame(steps: Step[]): string {
   return `clamp(440px, ${Math.ceil(44 + 38 + longest * 12 * 1.65)}px, 82vh)`
 }
 
-function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, editing, edit, setEdit, onStartEdit, onCancelEdit, onSave, onToggleLock, onRemove }: {
+function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, editing, edit, setEdit, onStartEdit, onCancelEdit, onSave, onToggleLock, onRemove, onMove }: {
   steps: Step[]; i: number; editor: boolean; tagsByStep: StepTagDesc[][]; factsByStep: StepFactSection[][]
   onNav: (i: number) => void; onClose: () => void
   // §11 step editing — present on the editor page only
@@ -685,6 +697,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   onSave: () => void
   onToggleLock: () => void
   onRemove: () => void
+  onMove: (dir: -1 | 1) => void
 }) {
   const step = steps[i]
   // A script's single trailing final newline is neither rendered nor counted —
@@ -743,6 +756,25 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const handsOff = !editing || editing.disabled
   const controls = editing ? (
     <span data-testid="step-controls" style={{ display: 'contents' }}>
+      {/* §11 Move up / Move down: disabled at the ends and in edit mode */}
+      <button
+        className="ad-btn-icon"
+        aria-label="Move step up"
+        title="Move step up"
+        disabled={handsOff || editActive || i === 0}
+        onClick={() => onMove(-1)}
+      >
+        <i className="fa-solid fa-arrow-up" />
+      </button>
+      <button
+        className="ad-btn-icon"
+        aria-label="Move step down"
+        title="Move step down"
+        disabled={handsOff || editActive || i === steps.length - 1}
+        onClick={() => onMove(1)}
+      >
+        <i className="fa-solid fa-arrow-down" />
+      </button>
       <button
         className="ad-btn-icon"
         aria-label={step.locked ? 'Unlock step' : 'Lock step'}
@@ -774,7 +806,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
         return (
         <div className="ad-stepmodal" style={{ height: frame, display: 'flex', minWidth: 0 }}>
           {/* §11 edit mode: flipping and ⌘F are inert */}
-          <StepKeys i={i} count={steps.length} closing={closing} paused={editActive} onNav={onNav} onFind={find.show} />
+          <StepKeys i={i} count={steps.length} closing={closing} paused={editActive} onNav={onNav} onFind={find.show} onMove={editing ? onMove : undefined} />
           {/* step navigator */}
           <div className="ad-stepnav" style={{
             width: 280, flex: 'none', minHeight: 0, display: 'flex', flexDirection: 'column',
@@ -1076,6 +1108,19 @@ export function StepList(props: StepListProps) {
     const nextStep: Step = s.locked ? rest : { ...s, locked: true }
     commit(stepsRef.current.map((x, j) => (j === at ? nextStep : x)), at, false, { kind: 'lock', name: s.name, locked: !s.locked })
   }
+  // §11 Move up / Move down: swap with the neighbour, renumber the `NN-`
+  // prefixes from the new positions, keep the moved step viewed
+  const moveStep = (dir: -1 | 1) => {
+    if (!editing || editing.disabled || current === null) return
+    const at = current
+    const to = at + dir
+    const base = stepsRef.current
+    if (to < 0 || to >= base.length) return
+    const swapped = base.slice()
+    swapped[at] = base[to]
+    swapped[to] = base[at]
+    commit(renumberStepFiles(swapped), to, false, { kind: 'move', name: base[at].name, from: at + 1, to: to + 1 })
+  }
   const removeStep = () => {
     if (!editing || editing.disabled || current === null) return
     const at = current
@@ -1110,6 +1155,7 @@ export function StepList(props: StepListProps) {
           onSave={() => { void saveEdit() }}
           onToggleLock={toggleLock}
           onRemove={removeStep}
+          onMove={moveStep}
         />
       )}
       {swapAsk && (

@@ -116,6 +116,43 @@ def test_duplicate_step_names_match_kth_to_kth():
                                                          ("02.py", "changed")]
 
 
+def test_moved_step_carries_its_positions_and_stays_unchanged():
+    """§19: a step matched on both sides at different positions carries `moved`
+    {from, to} (1-based) and keeps its status; only step entries have the key."""
+    from autowright import versions_diff
+
+    old = _ver(_step("A", "a\n", file="01-a.py"), _step("B", "b\n", file="02-b.py"),
+               _step("C", "c\n", file="03-c.py"))
+    new = _ver(_step("B", "b\n", file="01-b.py"), _step("A", "a\n", file="02-a.py"),
+               _step("C", "c\n", file="03-c.py"))
+    files = versions_diff.diff_versions(old, new)
+    steps = _by_kind(files, "step")
+    assert [s["name"] for s in steps] == ["B", "A", "C"]
+    by_name = {s["name"]: s for s in steps}
+    assert by_name["B"]["moved"] == {"from": 2, "to": 1}
+    assert by_name["A"]["moved"] == {"from": 1, "to": 2}
+    assert by_name["C"]["moved"] is None
+    assert all(s["status"] == "unchanged" for s in steps)
+    assert all("moved" not in f for f in files if f["kind"] != "step")
+
+    # A new step and an appended old-only (removed) step are never moved.
+    files = versions_diff.diff_versions(
+        _ver(_step("A", "a\n"), _step("Gone", "g\n")),
+        _ver(_step("Fresh", "f\n"), _step("A", "a\n")))
+    by_name = {s["name"]: s for s in _by_kind(files, "step")}
+    assert by_name["Fresh"]["status"] == "new" and by_name["Fresh"]["moved"] is None
+    assert by_name["Gone"]["status"] == "removed" and by_name["Gone"]["moved"] is None
+    assert by_name["A"]["moved"] == {"from": 1, "to": 2}
+
+    # A moved step whose code also changed is changed AND carries its positions.
+    files = versions_diff.diff_versions(
+        _ver(_step("A", "a\n"), _step("B", "b\n")),
+        _ver(_step("B", "B\n"), _step("A", "a\n")))
+    b = _by_kind(files, "step")[0]
+    assert b["name"] == "B" and b["status"] == "changed"
+    assert b["moved"] == {"from": 2, "to": 1}
+
+
 # ---------------------------------------------------------------- manifest text
 
 def test_manifest_diff_shows_step_fields_and_excludes_when_and_note():
@@ -238,6 +275,9 @@ def test_version_diff_route_answers_the_file_list(client):
     changed = [f for f in d["files"] if f["kind"] == "step" and f["name"] == "Say hello"]
     assert len(changed) == 1 and changed[0]["status"] == "changed"
     assert changed[0]["added"] and changed[0]["removed"]
+    # §19 `moved`: every step entry carries the key, None when it kept its position.
+    steps = [f for f in d["files"] if f["kind"] == "step"]
+    assert steps and all("moved" in f and f["moved"] is None for f in steps)
 
 
 def test_version_diff_route_guards(client):
@@ -289,6 +329,33 @@ def test_cmd_automation_diff_defaults_to_the_current_version(capsys):
         "== notes.md (new)",
         "+ first",
         "+ second",
+    ]
+
+
+def test_cmd_automation_diff_header_names_a_moved_step(capsys):
+    """§20: a step at a different position adds `, moved from N` to its header;
+    a file whose `moved` is null prints as before."""
+    payload = {"from": 1, "to": 4, "files": [
+        {"kind": "step", "name": "A", "file": "02-a.py", "status": "unchanged",
+         "added": 0, "removed": 0, "moved": {"from": 1, "to": 2},
+         "rows": [_same("a")]},
+        {"kind": "step", "name": "B", "file": "01-b.py", "status": "changed",
+         "added": 1, "removed": 1, "moved": {"from": 2, "to": 1},
+         "rows": [{"kind": "mod", "left": {"number": 1, "text": "b"},
+                   "right": {"number": 1, "text": "B"}}]},
+        {"kind": "step", "name": "C", "file": "03-c.py", "status": "unchanged",
+         "added": 0, "removed": 0, "moved": None, "rows": [_same("c")]},
+    ]}
+    gets = _auto_gets(CLI_AUTO,
+                      **{f"/automations/{AUTO_ID}/diff?from=v1&to=v4": payload})
+    _run(_RouteClient(gets), "automation", "diff", "Daily Report", "--from", "v1")
+    assert capsys.readouterr().out.splitlines() == [
+        "Daily Report: v1 → v4",
+        "== 02-a.py (unchanged, moved from 1)",
+        "== 01-b.py (changed, +1 -1, moved from 2)",
+        "- b",
+        "+ B",
+        "== 03-c.py (unchanged)",
     ]
 
 

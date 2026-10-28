@@ -270,6 +270,16 @@ applies unchanged; the chat pane never collapses.
   - **Analyze failure** (`fa-magnifying-glass`) — while the draft's tracked test
     settled failed; sends the canned analyze chat message exactly like the TEST card's
     button, with the same gating.
+  - **Remember this order** (`fa-list-check`) — while the thread's last entry is a
+    "Step '<name>' moved to position N." chip landed by this page since it opened (the
+    offer is page state, not persisted: a reload, or any later entry, retires it). It
+    writes the draft's current step order as the one build rule `Step order: "<name
+    1>", "<name 2>", …` under the spec's `## Build rules` section — replacing an
+    existing `Step order:` bullet there, appending otherwise, creating the section at
+    the end of the spec when absent — without marking the workflow out of sync (the
+    Step editing remember rule), and lands the system chip "Build rule added."
+    (`fa-list-check`), which ends the offer. The rule is binding on every later sync by
+    the §8 three-layer rule; the user prunes it in the spec editor like any spec text.
 - **Input:** pinned footer composer, two stacked rows. Top row: a full-width auto-growing
   textarea — the **ask-box pattern** referenced throughout this spec: sized to its
   content, never scrolls, no manual resize handle, Enter sends (the primary send path),
@@ -985,15 +995,18 @@ editors enter with
   agent-written and unlocked; once any step is locked or user-written it reads plain
   "STEPS" — the steps are no longer purely generated. The editor variant of the §9.2 step-script modal is where every hand edit
   happens:
-  - Its toolbar cluster (top right of the code pane) gains three `.ad-btn-icon` buttons
-    before the find button, in order: **Edit** (`fa-pen`, "Edit script"), the **lock
+  - Its toolbar cluster (top right of the code pane) gains five `.ad-btn-icon` buttons
+    before the find button, in order: **Edit** (`fa-pen`, "Edit script"), **Move up**
+    (`fa-arrow-up`, aria-label and tooltip "Move step up") and **Move down**
+    (`fa-arrow-down`, "Move step down"), the **lock
     toggle** (`fa-lock` when locked / `fa-lock-open` when not, `aria-pressed` = locked,
     aria-label "Unlock step" / "Lock step", tooltip "A locked step is kept byte for byte
     by every sync — the agent builds the other steps around it") and **Remove step**
     (`fa-trash`, the `.danger` icon variant — muted at rest, red on hover; aria-label and
     tooltip "Remove step"). The navigator's viewed row carries no controls — it stays
-    the read-only table of contents. All three are disabled while a §8 job is in flight
-    or an old version is viewed.
+    the read-only table of contents. All five are disabled while a §8 job is in flight
+    or an old version is viewed; Move up is also disabled on the first step and Move
+    down on the last.
   - **Edit mode**: the code pane's body becomes the document-editor modal's textarea
     (same rhythm, padding, inset, focus-on-open with the caret at the end); the find bar
     closes and ⌘F is inert; flipping steps (chevrons, arrow keys, navigator rows) is
@@ -1002,9 +1015,9 @@ editors enter with
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
     changes you typed into the script editor will be lost.", confirm "Discard edits"),
     while Cancel returns to view mode through the same guard. In edit mode the find and
-    chevron buttons stay visible but disabled, Edit is hidden, and the lock toggle and
-    Remove step stay visible but disabled (their commit would end the edit and drop the
-    typed text).
+    chevron buttons stay visible but disabled, Edit is hidden, and the move buttons, the
+    lock toggle and Remove step stay visible but disabled (their commit would end the
+    edit and drop the typed text).
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
     **description** as two `.ad-input.compact` fields in edit mode (name required — a
     blank name disables Save with the inline hint "Give the step a name"). Beneath the
@@ -1025,6 +1038,18 @@ editors enter with
     "Build rule added." (`fa-list-check`). The remembered rule is binding on every later
     sync by the §8 three-layer rule, and the user prunes it in the spec editor like any
     spec text.
+  - **Move up / Move down** swap the viewed step with its neighbour, renumber every
+    `NN-` prefix from the new positions (the suffixes are kept, so a move never renames
+    a script beyond its prefix), keep the moved step viewed at its new position, and
+    land the chip "Step '<name>' moved to position N." (`fa-arrows-up-down`, N the
+    1-based new position). **⌥↑ / ⌥↓** (Alt+↑ / Alt+↓) do the same while the editor's
+    modal is open in view mode (inert in edit mode, on the detail page, and at the
+    ends); the plain arrows keep flipping. A locked step moves like any other — §4.1
+    freezes its content, not its position. A move is a manual edit: draft touched,
+    undo snapshot cleared, never out of sync. Because the next sync lays the unlocked
+    steps out as the spec implies, an order that matters belongs in the spec: while
+    the move chip is the thread's last entry, the turn action row offers **Remember
+    this order** (below), which writes the current order as one build rule.
   - **Lock toggle** flips the draft step's `locked` (the toolbar glyph swaps and the
     navigator's "Locked" chip appears or goes) and lands the chip "Step '<name>'
     locked." / "… unlocked." (`fa-lock` / `fa-lock-open`). **Remove step** confirms
@@ -1033,7 +1058,7 @@ editors enter with
     otherwise."; confirm label "Remove step"), then drops the step, renumbers the `NN-`
     prefixes, views the next step (the previous at the end) or closes the modal when none
     is left. Both are manual edits: draft touched, undo snapshot cleared.
-  - **Never out of sync.** Editing, adding, removing and locking steps change the
+  - **Never out of sync.** Editing, adding, removing, moving and locking steps change the
     implementation, not the spec: none of them marks the workflow out of sync (Dirty
     gating below), the draft saves directly (the §19 save validators are the gate), and
     the last test goes stale by the fingerprint rule as after any steps change.
@@ -1088,7 +1113,7 @@ editors enter with
   **blocks saving** until the BUILD card's "Sync now" button makes one §8 `sync` call
   regenerating the steps ("Steps synced with the spec — review them, then save."). Hand
   edits to the steps (Step editing above) and the build rules the step editor's remember
-  control writes never do — they describe the implementation the steps already have. The
+  controls write never do — they describe the implementation the steps already have. The
   out-of-sync state persists with the draft (§4.4 `outOfSync`) and is restored on resume —
   keeping a locked draft and reopening it must not unlock Save around the gate. Grant
   toggles (agent enablement, secret allowance) never mark the workflow out of sync by

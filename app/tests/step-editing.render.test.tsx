@@ -2,9 +2,10 @@
 // (src/steps.tsx): the §4.1 lock / authorship marks on rows and in the
 // step-script modal, Add step, the modal's edit mode (validate-then-apply
 // Save, the blank-name gate, the remember-as-build-rule control, the close
-// guard), the lock toggle, and Remove step's confirm + renumbering. The list
-// renders under a small harness that owns the steps the way the editor page
-// does, so each hand edit's commit flows back in as new props.
+// guard), Move up / Move down, the lock toggle, and Remove step's confirm +
+// renumbering. The list renders under a small harness that owns the steps the
+// way the editor page does, so each hand edit's commit flows back in as new
+// props.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useRef, useState } from 'react'
@@ -226,8 +227,63 @@ describe('step editing in the step-script modal (§11)', () => {
     openRow('Fetch page')
     expect((screen.getByLabelText('Edit script') as HTMLButtonElement).disabled).toBe(true)
     const controls = screen.getByTestId('step-controls')
+    expect((within(controls).getByLabelText('Move step up') as HTMLButtonElement).disabled).toBe(true)
+    expect((within(controls).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(true)
     expect((within(controls).getByLabelText('Lock step') as HTMLButtonElement).disabled).toBe(true)
     expect((within(controls).getByLabelText('Remove step') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('the controls read Move up, Move down, the lock toggle, Remove step; both moves disable in edit mode', () => {
+    render(<Harness initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' }), step({ name: 'C', file: '03-c.py' })]} />)
+    openRow('B')
+    const controls = screen.getByTestId('step-controls')
+    expect(within(controls).getAllByRole('button').map((b) => b.getAttribute('aria-label')))
+      .toEqual(['Move step up', 'Move step down', 'Lock step', 'Remove step'])
+    expect((within(controls).getByLabelText('Move step up') as HTMLButtonElement).disabled).toBe(false)
+    expect((within(controls).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    expect((within(screen.getByTestId('step-controls')).getByLabelText('Move step up') as HTMLButtonElement).disabled).toBe(true)
+    expect((within(screen.getByTestId('step-controls')).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('Move down swaps the step, renumbers the files, keeps it viewed and reports the move', () => {
+    const onCommit = vi.fn()
+    render(<Harness
+      initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' }), step({ name: 'C', file: '03-c.py' })]}
+      onCommit={onCommit}
+    />)
+    openRow('A')
+    const control = (label: string) => within(screen.getByTestId('step-controls')).getByLabelText(label) as HTMLButtonElement
+    expect(control('Move step up').disabled).toBe(true)
+    expect(control('Move step up').getAttribute('title')).toBe('Move step up')
+    expect(control('Move step down').getAttribute('title')).toBe('Move step down')
+    fireEvent.click(control('Move step down'))
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const [next, effect] = onCommit.mock.calls[0]
+    expect(effect).toEqual({ kind: 'move', name: 'A', from: 1, to: 2 })
+    expect(next.map((s: Step) => [s.name, s.file])).toEqual([['B', '01-b.py'], ['A', '02-a.py'], ['C', '03-c.py']])
+    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 3: A')
+    fireEvent.click(control('Move step down'))
+    expect(onCommit.mock.calls[1][1]).toEqual({ kind: 'move', name: 'A', from: 2, to: 3 })
+    expect(dialog().getAttribute('aria-label')).toBe('Step 3 of 3: A')
+    expect(control('Move step down').disabled).toBe(true)
+    expect(control('Move step up').disabled).toBe(false)
+  })
+
+  it('⌥↓ moves the step and plain ↓ flips', () => {
+    const onCommit = vi.fn()
+    render(<Harness
+      initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' }), step({ name: 'C', file: '03-c.py' })]}
+      onCommit={onCommit}
+    />)
+    openRow('A')
+    fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true })
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'move', name: 'A', from: 1, to: 2 })
+    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 3: A')
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(dialog().getAttribute('aria-label')).toBe('Step 3 of 3: C')
   })
 
   it('Escape over an unsaved edit raises the discard confirm; cancelling keeps the text, confirming closes', async () => {

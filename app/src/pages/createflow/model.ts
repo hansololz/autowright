@@ -52,6 +52,26 @@ export function appendBuildRule(spec: SpecBlock[], stepName: string, text: strin
   return appendUnderSection(spec, BUILD_RULES_TITLE, [{ kind: 'li', text: `Step "${stepName}": ${text}` }])
 }
 
+// §11 "Remember this order": the draft's step order as the one `Step order:`
+// bullet under `## Build rules` — replacing an existing one in that section,
+// appending otherwise (the section is created at the end when absent).
+const STEP_ORDER_PREFIX = 'Step order:'
+export function stepOrderRule(steps: Step[]): string {
+  return `${STEP_ORDER_PREFIX} ${steps.map((s) => `"${s.name}"`).join(', ')}`
+}
+export function upsertStepOrderRule(spec: SpecBlock[], steps: Step[]): SpecBlock[] {
+  const item: SpecBlock = { kind: 'li', text: stepOrderRule(steps) }
+  const at = spec.findIndex((b) => b.kind === 'h2' && b.text.trim().toLowerCase() === BUILD_RULES_TITLE.toLowerCase())
+  if (at >= 0) {
+    for (let j = at + 1; j < spec.length && spec[j].kind !== 'h2' && spec[j].kind !== 'h1'; j++) {
+      if (spec[j].kind === 'li' && spec[j].text.trimStart().toLowerCase().startsWith(STEP_ORDER_PREFIX.toLowerCase())) {
+        return spec.map((b, k) => (k === j ? item : b))
+      }
+    }
+  }
+  return appendUnderSection(spec, BUILD_RULES_TITLE, [item])
+}
+
 // §11 constraint blocker "Remove the rule": the spec without its first `li`
 // block containing the rule text (case-insensitive) — null when none does.
 export function removeRuleBlock(spec: SpecBlock[], rule: string): SpecBlock[] | null {

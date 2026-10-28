@@ -261,6 +261,9 @@ export interface ChatPanelProps {
   // §11 turn action row: sends the canned analyze message — null while the
   // draft's tracked test didn't settle failed (the pill hides)
   analyzeFailure: (() => void) | null
+  // §11 turn action row: writes the step order as a build rule — null unless
+  // the thread ends on this page's move chip (the pill hides)
+  rememberOrder: (() => void) | null
   patchEntry: (id: string, patch: Partial<ChatEntry>) => void
   applyBlockersEntry: (entry: ChatEntry) => void
   // §11 constraint blockers' own resolution rows
@@ -279,7 +282,7 @@ export function ChatPanel({
   rev, agents, selAgent, isEdit, isCreateEmpty, anyJobBusy, busyRewrite,
   testLive, viewingOld, inputDisabled, outOfSync, syncDisabled,
   lastRewriteId, composer, sendMessage,
-  undoDraft, runSync, runDraftTest, analyzeFailure, patchEntry,
+  undoDraft, runSync, runDraftTest, analyzeFailure, rememberOrder, patchEntry,
   applyBlockersEntry, applyWorkaround, unlockConstraintStep, removeConstraintRule,
   clearChat, cancelChat, cancelSync, setAgentId, up, showToast,
 }: ChatPanelProps) {
@@ -421,7 +424,7 @@ export function ChatPanel({
   const showSyncPill = outOfSync && rev.dirty && !syncDisabled && !rev.pendingSync
   const showTestPill = !outOfSync && rev.steps.length > 0 && !rev.pendingSync && !rev.pendingTest
   const showTurnRow = rowsAllowed && !!lastEntry && lastEntry.kind !== 'user' && !lastEntry.boundary
-    && (undoAtEnd || showSyncPill || showTestPill || !!analyzeFailure)
+    && (undoAtEnd || showSyncPill || showTestPill || !!analyzeFailure || !!rememberOrder)
   const pillGlyph: React.CSSProperties = { fontSize: 9, color: 'var(--text-faint)' }
   // §11 composer: while the thread ends on a "Question for you" block, the
   // placeholder invites the answer; any entry after the question reverts it.
@@ -746,6 +749,12 @@ export function ChatPanel({
                 <button className="ad-btn-pill action" data-testid="chat-analyze-failure" onClick={analyzeFailure}>
                   <i className="fa-solid fa-magnifying-glass" style={pillGlyph} />
                   Analyze failure
+                </button>
+              )}
+              {rememberOrder && (
+                <button className="ad-btn-pill action" data-testid="chat-remember-order" onClick={rememberOrder}>
+                  <i className="fa-solid fa-list-check" style={pillGlyph} />
+                  Remember this order
                 </button>
               )}
             </ActionRow>

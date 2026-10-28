@@ -1102,7 +1102,9 @@ def cmd_automation_diff(c: Client, args) -> None:
     for f in d["files"]:
         status = f["status"]
         counts = f", +{f['added']} -{f['removed']}" if status == "changed" else ""
-        print(f"== {f['file']} ({status}{counts})")
+        # §19 `moved`: a step at a different position in the two versions
+        moved = f", moved from {f['moved']['from']}" if f.get("moved") else ""
+        print(f"== {f['file']} ({status}{counts}{moved})")
         if status == "unchanged":
             continue
         for line in diff_rows_text(f["rows"], collapse=status == "changed"):

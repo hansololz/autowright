@@ -68,13 +68,20 @@ export function firstChanged(files: DiffFile[]): number {
 
 function ChangeTag({ file, faint }: { file: DiffFile; faint?: boolean }) {
   const mono = { font: "500 11px var(--mono)", whiteSpace: 'nowrap' as const, flex: 'none' as const }
+  // §9.2: a step at a different position in the two versions (§19 `moved`)
+  // reads "Moved" — in place of "Unchanged", or before a changed file's counts
+  const moved = file.moved ? `Was step ${file.moved.from}, now step ${file.moved.to}` : undefined
   if (file.status === 'changed') {
     return (
-      <span style={{ ...mono, color: 'var(--text-faint)' }} data-testid="diff-tag">
+      <span style={{ ...mono, color: 'var(--text-faint)' }} data-testid="diff-tag" title={moved}>
+        {file.moved && <>Moved{' '}</>}
         +<span style={{ color: 'var(--green)' }}>{file.added}</span>
         {' '}−<span style={{ color: 'var(--red)' }}>{file.removed}</span>
       </span>
     )
+  }
+  if (file.status === 'unchanged' && file.moved) {
+    return <span style={{ ...mono, color: 'var(--text-faint)' }} data-testid="diff-tag" title={moved}>Moved</span>
   }
   const label = { new: 'New', removed: 'Removed', unchanged: 'Unchanged' }[file.status]
   const color = file.status === 'new' ? 'var(--green)' : file.status === 'removed' ? 'var(--red)' : 'var(--text-faint)'

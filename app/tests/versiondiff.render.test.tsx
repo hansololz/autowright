@@ -193,6 +193,34 @@ describe('VersionDiffModal', () => {
   })
 })
 
+describe('moved steps (§9.2/§19)', () => {
+  it('a step at a different position reads Moved', async () => {
+    const files: DiffFile[] = [
+      file({ kind: 'manifest', name: 'Manifest', file: 'automation.yaml', status: 'unchanged', rows: [same(1, 'params: []')] }),
+      file({ name: 'A', file: '02-a.py', status: 'unchanged', moved: { from: 1, to: 2 }, rows: [same(1, 'a = 1')] }),
+      file({
+        name: 'B', file: '01-b.py', status: 'changed', added: 2, removed: 1, moved: { from: 2, to: 1 },
+        rows: [
+          { kind: 'mod', left: { number: 1, text: 'b = 1' }, right: { number: 1, text: 'b = 2' } },
+          { kind: 'add', left: null, right: { number: 2, text: 'c = 3' } },
+        ],
+      }),
+    ]
+    // status drives the viewed-on-open file: a moved-but-unchanged step is skipped
+    expect(mod.firstChanged(files)).toBe(2)
+    mockedApi.versionDiff.mockResolvedValue({ from: 1, to: 3, files })
+    open()
+    await waitFor(() => expect(screen.getByText('FILE 3 OF 3')).toBeTruthy())
+    const tagOf = (testId: string) => screen.getByTestId(testId).querySelector('[data-testid="diff-tag"]') as HTMLElement
+    expect(tagOf('diff-file-manifest').textContent).toBe('Unchanged')
+    expect(tagOf('diff-file-manifest').getAttribute('title')).toBeNull()
+    expect(tagOf('diff-file-02-a.py').textContent).toBe('Moved')
+    expect(tagOf('diff-file-02-a.py').getAttribute('title')).toBe('Was step 1, now step 2')
+    expect(tagOf('diff-file-01-b.py').textContent).toBe('Moved +2 \u22121')
+    expect(tagOf('diff-file-01-b.py').getAttribute('title')).toBe('Was step 2, now step 1')
+  })
+})
+
 describe('navigator lock glyph (§9.2/§4.1)', () => {
   it('a step locked on the newer side carries the faint lock glyph; a removed or unlocked file does not', async () => {
     mockedApi.versionDiff.mockResolvedValue(DIFF)

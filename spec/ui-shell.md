@@ -1067,8 +1067,13 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   documents), and at its right a change tag in mono: "+`<a>` −`<r>`" (added / removed line
   counts, green / red `--text` on the digits, the sign faint) for a changed file, "New" for a
   file only the newer version has, "Removed" for one only the older has, "Unchanged"
-  (faint) for an identical one; a step locked (§4.1) on the newer side carries a faint
-  `fa-lock` glyph before its change tag. Every file is listed, unchanged ones included, so the
+  (faint) for an identical one; a step that sits at a different position in the two
+  versions (§19 `moved`) reads "Moved" (in the tag's `--text-faint`, a shade above the
+  navigator's dimmer Unchanged — a move is a change; tooltip "Was step `<from>`, now step
+  `<to>`") in place of "Unchanged", or "Moved" before its "+`<a>` −`<r>`" counts when its
+  script changed too — a §11 reorder never shows as removed-and-new, since steps match
+  by name; a step locked (§4.1) on the newer side carries a faint `fa-lock` glyph before
+  its change tag. Every file is listed, unchanged ones included, so the
   navigator reads as the whole version folder with the changes marked. The viewed row
   carries the 2 px accent bar and faint fill of the step navigator; the unviewed rows are
   buttons, the viewed row a plain block, and ↑ / ↓ or ← / → flip files with the same
