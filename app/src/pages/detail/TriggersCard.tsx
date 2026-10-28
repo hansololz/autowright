@@ -1,6 +1,6 @@
 // §9.2 TRIGGERS card: the rows with toggle/edit/remove, the inline editor
 // swap, the add-trigger disclosure, and the remove confirmation.
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { api } from '../../api'
 import type { Automation, DraftTrigger, Trigger } from '../../types'
 import { ConfirmModal, EmptyLine, Eyebrow, MiniBadge, Toggle } from '../../ui'
@@ -14,6 +14,11 @@ const rowDivider = (i: number, total: number): React.CSSProperties =>
 export function TriggersCard({ auto, statusText }: { auto: Automation; statusText: string }) {
   const [editTrig, setEditTrig] = useState<string | null>(null) // §9.2: id of the row swapped for the inline editor
   const [removeTrig, setRemoveTrig] = useState<Trigger | null>(null) // §9.2: trigger awaiting remove confirmation
+  // §9.2: one trigger save at a time — two in flight would race, the second
+  // carrying the first's stale list. The ref closes the same-tick double click
+  // the disabled render cannot.
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
   const trigs = auto.triggers
   const noTrigs = trigs.length === 0
 
@@ -24,11 +29,18 @@ export function TriggersCard({ auto, statusText }: { auto: Automation; statusTex
   // already up) — an editor closes only on true, so a rejected save (a 422)
   // keeps what the user typed.
   const putTriggers = (next: Array<Trigger | DraftTrigger>, toastMsg: string | ((saved: Automation) => string)) => {
+    if (savingRef.current) return Promise.resolve(false)
+    savingRef.current = true
+    setSaving(true)
     let saved = true
     return runAction(auto.id, async () => {
       const result = await api.patchAutomation(auto.id, { triggers: next })
       return typeof toastMsg === 'string' ? toastMsg : toastMsg(result)
-    }, { onError: () => { saved = false } }).then(() => saved)
+    }, { onError: () => { saved = false } }).then(() => {
+      savingRef.current = false
+      setSaving(false)
+      return saved
+    })
   }
   const toggleTrigger = (t: Trigger) => {
     putTriggers(
@@ -60,6 +72,7 @@ export function TriggersCard({ auto, statusText }: { auto: Automation; statusTex
                   ).then((ok) => { if (ok) setEditTrig(null) })
                 }}
                 onCancel={() => setEditTrig(null)}
+                busy={saving}
               />
             </div>
           ) : (
@@ -97,8 +110,8 @@ export function TriggersCard({ auto, statusText }: { auto: Automation; statusTex
                     <i className="fa-solid fa-pen" style={{ fontSize: 11 }} />
                   </button>
                 )}
-                <Toggle on={t.enabled} onChange={() => toggleTrigger(t)} title={t.enabled ? 'Turn this trigger off' : 'Turn this trigger on'} />
-                <button className="ad-btn-x" onClick={() => setRemoveTrig(t)} title="Remove trigger" aria-label="Remove trigger">
+                <Toggle on={t.enabled} onChange={() => toggleTrigger(t)} disabled={saving} title={t.enabled ? 'Turn this trigger off' : 'Turn this trigger on'} />
+                <button className="ad-btn-x" onClick={() => setRemoveTrig(t)} disabled={saving} title="Remove trigger" aria-label="Remove trigger">
                   <i className="fa-solid fa-xmark" />
                 </button>
               </div>
@@ -118,6 +131,7 @@ export function TriggersCard({ auto, statusText }: { auto: Automation; statusTex
             <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-muted)' }}>{statusText}</div>
             <AddTrigger
               hasAppStart={trigs.some((t) => t.kind === 'app_start')}
+              busy={saving}
               onAdd={(t) => putTriggers(
                 [...trigs, { ...t, enabled: true }],
                 // a whole-list replace keeps order — the added entry is last

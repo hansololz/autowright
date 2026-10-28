@@ -1049,11 +1049,64 @@ describe('CreateFlow step editing (§11)', () => {
     expect(current.steps[0].locked).toBeUndefined()
   })
 
+  it('Unlock with no locked step of that name toasts and runs no sync', async () => {
+    // the step is already unlocked
+    ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...BLOCKED_SYNC,
+      blockers: [{ kind: 'constraint', step: 'Fetch pages', reason: 'Fetch pages is locked.', fix: 'Unlock it.' }],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getByText('Sync spec'))
+    await waitFor(() => expect(screen.getByText('Unlock "Fetch pages"')).toBeTruthy(), { timeout: 3000 })
+    fireEvent.click(screen.getByText('Unlock "Fetch pages"'))
+    expect(storeMod.useStore.getState().toast).toBe("No locked step named 'Fetch pages' — unlock it in the step editor")
+    expect(screen.queryByText('Step \'Fetch pages\' unlocked.')).toBeNull()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(mockedApi.postDraftJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('a step added since the move retires Remember this order', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        steps: [
+          { file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("a")' },
+          { file: '02-b.py', name: 'Second', description: '', code: 'log("b")' },
+        ],
+      } as unknown as Automation],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getAllByText('Fetch pages')[0])
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Move step down'))
+    expect(screen.getByTestId('chat-remember-order')).toBeTruthy()
+    fireEvent.click(within(cardOf(screen.getByText('STEPS · GENERATED'))).getByText('Add step'))
+    // the move chip is still the thread's last entry, but the steps changed
+    expect(screen.getByText('Step \'Fetch pages\' moved to position 2.')).toBeTruthy()
+    expect(screen.queryByTestId('chat-remember-order')).toBeNull()
+  })
+
+  it('an automation needing fixing for a step-modified problem opens with the draft already touched', () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        problems: [{ kind: 'step-modified', label: 'A step script was edited outside Autowright.' }],
+      } as unknown as Automation],
+    })
+    render(<CreateFlow />)
+    expect(screen.getByText('Keep draft')).toBeTruthy()
+    expect((screen.getByText('Save as v2').closest('button') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('an automation without problems opens untouched', () => {
+    render(<CreateFlow />)
+    expect(screen.queryByText('Keep draft')).toBeNull()
+  })
+
   it('Remove the rule deletes the quoted spec bullet and syncs; an unmatched rule only toasts', async () => {
     storeMod.useStore.setState({
       automations: [{
         ...AUTO,
-        spec: [...AUTO.spec, { kind: 'h2', text: 'Build rules' }, { kind: 'li', text: 'Step "Fetch pages": Never use JSON' }],
+        spec: [...(AUTO.spec ?? []), { kind: 'h2', text: 'Build rules' }, { kind: 'li', text: 'Step "Fetch pages": Never use JSON' }],
       } as unknown as Automation],
     })
     ;(mockedApi.getDraftJob as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -3213,6 +3266,7 @@ describe('§11 chat thread auto-scroll', () => {
       undoDraft={noop} runSync={noop} runDraftTest={noop} analyzeFailure={null} rememberOrder={null}
       patchEntry={noop} applyBlockersEntry={noop} clearChat={noop} cancelChat={noop}
       cancelSync={noop} setAgentId={noop} up={noop} showToast={noop}
+      applyWorkaround={noop} unlockConstraintStep={noop} removeConstraintRule={noop}
       {...over}
     />
   )
@@ -3225,6 +3279,24 @@ describe('§11 chat thread auto-scroll', () => {
     fireEvent.scroll(el)
     return el
   }
+
+  it('a live draft test disables the constraint resolutions and Apply to the spec & sync', () => {
+    const blockers: ChatEntry = {
+      id: 'b1', kind: 'blockers', source: 'sync',
+      blockers: [
+        { reason: 'Needs a channel id.', fix: 'Name it in the spec.' },
+        { kind: 'constraint', step: 'Fetch pages', reason: 'Locked.', fix: 'Unlock it.', workaround: 'Add a step.' },
+        { kind: 'constraint', rule: 'never use json', reason: 'A rule.', fix: 'Drop it.' },
+      ],
+    }
+    const labels = ['Use the workaround', 'Unlock "Fetch pages"', 'Remove the rule', 'Apply to the spec & sync']
+    const { rerender } = render(panel([blockers]))
+    for (const label of labels) expect((screen.getByText(label).closest('button') as HTMLButtonElement).disabled).toBe(false)
+    rerender(panel([blockers], { testLive: true }))
+    for (const label of labels) expect((screen.getByText(label).closest('button') as HTMLButtonElement).disabled).toBe(true)
+    // Dismiss is never gated
+    expect((screen.getByText('Dismiss').closest('button') as HTMLButtonElement).disabled).toBe(false)
+  })
 
   it('a settled activity entry leaves a scrolled-up thread where it is', () => {
     const chat = [entry('c1', 'user', 'do it')]

@@ -18,11 +18,11 @@ from typing import Any
 
 from . import harness, keychain, listeners, notify, packages as pkglib, paths, platform, timefmt
 from .events import hub
-from .executor import CLIP_MARKER, CTRL, ERROR_MESSAGE_CAP, _LineWriter, substantive_probe
+from .executor import CLIP_MARKER, CTRL, ERROR_MESSAGE_CAP, _LineWriter, secret_probes
 from .firing import DATA_PATH_UNREACHABLE, finish_queued
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
                       clamp_max_parallel, effective_notifications, exec_version_label,
-                      is_test, new_id,
+                      is_test, new_id, step_script_sha,
                       resolve_param_value, trigger_label)
 
 log = logging.getLogger("autowright.engine")
@@ -199,18 +199,17 @@ def build_redactions(values_by_id: dict[str, str],
     off) and its `repr` form whenever they differ from the value (a
     `print(repr(v))`, a `json.dumps`, a `KeyError` message), plus the value
     without its trailing newline(s) — a pasted value ending in a newline never
-    matches a single log line whole. A variant never overrides another
-    value's whole-value entry."""
+    matches a single log line whole. Each line is also kept stripped and
+    JSON-escaped, and a JSON value adds every string leaf of 8+ characters
+    with the same forms (`executor.secret_probes`). A variant never overrides
+    another value's whole-value entry."""
     redactions = {v: names_by_id.get(i, i) for i, v in values_by_id.items()}
     for i, v in values_by_id.items():
-        for variant in (json.dumps(v)[1:-1], json.dumps(v, ensure_ascii=False)[1:-1],
-                        repr(v)[1:-1], v.rstrip("\r\n")):
-            if variant and variant != v:
-                redactions.setdefault(variant, names_by_id.get(i, i))
-        if "\n" in v:
-            for part in v.splitlines():
-                if substantive_probe(part):
-                    redactions.setdefault(part, names_by_id.get(i, i))
+        # §4.8: each line also stripped and JSON-escaped, and every string
+        # leaf of a JSON value with its own forms — the set the outbound scan
+        # and the executor's cut guards share (`secret_probes`).
+        for variant in secret_probes(v)[1:]:
+            redactions.setdefault(variant, names_by_id.get(i, i))
     return redactions
 
 
@@ -913,7 +912,11 @@ class Engine:
             # record's steps — re-entering the loop would pair old statuses with
             # new scripts. Real versions are immutable, so only Draft can drift.
             # Compare code hashes too: an edit can keep the same names/files.
-            if [(s["name"], s.get("file"), s.get("sha")) for s in h["steps"]] != \
+            # (Draft only, per §7: a version's record sha is the hash of the
+            # bytes on disk at execution start, which a hand edit may make
+            # differ from the code loaded at boot.)
+            if h["kind"] == "draft" and \
+                    [(s["name"], s.get("file"), s.get("sha")) for s in h["steps"]] != \
                     [(s["name"], s.get("file"), _step_sha(s)) for s in ver["steps"]]:
                 raise RuntimeError("the draft's steps changed since this execution — execute it fresh instead")
             self.store.execs[h["id"]] = h  # the live in-memory record is the full one
@@ -923,8 +926,9 @@ class Engine:
             h["status"] = "executing"
             h["finished_at"] = None
             h["error"] = None
-            h["chip"] = None
-            h["chip_status"] = None
+            # §7: the chip (and its `changes`/`attention` status) is kept — a
+            # step that isn't re-executed can't set it again; a re-executed
+            # step that sets one overrides it at the end of the pass.
             idx = next((i for i, s in enumerate(h["steps"]) if s["status"] == "queued"), None)
             if idx is not None:
                 n = _next_attempt_n(h["steps"][idx])
@@ -1127,6 +1131,50 @@ class Engine:
         base = self.store.auto_dir(auto)
         return base / "draft" / "automation" if kind == "draft" else base / "versions" / f"v{version}"
 
+    def _read_version_steps(self, ver: dict, h: dict, vdir: Path) -> dict[int, str]:
+        """§4.1/§7 execution-start seal check: each step this pass will run
+        is read from disk once; its record `sha` becomes the hash of those
+        bytes, and a hash that differs from the folder's §5 seal marks the
+        loaded step `modifiedOnDisk` exactly as load does — published at once
+        so the `step-modified` problem shows without a restart. Returns step
+        index → the script text read (steps whose file can't be read are left
+        to `_execute_step`'s missing-script path)."""
+        codes: dict[int, str] = {}
+        marked = False
+        for i, s in enumerate(ver["steps"]):
+            if i >= len(h["steps"]) or h["steps"][i]["status"] in ("succeeded", "skipped"):
+                continue
+            file = s.get("file")
+            if not file:
+                continue
+            try:
+                path = vdir / file
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            sha = step_script_sha(data)
+            h["steps"][i]["sha"] = sha
+            codes[i] = data.decode("utf-8", errors="replace")
+            sealed = self.store.sealed_step_sha(vdir, file)
+            if sealed and sha != sealed and (not s.get("modifiedOnDisk")
+                                             or s.get("code") != codes[i]):
+                # §4.1: the loaded step now holds what a restart's load would —
+                # the bytes on disk — so the editor's Save (and pull) seal the
+                # script that actually ran instead of silently reverting it.
+                with self.store.lock:
+                    s["modifiedOnDisk"] = True
+                    s["code"] = codes[i]
+                marked = True
+        if marked:
+            with self.store.lock:
+                a = self.store.autos.get(h["automation_id"])
+                if a is not None:
+                    hub.publish("automation.changed", automationId=a["id"],
+                                automation=self.store.auto_json(a, full=False))
+        return codes
+
     def _memory_dir(self, auto: dict, kind: str) -> Path:
         """§4.4: Draft executions get the draft's own memory — the live dir is
         never handed to a draft step."""
@@ -1215,8 +1263,8 @@ class Engine:
         back-to-back. Cancel and skip cut the wait short."""
         if not forever:
             return
-        end = time.time() + _retry_pause_s()
-        while time.time() < end:
+        end = time.monotonic() + _retry_pause_s()
+        while time.monotonic() < end:
             if state["cancel"] or state.get("shutdown") or state.get("skip") == i:
                 return
             time.sleep(0.05)
@@ -1280,9 +1328,19 @@ class Engine:
             # code-referenced secrets["<id>"] literals alike. Ids are the
             # binding (§4.8); every message resolves the id to the secret's
             # name — names are the display, never the identity.
+            # §11 test executions carry their own script/memory dirs (`_test` is
+            # in-memory only — write_exec_yaml persists a fixed key set).
+            vdir = (Path(h["_test"]["vdir"]) if h.get("_test")
+                    else self._version_dir(auto, h["kind"], h.get("version")))
+            # §4.1/§7: a version execution reads each step it will run from
+            # disk once — the record's sha, the secret scan below, and the
+            # seal check all use those bytes, never the code loaded at boot.
+            step_code: dict[int, str] = {}
+            if h["kind"] == "version" and not h.get("_test"):
+                step_code = self._read_version_steps(ver, h, vdir)
             needed: set[str] = set()
-            for s in ver["steps"]:
-                needed |= set(SECRET_REF_RE.findall(s.get("code", "")))
+            for i, s in enumerate(ver["steps"]):
+                needed |= set(SECRET_REF_RE.findall(step_code.get(i, s.get("code", ""))))
                 needed |= {e["id"] for e in s.get("secrets") or [] if e.get("id")}
             by_id = {x["id"]: x for x in self.store.secrets}
             secret_values: dict[str, str] = {}   # id → value (§6 step scoping keys on ids)
@@ -1306,7 +1364,23 @@ class Engine:
                     failed = True
                 else:
                     # §4.8: the Keychain entry is keyed by the secret's id.
-                    v = keychain.get_secret(sid)
+                    try:
+                        v = keychain.get_secret(sid)
+                    except Exception as e:  # noqa: BLE001 — locked, access denied, …
+                        # §7 secret category: an unreadable Keychain fails at
+                        # this pre-step gate, never as an engine error. Named
+                        # by the record's name; the OS error carries no value.
+                        log.warning("couldn't read secret %s from the OS secret store: %s",
+                                    sid[:8], e)
+                        msg = (f"couldn't read secret {sec['name']} from your "
+                               f"{paths.secret_store_name()} — the execution can't start")
+                        self._log(h, "err", msg, {})
+                        if not h.get("error"):
+                            h["error"] = {"step": None, "message": msg,
+                                          "reason": "The Keychain couldn't be read — unlock it or "
+                                                    "allow access, then execute again."}
+                        failed = True
+                        continue
                     if v is None:
                         # §4.8: a placeholder (set: False) gets the clearer message —
                         # the secret exists, only its value was never added.
@@ -1356,10 +1430,6 @@ class Engine:
                 if self._seed_draft_memory(auto):
                     self._log(h, "sys", "draft memory created — copied from the automation's memory", redactions)
 
-            # §11 test executions carry their own script/memory dirs (`_test` is
-            # in-memory only — write_exec_yaml persists a fixed key set).
-            vdir = (Path(h["_test"]["vdir"]) if h.get("_test")
-                    else self._version_dir(auto, h["kind"], h.get("version")))
             for i, s in enumerate(ver["steps"]):
                 step = h["steps"][i]
                 if step["status"] in ("succeeded", "skipped"):
@@ -1392,7 +1462,7 @@ class Engine:
                                   f"attempt {n - 1} failed — retrying (attempt {n})" if forever
                                   else f"attempt {n - 1} failed — retrying ({pass_tries} of {budget})",
                                   redactions)
-                    t0 = time.time()
+                    t0 = time.monotonic()  # §6: step durations run on the monotonic clock
                     agent_cfgs: list[dict] = []
                     rc = 1
                     notify_holder: dict = {}
@@ -1411,12 +1481,12 @@ class Engine:
                     if not (s.get("agent") and not agent_cfgs):
                         rc = self._execute_step(auto, ver, h, s, i + 1, vdir, params, secret_values,
                                                 secret_names, agent_cfgs, state, redactions,
-                                                result, notify_holder)
+                                                result, notify_holder, code=step_code.get(i))
                     if notify_holder.get("text"):
                         notify_text = notify_holder["text"]
                     if notify_holder.get("result_touched"):
                         result_touched = True
-                    dur = int((time.time() - t0) * 1000)
+                    dur = max(0, int((time.monotonic() - t0) * 1000))
                     step["duration_ms"] = dur
                     attempt["duration_ms"] = dur
                     skip = state.pop("skip", None)
@@ -1682,10 +1752,16 @@ class Engine:
 
     def _execute_step(self, auto: dict, ver: dict, h: dict, s: dict, step_index: int, vdir: Path,
                   params: dict, secret_values: dict, secret_names: dict, agent_cfgs: list[dict],
-                  state: dict, redactions: dict, result: dict, notify_holder: dict) -> int:
+                  state: dict, redactions: dict, result: dict, notify_holder: dict,
+                  code: str | None = None) -> int:
+        """`code` is the script text the execution read from disk at its
+        start (§7 version executions); None falls back to the loaded code."""
         script = vdir / (s.get("file") or "")
-        if not script.exists():
-            msg = f"step script {s.get('file')} is missing"
+        # is_file(): a blank or missing `file` resolves to the version folder
+        # itself, which exists but is no script.
+        if not s.get("file") or not script.is_file():
+            msg = (f"step script {s.get('file')} is missing" if s.get("file")
+                   else f"step {s.get('name', step_index)} names no script file")
             self._log(h, "err", msg, redactions)
             notify_holder["error"] = {"type": "MissingScript", "message": msg}
             # §7: an engine-level failure, not a step attempt — never retried.
@@ -1696,7 +1772,7 @@ class Engine:
         # The full value map stays
         # engine-side for log redaction; reading an uninjected secret raises in
         # the executor and fails the execution.
-        step_refs = set(SECRET_REF_RE.findall(s.get("code", ""))) | {e["id"] for e in s.get("secrets") or [] if e.get("id")}
+        step_refs = set(SECRET_REF_RE.findall(s.get("code", "") if code is None else code)) | {e["id"] for e in s.get("secrets") or [] if e.get("id")}
         step_secrets = {k: v for k, v in secret_values.items() if k in step_refs}
         ctx = {
             "params": params,
@@ -1804,7 +1880,7 @@ class Engine:
             or h.get("chip_status") in ("changes", "attention")
         )
         if setting == "all" or interesting:
-            body = notify_text or (result or {}).get("chip") or \
+            body = notify_text or (result or {}).get("chip") or h.get("chip") or \
                 ("Execution failed" if status == "failed" else "Execution finished")
             title_param = None
             for p in ver.get("params", []):

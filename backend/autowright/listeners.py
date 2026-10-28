@@ -225,6 +225,7 @@ class _Conn(threading.Thread):
         self.guild_names: dict[str, str] = {}  # guild id → name
         self._stop = threading.Event()
         self._ws = None
+        self._reached_ready = False  # §6: the current session handled READY
 
     def stop(self) -> None:
         # §3 shutdown: fire-and-forget — the gateway close can take the
@@ -283,21 +284,29 @@ class _Conn(threading.Thread):
                 self._stop.wait(BACKOFF_MAX)
                 continue
             self.mgr.set_status(self.secret, "connecting")
+            # §6: set by `_session` when READY is handled — a session that
+            # reached READY resets the backoff however it ended (return or
+            # raise), so a long-healthy connection's drop reconnects in 1 s.
+            self._reached_ready = False
             try:
                 if self._session(token):
-                    backoff = 1.0  # a healthy session resets the backoff
+                    self._reached_ready = True
             except Exception as e:  # noqa: BLE001 — closes, network errors, DNS, TLS, …
                 code = e.rcvd.code if isinstance(e, ConnectionClosed) and e.rcvd else None
                 reason = _CLOSE_REASONS.get(code)
                 if reason:
                     # §6: an auth-class failure parks at the backoff cap — a
                     # fixed token/intent heals on the next attempt.
+                    if self._reached_ready:
+                        backoff = 1.0
                     self.mgr.set_status(self.secret, "error", reason)
                     self._stop.wait(BACKOFF_MAX)
                     continue
                 if not self._stop.is_set():
                     self.mgr.set_status(self.secret, "connecting",
                                         f"connection failed — {e}")
+            if self._reached_ready:
+                backoff = 1.0  # a session that reached READY resets the backoff
             self._stop.wait(backoff)
             backoff = min(backoff * 2, BACKOFF_MAX)
 
@@ -362,6 +371,7 @@ class _Conn(threading.Thread):
                         self.guild_names = {}
                         self.mgr.set_status(self.secret, "connected")
                         ready = True
+                        self._reached_ready = True
                     elif op == 0 and msg.get("t") == "GUILD_CREATE":
                         g = msg.get("d") or {}
                         for role in g.get("roles") or []:
@@ -393,6 +403,9 @@ class _ImsgWatcher:
         self.mgr = mgr
         self._db = None
         self._cursor = 0
+        # Whether `_cursor` came from a db this watcher already read — a
+        # reopen after a transient read error resumes from it (§6).
+        self._has_cursor = False
 
     def close(self) -> None:
         if self._db is not None:
@@ -413,7 +426,14 @@ class _ImsgWatcher:
                 # DbError — max_rowid can raise sqlite3 errors too) leaves
                 # self._db None: a half-open watcher keeping its __init__
                 # cursor of 0 would replay pre-watch history next tick.
-                self._cursor = imessage.max_rowid(db)
+                # A reopen after a read error keeps the old cursor while the
+                # db still reaches it, so a message that arrived during the
+                # outage still fires; only a db that shrank (replaced,
+                # restored) restarts at its MAX(ROWID).
+                top = imessage.max_rowid(db)
+                if not self._has_cursor or top < self._cursor:
+                    self._cursor = top
+                self._has_cursor = True
                 self._db = db
                 self.mgr.set_status(IMSG_KEY, "connected")
             except Exception as e:  # noqa: BLE001

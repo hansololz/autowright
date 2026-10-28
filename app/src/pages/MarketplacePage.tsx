@@ -416,7 +416,7 @@ export default function MarketplacePage() {
   // Per-field selectors (UI-GUIDE): a bare useStore() re-renders this page on
   // every store write anywhere - every toast, every log line of every execution.
   const showToast = useStore((s) => s.showToast)
-  const refresh = useStore((s) => s.refresh)
+  const loadAuto = useStore((s) => s.loadAuto)
   // §22.4 marketplace.changed - a §20 CLI change or an auto refresh shows
   // without a reload.
   const marketplaceVersion = useStore((s) => s.marketplaceVersion)
@@ -491,9 +491,11 @@ export default function MarketplacePage() {
   const refreshAll = async () => {
     if (refreshingAll || refreshing) return
     setRefreshingAll(true)
+    // §22.3: a whole list, ordered like load() — a newer list wins.
+    const sequence = ++listSequence.current
     try {
       const r = await api.marketplaceRefreshAll()
-      setSources(r.sources)
+      if (alive.current && sequence === listSequence.current) setSources(r.sources)
     } catch (e) { showToast((e as Error).message) }
     setRefreshingAll(false)
   }
@@ -509,12 +511,20 @@ export default function MarketplacePage() {
       if (path) showToast(`Exported to ${path}.`)
     } catch (e) { showToast((e as Error).message) }
   }
+  // §22.3 list ordering: an answered row is newer than any list still in
+  // flight, so landing it bumps the sequence — that older list can no longer
+  // overwrite it. Row answers patch in place, so two never drop each other.
+  const landRow = (source: MarketplaceSource) => {
+    if (!alive.current) return
+    ++listSequence.current
+    setSources((prev) => prev?.map((row) => (row.id === source.id ? source : row)) ?? null)
+  }
   // §22.3: the header caret flips `expanded` in place - one PATCH, the
   // answered row replacing this one; a failure toasts and changes nothing.
   const toggleExpanded = async (s: MarketplaceSource) => {
     try {
       const source = await api.marketplaceSettings(s.id, { expanded: !s.expanded })
-      setSources((prev) => prev?.map((row) => (row.id === s.id ? source : row)) ?? null)
+      landRow(source)
     } catch (e) { showToast((e as Error).message) }
   }
   const refreshOne = async (id: string) => {
@@ -522,7 +532,7 @@ export default function MarketplacePage() {
     setRefreshing(id)
     try {
       const source = await api.marketplaceRefresh(id)
-      setSources((prev) => prev?.map((s) => (s.id === id ? source : s)) ?? null)
+      landRow(source)
     } catch (e) { showToast((e as Error).message) }
     setRefreshing(null)
   }
@@ -552,7 +562,8 @@ export default function MarketplacePage() {
   // §5.2/§22.3: confirm landed the automation - the §9.1 summary modal follows.
   const importDone = async (r: { name: string; automationId: string; summary: ImportSummary }) => {
     setInstall(null)
-    await refresh()
+    // §9.1: the Duplicate's insert, not a list refresh a newer one may supersede
+    await loadAuto(r.automationId, { insert: true })
     setImported(r)
   }
 

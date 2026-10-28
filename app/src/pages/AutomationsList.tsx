@@ -16,6 +16,24 @@ export function ImportSummaryModal({ name, automationId, summary, onClose }: {
   onClose: () => void
 }) {
   const go = useStore((s) => s.go)
+  const loadAuto = useStore((s) => s.loadAuto)
+  const [opening, setOpening] = useState(false)
+  // §9.1 Open automation: load the new automation into the store (the §9.2
+  // Duplicate's insert — a list refresh may have been superseded by a newer
+  // one), then navigate, and only while the page that started it is shown.
+  const openAutomation = async (close: () => void) => {
+    if (opening) return
+    setOpening(true)
+    const clicked = useStore.getState()
+    const clickedPage = clicked.page
+    const clickedId = clicked.automationId
+    await loadAuto(automationId, { insert: true })
+    setOpening(false)
+    const now = useStore.getState()
+    if (now.page !== clickedPage || now.automationId !== clickedId) return
+    close()
+    go('automation', { automationId })
+  }
   // §9 per-OS copy rule: the machine noun this modal names.
   const copy = usePlatformCopy()
   const section = (title: string, body: React.ReactNode) => (
@@ -99,7 +117,7 @@ export function ImportSummaryModal({ name, automationId, summary, onClose }: {
           )}
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 18 }}>
             <BtnGhost onClick={close}>Close</BtnGhost>
-            <BtnPrimary onClick={() => { close(); go('automation', { automationId }) }}>
+            <BtnPrimary onClick={() => { void openAutomation(close) }} disabled={opening}>
               Open automation
             </BtnPrimary>
           </div>
@@ -238,7 +256,7 @@ export default function AutomationsList() {
   // no draft yet, but the session is resumable all the same).
   const slotJobId = useStore((s) => s.draftJobs.find((j) => j.owner === 'pending')?.jobId)
   const hasSlotJob = !!slotJobId
-  const refresh = useStore((s) => s.refresh)
+  const loadAuto = useStore((s) => s.loadAuto)
   const showToast = useStore((s) => s.showToast)
   const [confirmFresh, setConfirmFresh] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -268,7 +286,8 @@ export default function AutomationsList() {
   // §5.2/§9.1 import: the modal previews (URL or file), confirm lands it.
   const importDone = async (r: { name: string; automationId: string; summary: ImportSummary }) => {
     setImportOpen(false)
-    await refresh()
+    // §9.1: the Duplicate's insert, not a list refresh a newer one may supersede
+    await loadAuto(r.automationId, { insert: true })
     setImported(r)
   }
 

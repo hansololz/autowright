@@ -46,6 +46,10 @@ class Scheduler:
         # it never fire (startup baseline = now, §6 no catch-up queue).
         self._baseline: dict[tuple[str, str], datetime] = {}
         self._baseline_utc: dict[tuple[str, str], datetime] = {}
+        # (automation id, trigger id) → (local, UTC) of the last occurrence it
+        # fired — a backward clock step never moves the baseline below it, so
+        # an occurrence already fired never re-fires (§6 missed executions).
+        self._last_fired: dict[tuple[str, str], tuple[datetime, datetime]] = {}
         # Keys already warned about a wall-clock rewind too large for DST (a
         # system-timezone change) — one warning per rewind, not one per tick.
         self._warned_rewind: set[tuple[str, str]] = set()
@@ -116,6 +120,7 @@ class Scheduler:
         # Forget baselines of deleted automations / removed triggers.
         self._baseline = {k: v for k, v in self._baseline.items() if k in live_keys}
         self._baseline_utc = {k: v for k, v in self._baseline_utc.items() if k in live_keys}
+        self._last_fired = {k: v for k, v in self._last_fired.items() if k in live_keys}
         self._warned_rewind &= live_keys
         # Both hourly sweeps advance their timestamp first (a failing sweep
         # retries next hour, never hot-loops) and are guarded so neither can
@@ -165,6 +170,10 @@ class Scheduler:
         self._warned_unreachable = False
         due: list[tuple[datetime, dict]] = []
         dropped: list[dict] = []  # §6 runIfMissed-off triggers whose span was slept through
+        # Baselines of due triggers before this tick advanced them — restored
+        # when the firing was never attempted (§4.3), so a due one-shot isn't
+        # read as spent next tick.
+        prior_baselines: dict[tuple[str, str], tuple[datetime, datetime]] = {}
         # §4.3 interval anchor: the automation's run baseline, read once per
         # tick (the same baseline §4.1 overdue uses) — never stored.
         run_baseline = self.store.run_baseline(a)
@@ -190,9 +199,16 @@ class Scheduler:
                 # trigger until the wall clock re-reaches the old baseline.
                 # UTC moved back too, so this is a real step — not a DST
                 # fall-back, where holding the baseline is what makes the
-                # repeated hour fire once (§4.3).
-                base = now
-                self._set_baseline(key, now, now_utc)
+                # repeated hour fire once (§4.3). §6: never below the last
+                # occurrence this trigger fired — a 09:00 fired at 09:00:10
+                # stays fired when the clock steps back to 08:59:50.
+                fired = self._last_fired.get(key)
+                if fired is not None and fired[1] > now_utc:
+                    base = fired[0]
+                    self._set_baseline(key, fired[0], fired[1])
+                else:
+                    base = now
+                    self._set_baseline(key, now, now_utc)
             if t["enabled"] and base > now and (base - now).total_seconds() > 3900:
                 # §4.3: the wall clock rewound with UTC steady, by more
                 # than any DST fall-back shifts (> 65 min) — almost
@@ -241,6 +257,7 @@ class Scheduler:
 
             occ, occ_due = occurrence(base, self._baseline_utc[key])
             if occ and occ_due:
+                prior_baselines[key] = (self._baseline[key], self._baseline_utc[key])
                 # §6: at most one catch-up per wake — swallow every older occurrence.
                 self._set_baseline(key, now, now_utc)
                 if not triggerlib.run_if_missed(t):
@@ -279,6 +296,13 @@ class Scheduler:
             # one-shot included.
             due.sort(key=lambda p: p[0])
             attempted = self._fire(a, due[0][1])
+            for occ, t in due:
+                key = (a["id"], t["id"])
+                if attempted:
+                    # §6: the fired execution covers every coalesced occurrence.
+                    self._last_fired[key] = (occ, occ.astimezone(timezone.utc))
+                elif key in prior_baselines:
+                    self._set_baseline(key, *prior_baselines[key])
             consumed = False
             # §4.3: a firing the shutting-down engine refused consumes nothing.
             for _, t in (due if attempted else ()):
@@ -333,11 +357,14 @@ class Scheduler:
             # A DELETE landing mid-tick removed the automation and its tree —
             # firing against the stale snapshot would create a spurious record
             # (and the engine would re-create a ghost directory).
+            # §4.3: either stale-snapshot early-out is a firing never
+            # attempted — the caller consumes nothing, so a coalesced due
+            # one-shot survives and fires on its own next tick.
             if self.store.autos.get(a["id"]) is not a:
-                return True
+                return False
             cur = next((x for x in a["triggers"] if x["id"] == t["id"]), None)
             if cur is None or not cur["enabled"]:
-                return True
+                return False
         # §6: a cron/one-shot/app-start firing with no free slot is skipped, never
         # queued — only message firings queue (a due one-shot is still consumed by
         # the caller).

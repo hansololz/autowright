@@ -245,6 +245,10 @@ def send_message(chat_guid: str, text: str) -> str | None:
             timeout=30)
     except FileNotFoundError:
         return "osascript not found"
+    except ValueError:
+        # A NUL byte in the reply (or the chat guid) can't ride argv — the
+        # engine logs it as a failed reply, never an engine error.
+        return "the reply contains a NUL character, which Messages can't send"
     if r is None:
         return "Messages didn't answer within 30 s"
     if r.returncode != 0:
@@ -286,11 +290,15 @@ def automation_status() -> str:
 def automation_probe() -> str:
     """§19 POST /imessage/permissions/automation-probe: fire a benign Apple
     Event at Messages.app — macOS shows the consent prompt if never answered
-    (and may launch Messages.app). Blocks until the user answers."""
+    (and may launch Messages.app). Blocks until the user answers, up to
+    300 s — a prompt still unanswered then answers "unknown" and leaves the
+    remembered state untouched (a timeout is not a denial)."""
     try:
         r = run_bounded(["osascript", "-e", _PROBE_SCRIPT], timeout=300)
-        state = "granted" if r is not None and r.returncode == 0 else "denied"
     except FileNotFoundError:
-        state = "denied"
+        r = False
+    if r is None:
+        return "unknown"
+    state = "granted" if r and r.returncode == 0 else "denied"
     _remember_automation(state)
     return state

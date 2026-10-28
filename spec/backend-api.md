@@ -221,11 +221,13 @@ remain plain dicts (§2).
   Events send to Messages (probe, `reply()`, or busy notice) — macOS offers no
   prompt-free way to read it, so it is `"unknown"` until the backend has sent one this
   install (the remembered value persists in settings storage, §5)
-- `POST /imessage/permissions/automation-probe` → `{ automation: "granted" | "denied" }` —
+- `POST /imessage/permissions/automation-probe` → `{ automation: "granted" | "denied" | "unknown" }` —
   fires a benign Apple Event at Messages.app (`osascript`: count chats), which makes macOS
   show the Automation consent prompt if the user has never answered it (and may launch
   Messages.app); the result updates the remembered `automation` state above. Called by the §9
-  checklist's Grant button; blocks until the user answers the prompt
+  checklist's Grant button; blocks until the user answers the prompt, up to 300 s — a prompt
+  still unanswered then answers `unknown` and leaves the remembered state untouched (a
+  timeout is not a denial)
 - `POST /automations` `{ draft, name?, agentId?, stepAgents?, allowedSecrets?, paramValues?, concurrency?, settlePending? }` → the new
   automation's bare §4 automation JSON — create v1 from the sent draft (the §11 Create
   button). `settlePending` (default `true`) is the §11 Create button's behavior described
@@ -265,7 +267,8 @@ remain plain dicts (§2).
   create endpoint's — the PATCH's validation, 422 aborts the save. **Operational-only save** (§4.4): when
   the sent draft's versioned content — spec, steps, instructions, notes, param
   definitions, packages — equals the current version's over the stored serialization, no
-  version is minted; the triggers replacement, `paramValues`, `concurrency`, and the identity/grant patch
+  version is minted (a current step modified on disk, §4.1 `step-modified`, never compares
+  equal: the save always mints, validates the edited script, and seals it); the triggers replacement, `paramValues`, `concurrency`, and the identity/grant patch
   still apply, and the response is the same automation JSON either way. Saving settles the
   draft (the container is deleted) and appends the §4.4 boundary marker to the
   automation's thread — "Draft saved as vN." when a version was minted, "Changes saved —
@@ -277,15 +280,19 @@ remain plain dicts (§2).
   (`step_json`, the manifest entry builder, the version diff, restore) read those fields
   leniently, so a hand-edited stored version with `timeout: abc` degrades to the default
   instead of a 500.
-- `POST /validate-steps` `{ draft }` — the §8 step validators (the same pass the save
+- `POST /validate-steps` `{ draft, automationId? }` — the §8 step validators (the same pass the save
   endpoints run, below) over a draft-shaped body, answering **200** `{ errors: string[] }`
   — an empty list means it would save; validation failures are the response body, never
   a 422, because the caller is asking, not saving. It writes nothing. Backs the §11 step
   editor's Save (which shows the lines inline) and the §20 `automation validate` verb; the
   step keys `authoredBy` / `locked` ride the body like every other step field (§4.1).
+  With an `automationId` the pass reads that automation's context exactly as its save
+  would (the §5.1 `unresolved_references` wording for an imported reference), so the
+  editor's strip and `automation validate` match a refused save word for word; a stale id
+  answers 404.
 - **Server-side step validation** — `POST /automations` and `POST /automations/{id}/versions`
   run the §8 step validators (`ast.parse`, the §6.2 import allowlist, manifest schema and
-  step-file ordering, the timeout/retry rules, the §8 rule-6/7 id checks — step `agents:` /
+  step-file ordering, §4.1 step-name uniqueness, the timeout/retry rules, the §8 rule-6/7 id checks — step `agents:` /
   `secrets:` entries and the code-scanned `agents["<id>"]` / `secrets["<id>"]` literals
   resolved against all configured agents and stored secrets) on the sent draft and answer
   422 with the
@@ -337,10 +344,13 @@ remain plain dicts (§2).
   endpoints themselves (save, create, draft DELETE), never through this surface
 - `POST /automations/{id}/restore` `{ version }` — restore vX as vN+1, written through the
   §5 version-folder writer (manifest last as the commit point — never a tree copy). The
-  restored steps go through the same server-side step validation as a save (below) and a
-  failure answers 422 with the errors: a stored folder whose script was edited on disk
-  (§4.1 `step-modified`) must not become a validated-looking new version by way of a
-  restore
+  restored content is the stored content, unchanged and unvalidated (2026-10-27, replacing
+  the one-day rule that ran the save validators: a version written under older rules, or
+  one referencing an agent or secret deleted since, must stay restorable — the §4.1
+  `problems` audit reports what no longer resolves, as it always did), with one gate: a
+  version holding a step modified on disk (§4.1 `step-modified`) answers 422 ("v3's step
+  `X` was edited on disk — pull and push it instead"), so a hand edit never becomes a
+  validated-looking new version by way of a restore
 - `GET /automations/{id}/diff?from=vX&to=vY`: the §9.2 version diff, what changed between
   two stored versions, computed here (stdlib `difflib`, `versions_diff.py`) so the UI and
   the §20 CLI render one result and neither diffs. `from` / `to` are "vN" labels
@@ -356,7 +366,10 @@ remain plain dicts (§2).
   [{ kind: "same" | "add" | "del" | "mod", left: { number, text } | null, right: { number,
   text } | null }] }`; a **step** entry also carries `moved: { from, to } | null` — the
   step's 1-based positions in the `from` and `to` versions when it is matched on both
-  sides and they differ (a §11 reorder), `null` otherwise (and absent on the three
+  sides and its **relative order among the steps both versions hold** changed (the moved
+  steps are those outside the longest in-order run of the common steps, so adding or
+  removing a step marks nothing moved while a step dragged from 1 to 5 marks that step
+  alone — a §11 reorder), `null` otherwise (and absent on the three
   documents). `status` is unaffected: a moved step with an identical script stays
   `unchanged`. The text compared: for the **manifest**, the versioned manifest
   fields the §5 writer emits (`params` definitions, `packages`, the step entries with
@@ -383,7 +396,10 @@ remain plain dicts (§2).
   dedupes per §4.1 like create, so the route never 422s on a collision — the landed name is
   in the response. 404 on an unknown id. Publishes one single-row `automation.changed` for the
   new automation (clients insert the row, §19 merge rule for an unknown id). A `copyMemory`
-  request is refused up front with 409 "an execution is in progress" while the source is live
+  request is refused up front with 409 "an execution is in progress" while the source is live;
+  any duplicate is refused with 409 "Step `X` was edited on disk — pull and push it, or save
+  it from the editor, before duplicating" while the source's current version holds a §4.1
+  `step-modified` step (a copy would seal an unvalidated script, §5)
   (the §6.3 manual-snapshot rule: a mid-execution copy could catch a half-written file) — nothing
   is created; the copy's commit re-checks the source, and a source that started executing
   during the copy abandons the memory copy. A memory copy that failed or was abandoned after

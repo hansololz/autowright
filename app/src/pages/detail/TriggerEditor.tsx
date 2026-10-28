@@ -363,11 +363,12 @@ type TriggerFieldBag = {
   from?: string
 }
 
-export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
+export function TriggerEditor({ hasAppStart, initial, onSave, onCancel, busy = false }: {
   hasAppStart: boolean
   initial?: Trigger // §9.2 edit mode: pre-filled, submit reads Save
   onSave: (t: TriggerDraft) => void
   onCancel: () => void
+  busy?: boolean // §9.2: a trigger save is in flight — the submit disables
 }) {
   const secrets = useStore((s) => s.secrets)
   // §9.2/§2 gating: the iMessage chip renders only while the platform can
@@ -703,7 +704,7 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
                   ...(runIfMissed ? {} : { runIfMissed: false }),
                 })
           }}
-          disabled={!canAdd}
+          disabled={!canAdd || busy}
           style={{ flex: 'none' }}
         >
           {initial ? 'Save' : 'Add'}
@@ -718,13 +719,14 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel }: {
 
 // §9.2: `onAdd` resolves true once the trigger is saved — the editor closes
 // only then, so a rejected save (a 422) keeps the typed entry open.
-export function AddTrigger({ hasAppStart, onAdd }: {
+export function AddTrigger({ hasAppStart, onAdd, busy = false }: {
   hasAppStart: boolean; onAdd: (t: TriggerDraft) => Promise<boolean>
+  busy?: boolean // §9.2: a trigger save is in flight — Add trigger and the editor's submit disable
 }) {
   const [open, setOpen] = useState(false)
   if (!open) {
     return (
-      <button className="ad-btn-dashed" onClick={() => setOpen(true)} style={{ marginTop: 9 }}>
+      <button className="ad-btn-dashed" onClick={() => setOpen(true)} disabled={busy} style={{ marginTop: 9 }}>
         <i className="fa-solid fa-plus" style={{ fontSize: 10 }} /> Add trigger
       </button>
     )
@@ -735,6 +737,7 @@ export function AddTrigger({ hasAppStart, onAdd }: {
         hasAppStart={hasAppStart}
         onSave={(t) => { void onAdd(t).then((ok) => { if (ok) setOpen(false) }) }}
         onCancel={() => setOpen(false)}
+        busy={busy}
       />
     </div>
   )

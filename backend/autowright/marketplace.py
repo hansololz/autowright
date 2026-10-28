@@ -118,6 +118,7 @@ ALREADY_ADDED = "that marketplace is already added"
 NO_COPY_TO_KEEP = "there's no saved copy to keep - refresh first"
 AUTO_NEEDS_LOCATION = "auto refresh needs a location"
 BAD_LOCATION = "give an https link or an absolute path"
+NOT_A_LINK = "not a valid https link"
 NO_EXPORT_FOLDER = "say where to export the automations you added"
 BUILTIN_LOCATION_PINNED = "the built-in catalog's location can't be changed"
 BUSY = "the marketplace is busy reading other references - try again"
@@ -176,6 +177,19 @@ def kind_of(location: str | None) -> str:
     return "url" if location.lower().startswith("https://") else "file"
 
 
+def parses_as_link(value: str) -> bool:
+    """§22.2: an https link that parses - `urlsplit` raises ValueError for an
+    unbalanced IPv6 bracket (`https://[host/x.yaml`), the known way a
+    prefix-valid link fails - and names a host. Every route reaching a
+    stored location parses it, so one that can't parse must never be stored."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme.lower() == "https" and bool(host)
+
+
 def normalize_location(value: str | None) -> str | None:
     """§22.2/§22.4: a location as the user gave it - blank is `null`, an https
     link is kept as pasted (stripped), a path has `~` expanded and must be
@@ -184,6 +198,8 @@ def normalize_location(value: str | None) -> str | None:
     if not text:
         return None
     if text.lower().startswith("https://"):
+        if not parses_as_link(text):
+            raise MarketplaceError(NOT_A_LINK)
         return text
     if "://" in text:
         raise MarketplaceError(BAD_LOCATION)
@@ -238,6 +254,16 @@ def default_name(location: str | None) -> str:
     host name. A catalog kept by the app is "My catalog"."""
     if location is None:
         return KEPT_NAME
+    try:
+        return _default_name(location)
+    except ValueError:
+        # §22.2: serializing a stored row must never raise - a link that
+        # doesn't parse is skipped at load, and this is the belt.
+        return location
+
+
+def _default_name(location: str) -> str:
+    """`default_name` for a location; ValueError for a link that can't parse."""
     if kind_of(location) == "url":
         if github := github_catalog_url(location):
             return github[1] or "marketplace"
@@ -402,18 +428,20 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
     deadline, https only with redirects refused before they are followed, and
     a hard byte cap."""
     request = urllib.request.Request(url, headers=transfer._headers())
+    # The per-read timeout can't catch a server trickling bytes forever; only a
+    # whole-download deadline can, and this runs on a threadpool worker the
+    # backend needs back. §5.2: it is measured from before the connect, so a
+    # slow connect and header read count against it too.
+    deadline = time.monotonic() + deadline_s
     try:
         with transfer.open_https_only(
-                request, timeout=transfer.FETCH_TIMEOUT,
+                request, timeout=transfer.open_timeout(deadline),
                 refuse=lambda: MarketplaceError(transfer.REDIRECTED_OFF_HTTPS)) as response:
             # §22.1: the redirect handler refuses a hop off https before it is
             # followed; the landing URL is re-checked as a belt.
             if urllib.parse.urlsplit(response.geturl()).scheme != "https":
                 raise MarketplaceError(transfer.REDIRECTED_OFF_HTTPS)
-            # The per-read timeout can't catch a server trickling bytes forever;
-            # only a whole-download deadline can, and this runs on a threadpool
-            # worker the backend needs back.
-            deadline = time.monotonic() + deadline_s
+            expected = transfer.content_length(response)
             chunks, total = [], 0
             # read1, not read: read(n) blocks until n bytes (or EOF) arrive,
             # so a trickle would never reach the deadline check; read1 returns
@@ -427,6 +455,10 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
                     raise MarketplaceError(
                         f"the download is larger than the {cap // (1024 * 1024)} MB limit")
                 chunks.append(chunk)
+            if expected is not None and total < expected:
+                # §5.2: read1 returns b"" when the connection closes early, so a
+                # body short of its Content-Length is a failed download.
+                raise MarketplaceError(transfer.SHORT_DOWNLOAD)
     except urllib.error.HTTPError as e:
         raise MarketplaceError(f"download failed - the server answered {e.code}") from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
@@ -459,8 +491,13 @@ def _read_slotted(reference: str, *, cap: int, what: str) -> bytes:
     """`_read_reference`'s body, run while it holds a slot."""
     if kind_of(reference) == "url":
         # §22.1: a GitHub file page is read from its raw link; the
-        # reference itself stays as written everywhere else.
-        return _fetch_url(transfer.github_raw_url(reference), cap=cap)
+        # reference itself stays as written everywhere else. A reference
+        # that doesn't parse is an unreadable one, never a 500.
+        try:
+            url = transfer.github_raw_url(reference)
+        except transfer.TransferError as e:
+            raise MarketplaceError(f"couldn't read the {what} - {e}") from None
+        return _fetch_url(url, cap=cap)
     over = f"the {what} is larger than the {cap // (1024 * 1024)} MB limit"
     try:
         st = Path(reference).stat()
@@ -635,7 +672,8 @@ class MarketplaceStore:
                 continue
             location = entry.get("location")
             if location is not None:
-                if not isinstance(location, str) or not is_reference(location):
+                if (not isinstance(location, str) or not is_reference(location)
+                        or (is_link(location) and not parses_as_link(location))):
                     log.warning("skipping marketplaces.yaml row %r - %r isn't a location",
                                 entry["id"], location)
                     unreadable = True
@@ -834,6 +872,8 @@ class MarketplaceStore:
         if url:
             if not given.lower().startswith("https://"):
                 raise MarketplaceError("only https:// links can be added")
+            if not parses_as_link(given):
+                raise MarketplaceError(NOT_A_LINK)
             location = given
         else:
             if "://" in given:

@@ -136,8 +136,9 @@ export default function AutomationDetail() {
     const t = setInterval(() => setTick((x) => x + 1), 30000)
     return () => clearInterval(t)
   }, [])
-  // automationId may point at a deleted automation.
-  useEffect(() => { if (!auto) go('automations') }, [auto, go])
+  // automationId may point at a deleted automation — redirect by replacing the
+  // history entry so back never lands on the dead page again (§9).
+  useEffect(() => { if (!auto) go('automations', {}, { replace: true }) }, [auto, go])
 
   // §19: per-trigger next occurrences come from POST /triggers/preview — the
   // renderer holds no trigger math (must run before the early return: hooks).
@@ -668,21 +669,33 @@ export default function AutomationDetail() {
         </Modal>
       )}
       {duplicateAsk && (
-        <Modal onClose={() => setDuplicateAsk(false)} width={440} ariaLabel={`Duplicate ${auto.name}`}>
+        // §9: Escape and the backdrop stay inert while the copy is in flight,
+        // so the result the user waited for is never lost to an early close.
+        <Modal onClose={() => setDuplicateAsk(false)} width={440} ariaLabel={`Duplicate ${auto.name}`}
+          guardClose={() => !duplicating}>
           {(close) => {
             // §5 store-level duplicate: the server dedupes the name again, so
             // the toast names the one that landed.
             const doDuplicate = async () => {
               if (duplicating) return
               setDuplicating(true)
+              // §9: the landing navigates only while the page that started it
+              // is still shown — a long copy never pulls the user off a page
+              // they moved to meanwhile.
+              const clicked = useStore.getState()
+              const clickedPage = clicked.page
+              const clickedId = clicked.automationId
               try {
                 const created = await api.duplicateAutomation(auto.id, {
                   name: duplicateName.trim() || undefined,
                   copyMemory: duplicateMemory,
                 })
                 await loadAuto(created.id, { insert: true })
-                close()
-                go('automation', { automationId: created.id })
+                const now = useStore.getState()
+                if (now.page === clickedPage && now.automationId === clickedId) {
+                  close()
+                  go('automation', { automationId: created.id })
+                }
                 // §19: a 201 with `warning` landed the copy without its memory -
                 // the warning replaces the success line, never an error.
                 showToast(created.warning ?? `Duplicated as “${created.name}”.`)
@@ -721,7 +734,7 @@ export default function AutomationDetail() {
                   <span style={{ fontSize: 11.5, color: 'var(--text-faint)', marginRight: 'auto' }}>
                     Triggers start off. Chat, execution history, and snapshots are not copied.
                   </span>
-                  <BtnGhost onClick={close}>Cancel</BtnGhost>
+                  <BtnGhost onClick={close} disabled={duplicating}>Cancel</BtnGhost>
                   <BtnPrimary onClick={() => { void doDuplicate() }} disabled={duplicating}>
                     {duplicating && <Spinner size={10} color="currentColor" style={{ marginRight: 5, verticalAlign: '-1px' }} />}
                     {duplicating ? 'Duplicating…' : 'Duplicate'}

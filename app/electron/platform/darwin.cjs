@@ -121,6 +121,10 @@ function applyLoginItem(app, enabled) {
 // bundle). The module names it rather than constructing it: platform modules
 // never import `electron`.
 const UPDATER = 'mac'
+
+// §3: ShipIt swaps the bundle under a running backend (it keeps running and
+// the next launch version-syncs it), so update-install leaves it alone.
+const stopBackendBeforeInstall = false
 // AppUserModelID is a Windows concept — no-op here (§3).
 const APP_USER_MODEL_ID = null
 
@@ -204,6 +208,7 @@ module.exports = {
   applyLoginItem,
   applyDesktopEntry,
   UPDATER,
+  stopBackendBeforeInstall,
   APP_USER_MODEL_ID,
   updateFeedUrl,
   managedInstall,

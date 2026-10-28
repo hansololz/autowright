@@ -16,6 +16,7 @@ registration.
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import plistlib
 import subprocess
@@ -25,6 +26,8 @@ from pathlib import Path
 
 from . import paths, platform
 from .yamlio import atomic_write_text
+
+_log = logging.getLogger("autowright.service")
 
 LABEL = "ai.autowright.backend"
 SHIM_MARKER = "# autowright CLI shim"
@@ -58,6 +61,11 @@ def _heal_one(p: Path) -> str | None:
     """Heal a single candidate location; None when nothing is there. An
     undecodable (binary) file can't carry the marker: foreign, left alone,
     never a traceback (same tolerance as _remove_shim)."""
+    if p.is_symlink():
+        # §3: a symlink there, dangling or not, is foreign - writing or
+        # chmodding through it would land wherever the link points.
+        _log.warning("CLI shim location %s is a symlink - left alone", p)
+        return f"foreign {p} left alone (a symlink)"
     try:
         current = p.read_text()
     except (OSError, UnicodeDecodeError):
@@ -93,6 +101,10 @@ def _remove_shim() -> str | None:
     delete goes on the result line instead of raising."""
     notes = []
     for p in shim_paths():
+        if p.is_symlink():
+            # §3: a symlink is foreign, never deleted through or followed.
+            _log.warning("CLI shim location %s is a symlink - left alone", p)
+            continue
         try:
             if SHIM_MARKER not in p.read_text():
                 continue

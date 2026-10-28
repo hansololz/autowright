@@ -283,6 +283,8 @@ steps:                                 # ordered; every key is described in the 
 (python source)
 ===END===
 
+- Step names are non-blank and unique: no two steps share a name.
+
 Return every file named in steps, except the locked ones."""
 
 # §8 rule 8: the lock contract heading the LOCKED STEPS section of the sync
@@ -1392,6 +1394,24 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             errors.append(f"step {i}: `authored_by` must be agent or user")
         if "locked" in s and not isinstance(s["locked"], bool):
             errors.append(f"step {i}: `locked` must be true or false")
+    # §4.1 / §8 rule 3: step names are non-blank and unique (compared after
+    # trimming) — every by-name match (the lock splice below, the §11 chips,
+    # the §19 diff) rests on it, so this runs before the lock checks.
+    name_counts: dict[str, int] = {}
+    for i, s in enumerate(steps, 1):
+        if not isinstance(s, dict):
+            continue
+        name = s.get("name")
+        if name is not None and not isinstance(name, str):
+            continue  # reported below as "`name` must be a string"
+        if not (name or "").strip():
+            errors.append(f"step {i} needs a name")
+            continue
+        name_counts[name.strip()] = name_counts.get(name.strip(), 0) + 1
+    for name, n in name_counts.items():
+        if n > 1:
+            errors.append(f"step names must be unique: `{name}` appears "
+                          + ("twice" if n == 2 else f"{n} times"))
     if syncing and not bad_file:
         steps = _splice_locked_steps(steps, files, locked_steps or [], errors)
     listed = [s.get("file", "") for s in steps
@@ -1647,6 +1667,43 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
     return draft, []
 
 
+LOCKED_PREFLIGHT_FIX = "Unlock the step so the next sync can rewrite it, or restore what it needs"
+
+
+def locked_step_preflight(current: dict | None, grants: dict | None,
+                          unresolved: dict | None = None) -> list[dict]:
+    """§8 locked-step preflight: the grant and import checks (rules 4, 6, 7)
+    over the draft's §4.1 locked steps as stored, before a sync's agent call —
+    the agent may not touch a locked step, so a failure here could never be
+    repaired. Returns one `kind: constraint` blocker per failing step (empty
+    when every locked step passes). Each step runs through `validate_steps`
+    alone, under a position-1 filename (so the ordering rule stays quiet);
+    only its own `step <name>:` / `<file>:` lines count, file names reported
+    as stored."""
+    packages = [dict(p) for p in (current or {}).get("packages") or []
+                if isinstance(p, dict)]
+    blockers: list[dict] = []
+    for s in locked_steps(current):
+        name = str(s.get("name") or "")
+        stored_file = str(s.get("file") or "")
+        suffix = stored_file.split("-", 1)[1] if "-" in stored_file else stored_file
+        probe_file = f"01-{suffix}"
+        manifest = {"steps": [locked_manifest_entry(s, probe_file)], "packages": packages}
+        files = {"manifest.yaml": yaml.safe_dump(manifest, sort_keys=False),
+                 probe_file: str(s.get("code") or "")}
+        _, errors = validate_steps(files, grants, unresolved=unresolved)
+        lines = []
+        for e in errors:
+            if e.startswith(f"step {name}: "):
+                lines.append(e[len(f"step {name}: "):])
+            elif e.startswith(f"{probe_file}: "):
+                lines.append(f"{stored_file}: " + e[len(f"{probe_file}: "):])
+        if lines:
+            blockers.append({"reason": "; ".join(lines), "fix": LOCKED_PREFLIGHT_FIX,
+                             "details": "", "kind": "constraint", "step": name})
+    return blockers
+
+
 def _same_code(a: str, b: str) -> bool:
     """§8 byte-identity of a step script, modulo the envelope's own newline
     framing (`parse_envelope` trims a block's surrounding blank lines and ends
@@ -1658,8 +1715,9 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
                          locked: list[dict], errors: list[str]) -> list:
     """§8 rule 3 lock checks + splice, on a sync's manifest steps: every
     locked step's name exactly once with `locked: true`, `locked: true` on no
-    other name, and a returned file block for a locked step only when
-    byte-identical to the stored script. Each locked entry is then replaced
+    other name, and a returned file block for a locked step (under the
+    listed or the stored filename) only when byte-identical to the stored
+    script. Each locked entry is then replaced
     whole by the stored step (its manifest fields, `authored_by`, `locked`),
     keeping the agent's `NN-` position prefix with the stored file's suffix;
     `files` gets the stored code under the spliced name, so every later check
@@ -1697,7 +1755,13 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
         prefix = re.match(r"(\d+)-", agent_file)
         spliced_file = f"{prefix.group(1)}-{suffix}" if prefix else agent_file
         code = str(stored.get("code") or "")
-        for fname in dict.fromkeys((agent_file, spliced_file)):
+        # The agent may return an identical block under the filename it
+        # listed or under the stored filename (§8 rule 3) — unless another
+        # step lists the stored filename as its own.
+        others = {o.get("file") for o in steps if isinstance(o, dict) and o is not s}
+        candidates = (agent_file, spliced_file) + (
+            (stored_file,) if stored_file and stored_file not in others else ())
+        for fname in dict.fromkeys(candidates):
             if fname in files:
                 if not _same_code(files[fname], code):
                     errors.append(f"step `{name}` is locked — do not return its file")
@@ -2068,6 +2132,12 @@ class DraftJobs:
         # a locked one.
         current_steps = [s for s in (current or {}).get("steps") or [] if isinstance(s, dict)]
         locked = locked_steps(current)
+        # §8 locked-step preflight: a locked step that fails the grant or
+        # import checks as stored blocks at once — no agent call.
+        preflight = locked_step_preflight(
+            current, grants, (current or {}).get("unresolved_references"))
+        if preflight:
+            return self._block(job, "steps", preflight, None)
         draft, _errors, blockers, diagnosed, bnotes = self._call_with_repair(
             job, agent, build_steps_prompt(spec_md, current, grants),
             lambda files: validate_steps(
@@ -2148,7 +2218,7 @@ class DraftJobs:
                 raw, pnames, tcount, kept, answer, locked_names=lnames)
         if outcome == "invalid":
             diag = self._diagnose(job, agent, prompt, raw, payload,
-                                  attempts=len(rounds) + 1)
+                                  attempts=len(rounds) + 1, locked_names=lnames)
             self._record_failure(job, agent, "chat", "diagnosed", prompt,
                                  rounds + [{"errors": payload, "response": raw}], diag)
             return self._block(job, "chat", diag, None, diagnosed=True)
@@ -2344,7 +2414,7 @@ class DraftJobs:
             result, errors, blockers, notes = self._parse_validate(raw, validator, locked_names)
         if errors:
             diag = self._diagnose(job, agent, prompt, raw, errors,
-                                  attempts=len(rounds) + 1)
+                                  attempts=len(rounds) + 1, locked_names=locked_names)
             self._record_failure(job, agent, call, "diagnosed", prompt,
                                  rounds + [{"errors": errors, "response": raw}], diag)
             return {}, [], diag, True, None
@@ -2368,12 +2438,15 @@ class DraftJobs:
             agent.get("model") or "configured default", outcome, prompt, rounds, blockers)
 
     def _diagnose(self, job: dict, agent: dict, prompt: str, raw: str,
-                  errors: list[str], attempts: int = 2) -> list[dict]:
+                  errors: list[str], attempts: int = 2,
+                  locked_names: set[str] | None = None) -> list[dict]:
         """§8 build diagnosis: one blocker-envelope-only call explaining why the
         build failed validation every round (`attempts` = total invalid
         responses, driving the twice/N-times wording); on any failure of the
         diagnosis itself, a deterministic fallback blocker built from the
-        validation errors."""
+        validation errors. `locked_names` is the calling parse's §4.1 locked
+        step names — a constraint blocker naming any other step is a parse
+        error here too."""
         self._event(job, f"The response didn't validate{attempts_phrase(attempts)}"
                          " — analyzing what went wrong…")
         diagnose = (prompt + "\n\n=== YOUR PREVIOUS RESPONSE ===\n" + clip_response(raw)
@@ -2385,7 +2458,8 @@ class DraftJobs:
             # below, so a cancelled diagnosis never settles a fallback blocker.
             # The diagnosis call is never offered the notes.md option — its
             # optional notes are ignored.
-            blockers, _notes = parse_blockers(self._invoke(job, agent, diagnose))
+            blockers, _notes = parse_blockers(self._invoke(job, agent, diagnose),
+                                              locked_names)
         except (harness.HarnessError, ValueError) as e:
             log.warning("build-diagnosis call failed: %s", e)
         if not blockers:

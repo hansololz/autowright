@@ -173,6 +173,73 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'save', rule: { name: 'Fetch page', text: 'keep the log line' } })
   })
 
+  it('a checked remember box with a blank rule disables Save with the inline hint', () => {
+    render(<Harness initial={[step()]} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("c")' } })
+    expect(saveButton().disabled).toBe(false)
+    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
+    expect(saveButton().disabled).toBe(true)
+    expect(screen.getByText('Write the rule to remember')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: '   ' } })
+    expect(saveButton().disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: 'keep it' } })
+    expect(saveButton().disabled).toBe(false)
+    expect(screen.queryByText('Write the rule to remember')).toBeNull()
+  })
+
+  it('while Save validates, the editor is inert: typing is impossible and Escape asks nothing; the edit commits when validation answers', async () => {
+    let answer: (errors: string[]) => void = () => {}
+    const validate = vi.fn(() => new Promise<string[]>((resolve) => { answer = resolve }))
+    const onCommit = vi.fn()
+    render(<Harness initial={[step()]} validate={validate} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("saved")' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1))
+    // every input, Cancel and ✕ are disabled; Save shows its busy state
+    expect(editor().disabled).toBe(true)
+    expect((screen.getByLabelText('Step name') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('Step description') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('Remember this edit as a build rule') as HTMLInputElement).disabled).toBe(true)
+    expect((within(dialog()).getByText('Cancel') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByLabelText('Close') as HTMLButtonElement).disabled).toBe(true)
+    const busy = within(dialog()).getByText('Saving…') as HTMLButtonElement
+    expect(busy.disabled).toBe(true)
+    expect(busy.getAttribute('aria-busy')).toBe('true')
+    // Escape and ⌘S do nothing meanwhile
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    fireEvent.keyDown(document, { key: 's', metaKey: true })
+    expect(validate).toHaveBeenCalledTimes(1)
+    answer([])
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
+    expect(onCommit.mock.calls[0][0][0].code).toBe('log("saved")')
+    await waitFor(() => expect(screen.queryByTestId('step-editor')).toBeNull())
+    expect(screen.getByRole('dialog')).toBeTruthy()
+  })
+
+  it('⌘S after Discard edits, within the close window, saves nothing', async () => {
+    const validate = vi.fn(async () => [] as string[])
+    const onCommit = vi.fn()
+    render(<Harness initial={[step()]} validate={validate} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("dropped")' } })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('Discard edits'))
+    // the confirm settles, the step modal starts closing — its card is still
+    // mounted (and the edit still held) through the exit window
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 's', metaKey: true })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(validate).not.toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
   it('⌘S saves in edit mode', async () => {
     const onCommit = vi.fn()
     render(<Harness initial={[step()]} onCommit={onCommit} />)

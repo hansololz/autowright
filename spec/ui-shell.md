@@ -282,8 +282,14 @@ text without its discard confirm. A §13 deep link (`open-target`) that arrives 
 open, or before boot has finished, is **held** and applied once the last modal closes (its
 `guardClose` runs first) or once boot lands in the app shell — dropped if boot lands in
 onboarding, and replaced by a newer link that arrives meanwhile. A modal whose request is in
-flight (the §5.2 import confirm, the §22.7 catalog save) keeps Escape and the backdrop inert
-until it lands, so a result the user waited for is never lost to an early close. Page navigation (`go()`) always lands in the app
+flight (the §5.2 import confirm, the §22.7 catalog save, the §9.2 Duplicate modal) keeps Escape and the backdrop inert
+until it lands, so a result the user waited for is never lost to an early close. A request
+that navigates when it lands (Duplicate, Execute again, Fix with AI, the import summary's
+Open automation) navigates only while the page that started it is still shown — a long
+copy must never pull the user off a page they moved to meanwhile. A page whose record is
+gone — an automation or agent deleted while its page is shown, or reached again through
+back — redirects to its list by **replacing** the history entry, never pushing one, so back
+never traps on a dead page. Page navigation (`go()`) always lands in the app
 shell: if the create/edit surface is active, it exits back to `surface: app` — so sidebar tabs work
 while editing an automation. Popovers close on outside mousedown **and on Escape** (every menu goes through the shared `usePopover`, whose capture-phase Escape closes the menu and stops the key there, so a modal behind an open menu stays open — one Escape per layer). Modals render through a React portal on
 `document.body`: page containers animate `transform` (`.ad-anim-page`, fill
@@ -454,7 +460,9 @@ archive name + its description as a muted sub-line, over an amber caption "No ma
 found on this Mac - pick a replacement on the edit page."), and a packages
 note ("`<n>` packages are installing in the background", §5.1 background ensure) when the
 manifest declares any.
-Footer: accent **Open automation** (navigates to the new detail page) / quiet Close. One card per automation: name, description,
+Footer: accent **Open automation** (loads the new automation into the store — the §9.2
+Duplicate's insert, not a list refresh that a newer refresh may have superseded — then
+navigates to its detail page) / quiet Close. One card per automation: name, description,
 status badge, trigger chip (`triggerChip`, plus an OFF tag when `allTriggersOff`), an amber
 **Needs fixing** chip when the automation's §4.1 `problems` list is non-empty (the §7
 attention tint; its tooltip lists every problem label, one per line — the full detail
@@ -554,7 +562,10 @@ Sections top to bottom:
   (navigates to the Secrets page); `secret-missing`, `secret-unresolved`,
   `secret-ungranted`, `agent-missing`, `agent-unresolved`,
   `agent-ungranted`, and `os-mismatch` → **Edit** (opens the §11 edit page, where steps
-  are rewritten and grants are set on save); `package-missing` → no action (its label
+  are rewritten and grants are set on save); `step-modified` → **Edit** too (the editor
+  opens with the draft already touched, so Save is available at once: that save validates
+  the edited script and mints the version that seals it, §19 — the in-app form of the
+  label's pull-and-push remedy); `package-missing` → no action (its label
   already says it installs on the first execution); `overdue` → no action (informational —
   it clears by the automation running again, or by its triggers changing). The banner is pure §4.1 `problems`
   rendering — no probe, no dismiss state: it disappears by the problems being fixed.
@@ -602,6 +613,9 @@ Sections top to bottom:
   "`<label>` is removed from this automation. Its settings are gone — add it again to get
   it back." / Cancel / red Remove trigger)), the §4.3
   status line beneath the rows, and an **"+ Add trigger"** button opening an inline editor.
+  Every trigger save sends the whole list (§19 PATCH `triggers`), so the card's toggles,
+  remove buttons, Add trigger, and the inline editor's Save disable while one is in flight —
+  two in flight would race, the second carrying the first's stale state.
   The editor fades up on entry (`.ad-anim-item`) — both from Add trigger and from a row's
   edit swap; a row's connecting/error status line enters the same way.
   Unlike the other detail-page cards this card does not clip its overflow (it has no
@@ -1067,13 +1081,14 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   documents), and at its right a change tag in mono: "+`<a>` −`<r>`" (added / removed line
   counts, green / red `--text` on the digits, the sign faint) for a changed file, "New" for a
   file only the newer version has, "Removed" for one only the older has, "Unchanged"
-  (faint) for an identical one; a step that sits at a different position in the two
-  versions (§19 `moved`) reads "Moved" (in the tag's `--text-faint`, a shade above the
+  (faint) for an identical one; a step whose relative order changed between the two
+  versions (§19 `moved` — a step merely shifted by an insert or removal is not moved) reads "Moved" (in the tag's `--text-faint`, a shade above the
   navigator's dimmer Unchanged — a move is a change; tooltip "Was step `<from>`, now step
   `<to>`") in place of "Unchanged", or "Moved" before its "+`<a>` −`<r>`" counts when its
   script changed too — a §11 reorder never shows as removed-and-new, since steps match
   by name; a step locked (§4.1) on the newer side carries a faint `fa-lock` glyph before
-  its change tag. Every file is listed, unchanged ones included, so the
+  its change tag. Switching either version empties the navigator and pane until the new
+  comparison lands — never the previous pair's rows under the new eyebrow. Every file is listed, unchanged ones included, so the
   navigator reads as the whole version folder with the changes marked. The viewed row
   carries the 2 px accent bar and faint fill of the step navigator; the unviewed rows are
   buttons, the viewed row a plain block, and ↑ / ↓ or ← / → flip files with the same
@@ -1814,7 +1829,7 @@ target over IPC (`open-target`) and the renderer navigates in place — never a 
 which would drop the WebSocket and all renderer state. The footer link sends plain `'/app'`
 (focus only). Deep links are ignored while onboarding hasn't completed (one that arrives
 during the boot splash is held until boot decides — §9 modal rule — then applied or dropped). Two target forms
-exist: `automation=<uuid>` (the §9.2 detail page) and `execution=<uuid>` (the §7 execution
+exist: `automation=<id>` (the §9.2 detail page) and `execution=<id>` (the §7 execution
 page — `go('execution', { executionId })`, which needs no automation id; an execution the
 §6 retention sweep has since removed lands on the page's own not-found state). Both are
 parsed by one hash reader at boot and on `open-target`; a hash carrying neither is a plain

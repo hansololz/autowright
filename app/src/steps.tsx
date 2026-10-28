@@ -618,6 +618,7 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
               className="ad-input compact"
               aria-label="Step name"
               value={edit.name}
+              disabled={edit.saving}
               onChange={(e) => { const name = e.target.value; setEdit((x) => x && { ...x, name }) }}
               style={{ width: '100%' }}
             />
@@ -628,6 +629,7 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
               className="ad-input compact"
               aria-label="Step description"
               value={edit.description}
+              disabled={edit.saving}
               onChange={(e) => { const description = e.target.value; setEdit((x) => x && { ...x, description }) }}
               style={{ width: '100%' }}
             />
@@ -685,9 +687,12 @@ export function stepModalFrame(steps: Step[]): string {
   return `clamp(440px, ${Math.ceil(44 + 38 + longest * 12 * 1.65)}px, 82vh)`
 }
 
-function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, editing, edit, setEdit, onStartEdit, onCancelEdit, onSave, onToggleLock, onRemove, onMove }: {
+function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, closingRef, editing, edit, setEdit, onStartEdit, onCancelEdit, onSave, onToggleLock, onRemove, onMove }: {
   steps: Step[]; i: number; editor: boolean; tagsByStep: StepTagDesc[][]; factsByStep: StepFactSection[][]
   onNav: (i: number) => void; onClose: () => void
+  // Mirrors the Modal's `closing` flag, so a Save whose modal has started
+  // closing is dropped (§11) — read by the list's Save after validation
+  closingRef: React.MutableRefObject<boolean>
   // §11 step editing — present on the editor page only
   editing?: StepEditing
   edit: StepEdit | null
@@ -717,14 +722,20 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const dirty = !!edit && stepEditDirty(edit)
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
-  const canSave = !!edit && dirty && !!edit.name.trim() && !edit.saving
+  // §11: while Save's validation is in flight the editor is inert
+  const saving = !!edit && edit.saving
+  const savingRef = useRef(saving)
+  savingRef.current = saving
+  // §11: a checked remember box with a blank rule disables Save
+  const ruleMissing = !!edit && edit.remember && !edit.rule.trim()
+  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !edit.saving
   // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
   // backdrop close the modal) and the Remove step confirm
   const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
   const [removeAsk, setRemoveAsk] = useState(false)
   const closeRef = useRef<() => void>(() => {})
   const saveRef = useRef<() => void>(() => {})
-  saveRef.current = () => { if (canSave) onSave() }
+  saveRef.current = () => { if (canSave && !closingRef.current) onSave() }
   const ta = useRef<HTMLTextAreaElement | null>(null)
   // §11 edit mode: the textarea takes focus with the caret at the end
   useEffect(() => {
@@ -747,11 +758,16 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   }, [editActive])
   // §14 close guard: Escape and the backdrop ask before dropping an unsaved edit
   const guardClose = () => {
+    // §11: Escape and the backdrop are inert while Save's answer is in flight
+    if (savingRef.current) return false
     if (!dirtyRef.current) return true
     setDiscardAsk('close')
     return false
   }
-  const cancelEdit = () => { if (dirtyRef.current) setDiscardAsk('cancel'); else onCancelEdit() }
+  const cancelEdit = () => {
+    if (savingRef.current) return
+    if (dirtyRef.current) setDiscardAsk('cancel'); else onCancelEdit()
+  }
   const startEdit = () => { find.close(); onStartEdit() }
   const handsOff = !editing || editing.disabled
   const controls = editing ? (
@@ -803,6 +819,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
     >
       {(close, closing) => {
         closeRef.current = close
+        closingRef.current = closing
         return (
         <div className="ad-stepmodal" style={{ height: frame, display: 'flex', minWidth: 0 }}>
           {/* §11 edit mode: flipping and ⌘F are inert */}
@@ -847,11 +864,11 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
               </span>
               {editActive && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 6 }}>
-                  <button className="ad-btn-text dim small ad-focus-inset" onClick={cancelEdit}>
+                  <button className="ad-btn-text dim small ad-focus-inset" disabled={saving} onClick={cancelEdit}>
                     Cancel
                   </button>
-                  <button className="ad-btn-link small ad-focus-inset" disabled={!canSave} onClick={() => saveRef.current()}>
-                    Save
+                  <button className="ad-btn-link small ad-focus-inset" disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
+                    {saving ? 'Saving…' : 'Save'}
                   </button>
                 </div>
               )}
@@ -871,7 +888,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                 <button className="ad-btn-icon" aria-label="Next step" disabled={editActive || i === steps.length - 1} onClick={() => onNav(i + 1)}>
                   <i className="fa-solid fa-chevron-right" />
                 </button>
-                <button className="ad-btn-icon" aria-label="Close" onClick={() => { if (dirtyRef.current) setDiscardAsk('close'); else close() }}>
+                <button className="ad-btn-icon" aria-label="Close" disabled={saving} onClick={() => { if (savingRef.current) return; if (dirtyRef.current) setDiscardAsk('close'); else close() }}>
                   <i className="fa-solid fa-xmark" />
                 </button>
               </div>
@@ -890,6 +907,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                     data-testid="step-editor"
                     aria-label="Step script"
                     value={edit.code}
+                    disabled={saving}
                     onChange={(e) => { const value = e.target.value; setEdit((x) => x && { ...x, code: value }) }}
                     onScroll={thumb.onScroll}
                     spellCheck={false}
@@ -903,19 +921,26 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                     <input
                       type="checkbox"
                       checked={edit.remember}
+                      disabled={saving}
                       onChange={(e) => { const remember = e.target.checked; setEdit((x) => x && { ...x, remember }) }}
                     />
                     Remember this edit as a build rule
                   </label>
                   {edit.remember ? (
+                    <>
                     <input
                       className="ad-input compact"
                       aria-label="Build rule"
                       placeholder="What every future sync must keep — one line"
                       value={edit.rule}
+                      disabled={saving}
                       onChange={(e) => { const rule = e.target.value; setEdit((x) => x && { ...x, rule }) }}
                       style={{ flex: 1, minWidth: 0, padding: '4px 9px' }}
                     />
+                    {ruleMissing && (
+                      <span style={{ flex: 'none', font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>Write the rule to remember</span>
+                    )}
+                    </>
                   ) : (
                     <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       Saving keeps the workflow in sync — a hand edit changes the steps, not the spec.
@@ -1009,6 +1034,9 @@ export function StepList(props: StepListProps) {
   // Bumped whenever an edit is dropped, so a Save whose validation answers
   // after the edit was cancelled or closed never applies.
   const editSeq = useRef(0)
+  // The open modal's `closing` flag (StepModal writes it each render): a Save
+  // whose modal has started closing is dropped (§11)
+  const modalClosing = useRef(false)
   const setEdit = (fn: (e: StepEdit | null) => StepEdit | null) => setEditState(fn)
   const dropEdit = () => { editSeq.current++; setEditState(null) }
   // The view a hand edit's own steps change lands on (and whether it opens
@@ -1072,7 +1100,9 @@ export function StepList(props: StepListProps) {
   if (editing?.addRef) editing.addRef.current = add
   const saveEdit = async () => {
     const e = editRef.current
-    if (!editing || current === null || !e || !stepEditDirty(e) || !e.name.trim() || e.saving) return
+    if (!editing || current === null || !e || !stepEditDirty(e) || !e.name.trim() || e.saving || modalClosing.current) return
+    // §11: a checked remember box needs its rule
+    if (e.remember && !e.rule.trim()) return
     const at = current
     const base = stepsRef.current
     const name = e.name.trim()
@@ -1089,7 +1119,7 @@ export function StepList(props: StepListProps) {
       errors = [(err as Error).message]
     }
     // dropped meanwhile (cancel, close, a swap) — never apply
-    if (seq !== editSeq.current || stepsRef.current !== base) {
+    if (seq !== editSeq.current || stepsRef.current !== base || modalClosing.current) {
       if (seq === editSeq.current) setEditState((x) => x && { ...x, saving: false })
       return
     }
@@ -1097,7 +1127,7 @@ export function StepList(props: StepListProps) {
       setEditState((x) => x && { ...x, saving: false, errors })
       return
     }
-    const rule = e.remember && e.rule.trim() ? { name, text: e.rule.trim() } : null
+    const rule = e.remember ? { name, text: e.rule.trim() } : null
     commit(next, at, false, { kind: 'save', rule })
   }
   const toggleLock = () => {
@@ -1147,6 +1177,7 @@ export function StepList(props: StepListProps) {
           factsByStep={factsByStep}
           onNav={setViewing}
           onClose={() => { dropEdit(); setViewing(null) }}
+          closingRef={modalClosing}
           editing={editing}
           edit={edit}
           setEdit={setEdit}

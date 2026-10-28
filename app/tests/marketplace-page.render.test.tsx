@@ -453,6 +453,22 @@ describe('§22.3 Marketplace page', () => {
     expect(marketplaceList.mock.calls.length).toBe(listed)
   })
 
+  it('an older list still in flight never overwrites the caret\'s answered row (§22.3 ordering)', async () => {
+    marketplaceList.mockResolvedValue({ sources: [source()] })
+    marketplaceSettings.mockResolvedValue(source({ expanded: false }))
+    render(<MarketplacePage />)
+    const section = await screen.findByTestId('marketplace-source')
+    // A marketplace.changed list goes out and hangs, still answering expanded.
+    let landList: (v: { sources: MarketplaceSource[] }) => void = () => {}
+    marketplaceList.mockImplementation(() => new Promise((res) => { landList = res }))
+    act(() => { storeMod.useStore.setState({ marketplaceVersion: 1 }) })
+    await waitFor(() => expect(marketplaceList.mock.calls.length).toBeGreaterThan(0))
+    fireEvent.click(screen.getByTestId('marketplace-collapse'))
+    await waitFor(() => expect(section.getAttribute('data-collapsed')).toBe('true'))
+    await act(async () => { landList({ sources: [source()] }) })
+    expect(screen.getByTestId('marketplace-source').getAttribute('data-collapsed')).toBe('true')
+  })
+
   it('a rejected caret toasts the reason and leaves the row open', async () => {
     marketplaceList.mockResolvedValue({ sources: [source()] })
     marketplaceSettings.mockRejectedValue(new Error('that marketplace is gone'))

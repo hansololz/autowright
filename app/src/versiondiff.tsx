@@ -235,6 +235,10 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
 
   useEffect(() => {
     let live = true
+    // §9.2: switching either version empties the navigator and pane until
+    // the new comparison lands — never the previous pair's rows
+    setDiff(null)
+    setViewed(0)
     setLoading(true)
     setError(null)
     api.versionDiff(automationId, x, y).then((d) => {
@@ -252,7 +256,8 @@ export function VersionDiffModal({ automationId, versions, current, from, other:
   }, [automationId, x, y])
 
   const files = diff?.files ?? []
-  const newerSteps = versions.find((v) => v.version === y)?.steps
+  // the lock glyphs follow the landed comparison's newer side, not the picker
+  const newerSteps = diff ? versions.find((v) => v.version === Math.max(diff.from, diff.to))?.steps : undefined
   const locks = useMemo(() => lockedOnNewer(files, newerSteps), [files, newerSteps])
   const file = files[viewed]
   const frame = diff ? diffModalFrame(files) : 'clamp(440px, 60vh, 82vh)'

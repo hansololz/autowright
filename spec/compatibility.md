@@ -68,6 +68,14 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-10-27 (later) - step-name uniqueness, restore gate narrowed, duplicate 409.** Not a
+  stored-shape change: the §4.1 uniqueness rule is enforced by the save/sync validators
+  only, so stored versions with duplicate names keep loading, displaying, and executing
+  (by-name surfaces pair k-th with k-th); restore no longer runs the save validators
+  (same-day reversal — versions referencing deleted agents or secrets, or written under
+  older validator rules, must stay restorable) and refuses only a `step-modified` version;
+  `duplicate` refuses a step-modified source; the §20 workdir manifest gains a `pulled_from`
+  key that push reads and never stores. No migration, no fixture.
 - **2026-10-27 - `authored_by`, `locked`, and `sha` added to version-manifest steps
   (§4.1 authorship and lock, §5 `versions/vN/automation.yaml`).** Each step entry may
   carry `authored_by: user`, `locked: true`, and `sha: <16 hex>`; the draft container's

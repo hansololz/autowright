@@ -624,16 +624,16 @@ export function ChatPanel({
                       {b.kind === 'constraint' && (
                         <ActionRow style={{ marginTop: 4, marginBottom: 6 }}>
                           {(b.workaround ?? '').trim() && (
-                            <BtnPrimary disabled={anyJobBusy || viewingOld} onClick={() => applyWorkaround(e, b)}>
+                            <BtnPrimary disabled={anyJobBusy || viewingOld || testLive} onClick={() => applyWorkaround(e, b)}>
                               Use the workaround
                             </BtnPrimary>
                           )}
                           {b.step ? (
-                            <BtnGhost disabled={anyJobBusy || viewingOld} onClick={() => unlockConstraintStep(b)}>
+                            <BtnGhost disabled={anyJobBusy || viewingOld || testLive} onClick={() => unlockConstraintStep(b)}>
                               Unlock "{b.step}"
                             </BtnGhost>
                           ) : b.rule ? (
-                            <BtnGhost disabled={anyJobBusy || viewingOld} onClick={() => removeConstraintRule(b)}>
+                            <BtnGhost disabled={anyJobBusy || viewingOld || testLive} onClick={() => removeConstraintRule(b)}>
                               Remove the rule
                             </BtnGhost>
                           ) : null}
@@ -652,7 +652,7 @@ export function ChatPanel({
                   <BtnGhost onClick={() => patchEntry(e.id, { dismissed: true })}>Dismiss</BtnGhost>
                   {!clarify && ordinary.length > 0 && (
                     <BtnPrimary
-                      disabled={anyJobBusy || viewingOld}
+                      disabled={anyJobBusy || viewingOld || testLive}
                       onClick={() => applyBlockersEntry(e)}
                     >
                       Apply to the spec & sync

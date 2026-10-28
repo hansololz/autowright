@@ -1326,6 +1326,20 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
 FETCH_TIMEOUT = 30                          # seconds, connect + read
 FETCH_DEADLINE_S = 600                      # §5.2 whole-download wall clock
 _FETCH_CHUNK = 256 * 1024
+_GITHUB_API_MAX_BYTES = 1024 * 1024         # §5.2 GitHub API listing cap
+NOT_A_LINK = "not a valid https link"
+
+
+def _split_link(url: str):
+    """`urlsplit`, with the ValueError a malformed link raises (an unbalanced
+    IPv6 bracket, `https://[host/x`) turned into the 422 TransferError - no
+    route ever answers 500 for a malformed link (§22.2)."""
+    try:
+        parts = urlsplit(url)
+        parts.hostname  # noqa: B018 - parsing the netloc can raise too
+    except ValueError:
+        raise TransferError(NOT_A_LINK) from None
+    return parts
 REDIRECTED_OFF_HTTPS = "the download redirected off https"
 
 _GH_REPO_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?(?:/releases/latest)?$")
@@ -1357,6 +1371,30 @@ class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+SHORT_DOWNLOAD = ("download failed - the connection closed before the whole "
+                  "file arrived")
+
+
+def open_timeout(deadline: float) -> float:
+    """§5.2: the open's socket timeout - the per-read 30 s, or what remains of
+    the whole-download `deadline` (a `time.monotonic()` stamp taken before the
+    connect) when that is less, so a slow connect and header read can't
+    outlast it."""
+    return max(0.1, min(FETCH_TIMEOUT, deadline - time.monotonic()))
+
+
+def content_length(response) -> int | None:
+    """§5.2: the response's declared `Content-Length`, or None when it gives
+    none (or one that isn't a number) - a body short of it is a failed
+    download."""
+    headers = getattr(response, "headers", None)
+    try:
+        value = headers.get("Content-Length") if headers is not None else None
+        return int(value) if value is not None else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def open_https_only(request: urllib.request.Request, *, timeout: float, refuse):
     """`urllib.request.urlopen` with the redirect handler above: `refuse()`
     builds the error raised for a hop off https (TransferError here,
@@ -1370,9 +1408,24 @@ def _github_api(path: str):
     req = urllib.request.Request(
         f"https://api.github.com{path}",
         headers={**_headers(), "Accept": "application/vnd.github+json"})
+    # §5.2: the deadline, per-read timeout, cap, and short-body rule of every
+    # other outbound read - an API listing is small, so 1 MB is plenty.
+    deadline = time.monotonic() + FETCH_DEADLINE_S
     try:
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
-            return json.loads(r.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=open_timeout(deadline)) as r:
+            expected = content_length(r)
+            chunks, total = [], 0
+            while chunk := r.read1(_FETCH_CHUNK):
+                if time.monotonic() > deadline:
+                    raise TransferError("GitHub's answer timed out - try again")
+                total += len(chunk)
+                if total > _GITHUB_API_MAX_BYTES:
+                    raise TransferError("GitHub's answer is larger than the 1 MB limit")
+                chunks.append(chunk)
+            if expected is not None and total < expected:
+                raise TransferError("couldn't reach GitHub - the connection closed "
+                                    "before the whole answer arrived")
+            return json.loads(b"".join(chunks).decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
@@ -1392,8 +1445,9 @@ def github_raw_url(url: str) -> str:
     """§5.2 GitHub file rule: a `github.com/{owner}/{repo}/blob/{ref}/{path}`
     (or `/raw/`) page is read from `raw.githubusercontent.com` with any query
     (`?raw=true`) dropped. The pasted link is what every surface keeps and
-    shows; only the read translates. Anything else comes back as it is."""
-    parts = urlsplit(url)
+    shows; only the read translates. Anything else comes back as it is; a
+    link that doesn't parse raises TransferError."""
+    parts = _split_link(url)
     if parts.scheme != "https" or parts.hostname != "github.com":
         return url
     m = _GH_FILE_RE.match(parts.path)
@@ -1413,14 +1467,14 @@ def _release_asset(release) -> str | None:
 def resolve_url(url: str) -> str:
     """§5.2: turn a pasted URL into a direct archive URL, or reject with 422."""
     url = url.strip()
-    parts = urlsplit(url)
+    parts = _split_link(url)
     if parts.scheme != "https":
         raise TransferError("only https:// URLs can be imported")
     # The GitHub file rule runs before the others: a file page whose path
     # ends `.autowright` downloads directly, from the raw link.
     url = github_raw_url(url)
-    parts = urlsplit(url)
-    if parts.path.endswith(".autowright"):
+    parts = _split_link(url)
+    if parts.path.lower().endswith(".autowright"):
         return url
     if parts.hostname != "github.com":
         raise TransferError("the URL doesn't point to an .autowright archive — paste a "
@@ -1454,17 +1508,19 @@ def fetch_archive(url: str) -> tuple[bytes, str]:
     """§5.2 download: returns (archive bytes, resolved URL)."""
     resolved = resolve_url(url)
     req = urllib.request.Request(resolved, headers=_headers())
+    # §5.2: the per-read timeout can't catch a server trickling bytes forever —
+    # only a whole-download deadline can, and this runs on a threadpool worker
+    # the backend needs back. It is measured from before the connect, so a slow
+    # connect and header read count against it too.
+    deadline = time.monotonic() + FETCH_DEADLINE_S
     try:
-        with open_https_only(req, timeout=FETCH_TIMEOUT,
+        with open_https_only(req, timeout=open_timeout(deadline),
                              refuse=lambda: TransferError(REDIRECTED_OFF_HTTPS)) as r:
             # The redirect handler refuses a hop off https before it is
             # followed; the landing URL is re-checked as a belt.
             if urlsplit(r.geturl()).scheme != "https":
                 raise TransferError(REDIRECTED_OFF_HTTPS)
-            # §5.2: the per-read timeout can't catch a server trickling bytes
-            # forever — only a whole-download deadline can, and this runs on a
-            # threadpool worker the backend needs back.
-            deadline = time.monotonic() + FETCH_DEADLINE_S
+            expected = content_length(r)
             chunks, total = [], 0
             # read1, never read: read() fills its whole buffer, so a server
             # trickling one byte per read-timeout could hold it open past the
@@ -1477,6 +1533,10 @@ def fetch_archive(url: str) -> tuple[bytes, str]:
                 if total > MAX_ARCHIVE_BYTES:
                     raise TransferError("the download is larger than the 64 MB import limit")
                 chunks.append(chunk)
+            if expected is not None and total < expected:
+                # read1 returns b"" when the connection closes early: a body
+                # short of its Content-Length is a failed download, never parsed.
+                raise TransferError(SHORT_DOWNLOAD)
     except urllib.error.HTTPError as e:
         raise TransferError(f"download failed — the server answered {e.code}") from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:

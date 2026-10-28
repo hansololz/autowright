@@ -211,7 +211,8 @@ automations/<uuid>/
                                #          of SHA-256 over the step's script bytes as written,
                                #          stamped by the version writer on every step (never by
                                #          the §20 workdir or §5.1 archive — it is this folder's
-                               #          own seal) and compared at load: a mismatch marks the
+                               #          own seal) and compared at load and when an execution
+                               #          of the version starts (§4.1): a mismatch marks the
                                #          loaded step `modifiedOnDisk` (in-memory only, never
                                #          stored) and drives the §4.1 `step-modified` problem;
                                #          the file on disk is still what loads and executes;
@@ -337,11 +338,13 @@ definitions); the top-level `automation.yaml` holds **what the user owns and ope
 §5.1 archive drops concurrency, the snapshot toggles, one-shot triggers and user-sourced
 schedule provenance, rebuilds the grants from references (a copy could end up granted
 something the original was not), and refuses an automation with unresolved references, so
-it is the wrong tool for a same-machine copy. The copied version folders are re-sealed
-from the copied bytes: each manifest step's `sha` (§4.1) is re-stamped over the file as
-copied, so a hand-edited source yields a copy whose files and seals agree and the
-`step-modified` problem stays on the original alone (the manifest `sha` keys are, with
-`when` and `note` below, the one exception to the byte-for-byte copy). The copy gets a fresh uuid and a name
+it is the wrong tool for a same-machine copy. The copied version folders are sealed
+from the copied bytes: each manifest step's `sha` (§4.1) is stamped over the file as
+copied — the same bytes the source sealed, because a source whose current version holds a
+`step-modified` step refuses to duplicate (§19 409 naming the step: pull and push it, or
+save it from the editor, first), so a copy never launders an unvalidated script (the
+manifest `sha` keys are, with `when` and `note` below, the one exception to the
+byte-for-byte copy). The copy gets a fresh uuid and a name
 deduped by the §4.1 create rule (the smallest free "Name n" suffix, applied to the name the
 user typed or the source name — never a 422). Copied verbatim from the source's top-level
 file: `description`, `agent_id`, `enabled_agents`, `allowed_secrets`, `memory_snapshots`,
@@ -934,9 +937,17 @@ only matched records are granted.
   listing, first `*.autowright` alphabetically. `github.com/{owner}/{repo}/releases/tag/{tag}`
   resolves against that release's assets. Public repos only — no token ever travels.
 - Download: `User-Agent: autowright/<version>`, 30-second per-read timeout plus a 10-minute
-  whole-download deadline (a server trickling bytes must not pin a threadpool worker for
+  whole-download deadline measured from before the connect — the connect and header read
+  count against it, the open's socket timeout being the smaller of 30 s and what remains
+  (a server trickling bytes must not pin a threadpool worker for
   hours — so every read returns as soon as any bytes arrive, `read1`, never a buffer-filling
-  read that a one-byte-per-25-s server could hold open past the deadline), streamed with the §5.1
+  read that a one-byte-per-25-s server could hold open past the deadline; a body that ends
+  short of its `Content-Length` is a failed download, never parsed; the same timeout,
+  deadline, and short-body rules govern every other outbound read the backend makes — the
+  §22 catalog and image reads, the GitHub API listing above, the §6.2 PyPI version check,
+  and the §19 Ollama installer download, the last two keeping their own longer per-read
+  timeouts and byte caps — a package's PyPI record runs to megabytes and the Ollama binary
+  to hundreds — under the same `read1`, deadline, and short-body rules), streamed with the §5.1
   64 MB archive cap enforced during the read — an oversized or non-archive download is a 422,
   and the §5.1 decompression caps still apply after (member count, member size, decompressed
   total, **and no duplicate member names**: a zip may hold several members of one name, and

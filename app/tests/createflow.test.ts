@@ -881,3 +881,51 @@ describe('upsertStepOrderRule (§11 Remember this order)', () => {
     ])
   })
 })
+
+// ---- §11 Build rules section rule ----
+import { appendBuildRule, removeRuleBlock } from '../src/pages/createflow/model'
+
+describe('Build rules section rule (§11 Step editing)', () => {
+  const ordered = [step({ name: 'Second' }), step({ name: 'Fetch pages' })]
+
+  it('a heading reading "Build Rules:" is the section — case-insensitive, trailing colon ignored', () => {
+    const spec: SpecBlock[] = [
+      { kind: 'h2', text: 'Build Rules:' },
+      { kind: 'li', text: 'Step "A": keep it' },
+      { kind: 'h2', text: 'Later' },
+    ]
+    expect(appendBuildRule(spec, 'B', 'log once')).toEqual([
+      spec[0], spec[1], { kind: 'li', text: 'Step "B": log once' }, spec[2],
+    ])
+    expect(upsertStepOrderRule(spec, ordered)).toEqual([
+      spec[0], spec[1], { kind: 'li', text: 'Step order: "Second", "Fetch pages"' }, spec[2],
+    ])
+  })
+
+  it('every Step order bullet under any Build rules heading goes; the new one lands under the first', () => {
+    const spec: SpecBlock[] = [
+      { kind: 'h2', text: 'Build rules' },
+      { kind: 'li', text: 'Step "A": keep it' },
+      { kind: 'h2', text: 'Other' },
+      { kind: 'h2', text: 'build rules' },
+      { kind: 'li', text: 'Step order: "Old", "Order"' },
+    ]
+    expect(upsertStepOrderRule(spec, ordered)).toEqual([
+      spec[0], spec[1], { kind: 'li', text: 'Step order: "Second", "Fetch pages"' },
+      spec[2], spec[3],
+    ])
+  })
+
+  it('Remove the rule deletes only a bullet inside the Build rules section', () => {
+    const spec: SpecBlock[] = [
+      { kind: 'h2', text: 'Requirements' },
+      { kind: 'li', text: 'The build rule "never use JSON" is the one to keep in mind' },
+      { kind: 'h2', text: 'Build rules' },
+      { kind: 'li', text: 'Step "Fetch pages": Never use JSON' },
+    ]
+    expect(removeRuleBlock(spec, 'never use json')).toEqual([spec[0], spec[1], spec[2]])
+    // a quote outside the section is never a match
+    expect(removeRuleBlock(spec.slice(0, 2), 'never use json')).toBeNull()
+    expect(removeRuleBlock([...spec.slice(0, 3), { kind: 'h2', text: 'After' }, { kind: 'li', text: 'never use json' }], 'never use json')).toBeNull()
+  })
+})

@@ -276,7 +276,9 @@ export default function ExecutionsList() {
   // at fetch time (pinning it would strand the last page's newest rows behind
   // a disabled Next). A filter has only its fetches to go by.
   const total = !filtered
-    ? Math.max(0, executionsTotal - executing.length - queued.length)
+    // Never under the rows in hand (the readout's upper bound): a pill count
+    // that lags a finish would read "101–121 of 120".
+    ? Math.max(0, executionsTotal - executing.length - queued.length, finished.length)
     // A filter's serverTotal counts the server's matches, which can be fewer
     // than the rows in hand: the window's own matching rows are shown too, and
     // some of them are newer than the page the fetch answered with. A total

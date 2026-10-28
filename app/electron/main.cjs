@@ -180,15 +180,16 @@ function connectShellSocket() {
 }
 
 // The event crosses a socket, so its shape is checked before anything is
-// shown: string title and body, and a target whose id is uuid-shaped.
-const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
+// shown: string title and body, and a target naming a page and a non-empty
+// string id. Any id is accepted (not only a lowercase uuid) — the
+// notification always shows; the id is URI-encoded so it can never break out
+// of its query value.
 function notificationTargetHash(target) {
   if (!target || typeof target !== 'object') return null
   if (target.page === 'execution' && typeof target.executionId === 'string'
-    && UUID_SHAPE.test(target.executionId)) return `/app?execution=${target.executionId}`
+    && target.executionId) return `/app?execution=${encodeURIComponent(target.executionId)}`
   if (target.page === 'automation' && typeof target.automationId === 'string'
-    && UUID_SHAPE.test(target.automationId)) return `/app?automation=${target.automationId}`
+    && target.automationId) return `/app?automation=${encodeURIComponent(target.automationId)}`
   return null
 }
 
@@ -711,6 +712,9 @@ function createWindow(hash) {
   // died and is being reloaded; that reload's finish leaves the window as the
   // user has it instead of showing and focusing it like a first load would.
   let reloadingShownWindow = false
+  // What a failed main-frame load retries: the creation hash, until a
+  // renderer-death reload moves it to `/app` (§9: never the creation hash).
+  let retryHash = hash || '/app'
   // §9 watchdog: whatever else goes wrong, the app is never left running with
   // no window at all. Armed with the window, disarmed the moment it shows (or
   // the window closes), and fired below when neither happened in time.
@@ -725,7 +729,7 @@ function createWindow(hash) {
     failed = true
     failStreak += 1
     if (failStreak === 1) appLog(`window: renderer load failed (${code} ${desc}) — retrying every 1 s`)
-    setTimeout(() => { if (win === w && !w.isDestroyed()) load(w, hash || '/app') }, 1000)
+    setTimeout(() => { if (win === w && !w.isDestroyed()) load(w, retryHash) }, 1000)
   })
   win.webContents.on('did-finish-load', () => {
     if (win !== w || w.isDestroyed()) return
@@ -781,7 +785,8 @@ function createWindow(hash) {
       // renderer has its `open-target` listener again.
       reloadingShownWindow = winLoaded
       winLoaded = false
-      load(w, '/app')
+      retryHash = '/app'
+      load(w, retryHash)
       return
     }
     clearWatchdog()
@@ -1654,6 +1659,24 @@ ipcMain.handle('update-download', async () => {
   return downloadUpdate()
 })
 
+// §3 win32: the installer replaces the tree the backend runs from, so the
+// service is stopped first (bounded like every service child). A failed stop
+// is logged and never blocks the install. Answers whether a stop was made.
+async function stopBackendBeforeInstall() {
+  if (!plat.stopBackendBeforeInstall) return false
+  stopShellSocket()
+  const err = await runServiceVerb('stop', 'update-install')
+  if (err) appLog(`update-install: backend stop failed: ${err}`)
+  return true
+}
+
+// An install refused after that stop leaves the app up: installs may run
+// again, and the shell socket comes back (the failed quit-entirely rule).
+function resumeAfterRefusedInstall() {
+  quittingAll = false
+  startShellSocket()
+}
+
 // ShipIt (macOS) swaps the bundle at the same path (the LaunchAgent's
 // interpreter path stays valid); the old backend keeps running until the next
 // launch's version-compare flow restarts it.
@@ -1666,6 +1689,8 @@ ipcMain.handle('update-install', async () => {
   if (brewManaged()) return { error: plat.MANAGED_COPY_ERROR }
   if (await executionsLive()) return { busy: true }
   appLog('update: quitting to install')
+  const backendStopped = await stopBackendBeforeInstall()
+  const standDown = () => { if (backendStopped) resumeAfterRefusedInstall() }
   // §3: the same busy-gated, user-initiated install on every platform — only
   // the machinery that performs the swap differs (ShipIt vs. the NSIS
   // installer vs. the AppImage swap electron-updater staged).
@@ -1684,6 +1709,7 @@ ipcMain.handle('update-install', async () => {
     genericUpdater().quitAndInstall()
   } catch (err) {
     uiQuit = false
+    standDown()
     appLog(`update: install failed: ${String(err?.message || err)}`)
     return { error: String(err?.message || err) }
   }
@@ -1695,6 +1721,7 @@ ipcMain.handle('update-install', async () => {
   // no quit underway is the refusal.
   if (!quitting && lastUpdaterError !== null) {
     uiQuit = false
+    standDown()
     const error = lastUpdaterError
     appLog(`update: install refused: ${error}`)
     return { error }
@@ -1706,6 +1733,7 @@ ipcMain.handle('update-install', async () => {
   setTimeout(() => {
     if (quitting) return
     uiQuit = false
+    standDown()
     appLog('update-install: no quit began within 10 s')
   }, 10_000).unref()
   return { ok: true }

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -22,6 +23,8 @@ from pathlib import Path
 
 from .. import paths
 from .base import Capabilities, Platform
+
+_log = logging.getLogger("autowright.platform.windows")
 
 # Windows-only in CPython's subprocess module; the numeric value is part of
 # the Win32 ABI. The getattr keeps this module importable (and its §15 tests
@@ -538,9 +541,11 @@ def shim_text() -> str:
     backend under `pythonw.exe` (§3), and that is also what the shell writes
     its shim from (`backend.json`'s `python` field) — the CLI needs a console,
     and both halves must agree on one exec line or install would heal every
-    shim the shell wrote."""
+    shim the shell wrote. Every `%` in the interpreter path is doubled: batch
+    expands `%NAME%`, and a Windows user name may hold one."""
+    python = str(paths.console_python()).replace("%", "%%")
     return (f"@echo off\r\n{SHIM_MARKER}\r\n"
-            f'"{paths.console_python()}" -m autowright.cli %*\r\n')
+            f'"{python}" -m autowright.cli %*\r\n')
 
 
 def _heal_one(p: Path) -> str | None:
@@ -548,6 +553,11 @@ def _heal_one(p: Path) -> str | None:
     bytes: the file is CRLF by contract, and universal-newline text reading
     would make every comparison fail. An undecodable (binary) file can't carry
     the marker: foreign, left alone, never a traceback."""
+    if p.is_symlink():
+        # §3: a symlink there, dangling or not, is foreign - writing or
+        # chmodding through it would land wherever the link points.
+        _log.warning("CLI shim location %s is a symlink - left alone", p)
+        return f"foreign {p} left alone (a symlink)"
     try:
         current = p.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
@@ -581,6 +591,10 @@ def _remove_shim() -> str | None:
     delete goes on the result line instead of raising."""
     notes = []
     for p in shim_paths():
+        if p.is_symlink():
+            # §3: a symlink is foreign, never deleted through or followed.
+            _log.warning("CLI shim location %s is a symlink - left alone", p)
+            continue
         try:
             if SHIM_MARKER not in p.read_bytes().decode("utf-8"):
                 continue

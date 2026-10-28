@@ -388,6 +388,18 @@ describe('executions list finished paging (§7)', () => {
     expect(screen.getByText('e-0049')).toBeTruthy()
   })
 
+  it('the readout total never falls under the rows in hand (a lagging pill count)', async () => {
+    // 121 finished rows in hand, but the pill count still says 120
+    mockedApi.listExecutions.mockResolvedValue({ executions: finishedRows(71, 50), total: 120 })
+    seed(finishedRows(50), 120)
+    render(<ExecutionsList />)
+    fireEvent.click(pagerButton('Next'))
+    await waitFor(() => expect(screen.getByText('e-0050')).toBeTruthy())
+    fireEvent.click(pagerButton('Next'))
+    await waitFor(() => expect(screen.getByText('e-0120')).toBeTruthy())
+    expect(within(pager()).getByText('101–121 of 121')).toBeTruthy()
+  })
+
   it('fetches the next keyset page on Next, then advances the slice', async () => {
     const windowRows = finishedRows(50)
     mockedApi.listExecutions.mockResolvedValue({ executions: finishedRows(50, 50), total: 120 })
@@ -1533,6 +1545,27 @@ describe('execution page start actions (§9/§7)', () => {
     expect(mockedApi.executeNow).toHaveBeenCalledTimes(1)
     const busy = screen.getByRole('button', { name: /Starting…/ }) as HTMLButtonElement
     expect(busy.disabled).toBe(true)
+  })
+
+  it('Execute again lands on the new run only while this page is still shown (§9)', async () => {
+    let land: (v: unknown) => void = () => {}
+    mockedApi.executeNow.mockReturnValue(new Promise((resolve) => { land = resolve }))
+    seedFinished({ status: 'succeeded' })
+    render(<ExecutionPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Execute again' }))
+    act(() => { storeMod.useStore.setState({ page: 'automations' }) })
+    await act(async () => { land({ executionId: 'e-new', queued: false }) })
+    expect(storeMod.useStore.getState().page).toBe('automations')
+    expect(storeMod.useStore.getState().executionId).toBe('e1')
+  })
+
+  it('Execute again navigates to the new run when the page is unchanged', async () => {
+    mockedApi.executeNow.mockResolvedValue({ executionId: 'e-new', queued: false })
+    seedFinished({ status: 'succeeded' })
+    render(<ExecutionPage />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Execute again' })) })
+    await waitFor(() => expect(storeMod.useStore.getState().executionId).toBe('e-new'))
+    expect(storeMod.useStore.getState().page).toBe('execution')
   })
 
   it('Retry sends one POST for a double-click', async () => {

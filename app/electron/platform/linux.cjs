@@ -219,6 +219,10 @@ function applyDesktopEntry(app, iconPath) {
 // provider. The marker is what main.cjs discriminates on — the modules stay
 // electron-free, so they name the machinery rather than construct it.
 const UPDATER = 'appimage'
+
+// §3: the AppImage swap replaces one file; the running backend is left alone
+// and the next launch version-syncs it.
+const stopBackendBeforeInstall = false
 const APP_USER_MODEL_ID = null
 
 // §3: the generic provider is pointed at a *directory* (latest-linux.yml + the
@@ -297,6 +301,7 @@ module.exports = {
   applyLoginItem,
   applyDesktopEntry,
   UPDATER,
+  stopBackendBeforeInstall,
   APP_USER_MODEL_ID,
   updateFeedUrl,
   managedInstall,

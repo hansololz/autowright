@@ -4832,31 +4832,40 @@ def test_save_version_carries_authored_by_and_locked(client):
                        json={"draft": bad}).status_code == 422
 
 
-def test_restore_validates_like_a_save(client):
-    """§19: a restore runs the save's step validators — a stored folder whose
-    script was hand-edited on disk into broken Python answers 422 and mints
-    nothing; an unmodified restore still lands, sealed."""
+def test_restore_gates_only_a_step_modified_on_disk(client):
+    """§19: a restore lands the stored content unvalidated — a version
+    referencing a since-deleted secret restores fine (the §4.1 problems audit
+    reports it) — with one gate: a version holding a step hand-edited on disk
+    (§4.1 step-modified) answers 422 and mints nothing."""
+    import uuid
+
     from autowright.storage import step_script_sha, store
     from autowright.yamlio import load_yaml
 
-    a = store.create_automation(make_version(), "Restorer", "mock")
+    gone = str(uuid.uuid4())
+    base = make_version()
+    base["steps"][0] = {**base["steps"][0],
+                        "secrets": [{"id": gone, "why": "authenticates"}],
+                        "code": base["steps"][0]["code"] + f'secrets["{gone}"]\n'}
+    a = store.create_automation(base, "Restorer", "mock")
     store.save_new_version(a, make_version(notes="two"))
     store.save_new_version(a, make_version(notes="three"))
-    v1 = store.auto_dir(a) / "versions" / "v1"
-    (v1 / "02-finish.py").write_text("def oops(:\n", encoding="utf-8")
-    a["versions"][1] = store._load_version_folder(v1)
-    assert a["versions"][1]["steps"][1]["modifiedOnDisk"] is True
 
     r = client.post(f"/automations/{a['id']}/restore", json={"version": 1})
-    assert r.status_code == 422, r.text
-    assert "v1 doesn't validate" in r.json()["detail"]
-    assert a["current_version"] == 3
-    assert not (store.auto_dir(a) / "versions" / "v4").exists()
-
-    r = client.post(f"/automations/{a['id']}/restore", json={"version": 2})
     assert r.status_code == 200, r.text
     n = r.json()["version"]
+    assert n == 4
     vd = store.auto_dir(a) / "versions" / f"v{n}"
     for entry in load_yaml(vd / "automation.yaml")["steps"]:
         assert entry["sha"] == step_script_sha((vd / entry["file"]).read_bytes())
-    assert r.json()["automation"]["problems"] == []
+
+    v2 = store.auto_dir(a) / "versions" / "v2"
+    (v2 / "02-finish.py").write_text("def oops(:\n", encoding="utf-8")
+    a["versions"][2] = store._load_version_folder(v2)
+    assert a["versions"][2]["steps"][1]["modifiedOnDisk"] is True
+    r = client.post(f"/automations/{a['id']}/restore", json={"version": 2})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == ("v2's step `Finish` was edited on disk — "
+                                  "pull and push it instead")
+    assert a["current_version"] == 4
+    assert not (store.auto_dir(a) / "versions" / "v5").exists()

@@ -117,8 +117,9 @@ def test_duplicate_step_names_match_kth_to_kth():
 
 
 def test_moved_step_carries_its_positions_and_stays_unchanged():
-    """§19: a step matched on both sides at different positions carries `moved`
-    {from, to} (1-based) and keeps its status; only step entries have the key."""
+    """§19: a step whose relative order among the common steps changed (outside
+    the longest in-order run) carries `moved` {from, to} (1-based) and keeps
+    its status; only step entries have the key."""
     from autowright import versions_diff
 
     old = _ver(_step("A", "a\n", file="01-a.py"), _step("B", "b\n", file="02-b.py"),
@@ -130,19 +131,21 @@ def test_moved_step_carries_its_positions_and_stays_unchanged():
     assert [s["name"] for s in steps] == ["B", "A", "C"]
     by_name = {s["name"]: s for s in steps}
     assert by_name["B"]["moved"] == {"from": 2, "to": 1}
-    assert by_name["A"]["moved"] == {"from": 1, "to": 2}
+    # A keeps its order relative to C — the in-order run is A, C.
+    assert by_name["A"]["moved"] is None
     assert by_name["C"]["moved"] is None
     assert all(s["status"] == "unchanged" for s in steps)
     assert all("moved" not in f for f in files if f["kind"] != "step")
 
-    # A new step and an appended old-only (removed) step are never moved.
+    # A new step and an appended old-only (removed) step are never moved, and
+    # the shift they cause moves nothing.
     files = versions_diff.diff_versions(
         _ver(_step("A", "a\n"), _step("Gone", "g\n")),
         _ver(_step("Fresh", "f\n"), _step("A", "a\n")))
     by_name = {s["name"]: s for s in _by_kind(files, "step")}
     assert by_name["Fresh"]["status"] == "new" and by_name["Fresh"]["moved"] is None
     assert by_name["Gone"]["status"] == "removed" and by_name["Gone"]["moved"] is None
-    assert by_name["A"]["moved"] == {"from": 1, "to": 2}
+    assert by_name["A"]["moved"] is None
 
     # A moved step whose code also changed is changed AND carries its positions.
     files = versions_diff.diff_versions(
@@ -151,6 +154,27 @@ def test_moved_step_carries_its_positions_and_stays_unchanged():
     b = _by_kind(files, "step")[0]
     assert b["name"] == "B" and b["status"] == "changed"
     assert b["moved"] == {"from": 2, "to": 1}
+
+
+def test_moved_marks_only_steps_outside_the_in_order_run():
+    """§19: moved is relative order — a step dragged from 1 to 5 marks that
+    step alone; removing or adding the first step marks nothing."""
+    from autowright import versions_diff
+
+    def steps(*names):
+        return _ver(*[_step(n, n.lower() + "\n") for n in names])
+
+    files = versions_diff.diff_versions(steps("A", "B", "C", "D", "E"),
+                                        steps("B", "C", "D", "E", "A"))
+    moved = {s["name"]: s["moved"] for s in _by_kind(files, "step")}
+    assert moved == {"B": None, "C": None, "D": None, "E": None,
+                     "A": {"from": 1, "to": 5}}
+
+    files = versions_diff.diff_versions(steps("A", "B", "C"), steps("B", "C"))
+    assert all(s["moved"] is None for s in _by_kind(files, "step"))
+
+    files = versions_diff.diff_versions(steps("A", "B", "C"), steps("Z", "A", "B", "C"))
+    assert all(s["moved"] is None for s in _by_kind(files, "step"))
 
 
 # ---------------------------------------------------------------- manifest text

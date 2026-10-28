@@ -2552,10 +2552,12 @@ def test_cmd_execution_list_since_and_until_ride_as_the_inclusive_range():
     _run(_RouteClient(gets), "execution", "list",
          "--since", "2026-09-01", "--until", "2026-09-06")
 
-    # a minute-resolution value rides as exactly that minute on both ends
+    # a minute-resolution value: --since is the minute's start, --until its
+    # end (+59 999 ms, the §7 filter modal's To bound)
     at = int(datetime(2026, 9, 6, 18, 30).timestamp() * 1000)
-    assert _local_stamp_ms("2026-09-06T18:30", end_of_day=True) == at
-    minute_path = f"/executions?limit=20&startedFromMs={at}&startedToMs={at}"
+    assert _local_stamp_ms("2026-09-06T18:30", end_of_day=False) == at
+    assert _local_stamp_ms("2026-09-06T18:30", end_of_day=True) == at + 59_999
+    minute_path = f"/executions?limit=20&startedFromMs={at}&startedToMs={at + 59_999}"
     _run(_RouteClient(_auto_gets(**{minute_path: {"executions": [], "total": 0}})),
          "execution", "list", "--since", "2026-09-06T18:30", "--until", "2026-09-06T18:30")
 

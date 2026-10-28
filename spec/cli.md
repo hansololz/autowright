@@ -82,7 +82,8 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   nothing outside the vocabulary could ever have matched); `--automation` repeats (each
   resolved by the usual reference rules and sent as one §19 `automation` value), and
   `--since` / `--until` take a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (`--until` with a
-  bare date means the end of that day) and ride as the inclusive §19
+  bare date means the end of that day, and with a minute stamp the end of that minute —
+  the §7 filter modal's To bound, so the two surfaces agree) and ride as the inclusive §19
   `startedFromMs` / `startedToMs` - a value in neither form, or a date whose local
   midnight falls before the epoch (a negative stamp — `1970-01-01` east of UTC
   included), is a
@@ -210,7 +211,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   error (unknown command, missing argument, bad flag) exits **1** with the usage message on
   stderr, overriding argparse's own default of 2. Interrupting a follow with Ctrl-C is an
   error too, not a crash: it exits 1 after a plain `interrupted` line, never a
-  `KeyboardInterrupt` traceback.
+  `KeyboardInterrupt` traceback. A reader that closes the pipe early (`| head`, a `| less`
+  quit) ends any command quietly with exit 0 — never a `BrokenPipeError` traceback — not
+  only `execution result`.
 - **HTTP timeouts:** every backend request runs with a 30 s timeout, except the three calls
   that legitimately take long — package install (the §6.2 ensure runs pip), import (the
   URL fetch, the file upload, *and* the confirm that lands the archive — a large archive
@@ -269,8 +272,12 @@ whatever the user is drafting in the app. Files:
   them camelCase, written by `pull` (the authorship and lock keys only when set) and
   accepted by `push`; the version folder's `sha` seal is never written or read here).
   A step whose script the user changed in the workdir is pushed as `authored_by: user`
-  (push compares each file's bytes against the pulled version's; a byte-identical script
-  keeps its stored authorship) — unless the manifest states `authored_by` explicitly.
+  (push compares each file's bytes against the **pulled** version's — `pull` records the
+  version it wrote as a top-level `pulled_from: N` manifest key, which push reads and
+  never saves, falling back to the current version when the key is absent or that version
+  is gone; steps pair by name, k-th of a name to k-th for pre-uniqueness duplicates; a
+  byte-identical script keeps its stored authorship) — unless the manifest states
+  `authored_by` explicitly.
 - `NN-name.py` — one file per step, matching `steps[].file`.
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
 
@@ -290,8 +297,11 @@ steps so the lock is visible in the workdir and survives a round trip.
 **`automation validate <dir>`** runs the same validators push runs (below) over a workdir
 and writes nothing: prints `ok` and exits 0 when clean, otherwise one error per line and
 exit 1 — the developer loop's check before a push. It needs the backend only for the
-existence context (agents and secrets), through `POST /validate-steps` (§19), so its
-errors match the server's word for word.
+existence context (agents and secrets), through `POST /validate-steps` (§19, with the
+workdir's `automationId` when it has one), so its
+errors match the server's word for word; the grant checks (`--grant-*`, "an agent step
+needs at least one granted agent") belong to the target automation and run only on push
+and create — validate's help says so.
 
 `pull` owns the workdir's managed files: it rewrites every file above and removes the
 managed files it did not write this time — a `notes.md` the version no

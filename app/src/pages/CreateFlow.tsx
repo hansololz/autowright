@@ -538,7 +538,12 @@ export default function CreateFlow() {
   useEffect(() => {
     if (!isEdit || seededRef.current || !auto || !auto.spec) return
     seededRef.current = true
-    setRev(seedFromAuto(auto, agents, secrets.map((s) => s.id)))
+    const seeded = seedFromAuto(auto, agents, secrets.map((s) => s.id))
+    // §9.2 Needs-fixing `step-modified` → Edit: the editor opens with the
+    // draft already touched, so Save is available at once (the widening
+    // cast keeps this compiling before and after the kind joins the union)
+    const stepModified = (auto.problems ?? []).some((p) => (p.kind as string) === 'step-modified')
+    setRev(stepModified ? { ...seeded, touched: true } : seeded)
     if (auto.agentId) setAgentId(auto.agentId)
   }, [auto, isEdit, agents, secrets])
 
@@ -810,7 +815,7 @@ export default function CreateFlow() {
   // collapse the entry, then sync the steps. §8 user-action blockers are
   // skipped — the Mac isn't ready, there is nothing to amend.
   const applyBlockersEntry = (entry: ChatEntry) => {
-    if (!rev) return
+    if (!rev || testLive) return
     // §11: constraint blockers carry their own resolution rows
     const blockers = (entry.blockers ?? []).filter((b) => b.kind !== 'user-action' && b.kind !== 'constraint')
     if (!blockers.length) return
@@ -828,7 +833,7 @@ export default function CreateFlow() {
   // §11 constraint blocker "Use the workaround": the workaround lands under
   // "Constraints & resolutions" exactly as Apply does, then the sync runs.
   const applyWorkaround = (entry: ChatEntry, blocker: Blocker) => {
-    if (!rev || anyJobBusy || viewingOld || !(blocker.workaround ?? '').trim()) return
+    if (!rev || anyJobBusy || viewingOld || testLive || !(blocker.workaround ?? '').trim()) return
     const resolution = workaroundBlocker(blocker)
     guardManualEdit(() => {
       setRev((r) => r && ({
@@ -840,29 +845,34 @@ export default function CreateFlow() {
     })
   }
   // §11 constraint blocker "Unlock": clears `locked` on the named draft step
-  // (a manual edit — touched, undo snapshot cleared), then syncs.
+  // (a manual edit — touched, undo snapshot cleared), then syncs. No locked
+  // draft step of that name (renamed or already unlocked) toasts and runs no
+  // sync.
   const unlockConstraintStep = (blocker: Blocker) => {
-    if (!rev || anyJobBusy || viewingOld || !blocker.step) return
+    if (!rev || anyJobBusy || viewingOld || testLive || !blocker.step) return
+    if (!rev.steps.some((s) => s.name === blocker.step && s.locked)) {
+      showToast(`No locked step named '${blocker.step}' — unlock it in the step editor`)
+      return
+    }
     guardManualEdit(() => {
       const at = rev.steps.findIndex((s) => s.name === blocker.step && s.locked)
-      const steps: Step[] = at < 0 ? rev.steps : rev.steps.map((s, j) => {
+      if (at < 0) return
+      const steps: Step[] = rev.steps.map((s, j) => {
         if (j !== at) return s
         const { locked: _locked, ...rest } = s
         return rest
       })
-      if (at >= 0) {
-        setRev((r) => r && ({
-          ...r, steps, touched: true, undo: null,
-          chat: [...r.chat, newEntry({ kind: 'system', icon: 'fa-lock-open', text: `Step '${blocker.step}' unlocked.` })],
-        }))
-      }
+      setRev((r) => r && ({
+        ...r, steps, touched: true, undo: null,
+        chat: [...r.chat, newEntry({ kind: 'system', icon: 'fa-lock-open', text: `Step '${blocker.step}' unlocked.` })],
+      }))
       void jobs.runSync(undefined, steps)
     })
   }
   // §11 constraint blocker "Remove the rule": deletes the first spec bullet
   // quoting the rule, then syncs; none matching leaves the spec alone.
   const removeConstraintRule = (blocker: Blocker) => {
-    if (!rev || anyJobBusy || viewingOld || !blocker.rule) return
+    if (!rev || anyJobBusy || viewingOld || testLive || !blocker.rule) return
     const spec = removeRuleBlock(rev.spec, blocker.rule)
     if (!spec) { showToast('Rule not found — edit the spec by hand'); return }
     guardManualEdit(() => {
@@ -876,9 +886,11 @@ export default function CreateFlow() {
   // each marks the draft touched and clears the Draft-undo snapshot (a
   // manual edit, like the documents' saves). A remembered edit adds its
   // build rule to the spec without dirtying it either.
-  // §11 "Remember this order": the id of the move chip the offer hangs on —
-  // page state, never persisted; any later entry (or a reload) retires it.
-  const [orderOffer, setOrderOffer] = useState<string | null>(null)
+  // §11 "Remember this order": the id of the move chip the offer hangs on and
+  // the step names as they were moved — page state, never persisted; any
+  // later entry, a step added, removed or renamed since (or a reload)
+  // retires it.
+  const [orderOffer, setOrderOffer] = useState<{ chipId: string; names: string[] } | null>(null)
   const commitStepEdit = (steps: Step[], effect: StepEditEffect) => {
     const chips: ChatEntry[] = []
     if (effect.kind === 'save' && effect.rule) {
@@ -893,7 +905,7 @@ export default function CreateFlow() {
     if (effect.kind === 'move') {
       const chip = newEntry({ kind: 'system', icon: 'fa-arrows-up-down', text: `Step '${effect.name}' moved to position ${effect.to}.` })
       chips.push(chip)
-      setOrderOffer(chip.id)
+      setOrderOffer({ chipId: chip.id, names: steps.map((s) => s.name) })
     }
     setRev((r) => r && ({
       ...r, steps, touched: true, undo: null,
@@ -902,11 +914,15 @@ export default function CreateFlow() {
     }))
   }
   // The turn action row's Remember this order pill: offered only while the
-  // move chip is the thread's last entry. It writes the current order as the
-  // one `Step order:` build rule (never out of sync) and lands the receipt chip,
-  // which ends the offer.
+  // move chip is the thread's last entry and the draft's step names still
+  // equal the ones moved. It writes the current order as the one `Step
+  // order:` build rule (never out of sync) and lands the receipt chip, which
+  // ends the offer.
   const lastChatId = rev && rev.chat.length ? rev.chat[rev.chat.length - 1].id : null
-  const rememberOrder = orderOffer && lastChatId === orderOffer
+  const orderStepsUnchanged = !!rev && !!orderOffer
+    && rev.steps.length === orderOffer.names.length
+    && rev.steps.every((s, j) => s.name === orderOffer.names[j])
+  const rememberOrder = orderOffer && lastChatId === orderOffer.chipId && orderStepsUnchanged
     ? () => {
         setOrderOffer(null)
         setRev((r) => r && ({

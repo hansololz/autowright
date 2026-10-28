@@ -79,11 +79,13 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     expect(src).toContain("execFile(py, ['-m', 'autowright.service', verb]")
     const verbs = [...src.matchAll(/runServiceVerb\('([a-z]+)'/g)].map((m) => m[1])
     expect(new Set(verbs)).toEqual(new Set(['stop']))
-    expect(verbs).toHaveLength(2)
+    expect(verbs).toHaveLength(3)
     // §3 quit-entirely: the QUIT card's IPC and the OS quit share one
-    // stop-and-quit, labelled by its caller; reset has its own stop.
+    // stop-and-quit, labelled by its caller; reset has its own stop, and so
+    // does the win32 update-install.
     expect(src).toContain("runServiceVerb('stop', label)")
     expect(src).toContain("runServiceVerb('stop', 'reset')")
+    expect(src).toContain("runServiceVerb('stop', 'update-install')")
     expect(src).toContain("stopAndQuit(!!opts?.force, 'quit-all')")
     expect(src).toContain("stopAndQuit(false, 'quit')")
     expect(src).toContain("stopAndQuit(true, 'quit')")
@@ -121,7 +123,7 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     expect(src).not.toContain('autowright.cli')
     const shimForms = [
       'exec ${quoted} -m autowright.cli "$@"', // POSIX shim (darwin/linux/fallback, §3 single-quoted path)
-      '"${python}" -m autowright.cli %*', // Windows .cmd shim (win32)
+      '"${String(python).replace(/%/g, \'%%\')}" -m autowright.cli %*', // Windows .cmd shim (win32, §3 `%` doubled)
     ]
     const lines = union.split('\n').filter((l) => l.includes('autowright.cli'))
     expect(lines.length).toBeGreaterThanOrEqual(1)
@@ -342,6 +344,9 @@ interface WinRecord {
   shows: number
   focuses: number
   loads: number
+  // §9: the hash each load asked for, in order (the dist-file load's
+  // `{ hash }` option; the dev-server load's URL hash).
+  loadedHashes: string[]
   destroys: number
   // §13: hide() calls — a panel the tray toggle put away, and the one a late
   // blur must not put away again.
@@ -437,6 +442,10 @@ interface LoadOptions {
   // §13: what Notification.isSupported() answers (false by default, so no
   // other test ever opens the shell socket).
   notificationSupported?: boolean
+  // §2: patch individual exports of the platform module main.cjs selects
+  // (the real one for this host underneath), so a per-OS flag can be read
+  // as another OS declares it.
+  platform?: Record<string, unknown>
 }
 
 function loadMain(options: LoadOptions = {}): MainStub {
@@ -518,7 +527,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
     listeners = new Map<string, (...a: unknown[]) => void>()
     destroyed = false
     record: WinRecord = {
-      shows: 0, focuses: 0, loads: 0, destroys: 0, hides: 0, restores: 0, positions: [],
+      shows: 0, focuses: 0, loads: 0, loadedHashes: [], destroys: 0, hides: 0, restores: 0, positions: [],
       fire: (event, ...args) => { this.wcListeners.get(event)?.({}, ...args) },
       close: () => { this.listeners.get('closed')?.() },
       blur: () => { this.listeners.get('blur')?.() },
@@ -540,7 +549,16 @@ function loadMain(options: LoadOptions = {}): MainStub {
     }
 
     constructor(opts: unknown) { windows.push(opts); wins.push(this.record) }
-    loadFile() { this.record.loads += 1 } loadURL() { this.record.loads += 1 }
+    loadFile(_file: string, opts?: { hash?: string }) {
+      this.record.loads += 1
+      this.record.loadedHashes.push(opts?.hash ?? '')
+    }
+
+    loadURL(url: string) {
+      this.record.loads += 1
+      this.record.loadedHashes.push(new URL(url).hash.replace(/^#/, ''))
+    }
+
     on(event: string, fn: (...a: unknown[]) => void) { this.listeners.set(event, fn) }
     minimized = false
     show() { this.record.shows += 1 } focus() { this.record.focuses += 1 }
@@ -668,6 +686,9 @@ function loadMain(options: LoadOptions = {}): MainStub {
       }
       if (id === 'fs' && options.fs) {
         return { ...realRequire('fs') as object, ...options.fs }
+      }
+      if (id === './platform/index.cjs' && options.platform) {
+        return { ...realRequire(id) as object, ...options.platform }
       }
       if (id === 'child_process' && options.execFile) {
         return { ...realRequire('child_process') as object, execFile: options.execFile }
@@ -992,6 +1013,31 @@ describe('main.cjs §9 never-paint-blank window guard', () => {
     vi.advanceTimersByTime(60_000)
     expect(m.errors).toHaveLength(1)
     expect(w.shows).toBe(0)
+  })
+
+  it('a failed load after a renderer-death reload retries `/app`, never the creation hash (§9)', () => {
+    vi.useFakeTimers()
+    const m = loadMain()
+    const stale = '/app?execution=9b2f4c1e-7a3d-4e5f-8a6b-1c2d3e4f5a6b'
+    m.invoke('open-app', stale)
+    const w = m.wins[0]
+    // Before any death, a failed load retries the hash the window was made with.
+    w.fire('did-start-loading')
+    w.fire('did-fail-load', -102, 'ERR_CONNECTION_REFUSED', 'http://127.0.0.1:5173/', true)
+    w.fire('did-finish-load')
+    vi.advanceTimersByTime(1000)
+    expect(w.loadedHashes).toEqual([stale, stale])
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    // The death reload lands on `/app` (a notification target can be hours
+    // old) — and so does the retry of that reload when it fails.
+    w.fire('render-process-gone', { reason: 'oom' })
+    expect(w.loadedHashes).toEqual([stale, stale, '/app'])
+    w.fire('did-start-loading')
+    w.fire('did-fail-load', -102, 'ERR_CONNECTION_REFUSED', 'http://127.0.0.1:5173/', true)
+    w.fire('did-finish-load')
+    vi.advanceTimersByTime(1000)
+    expect(w.loadedHashes).toEqual([stale, stale, '/app', '/app'])
   })
 
   it('a reload alive 60 s past its load resets the death count — a later death gets its own reload (§9)', () => {
@@ -2140,6 +2186,55 @@ describe('main.cjs update-install refusals (§3)', () => {
     expect(m.emit('before-quit')).toBe(false)
   })
 
+  it('on win32 the backend service is stopped before quitAndInstall; elsewhere it is left running (§3)', async () => {
+    if (!HAS_UPDATER) return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    try {
+      const run = async (flag: unknown) => {
+        const order: string[] = []
+        const m = loadMain({
+          platform: { stopBackendBeforeInstall: flag },
+          execFile: (_py, args, _o, cb) => { order.push(`service ${args[2]}`); cb(null, 'stopped', '') },
+        })
+        writeFileSync(join(m.home, 'backend.json'),
+          JSON.stringify({ port: 4321, token: 'token', python: '/usr/bin/python3' }))
+        m.updater.onInstall = () => { order.push('quitAndInstall') }
+        expect(await m.invoke('update-install')).toEqual({ ok: true })
+        return order
+      }
+      const win32 = realRequire('./platform/win32.cjs') as { stopBackendBeforeInstall: unknown }
+      const darwin = realRequire('./platform/darwin.cjs') as { stopBackendBeforeInstall: unknown }
+      const linux = realRequire('./platform/linux.cjs') as { stopBackendBeforeInstall: unknown }
+      expect(await run(win32.stopBackendBeforeInstall)).toEqual(['service stop', 'quitAndInstall'])
+      expect(await run(darwin.stopBackendBeforeInstall)).toEqual(['quitAndInstall'])
+      expect(await run(linux.stopBackendBeforeInstall)).toEqual(['quitAndInstall'])
+    } finally {
+      fetchSpy.mockRestore()
+      restoreResourcesPath()
+    }
+  })
+
+  it('a failed win32 stop is logged and never blocks the install (§3)', async () => {
+    if (!HAS_UPDATER) return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    try {
+      const m = loadMain({
+        platform: { stopBackendBeforeInstall: true },
+        execFile: (_py, args, _o, cb) => { if (args[2] === 'stop') cb(new Error('boom'), '', 'boom') },
+      })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 4321, token: 'token', python: '/usr/bin/python3' }))
+      expect(await m.invoke('update-install')).toEqual({ ok: true })
+      expect(m.updater.installs).toBe(1)
+      expect(m.log()).toContain('update-install: backend stop failed: boom')
+    } finally {
+      fetchSpy.mockRestore()
+      restoreResourcesPath()
+    }
+  })
+
   it('update-install destroys the panel before quitAndInstall (§3/§13)', async () => {
     if (!HAS_UPDATER || !caps.trayPanel) return
     nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
@@ -2830,12 +2925,33 @@ describe('main.cjs shell notification socket (§13)', () => {
     socket.message({ event: 'execution.finished', title: 'x', body: 'y' })
     socket.message(posted({ title: 42 }))
     socket.message(posted({ body: null }))
-    socket.message(posted({ target: { page: 'execution', executionId: '../../etc' } }))
-    socket.message(posted({ target: { page: 'automation', automationId: EXECUTION_ID.toUpperCase() } }))
+    socket.message(posted({ target: { page: 'execution', executionId: '' } }))
+    socket.message(posted({ target: { page: 'automation', automationId: 42 } }))
     socket.message(posted({ target: { page: 'settings' } }))
     socket.message(posted({ target: null }))
     socket.message(null)
     expect(m.notifications).toHaveLength(0)
+  })
+
+  it('any non-empty id shows the notification, its click deep-linking with the id encoded', async () => {
+    const m = loadWithBackend({ notificationSupported: true })
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    const socket = FakeSocket.instances[0]
+    socket.message(posted({ target: { page: 'execution', executionId: 'my-report' } }))
+    socket.message(posted({
+      kind: 'overdue', target: { page: 'automation', automationId: AUTOMATION_ID.toUpperCase() },
+    }))
+    socket.message(posted({ target: { page: 'execution', executionId: '../a&b=c' } }))
+    expect(m.notifications.map((n) => n.shows)).toEqual([1, 1, 1])
+    for (const n of m.notifications) n.click()
+    expect(m.sent).toEqual([
+      ['open-target', '/app?execution=my-report'],
+      ['open-target', `/app?automation=${AUTOMATION_ID.toUpperCase()}`],
+      ['open-target', '/app?execution=..%2Fa%26b%3Dc'],
+    ])
   })
 
   it('reconnects with the 1.5 s doubling backoff, reset after a connection comes back', async () => {

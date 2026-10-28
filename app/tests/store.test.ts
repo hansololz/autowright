@@ -85,13 +85,19 @@ describe('autoIdFromHash (via the onOpenTarget deep link)', () => {
     expect(m.page).toBe('automation')
     expect(m.automationId).toBe('123e4567-e89b-12d3-a456-426614174000')
   })
-  it('missing or malformed auto id does not navigate', () => {
+  it('a missing or empty auto id does not navigate', () => {
     openTarget!('#/app')
     expect(store.useStore.getState().page).toBe('automations')
-    openTarget!('#/app?automation=SHORT')
+    openTarget!('#/app?automation=')
     expect(store.useStore.getState().page).toBe('automations')
-    openTarget!('#/app?automation=123E4567-E89B-12D3-A456-426614174000') // uppercase → no match
-    expect(store.useStore.getState().page).toBe('automations')
+  })
+  it('any non-empty id is followed, URI-decoded (§13: a hand-made folder id, an uppercase uuid)', () => {
+    openTarget!('#/app?automation=my-report')
+    expect(store.useStore.getState().automationId).toBe('my-report')
+    openTarget!('#/app?automation=123E4567-E89B-12D3-A456-426614174000')
+    expect(store.useStore.getState().automationId).toBe('123E4567-E89B-12D3-A456-426614174000')
+    openTarget!('#/app?automation=..%2Fa%26b%3Dc&x=1')
+    expect(store.useStore.getState().automationId).toBe('../a&b=c')
   })
 })
 
@@ -1153,6 +1159,35 @@ describe('history restore (popstate, §9)', () => {
     expect(store.useStore.getState().page).toBe('executions')
   })
 
+  it('a dead-record redirect replaces the entry: back never re-enters the deleted page (§9)', () => {
+    store.useStore.getState().go('settings')   // a known starting point (lastNav is module state)
+    // Model the browser's session history from the store's push/replace calls.
+    const entries: unknown[] = []
+    const push = vi.spyOn(history, 'pushState').mockImplementation((state) => { entries.push(state) })
+    const replace = vi.spyOn(history, 'replaceState').mockImplementation((state) => {
+      if (entries.length) entries[entries.length - 1] = state
+      else entries.push(state)
+    })
+    const back = () => {
+      entries.pop()
+      window.dispatchEvent(new PopStateEvent('popstate', { state: entries[entries.length - 1] }))
+    }
+    const m = store.useStore.getState()
+    m.go('executions')
+    m.go('automations')
+    m.go('automation', { automationId: 'X' })
+    // X is deleted while its page is shown: the page redirects with replace.
+    m.go('automations', {}, { replace: true })
+    expect(store.useStore.getState().page).toBe('automations')
+    back()
+    expect(store.useStore.getState().page).toBe('automations')
+    back()
+    expect(store.useStore.getState().page).toBe('executions')
+    expect(entries.some((e) => (e as { adNav?: { automationId?: string | null; page?: string } }).adNav?.page === 'automation')).toBe(false)
+    push.mockRestore()
+    replace.mockRestore()
+  })
+
   it('back into onboarding is refused once passed — the entry is re-pushed', () => {
     store.useStore.getState().setSurface('app')     // marks onboarding as passed
     const spy = vi.spyOn(history, 'pushState')
@@ -1195,11 +1230,14 @@ describe('execution deep link (§13 two target forms)', () => {
     expect(m.executionId).toBe(EXECUTION_ID)
   })
 
-  it('a malformed execution id is a plain focus', () => {
+  it('an empty execution id is a plain focus; any non-empty id is followed', () => {
     store.useStore.setState({ surface: 'app' })
-    openTarget!('#/app?execution=SHORT')
+    openTarget!('#/app?execution=')
     expect(store.useStore.getState().page).toBe('automations')
     expect(store.useStore.getState().executionId).toBeNull()
+    openTarget!('#/app?execution=SHORT')
+    expect(store.useStore.getState().page).toBe('execution')
+    expect(store.useStore.getState().executionId).toBe('SHORT')
   })
 
   const bootWithHash = async (hash: string) => {

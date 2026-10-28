@@ -33,7 +33,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   referencing that secret;
   connections open, close, and re-resolve their token as triggers are added, removed, toggled,
   or re-pointed. A dropped connection reconnects with exponential backoff (1 s doubling to a
-  60 s cap). Heartbeats track their acks (gateway op 11): a heartbeat whose ack has not
+  60 s cap, reset to 1 s by any session that reached READY — however it ended, return or
+  exception — so a healthy connection lost at every sleep/wake never climbs to the cap). Heartbeats track their acks (gateway op 11): a heartbeat whose ack has not
   arrived by the next heartbeat's deadline means the connection is a zombie (sleep/wake,
   network switch) - the session closes and reconnects instead of sitting "connected" while
   dropping messages; an authentication failure (bad token) or a missing/valueless secret parks the
@@ -162,6 +163,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   running when the moment passed, that occurrence is skipped entirely — no catch-up queue at
   startup; the next occurrence proceeds normally. At most one catch-up execution fires per wake
   regardless of how many occurrences — across all triggers — were slept through.
+  A clock stepped **backwards** (NTP) never re-fires an occurrence already fired: the
+  scheduler's baseline never moves below the last occurrence it fired, so a 09:00 cron fired
+  at 09:00:10 stays fired when the clock steps back to 08:59:50; retry pauses and step
+  durations run on the monotonic clock, so a step never stretches or goes negative.
   **Opting out (`runIfMissed: false`, §4.3):** a cron, interval, or one-shot with the field
   off never fires late. The scheduler tells "late" from "just now" with a **grace window** of
   `max(60, 4 × AUTOWRIGHT_TICK_S)` seconds (60 s at the default tick, §15 - no knob of its
@@ -279,7 +284,13 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   §6.1); values injected at runtime — each
   step receives only the secrets it declares in the manifest (`secrets` entry ids) plus the
   literal `secrets["<id>"]` subscripts its own code
-  references — and redacted from logs; a missing secret stops the execution before any step.
+  references — and redacted from logs (the redaction set holds, per secret, the whole
+  value and its JSON-escaped, `repr`, and trailing-newline-stripped forms, every line of a
+  multi-line value — each line also whitespace-stripped and JSON-escaped — and, for a value
+  that parses as JSON, every string leaf of 8+ characters with the same per-line and
+  escaped forms, so a service-account key survives `json.loads` → `print(creds)`,
+  `json.dumps`, or a traceback echoing one PEM line; probes under 8 characters are never
+  added, so a lone brace or `true` never redacts half a log); a missing secret stops the execution before any step.
   The engine resolves each needed id to its stored §4.8 record and reads the Keychain by the
   id itself (§4.8: the id keys the Keychain entry); every error message uses the record's
   name (a dangling id fails pre-step naming the short id

@@ -237,18 +237,92 @@ def substantive_probe(part: str) -> bool:
     return len(stripped) >= 8 and any(c.isalnum() for c in stripped)
 
 
+def _line_probes(text: str) -> list[str]:
+    """§4.8: each substantive line of a multi-line text, as written and
+    whitespace-stripped, each also JSON-escaped (a line re-serialized inside
+    a `json.dumps` or a dict's `repr` keeps its escapes)."""
+    forms: list[str] = []
+    for line in text.splitlines():
+        if not substantive_probe(line):
+            continue
+        stripped = line.strip()
+        forms.extend((line, stripped, json.dumps(line)[1:-1], json.dumps(stripped)[1:-1]))
+    return forms
+
+
+def _json_string_leaves(value: str) -> list[str]:
+    """§4.8: every string leaf of `value` parsed as JSON (dicts and lists
+    walked iteratively), [] when it doesn't parse."""
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return []
+    leaves: list[str] = []
+    pending = [parsed]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, str):
+            leaves.append(node)
+        elif isinstance(node, dict):
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+    return leaves
+
+
+def secret_probes(value: str) -> list[str]:
+    """§4.8 / §6: every text that counts as an occurrence of one secret value
+    — the whole value first, then its JSON-escaped (`ensure_ascii` on and
+    off), `repr`, and trailing-newline-stripped forms, each line of a
+    multi-line value (`_line_probes`), and, when the value parses as JSON,
+    every substantive string leaf with its escaped forms and its own lines —
+    so a service-account key survives `json.loads` → `print(creds)` or
+    `json.dumps`. Every line and leaf probe is at least 8 characters, so a
+    lone `{` or `true` never matches. Shared by the engine's log
+    redaction (`engine.build_redactions`), the outbound scan, and the cut
+    guards, so all three hold the same set."""
+    if not value:
+        return []
+    probes = [value]
+    seen = {value}
+
+    def add(probe: str, *, whole: bool = False) -> None:
+        # The whole value's own forms match at any length (they are the
+        # secret itself); line and leaf probes need at least 8 characters.
+        if probe and (whole or len(probe) >= 8) and probe not in seen:
+            seen.add(probe)
+            probes.append(probe)
+
+    for variant in (json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1],
+                    repr(value)[1:-1], value.rstrip("\r\n")):
+        add(variant, whole=True)
+    if "\n" in value:
+        for form in _line_probes(value):
+            add(form)
+    for leaf in _json_string_leaves(value):
+        if not substantive_probe(leaf):
+            continue
+        for form in (leaf, json.dumps(leaf)[1:-1], json.dumps(leaf, ensure_ascii=False)[1:-1],
+                     repr(leaf)[1:-1]):
+            add(form)
+        if "\n" in leaf:
+            for form in _line_probes(leaf):
+                add(form)
+    return probes
+
+
 def scan_outbound(text: str, what: str, scan: dict[str, str]) -> None:
     """§6: refuse to send `text` anywhere off this Mac if it carries a secret
     value. `scan` is every value of the automation, not just the calling step's:
     a value written to workspace/memory by an earlier step must be caught too.
-    Multi-line values are probed line by line (each substantive line — §4.8),
-    so a partial paste of a key is caught. Passed in explicitly — a default would let a missed wiring silently
+    Each value is probed by its full `secret_probes` set (lines, escaped
+    forms, JSON leaves — §4.8), so a partial paste or a re-serialized key is
+    caught. Passed in explicitly — a default would let a missed wiring silently
     turn the scan into a no-op."""
     for sname, val in scan.items():
         if not val:
             continue
-        probes = [val] + [p for p in val.splitlines() if substantive_probe(p)] if "\n" in val else [val]
-        if any(p in text for p in probes):
+        if any(p in text for p in secret_probes(val)):
             raise RuntimeError(f"{what} contains the value of secret {sname} — refusing to send")
 
 
@@ -409,15 +483,11 @@ MAX_LOG_PIECE = 131_072
 
 
 def _build_cut_guards(scan: dict[str, str]) -> list[str]:
-    """§7: every value of the scan map, plus each substantive line of a
-    multi-line value — the same probes `scan_outbound` matches."""
+    """§7: every `secret_probes` probe of every value of the scan map — the
+    same probes `scan_outbound` matches."""
     guards: list[str] = []
     for value in scan.values():
-        if not value:
-            continue
-        guards.append(value)
-        if "\n" in value:
-            guards.extend(p for p in value.splitlines() if substantive_probe(p))
+        guards.extend(secret_probes(value))
     return guards
 
 
@@ -487,6 +557,9 @@ class _LineWriter(io.TextIOBase):
     def __init__(self, kind: str):
         self.kind = kind
         self.buf = ""
+        # A step's threads share sys.stdout — the buffer split must be atomic
+        # or two writers duplicate or merge lines.
+        self._lock = threading.Lock()
 
     def _emit(self, text: str) -> None:
         """One logical line as ≤ MAX_LINE pieces — every control line stays
@@ -500,6 +573,11 @@ class _LineWriter(io.TextIOBase):
                 emit("log", kind=self.kind, text=piece)
 
     def write(self, s: str) -> int:  # type: ignore[override]
+        with self._lock:
+            self._write_locked(s)
+        return len(s)
+
+    def _write_locked(self, s: str) -> None:
         self.buf += s
         while "\n" in self.buf:
             line, self.buf = self.buf.split("\n", 1)
@@ -516,12 +594,12 @@ class _LineWriter(io.TextIOBase):
             if cut > 0:
                 self._emit(self.buf[:cut])
                 self.buf = self.buf[cut:]
-        return len(s)
 
     def flush(self) -> None:
-        if self.buf.strip():
-            self._emit(self.buf)
-        self.buf = ""
+        with self._lock:
+            if self.buf.strip():
+                self._emit(self.buf)
+            self.buf = ""
 
 
 def main() -> int:

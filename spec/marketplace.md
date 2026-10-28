@@ -156,7 +156,11 @@ Export…, or the §22.5 CLI) lands in a folder the user chose, never under the 
   couldn't be read - refresh to fetch it again" when it has a location, "… - remove this
   marketplace and add it again" when it has none) rather than vanishing. §5 lenient load
   applies to the table itself: a row missing `id` skips with a warning; a `location` that
-  is neither `null`, an absolute path, nor an `https://` link skips with a warning (any
+  is neither `null`, an absolute path, nor an `https://` link that parses (`urlsplit` — an
+  unbalanced IPv6 bracket is the known way a prefix-valid link fails to parse; the same
+  parse gates add and PATCH with a 422 "not a valid https link", and entry references
+  with their own 422 — the image route's 502, its code for any unreadable reference — so
+  no route ever answers 500 for a malformed link) skips with a warning (any
   skipped row flips the table read-only for the session, exactly like a corrupt file — the
   next save must not rewrite `marketplaces.yaml` without the row the user hand-edited); a
   missing `expanded` reads `true` (a pre-2026-09-20 `shown` key is read in its place and

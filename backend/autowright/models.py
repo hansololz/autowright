@@ -175,9 +175,11 @@ class VersionSave(BaseModel):
 
 
 class StepsValidate(BaseModel):
-    """POST /validate-steps (§19) — the save endpoints' draft shape."""
+    """POST /validate-steps (§19) — the save endpoints' draft shape, plus the
+    optional automation whose save context the pass reads."""
 
     draft: DraftIn
+    automationId: StrictStr | None = None
 
 
 class VersionRestore(BaseModel):

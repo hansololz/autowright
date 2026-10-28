@@ -8,6 +8,7 @@ included, so a consumer can show the whole folder with the changes marked.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 import re
 from typing import Any
@@ -111,6 +112,30 @@ def _file(kind: str, name: str, file: str | None, old: str | None, new: str | No
     return out
 
 
+def _longest_increasing(items: list, values: list[int]) -> list:
+    """The items whose values form one longest strictly increasing
+    subsequence of `values` (patience sorting, O(n log n))."""
+    tails: list[int] = []        # index into values of the smallest tail per length
+    tail_values: list[int] = []  # values[tails[k]], kept beside it for bisect
+    parent: list[int] = [-1] * len(values)
+    for i, v in enumerate(values):
+        j = bisect.bisect_left(tail_values, v)
+        if j > 0:
+            parent[i] = tails[j - 1]
+        if j == len(tails):
+            tails.append(i)
+            tail_values.append(v)
+        else:
+            tails[j] = i
+            tail_values[j] = v
+    out = []
+    i = tails[-1] if tails else -1
+    while i != -1:
+        out.append(items[i])
+        i = parent[i]
+    return out[::-1]
+
+
 def diff_versions(old: dict, new: dict) -> list[dict]:
     """The §19 `files` list for two loaded version dicts (§5 internal shape):
     the three documents, then the steps in the NEW version's order with the
@@ -126,12 +151,17 @@ def diff_versions(old: dict, new: dict) -> list[dict]:
     old_pos = {key: n for n, (key, _) in enumerate(old_keyed)}
     new_steps = _step_keys(new)
     matched: set[tuple[str, int]] = set()
+    # §19: moved = matched on both sides but outside the longest in-order run
+    # of the common steps — an add or remove shifts positions yet moves
+    # nothing; a dragged step (a §11 reorder) is the one marked.
+    common = [key for key, _ in new_steps if key in old_steps]
+    in_order = set(_longest_increasing(common, [old_pos[key] for key in common]))
     for n, (key, s) in enumerate(new_steps):
         o = old_steps.get(key)
         moved = None
         if o is not None:
             matched.add(key)
-            if old_pos[key] != n:
+            if key not in in_order:
                 moved = {"from": old_pos[key] + 1, "to": n + 1}
         files.append(_file("step", key[0], s.get("file"),
                            o.get("code", "") if o is not None else None, s.get("code", ""),

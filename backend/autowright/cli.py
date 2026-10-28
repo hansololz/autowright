@@ -10,6 +10,7 @@ ended other than succeeded; 2 signals nothing else.
 from __future__ import annotations
 
 import argparse
+import errno
 import getpass
 import http.client
 import json
@@ -354,6 +355,9 @@ def validate_workdir(d: Path, agents: list[dict], secrets: list[dict],
     else:
         errors.append("spec.md is missing")
     step_files = {n: t for n, t in files.items() if n not in ("spec.md", "notes.md")}
+    # §20: `pulled_from` is push's own bookkeeping, lifted out before any
+    # validator (local or the server's) sees the manifest.
+    step_files = _lift_pulled_from(step_files)
     # §20: the manifest's cron and every entries may carry `run_if_missed`
     # (§4.3), a key the §8 rule-9 dialect does not know; lifted out before
     # validation and stamped back onto the drafted schedules by their identity
@@ -404,6 +408,54 @@ def _schedule_key(t: dict) -> tuple | None:
     if t.get("kind") == "interval":
         return ("interval", _canonical_every(t.get("every")))
     return None
+
+
+def _pulled_from(files: dict[str, str]) -> int | None:
+    """§20: the version `pull` wrote into this workdir - the manifest's
+    top-level `pulled_from` - or None when the key is absent, not a whole
+    number, or the manifest doesn't parse."""
+    import yaml
+
+    try:
+        manifest = yaml.safe_load(files.get("manifest.yaml") or "")
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return None
+    value = manifest.get("pulled_from") if isinstance(manifest, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _lift_pulled_from(step_files: dict[str, str]) -> dict[str, str]:
+    """Strip the top-level `pulled_from` key from the manifest (§20: push
+    reads it and never saves it). A manifest without the key passes through
+    byte-for-byte."""
+    import yaml
+
+    text = step_files.get("manifest.yaml")
+    if not text:
+        return step_files
+    try:
+        manifest = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return step_files  # the drafting validator reports the parse error
+    if not isinstance(manifest, dict) or "pulled_from" not in manifest:
+        return step_files
+    manifest.pop("pulled_from")
+    return {**step_files,
+            "manifest.yaml": yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True)}
+
+
+def _pulled_steps(full: dict, files: dict[str, str]) -> list[dict]:
+    """§20 push authorship baseline: the steps of the version the workdir was
+    pulled from (its manifest's `pulled_from`), falling back to the current
+    version's when the key is absent or that version is gone."""
+    current = full.get("steps") or []
+    pulled = _pulled_from(files)
+    if pulled is None or pulled == full.get("version"):
+        return current
+    for version in full.get("versions") or []:
+        if version.get("version") == pulled:
+            return version.get("steps") or []
+    return current
 
 
 def _lift_run_if_missed(step_files: dict[str, str]) -> tuple[dict[str, str], set, list[str]]:
@@ -491,6 +543,10 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     written = ["spec.md", "manifest.yaml"]
     (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
     manifest: dict = {"name": auto["name"], "description": auto.get("description", "")}
+    if isinstance(auto.get("version"), int):
+        # §20: the version this pull wrote - push compares the scripts against
+        # it (authorship), reads it, and never saves it.
+        manifest["pulled_from"] = auto["version"]
     # §20: pull writes the stored spec-sourced schedules — crons and intervals
     # — so an untouched manifest round-trips them through push unchanged.
     # User-minted schedules (source: user, the trigger verbs' affair) stay out,
@@ -792,7 +848,7 @@ def cmd_automation_push(c: Client, args) -> None:
     _apply_lock_flags(files, getattr(args, "lock", None) or [],
                       getattr(args, "unlock", None) or [])
     draft = validate_workdir(d, agents, secrets, files=files)
-    _apply_step_authorship(draft, files, full.get("steps") or [])
+    _apply_step_authorship(draft, files, _pulled_steps(full, files))
     if args.note:
         draft["note"] = args.note
     draft["triggers"] = merge_draft_triggers(full.get("triggers") or [], draft["triggers"])
@@ -878,20 +934,28 @@ def _apply_step_authorship(draft: dict, files: dict[str, str],
                            stored_steps: list[dict] | None) -> None:
     """§20/§4.1: stamp each draft step's `authoredBy`/`locked` in the API
     spelling. An explicit manifest `authored_by` wins; otherwise (push only,
-    when `stored_steps` is the current version's steps) a step whose script
+    when `stored_steps` is the pulled version's steps) a step whose script
     differs byte for byte from the stored same-named step's, or that has no
     stored same-named step, is `user`, and an identical one keeps its stored
-    authorship. `locked` follows the manifest (after any --lock/--unlock)."""
+    authorship. Steps pair by name, the k-th draft step of a name with the
+    k-th stored step of that name (pre-uniqueness duplicates). `locked`
+    follows the manifest (after any --lock/--unlock)."""
     entries = {s.get("file"): s for s in _manifest_step_entries(files)}
-    stored = {s.get("name"): s for s in stored_steps or []}
+    stored: dict = {}
+    for s in stored_steps or []:
+        stored.setdefault(s.get("name"), []).append(s)
+    seen: dict = {}
     for step in draft.get("steps") or []:
         entry = entries.get(step.get("file")) or {}
         step.pop("authored_by", None)
         step.pop("authoredBy", None)
+        k = seen.get(step.get("name"), 0)
+        seen[step.get("name")] = k + 1
         if "authored_by" in entry:
             user = entry["authored_by"] == "user"
         elif stored_steps is not None:
-            previous = stored.get(step.get("name"))
+            same_name = stored.get(step.get("name")) or []
+            previous = same_name[k] if k < len(same_name) else None
             user = (previous is None
                     or (step.get("code") or "").encode("utf-8")
                     != (previous.get("code") or "").encode("utf-8")
@@ -1535,7 +1599,9 @@ def cmd_snapshot_delete(c: Client, args) -> None:
 def _local_stamp_ms(text: str, *, end_of_day: bool, flag: str = "") -> int:
     """§20 `--since` / `--until`: a local `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`
     as epoch ms — the §19 inclusive `startedFromMs` / `startedToMs`. A bare
-    date on `--until` means the end of that day. A date before 1970 is a usage
+    date on `--until` (`end_of_day`) means the end of that day, and a minute
+    stamp the end of that minute - the §7 filter modal's To bound. A date
+    before 1970 is a usage
     error named with the flag - no execution predates the epoch, and a
     negative stamp is a server 422 (or an OverflowError on some platforms)."""
     from datetime import datetime, timedelta
@@ -1553,8 +1619,9 @@ def _local_stamp_ms(text: str, *, end_of_day: bool, flag: str = "") -> int:
             ms = -1
         if ms < 0:
             raise SystemExit(f"error: {flag or 'the date'}: dates before 1970 aren't supported")
-        if whole_day and end_of_day:
-            dt = dt + timedelta(days=1, milliseconds=-1)
+        if end_of_day:
+            dt = dt + (timedelta(days=1, milliseconds=-1) if whole_day
+                       else timedelta(minutes=1, milliseconds=-1))
         return int(dt.timestamp() * 1000)
     raise SystemExit(f"error: {text!r} is not a YYYY-MM-DD or YYYY-MM-DDTHH:MM local time")
 
@@ -2642,7 +2709,12 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                          "imports, timeout and trigger rules, and the agents and secrets "
                          "the steps name. Prints ok when the directory would save; "
                          "otherwise prints the problems one per line and exits 1, the same "
-                         "lines a refused push would print.",
+                         "lines a refused push would print."
+                         "\n\n"
+                         "The grant checks are not run here: they belong to the automation "
+                         "a workdir saves into, so --grant-agent / --grant-secret and \"an "
+                         "agent step needs at least one granted agent\" are checked only "
+                         "by `automation push` and `automation create`.",
              epilog="Examples:\n"
                     "  autowright automation validate ./report")
     p.add_argument("dir", help="the workdir to check")
@@ -3118,7 +3190,7 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                         "YYYY-MM-DD or YYYY-MM-DDTHH:MM")
     p.add_argument("--until", metavar="WHEN",
                    help="only executions started at or before this local time: "
-                        "YYYY-MM-DD (the whole day) or YYYY-MM-DDTHH:MM")
+                        "YYYY-MM-DD (the whole day) or YYYY-MM-DDTHH:MM (the whole minute)")
     p = _sub(eg, "show", cmd_execution_show, "print one execution's steps, error, and result",
              json_flag=True,
              description="One execution in detail: how it ended and how long it took, every "
@@ -3596,11 +3668,24 @@ def main() -> None:
     c = Client() if args.client else None
     try:
         args.fn(c, args)
+        # Flushed here, inside the handler, so a reader that closed early is
+        # caught below rather than at the interpreter's own exit flush.
+        sys.stdout.flush()
     except KeyboardInterrupt:
         # §20/§3 guidance style: Ctrl-C anywhere (a slow delete, a hung
         # request) is a quiet exit 1, never a traceback. The follow loop's
         # own handler still exits with the execution's code first.
         sys.exit(1)
+    except OSError as e:
+        if not isinstance(e, BrokenPipeError) and e.errno != errno.EPIPE:
+            raise
+        # §20 exit codes: a reader that closed the pipe early (`| head`, a
+        # quit `| less`) is a normal end for any command - exit 0, no
+        # traceback. Point stdout at /dev/null first so the interpreter's
+        # final flush can't print "Exception ignored" over the closed pipe.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -87,6 +87,9 @@ function applyLoginItem(_app, _enabled) {}
 // No update machinery at all here — the capability flag is false, so main.cjs
 // never asks; the marker exists only to keep the module surfaces identical.
 const UPDATER = null
+
+// No install ever runs here; kept only for the identical module surface.
+const stopBackendBeforeInstall = false
 const APP_USER_MODEL_ID = null
 
 // No update channel yet: update-check reports a plain error state.
@@ -142,6 +145,7 @@ module.exports = {
   applyLoginItem,
   applyDesktopEntry,
   UPDATER,
+  stopBackendBeforeInstall,
   APP_USER_MODEL_ID,
   updateFeedUrl,
   managedInstall,

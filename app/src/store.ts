@@ -136,7 +136,10 @@ interface Model {
   disconnect(): void
   refresh(): Promise<void>
   applyEvent(msg: WsEvent): void
-  go(page: Page, ids?: { automationId?: string | null; executionId?: string | null; agentEditId?: string | null }): void
+  // `replace` swaps the current history entry instead of pushing one — the §9
+  // dead-record redirect, so back never traps on a page whose record is gone.
+  go(page: Page, ids?: { automationId?: string | null; executionId?: string | null; agentEditId?: string | null },
+    options?: { replace?: boolean }): void
   setSurface(s: Surface, from?: CreateFrom): void
   showToast(msg: string, ms?: number): void
   // §4.9 shared quit flow (§3 quit-entirely): null · 'stopping' (overlay up,
@@ -324,10 +327,18 @@ type DeepLink =
   | { page: 'execution'; executionId: string }
 
 function deepLinkFromHash(hash: string): DeepLink | null {
-  const automation = hash.match(/automation=([0-9a-f-]{36})/)
-  if (automation) return { page: 'automation', automationId: automation[1] }
-  const execution = hash.match(/execution=([0-9a-f-]{36})/)
-  if (execution) return { page: 'execution', executionId: execution[1] }
+  // Any non-empty id is followed (main.cjs URI-encodes it into the hash): ids
+  // are uuids in practice, but a hand-made automation folder is named by its
+  // id too, and a dead id is handled by the page's own redirect (§9).
+  const pick = (key: string): string | null => {
+    const m = hash.match(new RegExp(`${key}=([^&#]+)`))
+    if (!m) return null
+    try { return decodeURIComponent(m[1]) || null } catch { return m[1] }
+  }
+  const automationId = pick('automation')
+  if (automationId) return { page: 'automation', automationId }
+  const executionId = pick('execution')
+  if (executionId) return { page: 'execution', executionId }
   return null
 }
 
@@ -787,7 +798,7 @@ export const useStore = create<Model>((set, get) => ({
     }
   },
 
-  go(page, ids = {}) {
+  go(page, ids = {}, options = {}) {
     // Page nav always lands in the app shell — leaving the create/edit
     // surface here is what lets sidebar tabs escape the editor (§9).
     const leavingCreate = get().surface === 'create'
@@ -804,7 +815,7 @@ export const useStore = create<Model>((set, get) => ({
     if (m.executionId) touchExecutionMru(m.executionId)
     const evicted = evictExecutionCaches(m)
     if (evicted) set(evicted)
-    syncHistory(get())
+    syncHistory(get(), options.replace === true)
   },
 
   setSurface(surface, from = null) {
@@ -1035,7 +1046,7 @@ function navSame(a: NavSnap | null, b: NavSnap | null) {
     && a.agentEditId === b.agentEditId
 }
 
-function syncHistory(m: Model) {
+function syncHistory(m: Model, replace = false) {
   if (restoring) return
   const s: NavSnap = {
     surface: m.surface, page: m.page, automationId: m.automationId, executionId: m.executionId,
@@ -1048,7 +1059,8 @@ function syncHistory(m: Model) {
     // The session's first snapshot stamps the CURRENT entry (replaceState) —
     // a bare pushState would leave the initial history entry without adNav,
     // making the first page unreachable via back (§9: browser/OS back works).
-    if (first) history.replaceState({ adNav: s }, '')
+    // A replacing nav (§9 dead-record redirect) also stamps the current entry.
+    if (first || replace) history.replaceState({ adNav: s }, '')
     else history.pushState({ adNav: s }, '')
   } catch { /* file:// quirks */ }
 }

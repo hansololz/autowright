@@ -110,20 +110,23 @@ def test_download_writes_file_and_reports_increasing_progress(tmp_path):
 def test_download_trickle_hits_wall_clock_deadline(tmp_path, monkeypatch):
     """A server trickling bytes never EOFs and never trips the per-read
     timeout; the monotonic deadline must abort it. Deadline is derived from
-    INSTALL_TIMEOUT_S at call time, so shrink it to keep the test fast."""
+    INSTALL_TIMEOUT_S at call time, so shrink it to keep the test fast.
+    The trickle is sub-chunk (1 KB against the 64 KB read size): a
+    buffer-filling read(n) would block until 64 KB arrived and never reach
+    the deadline check, so only read1 passes (§5.2)."""
     monkeypatch.setattr(installer, "INSTALL_TIMEOUT_S", 1)
-    chunk = b"x" * (1 << 16)
+    chunk = b"x" * 1024
 
     class Trickle(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
-            self.send_header("Content-Length", str(len(chunk) * 50))
+            self.send_header("Content-Length", str(len(chunk) * 400))
             self.end_headers()
             try:
-                for _ in range(50):
+                for _ in range(400):
                     self.wfile.write(chunk)
                     self.wfile.flush()
-                    time.sleep(1.3)  # > deadline; client aborts mid-stream
+                    time.sleep(0.2)  # client aborts mid-stream at the deadline
             except OSError:
                 pass  # client hung up after raising — expected
 
@@ -132,8 +135,11 @@ def test_download_trickle_hits_wall_clock_deadline(tmp_path, monkeypatch):
 
     dest = tmp_path / "slow.bin"
     with _serve(Trickle) as base:
+        started = time.monotonic()
         with pytest.raises(RuntimeError, match="timed out"):
             installer._download(f"{base}/slow.bin", str(dest), Recorder(), "slow")
+        # A read(64 KB) would sit ~13 s on the first chunk before checking.
+        assert time.monotonic() - started < 5
 
 
 # ---------------------------------------------------------------- _install_ollama_app

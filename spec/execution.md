@@ -196,7 +196,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   again or retry from the edit page.") · missing secret — the §6 pre-step gate sets one of
   "A step references a secret this automation isn't allowed to use.", "A step references a
   secret whose value hasn't been added yet.", "A step references a secret that isn't in your
-  Keychain.", or — a §4.1 secret id matching no stored record — "A step references a secret
+  Keychain.", a Keychain read that errors (a locked keychain at a launchd login start, a
+  denied access prompt) — "The Keychain couldn't be read — unlock it or allow access, then
+  execute again." (the §6 gate fails the execution before any step, the secret category,
+  never a generic engine error), or — a §4.1 secret id matching no stored record — "A step references a secret
   that no longer exists (`<short id>`)."; a step whose code reads a nonexistent secret at
   runtime gets "The script
   references a secret that doesn't exist." · undeclared secret — the step read
@@ -218,7 +221,10 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 - **Retry (in place):** a failed execution can be retried — the same execution record
   re-executes from the failed step; no new execution is created. The failed step's status
   flips back to `queued` (its attempt history stays), the execution goes `status: executing`
-  with `finished_at`/`error`/chip cleared, and the engine re-enters the step loop, which
+  with `finished_at` and `error` cleared and the chip and `changes` **kept** from the record
+  (a step that is not re-executed cannot set them again — the record carries them unless a
+  re-executed step sets them anew; before 2026-10-27 the chip was cleared, which lost a
+  succeeded step's chip and its notification), and the engine re-enters the step loop, which
   executes exactly the steps still `queued` — succeeded and skipped steps are never
   re-executed and keep their attempts. Each executed step appends the next attempt. Same
   workspace (earlier steps' outputs are already there — nothing is copied), same result dir

@@ -296,7 +296,9 @@ def _download(url: str, dest: str, emit, label: str) -> None:
             if time.monotonic() > deadline:
                 # the per-read timeout can't catch a server trickling bytes
                 raise RuntimeError(f"{label} timed out after {INSTALL_TIMEOUT_S // 60} minutes")
-            chunk = r.read(1 << 16)
+            # read1, never read: read(n) blocks until n bytes arrive, so a
+            # sub-chunk trickle would never reach the deadline check (§5.2).
+            chunk = r.read1(1 << 16)
             if not chunk:
                 break
             f.write(chunk)
@@ -308,6 +310,11 @@ def _download(url: str, dest: str, emit, label: str) -> None:
                     # §19: the number rides only `percent` — `line` stays the
                     # bare step label the UI renders under the one install bar.
                     emit(line=label, percent=percent)
+        if total and got != total:
+            # §5.2: read1 returns b"" when the connection closes early - a body
+            # short of its Content-Length is a failed download, never unpacked.
+            raise RuntimeError(f"{label} failed - the connection closed before the "
+                               "whole file arrived")
 
 
 def _login_shell_path() -> list[str]:
@@ -468,20 +475,30 @@ def _install_ollama_app(emit) -> str:
         if quit_rc == 0:
             time.sleep(2)
         os.makedirs(apps, exist_ok=True)
-        # Move the new bundle beside the target BEFORE removing the old one:
-        # rmtree-ing first and then failing the move (a full disk, a
-        # cross-device copy dying halfway) would leave no Ollama at all where
-        # a working one stood. Nothing but the final rename is destructive.
+        # Move the new bundle beside the target BEFORE touching the old one,
+        # then swap by renames only: the old bundle is renamed aside, the
+        # staged one renamed into place, and only then is the aside copy
+        # removed. A failed move or swap (a full disk, a cross-device copy
+        # dying halfway, an rmtree stopping partway) never leaves a half-
+        # deleted Ollama where a working one stood - the aside copy is
+        # renamed back.
         staged = dest + ".ad-new"
+        aside = f"{dest}.old-{os.getpid()}"
         shutil.rmtree(staged, ignore_errors=True)
+        moved_aside = False
         try:
             shutil.move(src, staged)
-            if os.path.exists(dest):
-                shutil.rmtree(dest)
+            if os.path.lexists(dest):
+                os.rename(dest, aside)
+                moved_aside = True
             os.rename(staged, dest)
         except BaseException:
             shutil.rmtree(staged, ignore_errors=True)
+            if moved_aside and not os.path.lexists(dest):
+                os.rename(aside, dest)
             raise
+        if moved_aside:
+            shutil.rmtree(aside, ignore_errors=True)
     # §19 install-location principle: the vendor script symlinks
     # /usr/local/bin/ollama (sudo'd) — use that exact location when it's
     # writable without sudo, so the CLI sits where a manual install puts it;
@@ -512,9 +529,15 @@ def _install_ollama_tarball(emit) -> None:
         _download(OLLAMA_LINUX_TAR, tar, emit, "Downloading Ollama")
         emit(line="Installing Ollama…")
         os.makedirs(local, exist_ok=True)
-        # A previous install's lib tree may hold files a new archive dropped.
-        shutil.rmtree(os.path.join(local, "lib", "ollama"), ignore_errors=True)
         with tarfile.open(tar) as tf:  # transparent zstd (PEP 784)
+            # Read the whole archive first: a corrupt or truncated download
+            # fails here, before the working install's lib tree is touched.
+            try:
+                tf.getmembers()
+            except (tarfile.TarError, EOFError, OSError) as e:
+                raise RuntimeError(f"the downloaded Ollama archive is unreadable - {e}") from e
+            # A previous install's lib tree may hold files a new archive dropped.
+            shutil.rmtree(os.path.join(local, "lib", "ollama"), ignore_errors=True)
             tf.extractall(local, filter="data")
     _ensure_login_path(emit)
 

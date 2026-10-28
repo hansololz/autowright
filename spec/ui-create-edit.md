@@ -272,10 +272,13 @@ applies unchanged; the chat pane never collapses.
     button, with the same gating.
   - **Remember this order** (`fa-list-check`) — while the thread's last entry is a
     "Step '<name>' moved to position N." chip landed by this page since it opened (the
-    offer is page state, not persisted: a reload, or any later entry, retires it). It
+    offer is page state, not persisted: a reload, any later entry, or a step added,
+    removed, or renamed since the move retires it — the rule must name the steps as they
+    were moved). It
     writes the draft's current step order as the one build rule `Step order: "<name
-    1>", "<name 2>", …` under the spec's `## Build rules` section — replacing an
-    existing `Step order:` bullet there, appending otherwise, creating the section at
+    1>", "<name 2>", …` under the spec's `## Build rules` section (the Step editing
+    section rule) — replacing every existing `Step order:` bullet under any such
+    heading, appending under the first otherwise, creating the section at
     the end of the spec when absent — without marking the workflow out of sync (the
     Step editing remember rule), and lands the system chip "Build rule added."
     (`fa-list-check`), which ends the offer. The rule is binding on every later sync by
@@ -707,7 +710,8 @@ from the turn action row's pill styling) — a quiet **Dismiss** plus, by source
   agent rewrites with the answer in hand (a fresh draft's blocked first message works
   the same way — the reply completes the request through the CONVERSATION context).
 - **Blocked `sync`** — primary **"Apply to the spec & sync"**
-  (disabled while any §8 job is in flight or an old version is viewed; Dismiss is never
+  (disabled while any §8 job is in flight, an old version is viewed, or a draft test is
+  live — the sync it runs is refused while a test executes; Dismiss is never
   gated). It writes each blocker into the
   in-editor spec under a `## Constraints & resolutions` section (created on first use,
   extended after), one bullet per blocker — "`reason` — `fix`" — then runs a §8 `sync`
@@ -724,14 +728,20 @@ from the turn action row's pill styling) — a quiet **Dismiss** plus, by source
   present only with a `workaround`; writes "`reason` — `workaround`" under `##
   Constraints & resolutions` exactly as "Apply to the spec & sync" does, then syncs),
   and the lifting button — **Unlock "<step>"** for a `step` blocker (clears `locked` on
-  the named draft step with the "Step '<name>' unlocked." chip, then syncs) or **Remove
-  the rule** for a `rule` blocker (deletes the first `li` block of the in-editor spec whose
-  text contains the quoted rule, case-insensitive; none matching → the toast "Rule not
+  the named draft step with the "Step '<name>' unlocked." chip, then syncs; no locked
+  draft step of that name — renamed or already unlocked — toasts "No locked step named
+  '<step>' — unlock it in the step editor" and runs no sync) or **Remove
+  the rule** for a `rule` blocker (deletes the first `li` block under the in-editor spec's
+  `## Build rules` section (the Step editing section rule) whose text contains the quoted
+  rule, case-insensitive — never a bullet elsewhere that happens to quote it; none
+  matching → the toast "Rule not
   found — edit the spec by hand" and no sync; else the "Spec updated." system chip
   (`fa-file-pen`, not a `rewrite` entry — no request text exists to send the agent), then
   syncs). Use the workaround dismisses the entry and records its line under "Previously
   resolved" exactly as Apply does; Unlock is a manual edit (undo snapshot cleared).
-  Both are disabled under the Apply button's gating. The entry-level row keeps Dismiss
+  Both are disabled under the Apply button's gating (a §8 job in flight, an old version
+  viewed, or a draft test live — a resolution clicked while a test runs would change the
+  thread and the spec without the sync it promises). The entry-level row keeps Dismiss
   (and, in a mixed entry, the source's primary for the ordinary blockers only).
 - **Any blocker with §8 `kind: user-action`** — the Mac isn't ready, the automation is
   fine: the entry offers **Dismiss only** (never "Apply to the spec & sync", even on a
@@ -1023,17 +1033,25 @@ editors enter with
     blank name disables Save with the inline hint "Give the step a name"). Beneath the
     textarea a 36 px footer (the doc modal's hint style) carries a checkbox **Remember
     this edit as a build rule** and, enabled by it, a text field (placeholder "What every
-    future sync must keep — one line"); unchecked, the footer reads "Saving keeps the
+    future sync must keep — one line"; checked with a blank field, Save disables with the
+    inline hint "Write the rule to remember"); unchecked, the footer reads "Saving keeps the
     workflow in sync — a hand edit changes the steps, not the spec."
   - **Save** first asks the backend (`POST /validate-steps`, §19) with the draft's steps as
-    they would be after the edit; validation errors render as a red `Notice` strip between
+    they would be after the edit — while that answer is in flight the textarea, the name and
+    description fields, the remember controls, Cancel, ✕, Escape, the backdrop and ⌘S are
+    inert and Save shows its busy state, so nothing typed or decided meanwhile can be lost
+    or saved against the user's intent, and a Save whose modal has started closing is
+    dropped; validation errors render as a red `Notice` strip between
     the toolbar and the textarea, one line each, with the text intact and the modal open.
     On a clean pass it applies `code`, `name` and `description` to the draft step (the
     `file` keeps its suffix — a rename never renames the script), sets `authoredBy: user`
     (`locked` unchanged), marks the draft touched, clears the Draft-undo snapshot (a manual
     save, like the documents'), and returns the pane to view mode on the same step. A
     checked remember box appends `- Step "<name>": <text>` to the spec's `## Build rules`
-    section (created at the end of the spec when absent) **without** marking the workflow
+    section (**Build rules section rule:** the first `h2` whose text is "Build rules",
+    compared case-insensitively with a trailing colon ignored, holds the editor's bullets,
+    which end at the next heading of the same or higher level; created at the end of the
+    spec when absent) **without** marking the workflow
     out of sync — the rule describes what the steps already do — and lands the system chip
     "Build rule added." (`fa-list-check`). The remembered rule is binding on every later
     sync by the §8 three-layer rule, and the user prunes it in the spec editor like any

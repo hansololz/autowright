@@ -167,6 +167,15 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   `authoredBy` / `locked`, both omitted when at their defaults. A locked step is still a
   step: the §19 save validators (syntax, import allowlist, grants) apply to it unchanged —
   a lock freezes the script against the agent, never against policy.
+  **Step names are unique** within an automation (2026-10-27): the §8 / §19 step validators
+  reject a draft holding two steps of one name (compared after trimming) or a step with a
+  blank name ("step names must be unique: `X` appears twice" / "step N needs a name"), the
+  §8 sync prompt states the rule, and every by-name match in this spec — the §8 lock
+  splice, the §11 chips and constraint buttons, the `Step order:` build rule, the §19
+  diff — rests on it. Versions written before the rule may hold duplicates: they load,
+  display, and execute unchanged; the next save or sync must rename one (the §11 editor's
+  Save shows the error inline, a sync's repair round renames), and until then the by-name
+  surfaces pair k-th of a name with k-th.
 spec: block list [{ kind: h1|h2|p|li, text }] — the human-readable spec. The §5 spec.md
   conversion parses `#`/`##`/`- ` prefixes into h1/h2/li and merges other consecutive
   lines into one `p` - except numbered-list lines (`1. `-style), which each keep their own
@@ -288,6 +297,18 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
     per step, sorted by step order. "Step NAME was edited on disk after v<N> was saved —
     pull and push it to make it a validated version." A manifest written before the key
     existed (§21) carries no `sha` and never flags.
+    The seal is also checked when an execution of the version starts (§7): the engine
+    hashes the bytes it is about to run, records that `sha` on the execution's step record
+    (never the hash of code loaded at boot), scans those same bytes for the §6
+    `secrets["<id>"]` subscripts, and a mismatch marks the step modified there and then
+    and refreshes the loaded step's `code` to those bytes (what a restart's load would
+    hold — so the editor, `pull`, and the next save all see the script that actually
+    ran), so the problem appears without a restart. The remedy works in the app as well as the
+    CLI: a save landing while the current version holds a modified step always mints
+    (§19 — a modified step never compares equal to its stored version), the save
+    validators pass or refuse the edited script, and the new version seals it, which
+    clears the problem; `duplicate` refuses such a source (§19 409) rather than copy an
+    unvalidated script.
   A secret or agent yields at most one entry — precedence (unresolved | missing) >
   ungranted > unset, the order the §7 gates fail in; unresolved and missing are one slot,
   told apart by the `unresolvedReferences` map — and entries dedupe per referenced record

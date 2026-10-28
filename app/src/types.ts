@@ -224,7 +224,7 @@ export interface Automation {
   problems: { kind: 'overdue'
                   | 'secret-unresolved' | 'secret-missing' | 'secret-ungranted' | 'secret-unset'
                   | 'agent-unresolved' | 'agent-missing' | 'agent-ungranted' | 'package-missing'
-                  | 'os-mismatch'; label: string }[]
+                  | 'os-mismatch' | 'step-modified'; label: string }[]
   // §4.1/§5.1: the import's no-match map — the id is the minted placeholder
   // the steps carry; name/description are the archive record's. Always
   // present ({} when none), filtered to still-referenced ids.

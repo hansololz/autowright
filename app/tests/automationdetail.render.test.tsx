@@ -231,6 +231,33 @@ describe('§9.2 actions menu', () => {
     mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
   })
 
+  it('while the copy is in flight Escape is inert; a landing after the user moved on stays put (§9)', async () => {
+    seed(auto())
+    let land: (v: unknown) => void = () => {}
+    mockedApi.duplicateAutomation.mockImplementationOnce(() => new Promise((resolve) => { land = resolve }))
+    mockedApi.getAutomation.mockImplementation(async (id: string) => {
+      if (id === 'a2') return auto({ id: 'a2', name: 'Job 2' })
+      throw new Error('offline')
+    })
+    render(<AutomationDetail />)
+    fireEvent.click(screen.getByLabelText('Automation actions'))
+    fireEvent.click(screen.getByText('Duplicate…'))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Job' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: /Duplicating…/ })).toBeTruthy())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await new Promise((r) => setTimeout(r, 300))
+    expect(screen.getByRole('dialog', { name: 'Duplicate Job' })).toBeTruthy()
+    // The user moves on (a sidebar click) before the copy lands.
+    act(() => { storeMod.useStore.setState({ page: 'executions' }) })
+    await act(async () => { land(auto({ id: 'a2', name: 'Job 2' })) })
+    await waitFor(() => expect(storeMod.useStore.getState().toast).toMatch(/Duplicated as “Job 2”\./))
+    expect(storeMod.useStore.getState().page).toBe('executions')
+    expect(storeMod.useStore.getState().automationId).toBe('a1')
+    mockedApi.getAutomation.mockImplementation(() => Promise.reject(new Error('offline')))
+  })
+
   it('a failed Duplicate toasts the error and keeps the modal open', async () => {
     seed(auto())
     mockedApi.duplicateAutomation.mockRejectedValueOnce(new Error('backend said no'))
@@ -292,6 +319,20 @@ describe('§9.2 needs-fixing banner', () => {
     const edits = screen.getAllByText('Edit')
     expect(edits.length).toBe(3)
     expect(screen.queryByText('Open Secrets')).toBeNull()
+    fireEvent.click(edits[edits.length - 1])
+    expect(storeMod.useStore.getState().surface).toBe('create')
+  })
+
+  it('step-modified rows open the editor (§9.2)', () => {
+    seed(auto({ problems: [
+      { kind: 'step-modified', label: 'Step 1 was edited outside the app - save it from the edit page.' },
+    ] }))
+    render(<AutomationDetail />)
+    expect(screen.getByText('This automation needs fixing')).toBeTruthy()
+    expect(screen.getByText('Step 1 was edited outside the app - save it from the edit page.')).toBeTruthy()
+    // one Edit for the row plus the page header's own
+    const edits = screen.getAllByText('Edit')
+    expect(edits.length).toBe(2)
     fireEvent.click(edits[edits.length - 1])
     expect(storeMod.useStore.getState().surface).toBe('create')
   })

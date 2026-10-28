@@ -95,12 +95,15 @@ other file may accompany a blocker.
   `name` (short, plain words), `description` (one sentence), and optionally `agent: true`
   with a required `why` (why the step needs judgment), `agents`, `secrets`, `packages`
   (the three sections below), `timeout` or `no_timeout`, and `retries` or
-  `infinite_retries` (Timeouts and Retries below).
+  `infinite_retries` (Timeouts and Retries below). `locked: true` marks a step the user
+  froze: only the user sets it, never you (an already locked step's entry repeats it).
+  Step names are non-blank and unique: no two steps share a name.
 
 Step file names are `NN-name.py`: two digits, gapless from `01` in step order, a hyphen,
 then lowercase letters, digits, and hyphens only (`01-fetch-feeds.py`, never
-`1_fetch.py` or `01-Fetch.py`). The response carries every file named in `steps` as its
-own block, and may add one `notes.md` block with the full updated notes document.
+`1_fetch.py` or `01-Fetch.py`). The response carries every unlocked step's file as its
+own block (a locked step is listed in `steps` with `locked: true` and returns no file
+block), and may add one `notes.md` block with the full updated notes document.
 `name` and `description` may appear in the manifest but never change identity: identity
 changes only through the editing session's actions. The validator **rejects** an unknown
 manifest or step key — a misspelled key fails validation with the key named, so fix the
@@ -547,7 +550,8 @@ them.
 
 Locked and user-written steps: a step marked locked by the user is kept byte
 for byte by every sync. In the manifest you list it as `{ file, name, locked:
-true }` (its position prefix and stored file suffix) and nothing else, and you
+true }` (the `NN-` prefix is the position the pipeline needs it at, renumbered
+gapless with the other steps, followed by its stored file suffix) and nothing else, and you
 never return its file. You can never lock or unlock a step; only the user can.
 A request that needs a locked step changed gets a `kind: constraint` blocker,
 never a `sync`. A step written by the user (and not locked) is kept unless the

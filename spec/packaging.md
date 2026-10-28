@@ -230,7 +230,8 @@ the update bullets below).
   rewritten or chmodded through, since every operation would land wherever the link points
   (every probe uses `lstat`). On Windows (§2 groundwork, defined by `win32.cjs`) the
   shim is a batch file `autowright.cmd`: `@echo off`, a `rem autowright CLI shim` marker line,
-  then `"<python>" -m autowright.cli %*`, CRLF line endings, installed at
+  then `"<python>" -m autowright.cli %*` (the interpreter path with every `%` doubled —
+  batch expands `%NAME%`, and a Windows user name may hold one), CRLF line endings, installed at
   `%LOCALAPPDATA%\Autowright\bin\autowright.cmd` (user-owned, same no-privilege rule; the
   backend `service install` healing half below covers this `.cmd` shim too, through the
   Windows ServiceManager in `platform/windows.py`). The command name is `autowright` (no
@@ -358,7 +359,8 @@ the update bullets below).
   extra supervisor process. The launchd contract maps as:
   - Unit file `ai.autowright.backend.service` in `~/.config/systemd/user/` (the same
     reverse-DNS label as the LaunchAgent). `ExecStart` = the backend interpreter's
-    `python3 -m autowright.main` (absolute path, systemd-quoted); `Restart=always` with
+    `python3 -m autowright.main` (absolute path, systemd-quoted, `$` written `$$` — systemd
+    expands `$VAR` in `ExecStart`); `Restart=always` with
     `RestartSec=2` and `StartLimitIntervalSec=0` — KeepAlive's never-give-up restart,
     throttled the way launchd throttles; `[Install] WantedBy=default.target`, enabled
     (the RunAtLoad equivalent — starts at the user session's login).
@@ -1028,7 +1030,13 @@ and dropped (dormant project; the name-sharing Squirrel.Mac stays on macOS uncha
   rule carries over: a check only ever reads the feed — `checkForUpdates` runs with
   autoDownload off and `autoInstallOnAppQuit` off (installs happen only through the
   explicit `update-install` flow with its live-execution gate, never as a quit side
-  effect); downloads and installs stay user-initiated.
+  effect); downloads and installs stay user-initiated. On win32 `update-install` stops the
+  Task Scheduler backend (`service stop`, awaited up to the §3 quiesce bound) **before**
+  `quitAndInstall`: the backend's `pythonw.exe` lives under the install directory and
+  Windows file locking would make NSIS fail or half-replace that tree — unlike ShipIt on
+  macOS, where the old backend keeps running and the new one version-syncs; the relaunched
+  app's ensure-backend brings the service back (unverified on a real Windows host as of
+  2026-10-27).
 - **Signing (cert later, pipeline ready now — decided):** Windows builds may ship unsigned
   for the moment (unlike the mac no-ad-hoc rule); SmartScreen warnings are accepted until a
   certificate exists. The build signs whenever cert config is present (electron-builder

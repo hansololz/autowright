@@ -517,6 +517,24 @@ class Store:
         # background memory walk lands stats that differ from what was last
         # served — the API wires its single-row automation.changed publisher.
         self.on_memory_stats_changed = None
+        # §5 version seals, in memory only: (automation dir, "versions", "vN")
+        # → step file → the manifest `sha` read at load (or stamped by the
+        # writer). Never on the step dicts, so no serializer or writer can
+        # carry a stale seal forward; the engine compares the bytes it is
+        # about to run against it when an execution starts (§4.1
+        # `step-modified`).
+        self._sealed_shas: dict[tuple[str, ...], dict[str, str]] = {}
+
+    @staticmethod
+    def _seal_key(vd: Path) -> tuple[str, ...]:
+        return (vd.parent.parent.name, vd.parent.name, vd.name)
+
+    def sealed_step_sha(self, vd: Path, file: str | None) -> str | None:
+        """§5: the seal the version folder `vd` recorded for step script
+        `file` — None for an unsealed folder (draft, test, pre-seal manifest)."""
+        if not file:
+            return None
+        return (self._sealed_shas.get(self._seal_key(vd)) or {}).get(file)
 
     # ---------- paths ----------
     def data_path(self) -> Path:
@@ -1116,6 +1134,7 @@ class Store:
                         "treating the folder as absent", vd)
             return None
         steps = []
+        seals: dict[str, str] = {}
         raw_steps = meta.get("steps", []) or []
         if not isinstance(raw_steps, list):
             log.warning("version folder %s: 'steps' isn't a list — reading it as no steps", vd)
@@ -1152,8 +1171,11 @@ class Store:
             if s.get("locked") is False:
                 s.pop("locked")
             # §5 `sha` is this folder's own seal — consumed here, never carried
-            # in memory (so no writer can copy a stale one forward).
+            # on the step (so no writer can copy a stale one forward); kept
+            # only in the store's in-memory seal map for the §7 start check.
             sealed_sha = s.pop("sha", None)
+            if isinstance(sealed_sha, str) and sealed_sha and s.get("file"):
+                seals[s["file"]] = sealed_sha
             code = ""
             f = vd / (s.get("file") or "")
             # is_file(): a missing/empty `file` key resolves to the version dir
@@ -1170,6 +1192,10 @@ class Store:
                         and step_script_sha(f.read_bytes()) != sealed_sha:
                     s["modifiedOnDisk"] = True
             steps.append({**s, "code": code})
+        if seals:
+            self._sealed_shas[self._seal_key(vd)] = seals
+        else:
+            self._sealed_shas.pop(self._seal_key(vd), None)
         notes = ""
         if (vd / "notes.md").exists():
             # errors="replace": §5 lenient load, like the step scripts above.
@@ -1428,6 +1454,12 @@ class Store:
             "steps": manifest_steps,
             **(extra or {}),
         })
+        # §5 in-memory seal map follows what the committed manifest records.
+        seals = {e["file"]: e["sha"] for e in manifest_steps if e.get("sha")}
+        if seals:
+            self._sealed_shas[self._seal_key(vd)] = seals
+        else:
+            self._sealed_shas.pop(self._seal_key(vd), None)
         # list(): the prune unlinks inside the directory it is listing.
         for f in list(vd.iterdir()):
             if f.is_file() and f.name not in keep and not f.name.startswith(".ad-tmp-"):

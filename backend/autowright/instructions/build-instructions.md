@@ -297,7 +297,8 @@ Re-read the manifest and every step against this list before returning them:
   is unused; no stdlib or always-available module is declared.
 - Every agent and secret id is copied exactly from the grants yaml, with the name in
   a trailing comment at each use.
-- The file blocks match the manifest's `steps` one to one, in `NN-name.py` order.
+- The file blocks match the manifest's unlocked `steps` one to one (a locked step returns
+  no file block), in `NN-name.py` order.
 - Outside text is treated as data everywhere it enters a step.
 - The name and description are still true after this change.
 - The notes are updated when the build learned something worth keeping.

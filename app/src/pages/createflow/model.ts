@@ -26,14 +26,24 @@ export function textToSpec(text: string): SpecBlock[] {
 // a "Constraints & resolutions" section — the resolution lives in the document
 // itself, so it survives later edits and syncs and versions like any spec text.
 const CONSTRAINTS_TITLE = 'Constraints & resolutions'
-// Appends bullets at the end of the spec's `## <title>` section, creating the
-// section at the end of the spec when absent.
-function appendUnderSection(spec: SpecBlock[], title: string, items: SpecBlock[]): SpecBlock[] {
-  const at = spec.findIndex((b) => b.kind === 'h2' && b.text.trim().toLowerCase() === title.toLowerCase())
+// Appends bullets at the end of the spec's `## <title>` section (the first
+// `h2` the heading test accepts — by default its text, case-insensitive),
+// creating the section at the end of the spec when absent.
+function appendUnderSection(
+  spec: SpecBlock[], title: string, items: SpecBlock[],
+  isHeading: (b: SpecBlock) => boolean = (b) => b.kind === 'h2' && b.text.trim().toLowerCase() === title.toLowerCase(),
+): SpecBlock[] {
+  const at = spec.findIndex(isHeading)
   if (at < 0) return [...spec, { kind: 'h2', text: title }, ...items]
+  const end = sectionEnd(spec, at)
+  return [...spec.slice(0, end), ...items, ...spec.slice(end)]
+}
+// The index just past an `h2` section's last block: it ends at the next
+// heading of the same or higher level.
+function sectionEnd(spec: SpecBlock[], at: number): number {
   let end = at + 1
   while (end < spec.length && spec[end].kind !== 'h2' && spec[end].kind !== 'h1') end++
-  return [...spec.slice(0, end), ...items, ...spec.slice(end)]
+  return end
 }
 export function amendSpec(spec: SpecBlock[], blockers: Blocker[]): SpecBlock[] {
   return appendUnderSection(spec, CONSTRAINTS_TITLE, blockers.map((b) => ({ kind: 'li', text: blockerLine(b) })))
@@ -46,38 +56,53 @@ export const blockerLine = (b: Blocker) => `${b.reason.trim()} — ${b.fix.trim(
 export const workaroundBlocker = (b: Blocker): Blocker => ({ ...b, fix: b.workaround ?? '' })
 
 // §11 step editing "Remember this edit as a build rule": one bullet under the
-// spec's `## Build rules` section (created at the end of the spec when absent).
+// spec's `## Build rules` section. The Build rules section rule: the first
+// `h2` whose text is "Build rules" (case-insensitive, a trailing colon
+// ignored) holds the editor's bullets, which end at the next heading of the
+// same or higher level; created at the end of the spec when absent.
 const BUILD_RULES_TITLE = 'Build rules'
+function isBuildRulesHeading(b: SpecBlock): boolean {
+  return b.kind === 'h2' && b.text.trim().replace(/:$/, '').trimEnd().toLowerCase() === BUILD_RULES_TITLE.toLowerCase()
+}
 export function appendBuildRule(spec: SpecBlock[], stepName: string, text: string): SpecBlock[] {
-  return appendUnderSection(spec, BUILD_RULES_TITLE, [{ kind: 'li', text: `Step "${stepName}": ${text}` }])
+  return appendUnderSection(spec, BUILD_RULES_TITLE, [{ kind: 'li', text: `Step "${stepName}": ${text}` }], isBuildRulesHeading)
 }
 
 // §11 "Remember this order": the draft's step order as the one `Step order:`
-// bullet under `## Build rules` — replacing an existing one in that section,
-// appending otherwise (the section is created at the end when absent).
+// bullet under `## Build rules` — every existing `Step order:` bullet under
+// any Build rules heading is removed, and the new one is appended under the
+// first (the section is created at the end when absent).
 const STEP_ORDER_PREFIX = 'Step order:'
 export function stepOrderRule(steps: Step[]): string {
   return `${STEP_ORDER_PREFIX} ${steps.map((s) => `"${s.name}"`).join(', ')}`
 }
 export function upsertStepOrderRule(spec: SpecBlock[], steps: Step[]): SpecBlock[] {
   const item: SpecBlock = { kind: 'li', text: stepOrderRule(steps) }
-  const at = spec.findIndex((b) => b.kind === 'h2' && b.text.trim().toLowerCase() === BUILD_RULES_TITLE.toLowerCase())
-  if (at >= 0) {
-    for (let j = at + 1; j < spec.length && spec[j].kind !== 'h2' && spec[j].kind !== 'h1'; j++) {
-      if (spec[j].kind === 'li' && spec[j].text.trimStart().toLowerCase().startsWith(STEP_ORDER_PREFIX.toLowerCase())) {
-        return spec.map((b, k) => (k === j ? item : b))
-      }
+  const drop = new Set<number>()
+  spec.forEach((b, at) => {
+    if (!isBuildRulesHeading(b)) return
+    const end = sectionEnd(spec, at)
+    for (let j = at + 1; j < end; j++) {
+      if (spec[j].kind === 'li' && spec[j].text.trimStart().toLowerCase().startsWith(STEP_ORDER_PREFIX.toLowerCase())) drop.add(j)
     }
-  }
-  return appendUnderSection(spec, BUILD_RULES_TITLE, [item])
+  })
+  return appendUnderSection(spec.filter((_, k) => !drop.has(k)), BUILD_RULES_TITLE, [item], isBuildRulesHeading)
 }
 
-// §11 constraint blocker "Remove the rule": the spec without its first `li`
-// block containing the rule text (case-insensitive) — null when none does.
+// §11 constraint blocker "Remove the rule": the spec without the first `li`
+// block inside its Build rules section (the section rule above) containing
+// the rule text (case-insensitive) — never a bullet elsewhere that happens to
+// quote it; null when none does.
 export function removeRuleBlock(spec: SpecBlock[], rule: string): SpecBlock[] | null {
   const needle = rule.trim().toLowerCase()
   if (!needle) return null
-  const at = spec.findIndex((b) => b.kind === 'li' && b.text.toLowerCase().includes(needle))
+  const heading = spec.findIndex(isBuildRulesHeading)
+  if (heading < 0) return null
+  const end = sectionEnd(spec, heading)
+  let at = -1
+  for (let j = heading + 1; j < end; j++) {
+    if (spec[j].kind === 'li' && spec[j].text.toLowerCase().includes(needle)) { at = j; break }
+  }
   return at < 0 ? null : [...spec.slice(0, at), ...spec.slice(at + 1)]
 }
 

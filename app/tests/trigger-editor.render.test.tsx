@@ -360,6 +360,32 @@ describe('§9.2 TRIGGERS card save', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).toBeNull())
   })
 
+  it('a toggle while a save is in flight is a no-op; after it lands the next toggle sends the fresh list', async () => {
+    const second: Trigger = { ...cron, id: 't2', label: 'Every day at 10:00', short: 'daily 10:00' } as Trigger
+    let land: (v: unknown) => void = () => {}
+    vi.mocked(api.patchAutomation).mockClear()
+    vi.mocked(api.patchAutomation).mockImplementationOnce(() => new Promise((resolve) => { land = resolve }) as never)
+    const { rerender } = render(<TriggersCard auto={cardAuto([cron, second])} statusText="" />)
+    const toggles = () => screen.getAllByRole('switch') as HTMLButtonElement[]
+    fireEvent.click(toggles()[0])
+    expect(api.patchAutomation).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(toggles()[1].disabled).toBe(true))
+    expect((screen.getAllByRole('button', { name: 'Remove trigger' })[0] as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByText('Add trigger').closest('button') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(toggles()[1])
+    expect(api.patchAutomation).toHaveBeenCalledTimes(1)
+    // The first save lands; the store's reload hands the card the fresh list.
+    const fresh = cardAuto([{ ...cron, enabled: false } as Trigger, second])
+    land(fresh)
+    rerender(<TriggersCard auto={fresh} statusText="" />)
+    await waitFor(() => expect(toggles()[1].disabled).toBe(false))
+    vi.mocked(api.patchAutomation).mockResolvedValueOnce(fresh as never)
+    fireEvent.click(toggles()[1])
+    expect(api.patchAutomation).toHaveBeenCalledTimes(2)
+    const sent = vi.mocked(api.patchAutomation).mock.calls[1][1] as { triggers: Trigger[] }
+    expect(sent.triggers.map((t) => [t.id, t.enabled])).toEqual([['t1', false], ['t2', false]])
+  })
+
   it('a rejected add keeps the add form open with what was typed', async () => {
     reject422()
     render(<TriggersCard auto={cardAuto()} statusText="" />)

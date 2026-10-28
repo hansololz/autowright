@@ -85,7 +85,10 @@ function defaultShimPath() {
 }
 
 function shimText(python) {
-  return `@echo off\r\n${SHIM_MARKER}\r\n"${python}" -m autowright.cli %*\r\n`
+  // §3: batch expands `%NAME%`, and a Windows user name may hold a `%` —
+  // every `%` in the interpreter path is doubled (the Python twin in
+  // platform/windows.py writes the same bytes, so heal never rewrites).
+  return `@echo off\r\n${SHIM_MARKER}\r\n"${String(python).replace(/%/g, '%%')}" -m autowright.cli %*\r\n`
 }
 
 // §3: Windows GUI apps inherit the full user PATH — no login shell exists to
@@ -146,6 +149,12 @@ function applyLoginItem(app, enabled, exec = execFile) {
 // provider. The marker is what main.cjs discriminates on — the modules stay
 // electron-free, so they name the machinery rather than construct it.
 const UPDATER = 'nsis'
+
+// §3: NSIS replaces the install directory, and the backend's pythonw.exe lives
+// under it — Windows file locking would make the installer fail or
+// half-replace that tree, so update-install stops the service first (the
+// relaunched app's ensure-backend brings it back).
+const stopBackendBeforeInstall = true
 // §3 identifiers: matches the installer shortcut's AUMID and the appId.
 const APP_USER_MODEL_ID = 'ai.autowright.app'
 
@@ -213,6 +222,7 @@ module.exports = {
   applyDesktopEntry,
   sweepLegacyLoginItems,
   UPDATER,
+  stopBackendBeforeInstall,
   APP_USER_MODEL_ID,
   updateFeedUrl,
   managedInstall,

@@ -1239,13 +1239,18 @@ def _claude_stream_line(line: str) -> tuple[str | None, str | None, list[dict]]:
     if not isinstance(obj, dict):
         return None, None, []
     if obj.get("type") == "stream_event":
-        event = obj.get("event") or {}
-        delta = event.get("delta") or {}
-        if event.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
-            return delta.get("text") or "", None, []
+        # A non-dict `event` / `delta` (a malformed or future line) is
+        # skipped, never an AttributeError.
+        event = obj.get("event")
+        delta = event.get("delta") if isinstance(event, dict) else None
+        if (isinstance(delta, dict) and event.get("type") == "content_block_delta"
+                and delta.get("type") == "text_delta"):
+            text = delta.get("text")
+            return text if isinstance(text, str) else "", None, []
         return None, None, []
     if obj.get("type") == "assistant":
-        content = (obj.get("message") or {}).get("content")
+        message = obj.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
         tools = [{"name": b.get("name") or "", "input": b.get("input") or {}}
                  for b in (content if isinstance(content, list) else [])
                  if isinstance(b, dict) and b.get("type") == "tool_use"]

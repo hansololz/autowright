@@ -740,6 +740,13 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    why, and proposing the best workaround that keeps the constraint. The user then
    decides: accept the workaround, or lift the constraint. Mere inconvenience is not a
    constraint blocker — a locked step that still works with the spec is simply kept.
+   Step names are unique (§4.1), so a locked name is never reused.
+   **Locked-step preflight** (2026-10-27): before a sync's agent call the backend runs the
+   grant and import checks (rules 4, 6, 7) over the locked steps as stored; a failure
+   settles the job `blocked` at once with one synthesized `kind: constraint` blocker per
+   failing step (`step: <name>`, `reason`: the validator line, `fix`: "Unlock the step so the
+   next sync can rewrite it, or restore what it needs"), no agent call made — the agent
+   cannot fix a step it may not touch, so a round would only burn the repair budget.
 9. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
    BUILD INSTRUCTIONS above wherever it says otherwise.
 10. **Closing envelope reminder** — one final line restating the response shape (return
@@ -781,7 +788,7 @@ notes rewrite (§11).
    its response is a validation error (the spec is already settled); an optional `notes.md` block
    (above) is allowed and excluded from the step-file matching.
 3. `manifest.yaml` is schema-valid: kinds from §4.2 only, every param carries a default, steps
-   nonempty, `steps[].file` ↔ file blocks match 1:1, filenames follow `NN-name.py` ordering.
+   nonempty, step names non-blank and unique (§4.1), `steps[].file` ↔ file blocks match 1:1, filenames follow `NN-name.py` ordering.
    Field types are checked, not assumed: a step's `name`, `description` and `why`, a
    param's `name`, and the manifest `note` must be strings (YAML 1.1 turns `name: on` into
    a boolean and a mis-indented block into a mapping — either would land verbatim in the
@@ -797,7 +804,8 @@ notes rewrite (§11).
    blocker explaining why the spec can't be met with it"), listed twice, or returned
    without `locked: true` is a validation error; `locked: true` on any name that is not a
    stored locked step is a validation error ("only the user can lock a step"); a file block
-   returned for a locked step is accepted when identical to the stored script (up to the
+   returned for a locked step — under the filename the agent listed or under the stored
+   filename — is accepted when identical to the stored script (up to the
    envelope parser's leading/trailing-newline trim) and is
    a validation error otherwise ("step `X` is locked — do not return its file"). After
    validation the backend **splices** each locked step in: the stored step's name,

@@ -155,6 +155,25 @@ describe('VersionDiffModal', () => {
     expect(screen.getByTestId('diff-picker').textContent).toContain('vs v1')
   })
 
+  it('switching the "to" version empties the navigator and pane until the new comparison lands', async () => {
+    mockedApi.versionDiff.mockResolvedValue(DIFF)
+    open({ from: 2 })
+    await waitFor(() => expect(screen.getByText('FILE 3 OF 5')).toBeTruthy())
+    expect(screen.getAllByTestId(/^diff-file-/).length).toBe(5)
+    let land: (d: VersionDiff) => void = () => {}
+    mockedApi.versionDiff.mockReturnValue(new Promise<VersionDiff>((resolve) => { land = resolve }))
+    fireEvent.click(screen.getByTestId('diff-picker'))
+    fireEvent.click(screen.getByTestId('diff-pick-1'))
+    // the previous pair's rows never show under the new eyebrow
+    expect(screen.getByText('v1 → v2')).toBeTruthy()
+    expect(screen.queryAllByTestId(/^diff-file-/)).toHaveLength(0)
+    expect(screen.queryByText('FILE 3 OF 5')).toBeNull()
+    expect(screen.queryByText('x = 22')).toBeNull()
+    land({ from: 1, to: 2, files: [file({ kind: 'notes', name: 'Notes', file: 'notes.md', status: 'new', added: 1, rows: [{ kind: 'add', left: null, right: { number: 1, text: 'fresh' } }] })] })
+    await waitFor(() => expect(screen.getByText('FILE 1 OF 1')).toBeTruthy())
+    expect(screen.getAllByTestId(/^diff-file-/).length).toBe(1)
+  })
+
   it('the arrow keys stand down while the "to" picker is open', async () => {
     mockedApi.versionDiff.mockResolvedValue(DIFF)
     open()

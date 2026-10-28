@@ -279,10 +279,18 @@ export default function ExecutionPage() {
     if (!e.automationId || starting) return // §4.5: create-mode tests have no automation to re-execute
     const automationId = e.automationId
     setStarting('again')
+    // §9: the landing navigates only while this page is still shown — the
+    // user may have moved on while the request was in flight.
+    const clicked = useStore.getState()
+    const clickedPage = clicked.page
+    const clickedExecutionId = clicked.executionId
     void (async () => {
       try {
         const r = await api.executeNow(automationId)
-        go('execution', { executionId: r.executionId })
+        const now = useStore.getState()
+        if (now.page === clickedPage && now.executionId === clickedExecutionId) {
+          go('execution', { executionId: r.executionId })
+        }
       } catch (err) {
         // §19: only the no-free-slot 409 carries `reason: "capacity"` — it
         // gets the same §7 busy toast Execute now shows (§9.2); every other

@@ -114,6 +114,10 @@ export default function SettingsPage() {
   // command: with an ours shim on disk the flip asks first (confirm below);
   // with nothing installed it just patches false.
   const setCliEnabled = (on: boolean) => {
+    // Status still pending: without it an off flip can't tell whether a shim
+    // needs the uninstall path, so it never patches blind (the card itself
+    // renders only once the status is in).
+    if (!cli) return
     if (!on) {
       if (cli && cli.state === 'installed') setCliOffConfirm(true)
       else patch({ cliEnabled: false })

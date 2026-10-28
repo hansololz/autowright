@@ -169,7 +169,13 @@ def check(entries: list[dict]) -> list[dict]:
     return out
 
 
-PYPI_TIMEOUT = 8  # seconds per package lookup
+PYPI_TIMEOUT = 8  # seconds per package lookup (connect, and each read)
+# §5.2 outbound-read rules: a whole-lookup deadline measured from before the
+# connect, and a byte cap. A popular package's JSON (every release, every file)
+# runs to several MB, so the cap is the §5.1 archive one rather than 1 MB.
+PYPI_DEADLINE_S = 60
+PYPI_MAX_BYTES = 64 * 1024 * 1024
+_PYPI_CHUNK = 256 * 1024
 
 
 @functools.lru_cache(maxsize=1)
@@ -196,8 +202,25 @@ def _latest_compatible(name: str) -> str | None:
 
     url = f"https://pypi.org/pypi/{_norm(name)}/json"
     req = urllib.request.Request(url, headers={"User-Agent": "Autowright/1.0"})
+    deadline = time.monotonic() + PYPI_DEADLINE_S
     with urllib.request.urlopen(req, timeout=PYPI_TIMEOUT) as resp:
-        releases = json.load(resp).get("releases") or {}
+        try:
+            expected = int(resp.headers.get("Content-Length"))
+        except (TypeError, ValueError, AttributeError):
+            expected = None
+        chunks, total = [], 0
+        # read1, never read: a buffer-filling read lets a trickling server
+        # hold the lookup open past the deadline (§5.2).
+        while chunk := resp.read1(_PYPI_CHUNK):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"the PyPI lookup took over {PYPI_DEADLINE_S} seconds")
+            total += len(chunk)
+            if total > PYPI_MAX_BYTES:
+                raise ValueError("the PyPI answer is larger than the cap")
+            chunks.append(chunk)
+        if expected is not None and total < expected:
+            raise ConnectionError("the PyPI answer ended short of its Content-Length")
+    releases = json.loads(b"".join(chunks).decode("utf-8")).get("releases") or {}
     supported = _supported_tags()
     candidates: list[tuple[Version, list]] = []
     for ver_str, files in releases.items():

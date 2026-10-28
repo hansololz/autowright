@@ -168,8 +168,9 @@ def test_fetch_archive_times_out_on_one_byte_per_read1(monkeypatch):
                         lambda req, timeout, refuse: response)
     with pytest.raises(transfer.TransferError, match="timed out"):
         transfer.fetch_archive("https://example.test/pack.autowright")
-    # 600 s deadline from t=0: the read at t=700 is the one refused
-    assert response.reads == 7
+    # 600 s deadline from t=0, taken before the connect (whose socket timeout
+    # reads the clock at t=100): the read at t=700 is the one refused
+    assert response.reads == 6
 
 
 # ---------- §5.1 export: a step script missing on disk ----------

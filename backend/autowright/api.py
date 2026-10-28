@@ -28,7 +28,7 @@ from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, fini
                      fire_trigger, queue_manual)
 from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
                       NameTakenError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
-                      manifest_step_entry, size_label, store, strip_param_values)
+                      size_label, store, strip_param_values)
 from . import testexec, versions_diff
 
 log = logging.getLogger("autowright.api")
@@ -443,6 +443,10 @@ def _staged_values(a: dict, values: dict) -> dict:
     return {k: v for k, v in values.items() if k in defs and _kind_ok(defs[k], v)}
 
 
+# Step keys storage sets at load that are never versioned content.
+_IN_MEMORY_STEP_KEYS = ("modifiedOnDisk",)
+
+
 def _version_content(v: dict) -> dict:
     """§4.4 operational-only save: the versioned content, canonicalized so the
     stored serialization compares equal to a draft round-trip — falsy step and
@@ -453,12 +457,16 @@ def _version_content(v: dict) -> dict:
     def strip(d: dict) -> dict:
         return {k: x for k, x in d.items() if x}
 
+    def step(d: dict) -> dict:
+        # In-memory-only marks (§4.1 `modifiedOnDisk`) are never content.
+        return {k: x for k, x in strip(d).items() if k not in _IN_MEMORY_STEP_KEYS}
+
     def pdef(p: dict) -> dict:
         return {k: x for k, x in p.items() if k not in ("on", "lines", "rows", "value")}
 
     return {"params": [pdef(p) for p in v.get("params") or []],
             "packages": [strip(p) for p in v.get("packages") or []],
-            "steps": [strip(s) for s in v.get("steps") or []],
+            "steps": [step(s) for s in v.get("steps") or []],
             "spec": v.get("spec") or [],
             "notes": v.get("notes") or ""}
 
@@ -964,9 +972,12 @@ def validate_steps(body: models.StepsValidate) -> dict:
     answered as 200 `{ errors }` — the caller is asking, not saving, so a
     failure is the body, never a 422. Writes nothing, touches no draft."""
     d = body.draft.plain()
+    # §19: with an automationId the pass reads that automation's context as
+    # its save would (the §5.1 unresolved_references wording).
+    a = _auto_or_404(body.automationId) if body.automationId else None
     if not d.get("steps"):
         return {"errors": ["draft has no steps"]}
-    return {"errors": _draft_step_errors(d)}
+    return {"errors": _draft_step_errors(d, a)}
 
 
 @app.post("/automations/{automation_id}/duplicate", status_code=201,
@@ -977,6 +988,16 @@ def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict
     that failed or was abandoned keeps the automation (memory empty) and
     answers 201 with a `warning` saying so — never a 500."""
     source = _auto_or_404(automation_id)
+    with store.lock:
+        # §19/§5: a copy would seal a hand-edited (§4.1 step-modified) script
+        # as validated — refused before anything is created.
+        cur = source["versions"].get(source["current_version"]) or {}
+        modified = next((s for s in cur.get("steps") or []
+                         if isinstance(s, dict) and s.get("modifiedOnDisk")), None)
+        if modified is not None:
+            raise HTTPException(409, f"Step `{modified.get('name')}` was edited on disk — "
+                                     "pull and push it, or save it from the editor, "
+                                     "before duplicating")
     if body.copyMemory:
         with store.lock:
             # §19: a live source's memory is mid-write — refused before
@@ -1044,7 +1065,11 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
             # §19: uniqueness re-checked under the lock before anything lands —
             # a name taken since the up-front check mints no version either.
             store.require_name_free(sent["name"], exclude_id=a["id"])
-        minted = _version_content(ver) != _version_content(cur)
+        # §4.4: a step modified on disk always mints — the save seals the
+        # editor's content as a fresh, validated version.
+        minted = (_version_content(ver) != _version_content(cur)
+                  or any(isinstance(s, dict) and s.get("modifiedOnDisk")
+                         for s in cur.get("steps") or []))
         n = store.save_new_version(a, ver) if minted else a["current_version"]
         patch = {k: sent[k] for k in ("agentId", "stepAgents", "allowedSecrets", "name") if k in sent}
         if triggers is not None:
@@ -1445,20 +1470,16 @@ def restore(automation_id: str, body: models.VersionRestore) -> dict:
     with store.lock:
         if v not in a["versions"]:
             raise HTTPException(404, f"v{v} not found")
-        stored = a["versions"][v]
-        # §19: the restored steps validate like a save's — a folder whose
-        # script was hand-edited on disk (§4.1 step-modified) must not become
-        # a validated-looking new version by way of a restore. Validated is
-        # what the writer will land: the lenient manifest entry (a stored
-        # `timeout: abc` has already degraded to the default) plus the code.
-        d = {"steps": [{**manifest_step_entry(s, s.get("file") or ""),
-                        "code": s.get("code") or ""}
-                       for s in stored.get("steps") or [] if isinstance(s, dict)],
-             "params": stored.get("params") or [],
-             "packages": stored.get("packages") or []}
-    errors = _draft_step_errors(d, a)
-    if errors:
-        raise HTTPException(422, f"v{v} doesn't validate: " + "; ".join(errors))
+        # §19: the restored content is the stored content, unvalidated — a
+        # version written under older rules or referencing a since-deleted
+        # agent/secret stays restorable (the §4.1 `problems` audit reports
+        # it). One gate: a step hand-edited on disk (§4.1 step-modified) must
+        # not become a validated-looking new version by way of a restore.
+        modified = next((s for s in a["versions"][v].get("steps") or []
+                         if isinstance(s, dict) and s.get("modifiedOnDisk")), None)
+        if modified is not None:
+            raise HTTPException(422, f"v{v}'s step `{modified.get('name')}` was edited "
+                                     "on disk — pull and push it instead")
     n = store.restore_version(a, v)
     _publish_auto_changed(a)
     return {"version": n, "automation": _auto_json_locked(a)}
@@ -1573,7 +1594,8 @@ def imessage_permissions() -> dict:
 @app.post("/imessage/permissions/automation-probe", dependencies=[Depends(auth)])
 def imessage_automation_probe() -> dict:
     """§19: fire a benign Apple Event at Messages.app so macOS shows the
-    Automation consent prompt; blocks until the user answers it."""
+    Automation consent prompt; blocks until the user answers it, up to
+    300 s — an unanswered prompt answers "unknown" (never a denial)."""
     return {"automation": imessage.automation_probe()}
 
 

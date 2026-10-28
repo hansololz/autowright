@@ -237,6 +237,16 @@ describe('§3 update machinery is per-OS', () => {
     expect(linux.UPDATER).toBe('appimage')
   })
 
+  it('only Windows stops the backend before an install (§3)', () => {
+    // NSIS replaces the install directory the backend's pythonw.exe runs
+    // from; ShipIt and the AppImage swap leave a running backend alone.
+    const fallback = require('../electron/platform/fallback.cjs')
+    expect(win32.stopBackendBeforeInstall).toBe(true)
+    expect(darwin.stopBackendBeforeInstall).toBe(false)
+    expect(linux.stopBackendBeforeInstall).toBe(false)
+    expect(fallback.stopBackendBeforeInstall).toBe(false)
+  })
+
   it('a platform with no feed names no machinery either', () => {
     const fallback = require('../electron/platform/fallback.cjs')
     expect(fallback.UPDATER).toBeNull()
@@ -253,6 +263,16 @@ describe('§3 update machinery is per-OS', () => {
     for (const src of [pkg, mainSrc, readFileSync(join(ELECTRON_DIR, 'platform', 'win32.cjs'), 'utf-8')]) {
       expect(src).not.toMatch(/["']?publisherName["']?\s*[:=]/)
     }
+  })
+})
+
+describe('§3 Windows CLI shim text', () => {
+  it('doubles every % in the interpreter path (batch expands %NAME%; user names may hold one)', () => {
+    const text = win32.shimText('C:\\Users\\100%dev\\python.exe')
+    expect(text).toContain('"C:\\Users\\100%%dev\\python.exe" -m autowright.cli %*')
+    expect(text.endsWith('\r\n')).toBe(true)
+    // a path without % is written verbatim, so existing shims never re-heal
+    expect(win32.shimText('C:\\py\\python.exe')).toContain('"C:\\py\\python.exe" -m autowright.cli %*')
   })
 })
 

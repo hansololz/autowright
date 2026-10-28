@@ -51,8 +51,10 @@ def _unit_escape(s: str) -> str:
 
 
 def _unit_quote(s: str) -> str:
-    """One double-quoted ExecStart word, systemd quoting rules."""
-    return '"' + _unit_escape(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """One double-quoted ExecStart word, systemd quoting rules. `$` is written
+    `$$`: systemd expands `$VAR` in ExecStart, even inside quotes (§3)."""
+    return ('"' + _unit_escape(s).replace("\\", "\\\\").replace('"', '\\"')
+            .replace("$", "$$") + '"')
 
 
 def unit_text() -> str:
