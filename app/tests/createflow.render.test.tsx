@@ -1085,7 +1085,7 @@ describe('CreateFlow step editing (§11)', () => {
     expect(screen.queryByTestId('chat-remember-order')).toBeNull()
   })
 
-  it('an automation needing fixing for a step-modified problem opens with the draft already touched', () => {
+  it('a step-modified automation opens untouched: leaving without an edit keeps no phantom draft (§9.2, 2026-10-28)', async () => {
     storeMod.useStore.setState({
       automations: [{
         ...AUTO,
@@ -1093,8 +1093,13 @@ describe('CreateFlow step editing (§11)', () => {
       } as unknown as Automation],
     })
     render(<CreateFlow />)
-    expect(screen.getByText('Keep draft')).toBeTruthy()
-    expect((screen.getByText('Save as v2').closest('button') as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByText('Keep draft')).toBeNull()
+    // the back link leaves through the §4.4 keep path
+    fireEvent.click(screen.getAllByText('My auto').find((el) => el.closest('button'))!)
+    await waitFor(() => expect(storeMod.useStore.getState().surface).toBe('app'))
+    cleanup()
+    expect((mockedApi.putDraft as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === 'a1')).toBe(false)
+    expect(storeMod.useStore.getState().toast ?? '').not.toMatch(/^Draft kept/)
   })
 
   it('an automation without problems opens untouched', () => {
@@ -3682,5 +3687,90 @@ describe('CreateFlow full-record release on unmount (§19)', () => {
     ;(mockedApi.getAutomation as ReturnType<typeof vi.fn>).mockClear()
     act(() => storeMod.useStore.getState().applyEvent(finished('f2')))
     expect(mockedApi.getAutomation).not.toHaveBeenCalled()
+  })
+})
+
+describe('audit 2026-10-28: create/edit redirects, validate context, order offer (§9/§11/§19)', () => {
+  beforeEach(armPendingPoll)
+
+  // Models the browser's session history from the store's push/replace calls,
+  // like the store's own dead-record redirect test.
+  const recordHistory = () => {
+    const entries: unknown[] = []
+    const push = vi.spyOn(history, 'pushState').mockImplementation((state) => { entries.push(state) })
+    const replace = vi.spyOn(history, 'replaceState').mockImplementation((state) => {
+      if (entries.length) entries[entries.length - 1] = state
+      else entries.push(state)
+    })
+    return { entries, restore: () => { push.mockRestore(); replace.mockRestore() } }
+  }
+  type Snap = { adNav: { surface: string; page: string } }
+
+  it('a dead-record redirect replaces the history entry instead of pushing one', async () => {
+    storeMod.useStore.getState().go('settings') // a known starting point (lastNav is module state)
+    const h = recordHistory()
+    storeMod.useStore.getState().setSurface('create', 'edit')
+    expect(h.entries).toHaveLength(1)
+    storeMod.useStore.setState({ automations: [] })
+    render(<CreateFlow />)
+    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('automations'))
+    expect(storeMod.useStore.getState().surface).toBe('app')
+    expect(h.entries).toHaveLength(1)
+    expect((h.entries[0] as Snap).adNav).toMatchObject({ surface: 'app', page: 'automations' })
+    h.restore()
+  })
+
+  it('the zero-agents redirect replaces the history entry too', async () => {
+    storeMod.useStore.getState().go('settings')
+    const h = recordHistory()
+    storeMod.useStore.getState().setSurface('create', 'edit')
+    storeMod.useStore.setState({ agents: [] })
+    render(<CreateFlow />)
+    await waitFor(() => expect(storeMod.useStore.getState().page).toBe('agents'))
+    expect(storeMod.useStore.getState().surface).toBe('app')
+    expect(h.entries).toHaveLength(1)
+    expect((h.entries[0] as Snap).adNav).toMatchObject({ surface: 'app', page: 'agents' })
+    h.restore()
+  })
+
+  it('edit mode sends the automation id with the draft to /validate-steps', async () => {
+    render(<CreateFlow />)
+    fireEvent.click(screen.getAllByText('Fetch pages')[0])
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByTestId('step-editor'), { target: { value: 'log("b")' } })
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Save'))
+    await waitFor(() => expect(mockedApi.validateSteps).toHaveBeenCalledTimes(1))
+    const [draft, automationId] = (mockedApi.validateSteps as ReturnType<typeof vi.fn>).mock.calls[0] as [{ steps: { code: string }[] }, string]
+    expect(automationId).toBe('a1')
+    expect(draft.steps[0].code).toBe('log("b")')
+  })
+
+  it('move, add, remove: steps back at the moved names never revive Remember this order', async () => {
+    storeMod.useStore.setState({
+      automations: [{
+        ...AUTO,
+        steps: [
+          { file: '01-a.py', name: 'Fetch pages', description: '', code: 'log("a")' },
+          { file: '02-b.py', name: 'Second', description: '', code: 'log("b")' },
+        ],
+      } as unknown as Automation],
+    })
+    render(<CreateFlow />)
+    fireEvent.click(screen.getAllByText('Fetch pages')[0])
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Move step down'))
+    expect(screen.getByTestId('chat-remember-order')).toBeTruthy()
+    fireEvent.click(within(screen.getByRole('dialog')).getByLabelText('Close'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    fireEvent.click(within(cardOf(screen.getByText('STEPS · GENERATED'))).getByText('Add step'))
+    expect(screen.queryByTestId('chat-remember-order')).toBeNull()
+    // back to view mode on the new step, then remove it
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Cancel'))
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Remove step'))
+    const confirm = screen.getByRole('alertdialog')
+    fireEvent.click(within(confirm).getByText('Remove step'))
+    await waitFor(() => expect(screen.getByRole('dialog').getAttribute('aria-label')).toBe('Step 2 of 2: Fetch pages'))
+    // the names equal the moved ones again and the move chip is still last
+    expect(screen.getByText('Step \'Fetch pages\' moved to position 2.')).toBeTruthy()
+    expect(screen.queryByTestId('chat-remember-order')).toBeNull()
   })
 })

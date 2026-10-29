@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from . import keychain, paths, timefmt
-from .engine import Engine, _step_sha, build_redactions, redact_text
+from .engine import Engine, _crlf_step_sha, _step_sha, build_redactions, redact_text
 from .firing import DATA_PATH_UNREACHABLE
 from .events import hub
 from .storage import exec_version_label, is_test, safe_step_filename, store
@@ -311,7 +311,9 @@ def executions_context(auto: dict | None, current_steps: list[dict],
                 redaction_cache["map"] = None
         redactions = redaction_cache["map"]
         return None if redactions is None else redact_text(text, redactions)
-    cur_shas = [_step_sha(s) for s in current_steps or []]
+    # §4.1: a record's sha hashes the raw bytes that ran while the draft holds
+    # LF text — a CRLF-written step file counts as the same step.
+    cur_shas = [(_step_sha(s), _crlf_step_sha(s)) for s in current_steps or []]
     blocks = []
     kept: set[int] = set()  # block indexes the section cap never drops
     for i, h in enumerate(picked):
@@ -332,7 +334,7 @@ def executions_context(auto: dict | None, current_steps: list[dict],
     return "\n\n".join(blocks[i] for i in order)
 
 
-def _bounded_execution_block(h: dict, cur_shas: list[str], detail: bool,
+def _bounded_execution_block(h: dict, cur_shas: list[tuple[str, str]], detail: bool,
                              redact=None) -> str:
     """§8: one run's block bounded to BLOCK_CAP — while it exceeds the cap,
     the per-step log tails shrink (fewer lines, the last ones kept; the step
@@ -350,7 +352,7 @@ def _last_lines(lines: list[str], count: int) -> list[str]:
     return lines[-count:] if count > 0 else []
 
 
-def _execution_block(h: dict, cur_shas: list[str], detail: bool,
+def _execution_block(h: dict, cur_shas: list[tuple[str, str]], detail: bool,
                      tail_lines: int = LOG_TAIL,
                      tails: dict[int, list[str]] | None = None,
                      redact=None) -> str:
@@ -369,7 +371,9 @@ def _execution_block(h: dict, cur_shas: list[str], detail: bool,
 
     steps = h.get("steps") or []
     shas = [s.get("sha") for s in steps]
-    stale = ("steps match the current draft" if shas == cur_shas
+    same = len(shas) == len(cur_shas) and all(
+        sha in forms for sha, forms in zip(shas, cur_shas))
+    stale = ("steps match the current draft" if same
              else "ran older steps — treat its behavior as historical")
     started = ""
     if h.get("started_at"):

@@ -111,7 +111,11 @@ exactly that reason — and no window or panel is created once a quit has begun:
 return early while the quit flag is set, so a relaunching update (the Linux AppImage
 updater spawns the new instance before the old one exits, and the old one receives
 `second-instance`) or a stray click between `before-quit` and exit can't create a fresh
-window the quit then has to fight.
+window the quit then has to fight. The other side of that relaunch: the new instance,
+losing the single-instance lock while the old one is still exiting, retries the lock every
+250 ms for up to 10 s before giving up when the updater's `APPIMAGE_SILENT_INSTALL` marker
+is in its environment, so the update never quits into nothing (2026-10-28, unverified on a
+Linux host); any other loser still quits at once.
 Turning the tray off is the same rule at another moment: the tray-off transition destroys the
 tray **and its §13 panel window** (a hidden panel is still a window, and would keep
 `window-all-closed` from ever firing) and re-evaluates the rule right then — without a dock,
@@ -285,8 +289,13 @@ onboarding, and replaced by a newer link that arrives meanwhile. A modal whose r
 flight (the §5.2 import confirm, the §22.7 catalog save, the §9.2 Duplicate modal) keeps Escape and the backdrop inert
 until it lands, so a result the user waited for is never lost to an early close. A request
 that navigates when it lands (Duplicate, Execute again, Fix with AI, the import summary's
-Open automation) navigates only while the page that started it is still shown — a long
-copy must never pull the user off a page they moved to meanwhile. A page whose record is
+Open automation, and the automation and agent Delete confirms — a DELETE can wait on a
+cancelled execution, §19) navigates only while the page that started it is still shown — a long
+copy must never pull the user off a page they moved to meanwhile; a navigation that would
+land on a record the client failed to fetch (Duplicate's or Open automation's insert GET
+errored) stays put instead of bouncing through the dead-record redirect — Duplicate still
+closes its modal and shows its toast (the copy exists), the import summary's button simply
+re-enables. A page whose record is
 gone — an automation or agent deleted while its page is shown, or reached again through
 back — redirects to its list by **replacing** the history entry, never pushing one, so back
 never traps on a dead page. Page navigation (`go()`) always lands in the app
@@ -563,7 +572,8 @@ Sections top to bottom:
   `secret-ungranted`, `agent-missing`, `agent-unresolved`,
   `agent-ungranted`, and `os-mismatch` → **Edit** (opens the §11 edit page, where steps
   are rewritten and grants are set on save); `step-modified` → **Edit** too (the editor
-  opens with the draft already touched, so Save is available at once: that save validates
+  opens on the current version with Save available as always — nothing is pre-touched, so
+  a look without an edit keeps no phantom draft (2026-10-28); that save validates
   the edited script and mints the version that seals it, §19 — the in-app form of the
   label's pull-and-push remedy); `package-missing` → no action (its label
   already says it installs on the first execution); `overdue` → no action (informational —
@@ -1259,6 +1269,8 @@ also open itself after an update (below) with the About page nowhere in sight.
   `{ error }` answer (the updater refused to quit — nothing staged, a stale download, a
   failed installer spawn) renders the same "Update failed: `<error>`" sub-line as a
   download error and reverts the button, never a card stuck on "Restart to update";
+  while the call is pending the button reads **"Installing…"** and is disabled (the
+  win32 service stop can take a while, and `update-install` is single-flight, §3);
   otherwise the app quits and relaunches updated (the backend restarts on the next
   launch's §3 version-compare flow). Idle sub-line follows the toggle below: off →
   "Updates are only checked when you ask. Nothing runs in the background."; on →
@@ -1774,7 +1786,9 @@ pulsing while executing, name, mono sub-line colored by state: cyan "Executing n
 / accent for a result chip / faint otherwise, relative time right-aligned in a 56 px column, then
 the §9.1 square inline execute button (`.ad-btn-exec.small` — the §14 24 px/radius-6 variant that owns the size: solid accent with a play glyph →
 spinner + disabled while executing, tooltip explains) at the row's right edge — the same run
-button as the Automations list). Row click opens the app on that automation (a minimized
+button as the Automations list, with the same §9 busy rule: disabled from the click until
+the request lands, never only from the `execution.started` event, so a double-click never
+fires twice). Row click opens the app on that automation (a minimized
 main window is restored first — the same rule as the §3 second-instance focus and dock
 activate; showing a minimized window without restoring it looks like a no-op); execute
 button triggers a "Menu bar" execution. Footer: accent "Open Autowright" link + version. Click-outside

@@ -469,7 +469,8 @@ the update bullets below).
   and the tray-off no-dock rule (§9), the update install (§3 restart-install; the flag is
   cleared again when the updater refuses), and quit-entirely's own final quit. An OS
   session end is UI-only too: `powerMonitor` `shutdown` (logout, restart, shutdown on
-  macOS/Linux) sets the same pass-through — the LaunchAgent dies with the session anyway and
+  macOS/Linux) — and on Windows, where Electron never fires `shutdown`, the main window's
+  `query-session-end` (2026-10-28, unverified on a Windows host) — sets the same pass-through — the LaunchAgent dies with the session anyway and
   `RunAtLoad` brings it back at login, and a stop there would only delay the logout (the
   pass-through is sticky for the rest of the process — a logout the user cancels at the OS
   prompt leaves the next Cmd+Q UI-only, a corner accepted over guessing at a cancel). Every
@@ -1035,8 +1036,20 @@ and dropped (dormant project; the name-sharing Squirrel.Mac stays on macOS uncha
   `quitAndInstall`: the backend's `pythonw.exe` lives under the install directory and
   Windows file locking would make NSIS fail or half-replace that tree — unlike ShipIt on
   macOS, where the old backend keeps running and the new one version-syncs; the relaunched
-  app's ensure-backend brings the service back (unverified on a real Windows host as of
-  2026-10-27).
+  app's ensure-backend brings the service back. The stop happens only once the updater
+  reports a staged installer (otherwise the answer is the ordinary `{ error }` refusal with
+  nothing stopped); a stop that fails or times out answers `{ error }` ("couldn't stop the
+  background service — try again") and nothing installs — a half-replaced tree is worse
+  than a postponed update; after a good stop the app waits a fixed 1.5 s (the §3
+  stop-verification gap: `service stop` returns before the process tree is gone) before
+  `quitAndInstall`; and every path that does not end in a quit (a failed stop, the updater
+  threw, refused on its error stream, or the 10 s no-quit timer fired) kicks off the
+  backend's restore — the launch ensure-backend again, started before the answer goes back
+  but never awaited, since its health probes can take seconds — so a refused install never
+  leaves the scheduler stopped until the next logon. `update-install` is
+  single-flight on every OS: a second call while one is pending shares its answer (a second
+  `service stop` child could otherwise still be alive when NSIS starts). (2026-10-28;
+  unverified on a real Windows host.)
 - **Signing (cert later, pipeline ready now — decided):** Windows builds may ship unsigned
   for the moment (unlike the mac no-ad-hoc rule); SmartScreen warnings are accepted until a
   certificate exists. The build signs whenever cert config is present (electron-builder

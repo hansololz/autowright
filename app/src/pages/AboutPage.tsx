@@ -83,6 +83,10 @@ export default function AboutPage() {
   // Asked at mount and again on every manual check, so a brew install or
   // uninstall reflects without an app restart.
   const [brew, setBrew] = useState(false)
+  // §9.4: true while an `update-install` call is pending. The win32 service
+  // stop can take a while, and the call is single-flight (§3), so the button
+  // reads "Installing…" and stays disabled until it answers.
+  const [installing, setInstalling] = useState(false)
 
   useEffect(() => {
     void window.autowright?.updateBrewManaged?.().then((b) => setBrew(!!b)).catch(() => {})
@@ -140,9 +144,11 @@ export default function AboutPage() {
   const installUpdate = async (v: string) => {
     // A `busy` answer means an automation is executing (§3) — the app keeps
     // running; the update installs on a later restart attempt.
+    setInstalling(true)
     const r = await window.autowright?.updateInstall().catch(() => (
       { error: 'updater unavailable' } as const
     ))
+    setInstalling(false)
     if (r && 'busy' in r) setUpd({ state: 'downloaded', version: v, busy: true })
     // §9.4: the updater refused to quit (nothing staged, a stale download, a
     // failed installer spawn) or the call itself rejected — the same "Update
@@ -195,6 +201,7 @@ export default function AboutPage() {
   const updBtn =
     upd.state === 'available' && !brew ? { label: 'Download update', run: () => downloadUpdate(upd.version), disabled: false }
     : upd.state === 'downloading' ? { label: 'Downloading…', run: () => {}, disabled: true }
+    : upd.state === 'downloaded' && installing ? { label: 'Installing…', run: () => {}, disabled: true }
     : upd.state === 'downloaded' ? { label: 'Restart to update', run: () => installUpdate(upd.version), disabled: false }
     : {
         label: upd.state === 'checking' ? 'Checking…' : 'Check for updates',

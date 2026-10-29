@@ -1,7 +1,7 @@
 // Shared secret add/edit modal (§4.8, §12): Keychain-backed name/value pairs —
 // values are never fetched back. Opened by the Secrets page and by the §9.2
 // Discord trigger editor's New secret button.
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { api } from './api'
 import { usePlatformCopy } from './platformCopy'
 import { useStore } from './store'
@@ -43,15 +43,17 @@ export function SecretModal({ modal, onClose, onSaved }: {
   const hasStoredValue = modal.mode === 'edit' && modal.set
   const [replacing, setReplacing] = useState(false)
   // §12: one save per modal — Enter plus a click (or two quick clicks) must not
-  // post the secret twice.
+  // post the secret twice. The ref closes the same-tick double fire the
+  // disabled render cannot.
   const [busy, setBusy] = useState(false)
+  const savingRef = useRef(false)
   const showTextarea = !hasStoredValue || replacing
 
   return (
     <Modal onClose={onClose} width={460}>
       {(close) => {
         const save = async () => {
-          if (busy) return
+          if (busy || savingRef.current) return
           if (isAdd) {
             if (!name) { showToast('Give the secret a name.'); return }
             if (!NAME_RE.test(name)) { showToast('Secret names must start with a letter and use only A–Z, 0–9 and _.'); return }
@@ -62,6 +64,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
               return
             }
           }
+          savingRef.current = true
           setBusy(true)
           try {
             // §4.8: a blank value on edit keeps the stored one (description-only
@@ -74,7 +77,10 @@ export function SecretModal({ modal, onClose, onSaved }: {
               ? (value ? `Saved to your ${copy.secretStore}.` : 'Saved. Add the value before an automation needs it.')
               : 'Secret updated.')
             onSaved?.(saved)
-          } catch (e) { showToast((e as Error).message) } finally { setBusy(false) }
+          } catch (e) { showToast((e as Error).message) } finally {
+            savingRef.current = false
+            setBusy(false)
+          }
         }
 
         const onKeyDown = (e: React.KeyboardEvent) => {

@@ -15,6 +15,7 @@ import os
 import queue
 import threading
 import time
+from collections import OrderedDict
 
 from . import imessage, keychain, platform
 from .events import hub
@@ -37,6 +38,9 @@ BUSY_TEXT = ("I'm working on something else right now and couldn't take this "
 # triggers share it. Not a uuid, so it can never collide with a Discord
 # entry's key (§4.8 secret ids are uuids).
 IMSG_KEY = "imessage"
+# §6: how many recent (automation id, Discord message id) firings the manager
+# remembers — enough to cover one message reaching several connections.
+DISCORD_SEEN_LIMIT = 512
 
 # Gateway close codes worth a plain-word `connection` error (§4.3).
 _CLOSE_REASONS = {
@@ -483,6 +487,11 @@ class Listeners:
         # flag under it before adding one, so no connection can start after
         # stop() took its snapshot.
         self._conns_lock = threading.Lock()
+        # §6: (automation id, Discord message id) pairs already fired, shared
+        # across connections — an automation with discord triggers on two
+        # tokens watching one channel sees each message on both gateways and
+        # must fire once. Bounded LRU, guarded by store.lock (dispatch holds it).
+        self._discord_seen: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     def start(self) -> None:
         t = threading.Thread(target=self._loop, daemon=True, name="ad-listeners")
@@ -608,7 +617,7 @@ class Listeners:
                           if t["kind"] == "discord" and t["enabled"]
                           and t.get("secret") == secret
                           and message_matches(t, d, bot_id, bot_roles)), None)
-                if t:
+                if t and not self._seen_discord(a["id"], d.get("id")):
                     hits.append((a, t))
         for a, t in hits:
             # Per hit: one automation's firing must never drop the others'
@@ -621,6 +630,22 @@ class Listeners:
                                  guild_name=(guild_names or {}).get(d.get("guild_id"))))
             except Exception:  # noqa: BLE001
                 log.exception("discord firing on %r failed", a["name"])
+
+    def _seen_discord(self, automation_id: str, message_id) -> bool:
+        """True when this automation already fired for this Discord message
+        (another connection delivered it first); otherwise records it. A
+        payload without a message id is never de-duplicated. Caller holds
+        store.lock."""
+        if not message_id:
+            return False
+        key = (automation_id, str(message_id))
+        if key in self._discord_seen:
+            self._discord_seen.move_to_end(key)
+            return True
+        self._discord_seen[key] = None
+        if len(self._discord_seen) > DISCORD_SEEN_LIMIT:
+            self._discord_seen.popitem(last=False)
+        return False
 
     def dispatch_imessage(self, m: dict) -> None:
         """Route one decoded chat.db row to every matching enabled imessage

@@ -172,7 +172,9 @@ def diff_versions(old: dict, new: dict) -> list[dict]:
     return files
 
 
-_LABEL_RE = re.compile(r"^v(\d+)$", re.IGNORECASE)
+# At most nine digits: a longer label names no stored version, and `int()` of
+# a 5000-digit string raises past Python's digit limit (a 500, not the 404).
+_LABEL_RE = re.compile(r"^v(\d{1,9})$", re.IGNORECASE)
 
 
 def parse_version_label(label: Any) -> int | None:

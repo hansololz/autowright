@@ -335,6 +335,11 @@ interface UpdaterRecord {
   // moment of the call (§3: the panel is gone before it).
   onInstall: (() => void) | null
   listeners: Map<string, (arg: unknown) => void>
+  // §3 win32: BaseUpdater's installerPath — the staged installer file, null
+  // until a download staged one. The fake download sets it.
+  installerPath: string | null
+  // §3 macOS: MacUpdater's squirrelDownloadedUpdate (never resets once set).
+  squirrelDownloadedUpdate: boolean
 }
 
 // Per-window record: show/focus/load/destroy counts plus ways to fire the
@@ -362,6 +367,9 @@ interface WinRecord {
   navigate: (url: string) => boolean
   // §13: the window-level blur the OS can deliver after the window is gone.
   blur: () => void
+  // Fire any other window-level event main.cjs listens to (§3 Windows
+  // `query-session-end`).
+  windowEvent: (event: string) => void
 }
 
 interface MainStub {
@@ -390,14 +398,17 @@ interface MainStub {
   clickTray: () => void
   // §9: a second launch's `second-instance` signal (a relaunching update).
   secondInstance: () => void
-  // §9 watchdog / renderer-death reporting: every dialog.showErrorBox the
-  // shell put up, and the app.log lines behind them.
+  // §9 watchdog / renderer-death reporting: every error box (an async
+  // showMessageBox of type 'error') the shell put up, and the app.log lines
+  // behind them.
   errors: [string, string][]
   log: () => string
   // §3 reset: the exit codes app.exit was called with.
   exits: number[]
   // §13 shell-posted notifications: every Notification main.cjs constructed.
   notifications: NotificationRecord[]
+  // §13: every Tray construction attempted, the throwing ones included.
+  trayAttempts: number
 }
 
 // §13: one shown OS notification — its options, its show() count, and a way
@@ -446,6 +457,11 @@ interface LoadOptions {
   // (the real one for this host underneath), so a per-OS flag can be read
   // as another OS declares it.
   platform?: Record<string, unknown>
+  // §9: what app.requestSingleInstanceLock() answers on each call (true by
+  // default — the one instance).
+  singleInstanceLock?: () => boolean
+  // §13: make every Tray construction throw (a package missing its icon).
+  trayThrows?: boolean
 }
 
 function loadMain(options: LoadOptions = {}): MainStub {
@@ -468,6 +484,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
   const trayEvents = new Map<string, () => void>()
   const powerListeners = new Map<string, () => void>()
   let quits = 0
+  let trayAttempts = 0
   const exits: number[] = []
   const notifications: NotificationRecord[] = []
   const home = mkdtempSync(join(tmpdir(), 'aw-main-'))
@@ -479,15 +496,18 @@ function loadMain(options: LoadOptions = {}): MainStub {
     check: { updateInfo: { version: '9.9.9' } },
     checkError: null, downloadError: null, listeners: new Map(),
     installResult: undefined, installError: null, installThrows: null, onInstall: null,
+    installerPath: null, squirrelDownloadedUpdate: false,
   }
 
   class FakeUpdater {
     autoDownload = true
     autoInstallOnAppQuit = true
-    squirrelDownloadedUpdate = false
+    get squirrelDownloadedUpdate() { return updater.squirrelDownloadedUpdate }
+    set squirrelDownloadedUpdate(value: boolean) { updater.squirrelDownloadedUpdate = value }
     logger: unknown = null
 
     constructor(options: { provider?: string, url?: string }) { updater.options = options }
+    get installerPath() { return updater.installerPath }
     on(event: string, fn: (arg: unknown) => void) { updater.listeners.set(event, fn) }
 
     async checkForUpdates() {
@@ -506,6 +526,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       // The real MacUpdater sets this once Squirrel staged the bundle; the
       // fake stages "instantly" so main.cjs's stageWithSquirrel resolves.
       this.squirrelDownloadedUpdate = true
+      updater.installerPath = 'installer.exe'
       return ['installer.exe']
     }
 
@@ -531,6 +552,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       fire: (event, ...args) => { this.wcListeners.get(event)?.({}, ...args) },
       close: () => { this.listeners.get('closed')?.() },
       blur: () => { this.listeners.get('blur')?.() },
+      windowEvent: (event) => { this.listeners.get(event)?.() },
       minimize: () => { this.minimized = true },
       navigate: (url) => {
         let prevented = false
@@ -584,7 +606,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       getPath: () => home,
       getVersion: () => '0.0.0',
       commandLine: { appendSwitch() {} },
-      requestSingleInstanceLock: () => true,
+      requestSingleInstanceLock: () => (options.singleInstanceLock ? options.singleInstanceLock() : true),
       on(event: string, fn: (e: { preventDefault: () => void }) => void) { appEvents.set(event, fn) },
       // A ready-chain load is a ready app: second-instance only acts on one.
       isReady: () => Boolean(options.ready),
@@ -621,13 +643,19 @@ function loadMain(options: LoadOptions = {}): MainStub {
     },
     Menu: { buildFromTemplate: () => ({ popup() {} }) },
     Tray: class {
-      constructor(icon: unknown) { trays.push(icon) }
+      constructor(icon: unknown) {
+        trayAttempts += 1
+        if (options.trayThrows) throw new Error('tray icon asset missing')
+        trays.push(icon)
+      }
       setToolTip() {}
       on(event: string, fn: () => void) { trayEvents.set(event, fn) }
       setImage() {} destroy() {}
     },
     dialog: {
-      showErrorBox: (title: string, body: string) => { errors.push([title, body]) },
+      // §9: the synchronous box would block the main process; any call is a
+      // regression.
+      showErrorBox: () => { throw new Error('showErrorBox blocks the main process — use showMessageBox') },
       showOpenDialog: async (_w: unknown, opts: Record<string, unknown>) => {
         dialogs.push(['open', opts])
         return { canceled: dialogAnswer.canceled, filePaths: dialogAnswer.filePaths }
@@ -637,10 +665,17 @@ function loadMain(options: LoadOptions = {}): MainStub {
         return { canceled: dialogAnswer.canceled, filePath: dialogAnswer.filePath }
       },
       // §3 native busy confirm on a windowless OS quit.
-      showMessageBox: async (opts: Record<string, unknown>) => {
+      // An error box (type 'error') is recorded under `errors` and never
+      // answers — the user hasn't dismissed it — so a caller that awaited it
+      // would hang right here.
+      showMessageBox: (opts: Record<string, unknown>) => {
+        if (opts.type === 'error') {
+          errors.push([String(opts.title), String(opts.message)])
+          return new Promise(() => {})
+        }
         dialogs.push(['message', opts])
         if (options.showMessageBox) return options.showMessageBox()
-        return { response: dialogAnswer.response }
+        return Promise.resolve({ response: dialogAnswer.response })
       },
     },
     nativeImage: { createFromPath: () => ({ setTemplateImage() {} }) },
@@ -730,6 +765,7 @@ function loadMain(options: LoadOptions = {}): MainStub {
       try { return readFileSync(join(home, 'logs', 'app.log'), 'utf-8') } catch { return '' }
     },
     get quits() { return quits },
+    get trayAttempts() { return trayAttempts },
   }
 }
 
@@ -1432,7 +1468,7 @@ describe.skipIf(!HAS_UPDATER)('main.cjs electron-updater path (§3)', () => {
     expect(m.updater.installs).toBe(1)
     // The gate itself is one shared code path for every platform: the busy
     // check runs before either updater is asked to quit.
-    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,1200}quitAndInstall\(\)/)
+    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,2000}quitAndInstall\(\)/)
   })
 })
 
@@ -2156,6 +2192,7 @@ describe('main.cjs ready chain (§9)', () => {
 
 describe('main.cjs update-install refusals (§3)', () => {
   afterEach(() => {
+    vi.useRealTimers()
     restoreResourcesPath()
     if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
     else process.env.AUTOWRIGHT_HOME = savedHome
@@ -2186,7 +2223,51 @@ describe('main.cjs update-install refusals (§3)', () => {
     expect(m.emit('before-quit')).toBe(false)
   })
 
-  it('on win32 the backend service is stopped before quitAndInstall; elsewhere it is left running (§3)', async () => {
+  // §3 win32: a packaged launch (bundled interpreter) whose platform stops the
+  // backend before the installer runs. Every /health probe is recorded — the
+  // launch's ensure-backend opens with one, so a probe after the answer is
+  // the backend being brought back.
+  function win32Install(execFile: ServiceChildStub) {
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = platMod.bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    const health: string[] = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/health')) health.push(String(input))
+      return Promise.reject(new Error('offline in tests'))
+    })
+    const m = loadMain({ platform: { stopBackendBeforeInstall: true }, execFile })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 4321, token: 'token', python: '/usr/bin/python3' }))
+    const done = () => {
+      fetchSpy.mockRestore()
+      rmSync(resources, { recursive: true, force: true })
+    }
+    return { m, health, done }
+  }
+
+  it('on win32 a staged installer stops the backend, waits out the process-tree gap, then installs (§3)', async () => {
+    if (!HAS_UPDATER) return
+    vi.useFakeTimers()
+    const order: string[] = []
+    const { m, done } = win32Install((_py, args, _o, cb) => { order.push(`service ${args[2]}`); cb(null, 'stopped', '') })
+    try {
+      m.updater.installerPath = 'Autowright Setup.exe'
+      m.updater.onInstall = () => { order.push('quitAndInstall') }
+      const answer = m.invoke('update-install') as Promise<unknown>
+      await vi.advanceTimersByTimeAsync(1_499)
+      expect(order).toEqual(['service stop'])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await answer).toEqual({ ok: true })
+      expect(order).toEqual(['service stop', 'quitAndInstall'])
+    } finally {
+      done()
+    }
+  })
+
+  it('macOS and Linux leave the backend running across the install (§3)', async () => {
     if (!HAS_UPDATER) return
     nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
@@ -2199,14 +2280,15 @@ describe('main.cjs update-install refusals (§3)', () => {
         })
         writeFileSync(join(m.home, 'backend.json'),
           JSON.stringify({ port: 4321, token: 'token', python: '/usr/bin/python3' }))
+        m.updater.installerPath = 'staged'
         m.updater.onInstall = () => { order.push('quitAndInstall') }
         expect(await m.invoke('update-install')).toEqual({ ok: true })
         return order
       }
-      const win32 = realRequire('./platform/win32.cjs') as { stopBackendBeforeInstall: unknown }
       const darwin = realRequire('./platform/darwin.cjs') as { stopBackendBeforeInstall: unknown }
       const linux = realRequire('./platform/linux.cjs') as { stopBackendBeforeInstall: unknown }
-      expect(await run(win32.stopBackendBeforeInstall)).toEqual(['service stop', 'quitAndInstall'])
+      const win32 = realRequire('./platform/win32.cjs') as { stopBackendBeforeInstall: unknown }
+      expect(win32.stopBackendBeforeInstall).toBe(true)
       expect(await run(darwin.stopBackendBeforeInstall)).toEqual(['quitAndInstall'])
       expect(await run(linux.stopBackendBeforeInstall)).toEqual(['quitAndInstall'])
     } finally {
@@ -2215,23 +2297,111 @@ describe('main.cjs update-install refusals (§3)', () => {
     }
   })
 
-  it('a failed win32 stop is logged and never blocks the install (§3)', async () => {
+  it('on win32 with nothing staged nothing is stopped and the updater\'s own refusal answers (§3)', async () => {
     if (!HAS_UPDATER) return
-    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const stops: string[][] = []
+    const { m, done } = win32Install((_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') })
     try {
-      const m = loadMain({
-        platform: { stopBackendBeforeInstall: true },
-        execFile: (_py, args, _o, cb) => { if (args[2] === 'stop') cb(new Error('boom'), '', 'boom') },
-      })
-      writeFileSync(join(m.home, 'backend.json'),
-        JSON.stringify({ port: 4321, token: 'token', python: '/usr/bin/python3' }))
-      expect(await m.invoke('update-install')).toEqual({ ok: true })
-      expect(m.updater.installs).toBe(1)
-      expect(m.log()).toContain('update-install: backend stop failed: boom')
+      // BaseUpdater.install() with no installer dispatches this and returns.
+      m.updater.installError = new Error('No update filepath provided, can\'t quit and install')
+      expect(await m.invoke('update-install'))
+        .toEqual({ error: 'No update filepath provided, can\'t quit and install' })
+      expect(stops).toEqual([])
     } finally {
-      fetchSpy.mockRestore()
-      restoreResourcesPath()
+      done()
+    }
+  })
+
+  it('a failed win32 stop answers { error } and installs nothing; the backend is brought back (§3)', async () => {
+    if (!HAS_UPDATER) return
+    const { m, health, done } = win32Install((_py, args, _o, cb) => {
+      if (args[2] === 'stop') cb(new Error('boom'), '', 'boom')
+    })
+    try {
+      m.updater.installerPath = 'Autowright Setup.exe'
+      expect(await m.invoke('update-install'))
+        .toEqual({ error: 'couldn\'t stop the background service — try again' })
+      expect(m.updater.installs).toBe(0)
+      expect(m.log()).toContain('update-install: backend stop failed: boom')
+      // The launch's ensure-backend ran again: it opens with a /health probe.
+      await vi.waitFor(() => expect(health.length).toBeGreaterThan(0))
+      // uiQuit was never set: a later Cmd+Q is still the user's Quit.
+      expect(m.emit('before-quit')).toBe(true)
+    } finally {
+      done()
+    }
+  })
+
+  it('a win32 install refused after a good stop brings the backend back before answering (§3)', async () => {
+    if (!HAS_UPDATER) return
+    vi.useFakeTimers()
+    const { m, health, done } = win32Install((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
+    try {
+      m.updater.installerPath = 'Autowright Setup.exe'
+      m.updater.installError = new Error('spawn Autowright Setup.exe ENOENT')
+      const answer = m.invoke('update-install') as Promise<unknown>
+      // Nothing probed the backend on the way in (the stop and the gap).
+      expect(health).toEqual([])
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(await answer).toEqual({ error: 'spawn Autowright Setup.exe ENOENT' })
+      expect(health.length).toBeGreaterThan(0)
+    } finally {
+      done()
+    }
+  })
+
+  it('a win32 install that throws after a good stop brings the backend back too (§3)', async () => {
+    if (!HAS_UPDATER) return
+    vi.useFakeTimers()
+    const { m, health, done } = win32Install((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
+    try {
+      m.updater.installerPath = 'Autowright Setup.exe'
+      m.updater.installThrows = new Error('installer locked')
+      const answer = m.invoke('update-install') as Promise<unknown>
+      // Nothing probed the backend on the way in (the stop and the gap).
+      expect(health).toEqual([])
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(await answer).toEqual({ error: 'installer locked' })
+      expect(health.length).toBeGreaterThan(0)
+    } finally {
+      done()
+    }
+  })
+
+  it('a win32 install with no quit within 10 s brings the backend back (§3)', async () => {
+    if (!HAS_UPDATER) return
+    vi.useFakeTimers()
+    const { m, health, done } = win32Install((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
+    try {
+      m.updater.installerPath = 'Autowright Setup.exe'
+      const answer = m.invoke('update-install') as Promise<unknown>
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(await answer).toEqual({ ok: true })
+      expect(health).toEqual([])
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(m.log()).toContain('update-install: no quit began within 10 s')
+      expect(health.length).toBeGreaterThan(0)
+    } finally {
+      done()
+    }
+  })
+
+  it('update-install is single-flight: a second call while one is pending shares its answer (§3)', async () => {
+    if (!HAS_UPDATER) return
+    vi.useFakeTimers()
+    const stops: string[][] = []
+    const { m, done } = win32Install((_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') })
+    try {
+      m.updater.installerPath = 'Autowright Setup.exe'
+      const first = m.invoke('update-install')
+      const second = m.invoke('update-install')
+      expect(second).toBe(first)
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(await first).toEqual({ ok: true })
+      expect(stops).toHaveLength(1)
+      expect(m.updater.installs).toBe(1)
+    } finally {
+      done()
     }
   })
 
@@ -3024,5 +3194,178 @@ describe('main.cjs shell notification socket (§13)', () => {
     FakeSocket.instances[0].emit('close')
     await vi.advanceTimersByTimeAsync(20_000)
     expect(FakeSocket.instances).toHaveLength(1)
+  })
+})
+
+// ---- 2026-10-28 shell fixes ------------------------------------------------
+
+describe('main.cjs AppImage relaunch lock retry (§9)', () => {
+  const savedSilent = process.env.APPIMAGE_SILENT_INSTALL
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    restoreResourcesPath()
+    if (savedSilent === undefined) delete process.env.APPIMAGE_SILENT_INSTALL
+    else process.env.APPIMAGE_SILENT_INSTALL = savedSilent
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  function lockOnCall(n: number) {
+    let calls = 0
+    const lock = () => { calls += 1; return calls >= n }
+    return { lock, calls: () => calls }
+  }
+
+  it('an updater relaunch retries the lock every 250 ms and starts once it wins', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    process.env.APPIMAGE_SILENT_INSTALL = 'true'
+    const lock = lockOnCall(4)
+    const m = loadMain({ ready: true, singleInstanceLock: lock.lock })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(m.quits).toBe(0)
+    expect(m.windows).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(lock.calls()).toBe(3)
+    expect(m.windows).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(lock.calls()).toBe(4)
+    expect(m.quits).toBe(0)
+    expect(m.windows).toHaveLength(1)
+  })
+
+  it('an updater relaunch that never wins the lock gives up after 10 s', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    process.env.APPIMAGE_SILENT_INSTALL = 'true'
+    const m = loadMain({ ready: true, singleInstanceLock: () => false })
+    await vi.advanceTimersByTimeAsync(9_750)
+    expect(m.quits).toBe(0)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(m.quits).toBe(1)
+    expect(m.windows).toHaveLength(0)
+    // The quit is ours: before-quit lets it through.
+    expect(m.emit('before-quit')).toBe(false)
+  })
+
+  it('any other loser quits at once', async () => {
+    vi.useFakeTimers()
+    delete process.env.APPIMAGE_SILENT_INSTALL
+    const lock = lockOnCall(2)
+    const m = loadMain({ ready: true, singleInstanceLock: lock.lock })
+    expect(m.quits).toBe(1)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(lock.calls()).toBe(1)
+    expect(m.windows).toHaveLength(0)
+  })
+})
+
+describe('main.cjs staged-but-unknown macOS bundle (§3)', () => {
+  const savedCaskroom = process.env.AUTOWRIGHT_CASKROOM
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+    if (savedCaskroom === undefined) delete process.env.AUTOWRIGHT_CASKROOM
+    else process.env.AUTOWRIGHT_CASKROOM = savedCaskroom
+  })
+
+  it('a Squirrel flag already set with no recorded version refuses the download', async () => {
+    if (platMod.UPDATER !== 'mac') return // only Squirrel.Mac stages
+    const m = loadMain()
+    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
+    m.updater.squirrelDownloadedUpdate = true
+    expect(await m.invoke('update-download'))
+      .toEqual({ error: 'Restart to finish the update you already downloaded.' })
+    expect(m.updater.downloads).toBe(0)
+  })
+})
+
+describe('main.cjs error boxes never block (§9/§3)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('the watchdog\'s box is the async parentless one, and the handler returns without awaiting it', () => {
+    vi.useFakeTimers()
+    const m = loadMain()
+    m.invoke('open-app', '/app')
+    const w = m.wins[0]
+    w.fire('did-start-loading')
+    w.fire('did-fail-load', -6, 'ERR_FILE_NOT_FOUND', 'file:///dist/index.html', true)
+    w.fire('did-finish-load')
+    // The harness's error box never answers; a handler that awaited it would
+    // stall the timers queued behind it.
+    vi.advanceTimersByTime(15_000)
+    expect(m.errors).toHaveLength(1)
+    expect(m.errors[0][0]).toBe('Autowright')
+    // The main process went on with the box still up: a late renderer still
+    // shows the window.
+    w.fire('did-start-loading')
+    w.fire('did-finish-load')
+    expect(w.shows).toBe(1)
+    expect(src).not.toContain('showErrorBox')
+  })
+})
+
+describe('main.cjs Windows session end (§3)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('the main window\'s query-session-end lets the next before-quit through', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const m = loadMain({ ready: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(m.wins).toHaveLength(1)
+    m.wins[0].windowEvent('query-session-end')
+    expect(m.emit('before-quit')).toBe(false)
+  })
+})
+
+describe('main.cjs tray that failed to create (§13)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+  })
+
+  it('is not retried by the 60 s poll, only when menuBarIcon goes from off to on', async () => {
+    if (!caps.trayPanel) return
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (!String(input).includes('/settings')) return Promise.reject(new Error('offline in tests'))
+      return Promise.resolve({ ok: true, json: async () => ({ menuBarIcon: true }) } as Response)
+    })
+    const m = loadMain({ ready: true, trayThrows: true })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    await vi.advanceTimersByTimeAsync(0)
+    // The ready chain's attempt.
+    expect(m.trayAttempts).toBe(1)
+    await vi.advanceTimersByTimeAsync(3 * 60_000)
+    expect(m.trayAttempts).toBe(1)
+    // Still on: the renderer's push is no transition either.
+    m.invoke('apply-settings', { menuBarIcon: true })
+    expect(m.trayAttempts).toBe(1)
+    // Off, then on again: the one retry.
+    m.invoke('apply-settings', { menuBarIcon: false })
+    m.invoke('apply-settings', { menuBarIcon: true })
+    expect(m.trayAttempts).toBe(2)
   })
 })

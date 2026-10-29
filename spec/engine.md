@@ -165,8 +165,24 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   regardless of how many occurrences — across all triggers — were slept through.
   A clock stepped **backwards** (NTP) never re-fires an occurrence already fired: the
   scheduler's baseline never moves below the last occurrence it fired, so a 09:00 cron fired
-  at 09:00:10 stays fired when the clock steps back to 08:59:50; retry pauses and step
-  durations run on the monotonic clock, so a step never stretches or goes negative.
+  at 09:00:10 stays fired when the clock steps back to 08:59:50 — what a firing records as
+  "last fired" is the baseline it set (`now`), not the oldest occurrence it coalesced, so a
+  wake catch-up that swallowed 09:00–12:00 holds 12:00 fired through a post-wake step back
+  (2026-10-28); and that hold applies only while the recorded instant lies at most 15 min
+  ahead of the stepped-back clock — a larger gap is a corrected forward glitch (a bad RTC,
+  a date set ahead for a test) and the baseline resets to `now`, so the trigger is not
+  silenced until the wall clock re-reaches the bogus moment. In the repeated fall-back hour
+  a zone-less cron chooses, of the two readings of an ambiguous wall time, the one whose
+  instant is strictly after the baseline's instant (`fold` honoured, as the zoned path
+  already did), so a baseline that itself sits in the second pass (a boot, enable, or wake
+  during that hour) never sees a first-pass instant as due again every tick (2026-10-28).
+  When several triggers of one automation are due in a tick and the first one's snapshot
+  turned stale (disabled mid-tick), the scheduler attempts the next due trigger rather
+  than abandoning the group; when nothing was attempted at all, a drop below is still
+  recorded. On Linux the scheduler calls `time.tzset()` at the top of every tick, since
+  glibc caches `/etc/localtime` for a process's life (macOS reloads it on its own); retry
+  pauses and step durations run on the monotonic clock, so a step never stretches or goes
+  negative.
   **Opting out (`runIfMissed: false`, §4.3):** a cron, interval, or one-shot with the field
   off never fires late. The scheduler tells "late" from "just now" with a **grace window** of
   `max(60, 4 × AUTOWRIGHT_TICK_S)` seconds (60 s at the default tick, §15 - no knob of its
@@ -287,8 +303,15 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   references — and redacted from logs (the redaction set holds, per secret, the whole
   value and its JSON-escaped, `repr`, and trailing-newline-stripped forms, every line of a
   multi-line value — each line also whitespace-stripped and JSON-escaped — and, for a value
-  that parses as JSON, every string leaf of 8+ characters with the same per-line and
-  escaped forms, so a service-account key survives `json.loads` → `print(creds)`,
+  that parses as JSON, its secret-material string leaves of 8+ characters with the same
+  per-line and escaped forms — a leaf counts when its nearest enclosing object key,
+  lowercased, contains `secret`, `token`, `password`, `passwd`, `private`, `key`,
+  `credential`, `auth`, or `signature` and neither that key ends in `url`/`uri` nor the leaf
+  contains `://`; every substantive leaf of a top-level JSON array counts, having no key
+  (2026-10-28, replacing "every string leaf": a service-account key's public leaves —
+  `"universe_domain": "googleapis.com"`, `"type": "service_account"`, `token_uri` —
+  redacted every `googleapis.com` request line and blocked §6.1 replies naming the host) —
+  so a service-account key survives `json.loads` → `print(creds)`,
   `json.dumps`, or a traceback echoing one PEM line; probes under 8 characters are never
   added, so a lone brace or `true` never redacts half a log); a missing secret stops the execution before any step.
   The engine resolves each needed id to its stored §4.8 record and reads the Keychain by the
@@ -553,7 +576,11 @@ console — §2 spawn policy `paths.console_python()` + `CREATE_NO_WINDOW` — s
 helper children never show a terminal window under the §3 `pythonw.exe` service), wheels
 only (`--only-binary :all:` — a source-only
 distribution fails fast with pip's "no matching distribution" rather than hitting a compiler
-users don't have). The bundle inside the .app is never written to (read-only,
+users don't have). After pip exits 0 the ensure re-runs the import check: a declared
+`import` the distribution does not provide fails the entry with "distribution <pip> has no
+module <import>" (2026-10-28 — before, every execution re-ran pip and then failed on the
+step's own import with no hint; the install is not memoized, a satisfied requirement is a
+local no-op for pip). The bundle inside the .app is never written to (read-only,
 replaced whole on update). On macOS the interpreter that imports these wheels is the §3 signed
 bundle, so it carries the §3 interpreter entitlement (`disable-library-validation`): wheel
 extension modules are ad-hoc signed, and hardened-runtime library validation would otherwise

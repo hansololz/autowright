@@ -1496,10 +1496,13 @@ def test_step_manifest_text_fields_must_be_text(store):
                                                            *m["steps"][1:]]})
 
     for bad in (_first_step(name={"a": 1}), _first_step(name=["x"]),
-                _first_step(name=True), _first_step(name="   "),
+                _first_step(name=True),
                 _first_step(description=3), _first_step(why=["because"])):
         with pytest.raises(transfer.TransferError, match="invalid step manifest entry"):
             transfer.import_automation(store, bad)
+    # §4.1: a blank name is refused in the `POST /versions` wording.
+    with pytest.raises(transfer.TransferError, match="step 1 needs a name"):
+        transfer.import_automation(store, _first_step(name="   "))
     assert len(store.autos) == before
 
     # an absent description or why still defaults to the empty string (the

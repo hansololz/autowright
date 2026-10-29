@@ -301,14 +301,28 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
     hashes the bytes it is about to run, records that `sha` on the execution's step record
     (never the hash of code loaded at boot), scans those same bytes for the §6
     `secrets["<id>"]` subscripts, and a mismatch marks the step modified there and then
-    and refreshes the loaded step's `code` to those bytes (what a restart's load would
-    hold — so the editor, `pull`, and the next save all see the script that actually
-    ran), so the problem appears without a restart. The remedy works in the app as well as the
+    and refreshes the loaded step's `code` to those bytes — newline-normalized the way a
+    load reads a script (CRLF → LF, so a Windows-written file never compares as an edit;
+    the §8 RECENT EXECUTIONS staleness compare runs on the same basis), with the §4.1
+    reference memo dropped so `problems` re-derive from the refreshed code — (what a
+    restart's load would hold — so the editor, `pull`, and the next save all see the
+    script that actually ran), so the problem appears without a restart. The check is
+    two-way: a step flagged earlier whose file matches its seal again (the hand edit was
+    reverted) has the flag cleared and `code` refreshed the same way, so a reverted edit
+    never lingers as a problem, blocks a restore, or gets minted by the next save
+    (2026-10-28). A draft or test execution reads the step the same way at start — code
+    and `secrets["<id>"]` subscripts from the file it is about to run (`draft/automation/`
+    for a draft execution, the §11 test run's own `steps/` folder), never from the draft
+    loaded at boot — with no seal to check, so nothing is flagged there and the loaded
+    draft is left alone. The remedy works in the app as well as the
     CLI: a save landing while the current version holds a modified step always mints
     (§19 — a modified step never compares equal to its stored version), the save
     validators pass or refuse the edited script, and the new version seals it, which
-    clears the problem; `duplicate` refuses such a source (§19 409) rather than copy an
-    unvalidated script.
+    clears the problem; `duplicate` (§19 409) and export (§19 422) refuse such a source
+    rather than copy or ship an unvalidated script — both compare the current version's
+    files against their seals at copy time, under the store lock, never only the flag a
+    load or an execution set, so an edit made after boot with no execution since is
+    refused too and flags the step then and there (2026-10-28).
   A secret or agent yields at most one entry — precedence (unresolved | missing) >
   ungranted > unset, the order the §7 gates fail in; unresolved and missing are one slot,
   told apart by the `unresolvedReferences` map — and entries dedupe per referenced record

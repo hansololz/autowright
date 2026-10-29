@@ -100,7 +100,8 @@ export const LONG_REQUEST_TIMEOUT_MS = 660_000
 // The long routes (§20's list): package install and update (pip), every
 // import leg (file upload, URL fetch, confirm, and the §22.3 marketplace
 // entry preview that downloads the archive), automation delete (waits for
-// cancelled engine threads), and the memory operations that copy the whole
+// cancelled engine threads), the iMessage automation probe (blocks on the
+// macOS consent prompt up to 300 s), and the memory operations that copy the whole
 // memory directory (duplicate, clear, snapshot create, snapshot restore), plus the §22
 // marketplace routes that read the network or a slow disk (add, per-source
 // refresh, refresh-all, the entry archive, catalog create and save).
@@ -116,6 +117,7 @@ export function requestTimeoutMs(method: string, path: string): number {
   const long = (method === 'POST' && (
     route === '/packages/install' || route === '/packages/update'
     || route.startsWith('/automations/import')
+    || route === '/imessage/permissions/automation-probe'
     || /^\/marketplace\/sources\/[^/]+\/entries\/[^/]+\/preview$/.test(route)
     || route === '/marketplace/sources' || route === '/marketplace/refresh'
     || route === '/marketplace/catalogs'
@@ -250,7 +252,7 @@ export const api = {
     req<{ fullDisk: boolean; automation: 'granted' | 'denied' | 'unknown' }>(
       'GET', '/imessage/permissions'),
   imessageAutomationProbe: () =>
-    req<{ automation: 'granted' | 'denied' }>('POST', '/imessage/permissions/automation-probe'),
+    req<{ automation: 'granted' | 'denied' | 'unknown' }>('POST', '/imessage/permissions/automation-probe'),
   deleteAutomation: (automationId: string) => req('DELETE', `/automations/${automationId}`),
   clearMemory: (automationId: string) => req('POST', `/automations/${automationId}/memory/clear`),
   // §6 firing queue — cancels every waiting entry; running executions are untouched
@@ -305,8 +307,10 @@ export const api = {
   updatePackages: (packages: { pip: string; import: string }[]) =>
     req<{ packages: import('./types').PackageDep[] }>('POST', '/packages/update', { packages }),
   // §19 the §8 step validators over a draft-shaped body, nothing written —
-  // backs the §11 step editor's Save; an empty list means it would save
-  validateSteps: (draft: unknown) => req<{ errors: string[] }>('POST', '/validate-steps', { draft }),
+  // backs the §11 step editor's Save; an empty list means it would save. With
+  // an automationId the pass reads that automation's context as its save would.
+  validateSteps: (draft: unknown, automationId?: string) =>
+    req<{ errors: string[] }>('POST', '/validate-steps', automationId ? { draft, automationId } : { draft }),
   postDraftJob: (body: Record<string, unknown>) => req<{ jobId: string }>('POST', '/drafts', body),
   getDraftJob: (jobId: string) => req<DraftJob>('GET', `/drafts/${jobId}`),
   cancelDraftJob: (jobId: string) => req('DELETE', `/drafts/${jobId}`),

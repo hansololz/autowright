@@ -27,8 +27,11 @@ export function ImportSummaryModal({ name, automationId, summary, onClose }: {
     const clicked = useStore.getState()
     const clickedPage = clicked.page
     const clickedId = clicked.automationId
-    await loadAuto(automationId, { insert: true })
+    const held = await loadAuto(automationId, { insert: true })
     setOpening(false)
+    // §9: a record the client failed to fetch stays put rather than bouncing
+    // through the dead-record redirect.
+    if (!held) return
     const now = useStore.getState()
     if (now.page !== clickedPage || now.automationId !== clickedId) return
     close()

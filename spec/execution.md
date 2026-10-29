@@ -75,7 +75,13 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   and `notify` (10,000) are guarded cuts too, never fixed slices ahead of the engine's
   redaction; and the line writer's newline-free overflow flush holds back the last
   (longest secret value − 1) characters in its buffer, so a value straddling two `write`
-  calls is never split by the buffer's own end. The engine's bounded read has the matching
+  calls is never split by the buffer's own end — and an explicit `flush()` (`print(…,
+  flush=True)`, `sys.stdout.flush()`) on a buffer with no trailing newline holds back the
+  same tail, released at the next newline, overflow, or the process's final flush (an
+  `atexit` hook emits whatever the buffer still holds), so a key echoed chunk by chunk with
+  a flush per chunk is never split across two log lines either (2026-10-28). The line
+  writer's lock is re-entrant: a SIGTERM cleanup handler or a `__del__` warning that prints
+  while a write holds it appends to the buffer instead of deadlocking the step on itself. The engine's bounded read has the matching
   rule for text that bypasses the executor entirely (a child writing straight to the
   inherited fd): a chunk the read cap cut — one with no trailing newline — holds back its
   last (longest secret value − 1) characters, prepended to the next chunk before

@@ -112,6 +112,14 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   stops the user unit. With lingering enabled the backend then stays stopped across the
   next login. Verify on a real host; likely remedy is treating SIGTERM/SIGHUP from the
   session manager as a session end (UI-only quit) the way `'shutdown'` is.
+- **Windows: a logout's `query-session-end` pass-through is unverified** (§3, 2026-10-28):
+  Electron fires `powerMonitor 'shutdown'` on macOS/Linux only, so the main window's
+  `query-session-end` sets the UI-only quit flag on Windows; confirm on a host that a logout
+  neither stops the Task Scheduler backend nor shows the busy dialog.
+- **Windows: Task Scheduler's `-RestartCount 3 -RestartInterval 1 min` may not restart a
+  backend that exited non-zero** (the KeepAlive equivalent, §3): the setting is reported to
+  cover failed launches, and gives up after three tries either way. Verify on a host; the
+  remedy would be the app's own ensure-backend re-arming on the next poll.
 - **Windows: cross-thread pipe close can wedge on the buffer lock.** Two sites, both
   traced through CPython's Windows `communicate` (helper threads blocked in `read()` hold
   the `BufferedReader` lock, so a `close()` from another thread waits on it): the

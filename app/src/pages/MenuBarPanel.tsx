@@ -1,5 +1,5 @@
 // Menu-bar surface (§13): 334px translucent panel — one row per automation.
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
 import { badgeOf, executingToast, Eyebrow, PULSE, ScrollArea } from '../ui'
@@ -13,6 +13,11 @@ export default function MenuBarPanel() {
   const version = useStore((s) => s.version)
   const showToast = useStore((s) => s.showToast)
   const ref = useRef<HTMLDivElement>(null)
+  // §9 busy rule (§13): a row's run button disables from the click until its
+  // start request lands — a double-click never fires twice. The ref closes the
+  // same-tick double click the disabled render cannot.
+  const [starting, setStarting] = useState<ReadonlySet<string>>(() => new Set())
+  const startingRef = useRef(new Set<string>())
 
   // §13: the count matches the tray dot — failed or §4.1 overdue only.
   const failed = automations.filter((a) => a.lastStatus === 'failed'
@@ -33,6 +38,29 @@ export default function MenuBarPanel() {
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  const execute = (a: { id: string; maxParallel: number; maxQueued: number }) => {
+    if (startingRef.current.has(a.id)) return
+    startingRef.current.add(a.id)
+    setStarting(new Set(startingRef.current))
+    void (async () => {
+      try {
+        await api.executeNow(a.id, undefined, 'menubar')
+      } catch (err) {
+        // §7: the no-free-slot 409 gets the same toast as every other
+        // execute surface — what happens next depends on the §6 slots.
+        // §19: only that 409 carries `reason: "capacity"`; every other
+        // one shows the backend's own detail.
+        const er = err as Error & { status?: number; reason?: string }
+        showToast(er.status === 409 && er.reason === 'capacity'
+          ? executingToast(a.maxParallel, a.maxQueued)
+          : er.message)
+      } finally {
+        startingRef.current.delete(a.id)
+        setStarting(new Set(startingRef.current))
+      }
+    })()
+  }
 
   const openAutomation = (id: string) => {
     window.autowright?.openApp(`/app?automation=${id}`)
@@ -56,6 +84,7 @@ export default function MenuBarPanel() {
       <ScrollArea wrapStyle={{ minHeight: 0 }}>
         {automations.map((a) => {
           const live = a.live.length > 0
+          const busy = live || starting.has(a.id)
           const subColor = a.live.length
             ? 'var(--cyan)'
             : a.lastStatus === 'failed'
@@ -101,23 +130,15 @@ export default function MenuBarPanel() {
                 className="ad-btn-exec small"
                 onClick={(e) => {
                   e.stopPropagation()
-                  // §7: the no-free-slot 409 gets the same toast as every other
-                  // execute surface — what happens next depends on the §6 slots.
-                  // §19: only that 409 carries `reason: "capacity"`; every other
-                  // one shows the backend's own detail.
-                  if (!live) void api.executeNow(a.id, undefined, 'menubar').catch((err: Error & { status?: number; reason?: string }) => {
-                    showToast(err.status === 409 && err.reason === 'capacity'
-                      ? executingToast(a.maxParallel, a.maxQueued)
-                      : err.message)
-                  })
+                  if (!busy) execute(a)
                 }}
-                disabled={live}
-                title={live ? 'Executing…' : 'Execute now'}
-                aria-label={live ? 'Executing…' : 'Execute now'}
+                disabled={busy}
+                title={live ? 'Executing…' : busy ? 'Starting…' : 'Execute now'}
+                aria-label={live ? 'Executing…' : busy ? 'Starting…' : 'Execute now'}
               >
                 <i
-                  className={live ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-play'}
-                  style={{ fontSize: 8, marginLeft: live ? 0 : 1 }}
+                  className={busy ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-play'}
+                  style={{ fontSize: 8, marginLeft: busy ? 0 : 1 }}
                 />
               </button>
             </div>

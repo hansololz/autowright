@@ -67,6 +67,15 @@ class StepIn(BaseModel):
         return d
 
 
+class SpecBlockIn(BaseModel):
+    """One §4.1 spec block — exactly the kinds specmd.py reads and writes. A
+    wrong kind or a non-string text answers 422 before any version folder is
+    written (§19), never a 500 half-way through the spec.md write."""
+
+    kind: Literal["h1", "h2", "p", "li"]
+    text: StrictStr
+
+
 class DraftIn(BaseModel):
     """A §4.4 draft payload. Everything the store writes into a version folder
     is typed here — steps (each entry an object, the camelCase flag boundary
@@ -80,7 +89,7 @@ class DraftIn(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     steps: list[StepIn] = None
-    spec: list[dict] = None       # §4.4 spec blocks — {kind, text} objects
+    spec: list[SpecBlockIn] = None  # §4.4 spec blocks — {kind, text} objects
     notes: StrictStr = None       # §4.1 notes.md
     params: list[dict] = None     # §4.2 definitions (+ draft-only values)
     packages: list[dict] = None   # §6.2 declarations — {pip, import, why}
@@ -102,6 +111,9 @@ class DraftIn(BaseModel):
         for k in self._CONTENT_KEYS:
             if k in self.model_fields_set:
                 d[k] = getattr(self, k)
+        if self.spec is not None and "spec" in self.model_fields_set:
+            # Consumers read plain {kind, text} dicts, never the model objects.
+            d["spec"] = [b.model_dump() for b in self.spec]
         return d
 
 

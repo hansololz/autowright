@@ -153,7 +153,10 @@ interface Model {
   loadExecLogs(executionId: string, step?: number, attempt?: number): Promise<void>
   // §19 `track`: a page's own mount load (detail page, editor) tracks the id
   // as a full record; every other GET only keeps tracking that is already on.
-  loadAuto(automationId: string, opts?: { insert?: boolean; track?: boolean }): Promise<void>
+  // §9: resolves true when the store holds the row once this GET settles, so
+  // a navigation riding an insert (Duplicate, Open automation) stays put when
+  // the record never arrived.
+  loadAuto(automationId: string, opts?: { insert?: boolean; track?: boolean }): Promise<boolean>
   // §19: the page that loaded an id's full record forgets it on unmount, so
   // the finish- and change-triggered refetches stay bounded to open pages.
   releaseFull(automationId: string): void
@@ -587,7 +590,13 @@ export const useStore = create<Model>((set, get) => ({
         eventSeq++ // an in-flight /state snapshot is stale from here on
         set({ automations: cur.map((a) => (a.id === id ? { ...a, ...row } : a)) })
       }
-      else coalescedRefresh(m.refresh)
+      else {
+        // §19: a /state already in flight (which this coalesces behind) was
+        // serialized before this row existed — mark it stale so it refetches
+        // rather than applying a list without the new row.
+        eventSeq++
+        coalescedRefresh(m.refresh)
+      }
       updateTrayAlert(get().automations)
     }
     // §6 exec.queued (a firing admitted to the queue) carries the same header
@@ -953,18 +962,19 @@ export const useStore = create<Model>((set, get) => ({
     // tracking resumes only with a page's own mount load.
     const tracked = fullLoaded.has(automationId)
     if (opts?.track) trackArmed.set(automationId, releases)
+    const holds = () => get().automations.some((x) => x.id === automationId)
     try {
       const a = await api.getAutomation(automationId)
       // §19 per-id ordering: a newer GET for this id was issued while this one
       // was on the wire — its answer is the fresher one.
-      if (loadAutoSequence.get(automationId) !== sequence) return
+      if (loadAutoSequence.get(automationId) !== sequence) return holds()
       const automations = get().automations
       const held = automations.some((x) => x.id === automationId)
       // Update-only by default: a refresh that lands after the row was removed
       // (a delete, a §19 automation.changed with a null row) must not put it
       // back. Only the creator — which knows the row is new — asks for the
       // insert, and it is the one caller the list ordering can't come from.
-      if (!held && !opts?.insert) return
+      if (!held && !opts?.insert) return false
       // §19: a page that let go of this id while the GET was on the wire
       // released it; the record still lands, the tracking does not come back.
       // A mount load's arm counts for whichever GET lands first after it,
@@ -975,16 +985,21 @@ export const useStore = create<Model>((set, get) => ({
         fullLoaded.add(automationId)
       }
       trackArmed.delete(automationId) // consumed, or stale past a release
+      // §19: an insert makes an in-flight /state (a coalesced refresh issued
+      // before this row existed) stale — applying it would drop the new row.
+      if (!held) eventSeq++
       set({
         automations: held
           ? automations.map((x) => (x.id === automationId ? a : x))
           : [...automations, a],
       })
+      return true
     } catch {
       // Deleted, or the backend did not answer. §19: a failed newest GET
       // hands its slot back, so an older response still in flight can land
       // instead of leaving the record stale.
       if (loadAutoSequence.get(automationId) === sequence) loadAutoSequence.set(automationId, previous)
+      return holds()
     }
   },
 

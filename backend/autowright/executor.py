@@ -8,6 +8,7 @@ control lines on stdout. Plain stdout/stderr lines become out/err log lines.
 """
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import sys
@@ -39,8 +40,9 @@ _real_stdout = sys.stdout
 
 # Control lines are emitted from the step thread AND from the harness spawn
 # callback thread (§7 agent_group) — an interleaved write loses the op the
-# engine needs, so one line goes out at a time.
-_emit_lock = threading.Lock()
+# engine needs, so one line goes out at a time. Re-entrant (§7): a signal
+# handler that emits while this thread holds it must not deadlock the step.
+_emit_lock = threading.RLock()
 
 
 def emit(op: str, **kw) -> None:
@@ -250,23 +252,48 @@ def _line_probes(text: str) -> list[str]:
     return forms
 
 
+# §4.8: the key words that mark a JSON leaf as secret material. A leaf under
+# any other key (`"type": "service_account"`, `"universe_domain":
+# "googleapis.com"`) is public and would redact or block every text naming it.
+_SECRET_KEY_WORDS = ("secret", "token", "password", "passwd", "private", "key",
+                     "credential", "auth", "signature")
+
+
+def _secret_material_leaf(key: str | None, leaf: str) -> bool:
+    """§4.8: whether one JSON string leaf counts as secret material — every
+    leaf with no enclosing object key (a top-level array), else a leaf whose
+    nearest enclosing key, lowercased, holds a `_SECRET_KEY_WORDS` word, does
+    not end in `url`/`uri`, and whose text is not a URL."""
+    if key is None:
+        return True
+    lowered = key.lower()
+    if not any(word in lowered for word in _SECRET_KEY_WORDS):
+        return False
+    if lowered.endswith(("url", "uri")):
+        return False
+    return "://" not in leaf
+
+
 def _json_string_leaves(value: str) -> list[str]:
-    """§4.8: every string leaf of `value` parsed as JSON (dicts and lists
-    walked iteratively), [] when it doesn't parse."""
+    """§4.8: every secret-material string leaf of `value` parsed as JSON
+    (dicts and lists walked iteratively, each leaf gated by its nearest
+    enclosing object key — `_secret_material_leaf`), [] when it doesn't
+    parse."""
     try:
         parsed = json.loads(value)
     except Exception:
         return []
     leaves: list[str] = []
-    pending = [parsed]
+    pending: list[tuple[str | None, object]] = [(None, parsed)]
     while pending:
-        node = pending.pop()
+        key, node = pending.pop()
         if isinstance(node, str):
-            leaves.append(node)
+            if _secret_material_leaf(key, node):
+                leaves.append(node)
         elif isinstance(node, dict):
-            pending.extend(node.values())
+            pending.extend((str(child_key), child) for child_key, child in node.items())
         elif isinstance(node, list):
-            pending.extend(node)
+            pending.extend((key, child) for child in node)
     return leaves
 
 
@@ -275,7 +302,8 @@ def secret_probes(value: str) -> list[str]:
     — the whole value first, then its JSON-escaped (`ensure_ascii` on and
     off), `repr`, and trailing-newline-stripped forms, each line of a
     multi-line value (`_line_probes`), and, when the value parses as JSON,
-    every substantive string leaf with its escaped forms and its own lines —
+    every substantive secret-material string leaf (key-gated,
+    `_secret_material_leaf`) with its escaped forms and its own lines —
     so a service-account key survives `json.loads` → `print(creds)` or
     `json.dumps`. Every line and leaf probe is at least 8 characters, so a
     lone `{` or `true` never matches. Shared by the engine's log
@@ -558,8 +586,11 @@ class _LineWriter(io.TextIOBase):
         self.kind = kind
         self.buf = ""
         # A step's threads share sys.stdout — the buffer split must be atomic
-        # or two writers duplicate or merge lines.
-        self._lock = threading.Lock()
+        # or two writers duplicate or merge lines. §7: re-entrant — a SIGTERM
+        # handler or a `__del__` warning that prints while this thread holds
+        # it appends to the buffer (`_writing`) instead of deadlocking.
+        self._lock = threading.RLock()
+        self._writing = False
 
     def _emit(self, text: str) -> None:
         """One logical line as ≤ MAX_LINE pieces — every control line stays
@@ -574,7 +605,16 @@ class _LineWriter(io.TextIOBase):
 
     def write(self, s: str) -> int:  # type: ignore[override]
         with self._lock:
-            self._write_locked(s)
+            if self._writing:
+                # Re-entered from this thread mid-write: the outer write's
+                # loop picks the appended text up.
+                self.buf += s
+                return len(s)
+            self._writing = True
+            try:
+                self._write_locked(s)
+            finally:
+                self._writing = False
         return len(s)
 
     def _write_locked(self, s: str) -> None:
@@ -595,7 +635,47 @@ class _LineWriter(io.TextIOBase):
                 self._emit(self.buf[:cut])
                 self.buf = self.buf[cut:]
 
+    def _held_tail(self) -> int:
+        """§7: the length of the longest suffix of the buffer that is a proper
+        prefix of a cut guard, capped at `_GUARD_TAIL` — the head of a secret
+        value whose rest may arrive in the next `write`."""
+        cap = min(_GUARD_TAIL, len(self.buf))
+        if cap <= 0:
+            return 0
+        tail = self.buf[-cap:]
+        held = 0
+        for guard in _cut_guards:
+            # Only suffixes longer than the best so far, and shorter than the
+            # guard itself (a whole occurrence is emitted, never held).
+            start = max(0, len(tail) - len(guard) + 1)
+            index = tail.find(guard[0], start) if guard else -1
+            while index != -1 and len(tail) - index > held:
+                if guard.startswith(tail[index:]):
+                    held = len(tail) - index
+                    break
+                index = tail.find(guard[0], index + 1)
+        return held
+
     def flush(self) -> None:
+        """§7: an explicit flush emits the buffer but holds back a trailing
+        secret-value head (`_held_tail`), released by the next newline,
+        overflow, or `final_flush` — a key echoed chunk by chunk with a flush
+        per chunk is never split across two log lines."""
+        with self._lock:
+            if self._writing:
+                return
+            held = self._held_tail()
+            cut = len(self.buf) - held
+            if held and cut > 0:
+                cut = _guarded_boundary(self.buf, 0, cut, self.MAX_LINE)
+            if cut > 0:
+                if self.buf[:cut].strip():
+                    self._emit(self.buf[:cut])
+                self.buf = self.buf[cut:]
+
+    def final_flush(self) -> None:
+        """§7: the process's final flush — emits whatever the buffer still
+        holds, held tail included."""
         with self._lock:
             if self.buf.strip():
                 self._emit(self.buf)
@@ -704,8 +784,18 @@ def main() -> int:
 
     g = {"__name__": "__main__", "__file__": script}
 
-    sys.stdout = _LineWriter("out")  # type: ignore[assignment]
-    sys.stderr = _LineWriter("err")  # type: ignore[assignment]
+    out_writer, err_writer = _LineWriter("out"), _LineWriter("err")
+    sys.stdout = out_writer  # type: ignore[assignment]
+    sys.stderr = err_writer  # type: ignore[assignment]
+
+    def final_flush() -> None:
+        # §7: an explicit flush holds back a trailing secret-value head; the
+        # exit paths below release it before their own error/log ops, and the
+        # atexit hook catches anything a late thread or handler printed.
+        out_writer.final_flush()
+        err_writer.final_flush()
+
+    atexit.register(final_flush)
     try:
         source = Path(script).read_text(encoding="utf-8")
         # §6.2: re-validate the import allowlist at runtime — the draft-time
@@ -721,14 +811,12 @@ def main() -> int:
             return 4
         code = compile(source, script, "exec")
         exec(code, g)  # noqa: S102 — this is the engine's job
-        sys.stdout.flush()
-        sys.stderr.flush()
+        final_flush()
         return 0
     except MissingSecret as e:
         # Flush the line-writer shims first — a partial print() pending at
         # failure time is exactly the output tail the user needs in the log.
-        sys.stdout.flush()
-        sys.stderr.flush()
+        final_flush()
         _emit_error("MissingSecret", str(e))
         _emit_log("err", str(e))
         return 3
@@ -736,8 +824,7 @@ def main() -> int:
         # A step calling sys.exit() / sys.exit(0) is an ordinary early exit,
         # not a failure; a nonzero or message exit still fails the step —
         # keeping the author's message (sys.exit("why")) as the diagnostic.
-        sys.stdout.flush()
-        sys.stderr.flush()
+        final_flush()
         if e.code is None or e.code == 0:
             return 0
         if isinstance(e.code, int):
@@ -756,8 +843,7 @@ def main() -> int:
         # §7 failure diagnostics: the engine stores this structured event as the
         # execution's error; the traceback still goes to the logs line by line.
         try:
-            sys.stdout.flush()  # keep the partial-line tail (see MissingSecret)
-            sys.stderr.flush()
+            final_flush()  # keep the partial-line tail (see MissingSecret)
         except Exception:  # noqa: BLE001
             pass
         _emit_error(type(e).__name__,

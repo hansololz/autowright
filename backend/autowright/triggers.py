@@ -289,10 +289,13 @@ def _instant(d: datetime) -> datetime:
 def _local_gap_fix(d: datetime, after: datetime | None) -> datetime | None:
     """§4.3 gap rule for the system zone (no `timezone` on the trigger): a
     wall time erased by spring-forward fires shifted forward by the gap width,
-    same as `_wall_to_local` does for a zoned trigger. An ordinary or
-    ambiguous reading returns unchanged - the scheduler's naive baseline math
-    already fires a fall-back hour once. Returns None only when the shifted
-    reading lands at or before `after`."""
+    same as `_wall_to_local` does for a zoned trigger. An ordinary reading
+    returns unchanged. An ambiguous (fall-back) reading with `after` given is
+    the first of its two passes whose instant lies strictly after `after`'s
+    (`fold` honoured, §6) - a baseline in the second pass never sees the
+    first-pass instant as due again; without `after` it returns unchanged.
+    Returns None when the shifted reading, or both ambiguous readings, land at
+    or before `after` (the caller advances)."""
     d0, d1 = d.replace(fold=0), d.replace(fold=1)
     if d0.astimezone().utcoffset() == d1.astimezone().utcoffset():
         return d
@@ -300,7 +303,13 @@ def _local_gap_fix(d: datetime, after: datetime | None) -> datetime | None:
     # an ambiguous wall time survives it, an erased one comes back shifted.
     rt = d0.astimezone(UTC).astimezone().replace(tzinfo=None)
     if rt == d:
-        return d
+        if after is None:
+            return d
+        after_instant = _instant(after)
+        for reading in (d0, d1):
+            if _instant(reading) > after_instant:
+                return reading
+        return None
     return rt if after is None or rt > after else None
 
 

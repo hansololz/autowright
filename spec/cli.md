@@ -213,7 +213,13 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   error too, not a crash: it exits 1 after a plain `interrupted` line, never a
   `KeyboardInterrupt` traceback. A reader that closes the pipe early (`| head`, a `| less`
   quit) ends any command quietly with exit 0 — never a `BrokenPipeError` traceback — not
-  only `execution result`.
+  only `execution result`, and whichever way the command ends: a normal return or a
+  `sys.exit` status (`execution tail` on a failed execution, `marketplace refresh` with a
+  failed catalog) both flush under the same guard, so the interpreter's final flush never
+  prints "Exception ignored" or exits 120. A reply that isn't JSON (a stale `backend.json`
+  whose port another server now owns) is the same "backend isn't reachable" message as a
+  refused connection, never a decode traceback; link checks (`import`, `marketplace add`,
+  `set location=`) match the scheme case-insensitively like the backend.
 - **HTTP timeouts:** every backend request runs with a 30 s timeout, except the three calls
   that legitimately take long — package install (the §6.2 ensure runs pip), import (the
   URL fetch, the file upload, *and* the confirm that lands the archive — a large archive
@@ -277,7 +283,16 @@ whatever the user is drafting in the app. Files:
   never saves, falling back to the current version when the key is absent or that version
   is gone; steps pair by name, k-th of a name to k-th for pre-uniqueness duplicates; a
   byte-identical script keeps its stored authorship) — unless the manifest states
-  `authored_by` explicitly.
+  `authored_by` explicitly. **A stale workdir does not push silently** (2026-10-28): when
+  `pulled_from` is below the automation's current version — versions were saved in the app
+  since the pull — `push` exits 1 with `'<name>' is at v<cur>; this workdir was pulled from
+  v<pulled> — pull again, or pass --force to save over v<pulled+1>..v<cur>`; `--force` saves
+  anyway (the overwritten versions stay restorable, §9.2). A manifest without the key is
+  never refused on this ground. `pull` itself refuses (exit 1: "can't pull: step '<name>'
+  has file '<file>', which is not a plain step file name - fix the automation's manifest
+  first" — the store's own step-filename rule) a stored step whose `file` is not a plain
+  step filename (missing, a path with separators, or absolute — a hand-edited manifest),
+  since writing it would land outside the workdir; nothing is written when any step fails.
 - `NN-name.py` — one file per step, matching `steps[].file`.
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
 
@@ -425,7 +440,9 @@ intervals into the
 manifest (`cron`, `timezone` when set, or `every`; `run_if_missed: false` when off), so an untouched
 manifest round-trips the schedule unchanged, while user-minted schedules (`source: user`, the
 trigger verbs' affair) stay out of the manifest, so editing a manifest line can never
-duplicate one. Between pushes, `trigger add` (cron by default,
+duplicate one; two manifest lines with the same §4.3 identity (the same cron and zone, the
+same interval) collapse to one trigger — never two entries sharing a stored id or two
+identical schedules (2026-10-28; the app's manifest merge collapses them the same way). Between pushes, `trigger add` (cron by default,
 `--every <duration>` for a §4.3 interval (the interval dialect; the stored canonical form
 is what `trigger list` labels), `--at` for a §4.3 one-shot — cron and `--at` take `--timezone <zone>`, an IANA zone, stored on the
 entry (`--timezone` with `--every`, `--app-start`, `--discord` or `--imessage` exits 1 -

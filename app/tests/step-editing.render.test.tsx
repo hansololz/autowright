@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useRef, useState } from 'react'
 import type { Agent, Step } from '../src/types'
+import { useStore } from '../src/store'
 import {
   STEP_AUTHORED_TITLE, STEP_LOCKED_TITLE, STEP_LOCK_TOGGLE_TITLE, StepList,
   type StepEditEffect, type StepEditing, appendNewStep, newStepName, renumberStepFiles,
@@ -20,11 +21,13 @@ afterEach(() => cleanup())
 const AGENT: Agent = { id: 'g1', name: 'Cloud writer', harness: 'Claude Code', mode: 'default', model: null }
 const step = (over: Partial<Step> = {}): Step => ({ name: 'Fetch page', description: 'reads it', code: 'log("a")', ...over })
 
-function Harness({ initial, validate, onCommit, disabled = false }: {
+function Harness({ initial, validate, onCommit, disabled = false, swapTo }: {
   initial: Step[]
   validate?: (steps: Step[]) => Promise<string[]>
   onCommit?: (steps: Step[], effect: StepEditEffect) => void
   disabled?: boolean
+  // what the Swap steps button (a sync/undo/restore) replaces the steps with
+  swapTo?: (steps: Step[]) => Step[]
 }) {
   const [steps, setSteps] = useState(initial)
   const addRef = useRef<(() => void) | null>(null)
@@ -38,7 +41,7 @@ function Harness({ initial, validate, onCommit, disabled = false }: {
     <>
       <StepList variant="editor" steps={steps} availAgents={[AGENT]} allAgents={[AGENT]} secrets={[]} packages={[]} editing={editing} />
       <button onClick={() => addRef.current?.()}>Add step</button>
-      <button onClick={() => setSteps(steps.map((s) => ({ ...s })))}>Swap steps</button>
+      <button onClick={() => setSteps(swapTo ? swapTo(steps) : steps.map((s) => ({ ...s })))}>Swap steps</button>
     </>
   )
 }
@@ -199,10 +202,13 @@ describe('step editing in the step-script modal (§11)', () => {
     fireEvent.change(editor(), { target: { value: 'log("saved")' } })
     fireEvent.click(saveButton())
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(1))
-    // every input, Cancel and ✕ are disabled; Save shows its busy state
-    expect(editor().disabled).toBe(true)
-    expect((screen.getByLabelText('Step name') as HTMLInputElement).disabled).toBe(true)
-    expect((screen.getByLabelText('Step description') as HTMLInputElement).disabled).toBe(true)
+    // the text fields turn read-only and busy (focus survives), the checkbox,
+    // Cancel and ✕ are disabled; Save shows its busy state
+    for (const field of [editor(), screen.getByLabelText('Step name'), screen.getByLabelText('Step description')] as HTMLInputElement[]) {
+      expect(field.readOnly).toBe(true)
+      expect(field.disabled).toBe(false)
+      expect(field.getAttribute('aria-busy')).toBe('true')
+    }
     expect((screen.getByLabelText('Remember this edit as a build rule') as HTMLInputElement).disabled).toBe(true)
     expect((within(dialog()).getByText('Cancel') as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByLabelText('Close') as HTMLButtonElement).disabled).toBe(true)
@@ -379,5 +385,98 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(ask.getAttribute('aria-label')).toBe('Discard your script edits?')
     fireEvent.click(within(ask).getByText('Discard edits'))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('a cancelled swap guard keeps the edit on the step of the same name after a reorder (2026-10-28)', async () => {
+    const steps = [step({ name: 'Alpha', code: 'log("a")' }), step({ name: 'Beta', code: 'log("b")' })]
+    const onCommit = vi.fn()
+    render(<Harness initial={steps} onCommit={onCommit} swapTo={(cur) => [{ ...cur[1] }, { ...cur[0] }]} />)
+    openRow('Alpha')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("typed")' } })
+    fireEvent.click(screen.getByText('Swap steps'))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('Cancel'))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    // the edit followed its name to position 2, the typed text intact
+    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 2: Alpha')
+    expect(editor().value).toBe('log("typed")')
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
+    const [next] = onCommit.mock.calls[0] as [Step[]]
+    expect(next.map((s) => [s.name, s.code])).toEqual([['Beta', 'log("b")'], ['Alpha', 'log("typed")']])
+  })
+
+  it('a cancelled swap guard drops the edit with a toast when its step was renamed away (2026-10-28)', async () => {
+    useStore.setState({ toast: null })
+    const onCommit = vi.fn()
+    render(<Harness initial={[step({ name: '  Alpha ' })]} onCommit={onCommit} swapTo={(cur) => [{ ...cur[0], name: 'Gamma' }]} />)
+    openRow('Alpha')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("typed")' } })
+    fireEvent.click(screen.getByText('Swap steps'))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('Cancel'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(useStore.getState().toast).toBe("Step 'Alpha' is gone — your unsaved edit was discarded")
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('Save writes nothing while the modal is disabled (2026-10-28)', async () => {
+    const validate = vi.fn(async () => [] as string[])
+    const onCommit = vi.fn()
+    const { rerender } = render(<Harness initial={[step()]} validate={validate} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("typed")' } })
+    rerender(<Harness initial={[step()]} validate={validate} onCommit={onCommit} disabled />)
+    fireEvent.click(saveButton())
+    fireEvent.keyDown(document, { key: 's', metaKey: true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(validate).not.toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(editor().value).toBe('log("typed")')
+  })
+
+  it('a failed save keeps focus in the script textarea (2026-10-28)', async () => {
+    const validate = vi.fn(async () => ['Step 1: bad'])
+    render(<Harness initial={[step()]} validate={validate} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("typed")' } })
+    editor().focus()
+    fireEvent.keyDown(document, { key: 's', metaKey: true })
+    await waitFor(() => expect(screen.getByTestId('step-edit-errors')).toBeTruthy())
+    expect(document.activeElement).toBe(editor())
+    expect(editor().readOnly).toBe(false)
+  })
+
+  it('the description field is a multi-line textarea; a multi-line description saves and renders its line breaks (2026-10-28)', async () => {
+    const onCommit = vi.fn()
+    render(<Harness initial={[step()]} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    const field = screen.getByLabelText('Step description')
+    expect(field.tagName).toBe('TEXTAREA')
+    expect(screen.getByLabelText('Step name').tagName).toBe('INPUT')
+    fireEvent.change(field, { target: { value: 'reads it\nthen parses the table' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
+    expect(onCommit.mock.calls[0][0][0].description).toBe('reads it\nthen parses the table')
+    // view mode keeps the break as typed
+    const shown = within(dialog()).getByText((_, el) => el?.textContent === 'reads it\nthen parses the table' && el.tagName === 'DIV')
+    expect(shown.style.whiteSpace).toBe('pre-wrap')
+  })
+
+  it('a whitespace-only name or description change is nothing to save (2026-10-28)', () => {
+    render(<Harness initial={[step({ authoredBy: undefined })]} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByLabelText('Step name'), { target: { value: '  Fetch page  ' } })
+    fireEvent.change(screen.getByLabelText('Step description'), { target: { value: 'reads it ' } })
+    expect(saveButton().disabled).toBe(true)
+    // nothing dirty: Cancel returns to view mode without the discard confirm
+    fireEvent.click(within(dialog()).getByText('Cancel'))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.queryByTestId('step-editor')).toBeNull()
+    expect(screen.queryByText('Written by you')).toBeNull()
   })
 })

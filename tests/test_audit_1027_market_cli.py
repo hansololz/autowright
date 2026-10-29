@@ -415,7 +415,7 @@ def test_push_compares_against_the_version_it_pulled(tmp_path):
     v4["steps"][1]["code"] = "print('report v4')\n"
     (d / "spec.md").write_text((d / "spec.md").read_text() + "\nMore.\n", encoding="utf-8")
     c = _WorkdirClient(v4)
-    _run(c, "automation", "push", "Daily Report", str(d))
+    _run(c, "automation", "push", "Daily Report", str(d), "--force")
     assert all("authoredBy" not in s for s in _pushed_steps(c))
     _, _, body = next(p for p in c.posted if p[1].endswith("/versions"))
     assert "pulled_from" not in json.dumps(body)
@@ -429,7 +429,7 @@ def test_push_falls_back_to_the_current_version_when_the_pulled_one_is_gone(tmp_
     v4 = _versioned(_two_step_auto(), 4)
     v4["steps"][1]["code"] = "print('report v4')\n"
     c = _WorkdirClient(v4)
-    _run(c, "automation", "push", "Daily Report", str(d))
+    _run(c, "automation", "push", "Daily Report", str(d), "--force")
     first, second = _pushed_steps(c)
     assert "authoredBy" not in first and second["authoredBy"] == "user"
 

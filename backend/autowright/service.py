@@ -278,7 +278,12 @@ def uninstall() -> str:
     if registered:
         return "uninstall failed: launchd still reports the job"
     if p.exists():
-        p.unlink()
+        try:
+            p.unlink()
+        except OSError as e:
+            # §3: an undeletable plist is a result line (exit 1), never a
+            # traceback — the same answer as the install write.
+            return f"uninstall failed: couldn't delete {p} ({e})"
         out = "service unloaded and removed"
     else:
         out = "service was not installed"

@@ -746,7 +746,11 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    settles the job `blocked` at once with one synthesized `kind: constraint` blocker per
    failing step (`step: <name>`, `reason`: the validator line, `fix`: "Unlock the step so the
    next sync can rewrite it, or restore what it needs"), no agent call made — the agent
-   cannot fix a step it may not touch, so a round would only burn the repair budget.
+   cannot fix a step it may not touch, so a round would only burn the repair budget. A
+   locked step whose name another current step shares (a pre-uniqueness version) blocks the
+   same way (`reason`: "two steps are named `X` — the lock splice can't tell them apart",
+   `fix`: "Rename or unlock one of them"), since the by-name splice would otherwise keep
+   only one of them (2026-10-28).
 9. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
    BUILD INSTRUCTIONS above wherever it says otherwise.
 10. **Closing envelope reminder** — one final line restating the response shape (return

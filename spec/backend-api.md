@@ -399,7 +399,8 @@ remain plain dicts (§2).
   request is refused up front with 409 "an execution is in progress" while the source is live;
   any duplicate is refused with 409 "Step `X` was edited on disk — pull and push it, or save
   it from the editor, before duplicating" while the source's current version holds a §4.1
-  `step-modified` step (a copy would seal an unvalidated script, §5)
+  `step-modified` step — decided from the files on disk against their seals at copy time,
+  not only the loaded flag (a copy would seal an unvalidated script, §5)
   (the §6.3 manual-snapshot rule: a mid-execution copy could catch a half-written file) — nothing
   is created; the copy's commit re-checks the source, and a source that started executing
   during the copy abandons the memory copy. A memory copy that failed or was abandoned after
@@ -409,7 +410,9 @@ remain plain dicts (§2).
   client shows the warning instead of an error.
 - `GET /automations/{id}/export?values=0|1` — the §5.1 transfer archive as `application/zip`
   (`Content-Disposition` filename `<name>.autowright`, name sanitized for the filesystem);
-  `values=0` omits `param_values` from the manifest (default `1`)
+  `values=0` omits `param_values` from the manifest (default `1`); 422 naming the step for
+  a current version that can't travel (§5.1: a `step-modified` step checked on disk, two
+  steps of one trimmed name, a manifest shape the importer refuses)
 - `POST /automations/import` — the §5.1 archive as the raw request body
   (`application/octet-stream`, no multipart) → `{ automation, summary }` where `summary` is
   `{ secretsMatched, agentsMatched, unresolved, packages, renamedFrom, os, osMismatch }` —
@@ -1010,7 +1013,9 @@ already neutralize. The provider config and
   older response resolving later (a finish-triggered refetch slowed by the memory walk,
   overtaken by a PATCH's refetch) is dropped rather than regressing `paramValues`,
   triggers, or versions. Every renderer request carries a **client timeout** (30 s;
-  660 s for the install/import/delete routes, for `POST /automations/{id}/duplicate` (its
+  660 s for the install/import/delete routes, for `POST /imessage/permissions/automation-probe`
+  (it blocks on the consent prompt up to 300 s — a 30 s client abort would stop the spinner
+  with no verdict while the backend thread stays blocked), for `POST /automations/{id}/duplicate` (its
   `copyMemory` copies the whole memory directory, like the memory routes), and for the §22 marketplace routes that read
   the network or a slow disk — add, per-source refresh, refresh-all, the entry archive,
   catalog create and save — like the §20 CLI; 90 s for marketplace images, whose backend
@@ -1039,7 +1044,10 @@ already neutralize. The provider config and
   the row's fields, since `/state` rows carry the full fields too — the §9.2 detail page, the
   §11 editor — also re-`GET`s that record on reconnect, and the §22 marketplace page
   refetches its table on reconnect too, since a `marketplace.changed` missed while the socket
-  was down is never replayed: the snapshot's list rows carry no
+  was down is never replayed, and the §9 executions list refetches from its first page on
+  reconnect (the pager resets — a deeper page's cursor may name rows that are gone), since
+  an `execution.deleted` missed meanwhile — a retention sweep, a deleted automation — would
+  otherwise leave ghost rows on a filtered or deeper page (2026-10-28): the snapshot's list rows carry no
   steps/spec/versions, and an `automation.changed` missed while the socket was down would
   otherwise leave the page showing a new version number over old bodies until navigation), and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
   the client's disconnect, so a dropped client ends the handler immediately — an idle open

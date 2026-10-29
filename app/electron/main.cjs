@@ -52,7 +52,8 @@ let quitting = false
 // §3 quit means quit for good: an OS quit (Cmd+Q, the application menu's Quit,
 // the dock's Quit) runs the quit-entirely flow. Every quit of our own goes
 // through quitUi(), which sets the pass-through before-quit reads; a session
-// end (powerMonitor 'shutdown') passes through too. Any other before-quit is
+// end (powerMonitor 'shutdown', the main window's 'query-session-end' on
+// Windows) passes through too. Any other before-quit is
 // the user's Quit and is intercepted below.
 let uiQuit = false
 let sessionEnding = false
@@ -220,8 +221,36 @@ function showPostedNotification(message) {
 
 // One app process only: a second launch (login item racing a manual open,
 // `open -n`) would create a second tray and double-fire §6 app-start triggers.
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) quitUi()
+// §9: the one loser that waits is the Linux AppImage update's relaunch — the
+// updater spawns the new instance (APPIMAGE_SILENT_INSTALL in its environment)
+// before the old one has exited, so it retries the lock every 250 ms for up to
+// 10 s rather than quit into nothing. Any other loser quits at once.
+const LOCK_RETRY_MS = 250
+const LOCK_RETRY_WINDOW_MS = 10_000
+let gotLock = app.requestSingleInstanceLock()
+// The pending retry (resolves true once the lock is ours, false on giving
+// up); null when no retry runs. The ready chain waits on it.
+let lockRetry = null
+if (!gotLock && process.env.APPIMAGE_SILENT_INSTALL === 'true') lockRetry = retrySingleInstanceLock()
+else if (!gotLock) quitUi()
+
+function retrySingleInstanceLock() {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + LOCK_RETRY_WINDOW_MS
+    const attempt = () => {
+      if (app.requestSingleInstanceLock()) {
+        gotLock = true
+        return resolve(true)
+      }
+      if (Date.now() >= deadline) {
+        quitUi()
+        return resolve(false)
+      }
+      setTimeout(attempt, LOCK_RETRY_MS)
+    }
+    setTimeout(attempt, LOCK_RETRY_MS)
+  })
+}
 // second-instance can fire before whenReady (the exact login-item race above);
 // creating a BrowserWindow before ready throws. The ready path opens the
 // window itself, so the early signal needs no replay.
@@ -668,10 +697,20 @@ const WINDOW_WATCHDOG_MS = 15_000
 // §9: the one way the shell says out loud that it cannot paint. The message
 // always names app.log, which carries the detail. Never throws — a host with
 // no dialog available (a driven test run) must still reach the log line.
+// The box is the async one with no parent window: a synchronous error box
+// would block the main process (and the watchdog's retry behind it) until
+// the user dismissed it.
 function showStartupError(detail) {
+  showErrorMessage(`${detail}\n\nDetails are in ${path.join(logsDir(), 'app.log')}.`)
+}
+
+// An error box that never blocks and never throws: the caller returns at once
+// and a host with no dialog available just leaves the appLog line as the
+// whole report.
+function showErrorMessage(message) {
   try {
-    dialog.showErrorBox('Autowright',
-      `${detail}\n\nDetails are in ${path.join(logsDir(), 'app.log')}.`)
+    Promise.resolve(dialog.showMessageBox({ type: 'error', title: 'Autowright', message }))
+      .catch(() => {})
   } catch { /* no dialog here — the appLog line is the whole report */ }
 }
 
@@ -695,6 +734,10 @@ function createWindow(hash) {
   // and reloading a successor would drop its WS and all renderer state — so
   // every deferred handler here checks it is still the current, live window.
   const w = win
+  // §3 session end on Windows: Electron never fires powerMonitor 'shutdown'
+  // there, so the main window's query-session-end sets the same sticky
+  // pass-through. Only Windows emits the event — no platform check needed.
+  w.on('query-session-end', () => { sessionEnding = true })
   // §9: a failed main-frame load (a dead §15 AUTOWRIGHT_RENDERER_URL — a
   // packaged dist file load doesn't fail) keeps the window hidden and retries
   // every second until the renderer is really there. Chromium fires
@@ -874,11 +917,24 @@ function setTrayAlert(alert) {
   tray.setImage(trayIcon(alert))
 }
 
+// §13: a tray that failed to create is remembered, so the 60 s settings poll
+// doesn't retry (and log) the same failure every minute; only the
+// `menuBarIcon` setting going from off to on tries again. `lastMenuBarIcon`
+// is the value the previous reconcile saw (null before the first one).
+let trayFailed = false
+let lastMenuBarIcon = null
+
 function createTray() {
-  tray = new Tray(trayIcon(false))
-  trayAlert = false
-  tray.setToolTip('Autowright')
-  tray.on('click', () => togglePanel())
+  try {
+    tray = new Tray(trayIcon(false))
+    trayAlert = false
+    tray.setToolTip('Autowright')
+    tray.on('click', () => togglePanel())
+  } catch (err) {
+    trayFailed = true
+    throw err
+  }
+  trayFailed = false
 }
 
 // §13: the renderer feeds the alert dot over IPC while it's alive, but the app
@@ -944,7 +1000,9 @@ function applyShellSettings(s, { trusted = false } = {}) {
   }
   try {
     if (caps.trayPanel && typeof s?.menuBarIcon === 'boolean') {
-      if (s.menuBarIcon && !tray) {
+      const turnedOn = s.menuBarIcon && lastMenuBarIcon === false
+      lastMenuBarIcon = s.menuBarIcon
+      if (s.menuBarIcon && !tray && (!trayFailed || turnedOn)) {
         createTray()
         void refreshTrayAlert()
       } else if (!s.menuBarIcon && tray) {
@@ -1621,8 +1679,13 @@ async function runDownloadUpdate() {
     if (!isNewerVersion(version, app.getVersion())) return { error: 'no update available' }
     // §3 (macOS): Squirrel already staged a different version this run, and
     // electron-updater's squirrelDownloadedUpdate flag never resets, so staging
-    // would "succeed" on that flag and install the older staged bundle.
-    if (plat.UPDATER === 'mac' && stagedVersion !== null && stagedVersion !== version) {
+    // would "succeed" on that flag and install the older staged bundle. A flag
+    // already set with no version recorded is a staged bundle of a version we
+    // don't know — refused the same way.
+    const stagedOther = stagedVersion !== null
+      ? stagedVersion !== version
+      : Boolean(updater.squirrelDownloadedUpdate)
+    if (plat.UPDATER === 'mac' && stagedOther) {
       return { error: 'Restart to finish the update you already downloaded.' }
     }
     await updater.downloadUpdate(result?.cancellationToken)
@@ -1660,27 +1723,70 @@ ipcMain.handle('update-download', async () => {
 })
 
 // §3 win32: the installer replaces the tree the backend runs from, so the
-// service is stopped first (bounded like every service child). A failed stop
-// is logged and never blocks the install. Answers whether a stop was made.
+// service is stopped first (bounded like every service child) — but only once
+// the updater holds a staged installer. With nothing staged quitAndInstall
+// refuses on its own, and a stop would only take the backend down for no swap.
+// BaseUpdater's installerPath is the file its install() requires: null until a
+// download staged one this run.
+function installerStaged() {
+  try {
+    return genericUpdater().installerPath != null
+  } catch {
+    return false
+  }
+}
+
+// §3: Task Scheduler reports the stop ~1.5 s before the backend's process tree
+// is fully gone (the stop-verification gap). NSIS must not start replacing the
+// tree inside it.
+const PROCESS_TREE_GAP_MS = 1500
+
+// §3: a failed or timed-out stop installs nothing — a half-replaced tree is
+// worse than a postponed update.
+const INSTALL_STOP_FAILED_ERROR = "couldn't stop the background service — try again"
+
+// Answers whether the stop succeeded; a good stop waits out the process-tree
+// gap before answering.
 async function stopBackendBeforeInstall() {
-  if (!plat.stopBackendBeforeInstall) return false
   stopShellSocket()
   const err = await runServiceVerb('stop', 'update-install')
-  if (err) appLog(`update-install: backend stop failed: ${err}`)
+  if (err) {
+    appLog(`update-install: backend stop failed: ${err}`)
+    return false
+  }
+  await new Promise((r) => setTimeout(r, PROCESS_TREE_GAP_MS))
   return true
 }
 
-// An install refused after that stop leaves the app up: installs may run
-// again, and the shell socket comes back (the failed quit-entirely rule).
+// An install that ends without a quit after that stop leaves the app up:
+// installs may run again, the shell socket comes back (the failed
+// quit-entirely rule), and the backend is brought back by the launch's own
+// ensure-backend — a refused install never leaves the scheduler stopped until
+// the next logon.
 function resumeAfterRefusedInstall() {
   quittingAll = false
   startShellSocket()
+  void ensureBackend()
+}
+
+// §3: single-flight on every OS — a second call while one is pending shares
+// its answer (a second `service stop` child could otherwise still be alive
+// when NSIS starts).
+let installInFlight = null
+
+function installUpdate() {
+  if (!installInFlight) {
+    installInFlight = runInstallUpdate().finally(() => { installInFlight = null })
+  }
+  return installInFlight
 }
 
 // ShipIt (macOS) swaps the bundle at the same path (the LaunchAgent's
 // interpreter path stays valid); the old backend keeps running until the next
 // launch's version-compare flow restarts it.
-ipcMain.handle('update-install', async () => {
+ipcMain.handle('update-install', () => installUpdate())
+
+async function runInstallUpdate() {
   // §3: no feed → nothing can be staged; quitAndInstall with nothing staged
   // must never quit the app for no swap.
   // Same order as update-download: a platform with no feed says so, and only a
@@ -1689,8 +1795,12 @@ ipcMain.handle('update-install', async () => {
   if (brewManaged()) return { error: plat.MANAGED_COPY_ERROR }
   if (await executionsLive()) return { busy: true }
   appLog('update: quitting to install')
-  const backendStopped = await stopBackendBeforeInstall()
-  const standDown = () => { if (backendStopped) resumeAfterRefusedInstall() }
+  const stopsBackend = Boolean(plat.stopBackendBeforeInstall) && installerStaged()
+  if (stopsBackend && !(await stopBackendBeforeInstall())) {
+    resumeAfterRefusedInstall()
+    return { error: INSTALL_STOP_FAILED_ERROR }
+  }
+  const standDown = () => { if (stopsBackend) resumeAfterRefusedInstall() }
   // §3: the same busy-gated, user-initiated install on every platform — only
   // the machinery that performs the swap differs (ShipIt vs. the NSIS
   // installer vs. the AppImage swap electron-updater staged).
@@ -1737,7 +1847,7 @@ ipcMain.handle('update-install', async () => {
     appLog('update-install: no quit began within 10 s')
   }, 10_000).unref()
   return { ok: true }
-})
+}
 
 // §3: the explicit service command the shell runs — `stop` for the §4.9 QUIT
 // and RESET flows. One shared path: the same interpreter resolution as
@@ -1923,10 +2033,7 @@ async function quitNativelyHeld() {
   if (r.error) {
     sendQuitCancelled()
     // §3: the app stays up — and says so, since no renderer is showing it.
-    try {
-      dialog.showErrorBox('Autowright',
-        `Autowright couldn't stop its backend, so it stays open.\n\n${r.error}`)
-    } catch { /* the appLog line runServiceVerb wrote is the whole report */ }
+    showErrorMessage(`Autowright couldn't stop its backend, so it stays open.\n\n${r.error}`)
   }
 }
 
@@ -2097,7 +2204,8 @@ ipcMain.handle('reset-all', async () => {
   }
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (!gotLock && lockRetry) await lockRetry
   if (!gotLock) return
   // The reopen handler is registered before anything else at all — the first
   // createWindow included: whatever else fails at ready, the dock/tray must

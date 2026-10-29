@@ -87,9 +87,11 @@ class Client:
         except urllib.error.HTTPError as e:
             _exit_http(e)
         except (urllib.error.URLError, http.client.HTTPException,
-                TimeoutError, OSError) as e:
+                TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             # §3: backend.json can be well-formed yet point at a dead backend
             # (SIGKILL leftovers) — same clean guidance as a stale file, no traceback.
+            # §20: so can a reply that isn't JSON (another server now owns the
+            # stale port) — never a decode traceback.
             sys.exit(f"backend isn't reachable at {self.base} ({e}) — restart it with "
                      "`autowright service restart` or `autowright-backend`")
 
@@ -538,7 +540,18 @@ def write_workdir(d: Path, auto: dict) -> list[str]:
 
 def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     from .drafting import STEP_FILE_RE
+    from .storage import safe_step_filename
 
+    # §20: a stored step whose `file` is not a plain step file name (missing,
+    # a path with separators, absolute - a hand-edited manifest) is refused
+    # before anything is written, since writing it would land outside the
+    # workdir. The check is the store's own step-file rule.
+    for i, s in enumerate(auto.get("steps") or [], 1):
+        fname = s.get("file")
+        if not isinstance(fname, str) or safe_step_filename(fname, i, s.get("name"),
+                                                            set()) != fname:
+            sys.exit(f"can't pull: step {s.get('name')!r} has file {fname!r}, which is "
+                     "not a plain step file name - fix the automation's manifest first")
     d.mkdir(parents=True, exist_ok=True)
     written = ["spec.md", "manifest.yaml"]
     (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
@@ -614,9 +627,20 @@ def merge_draft_triggers(stored: list[dict], drafted: list[dict]) -> list[dict]:
                     and (a.get("author") or []) == (b.get("author") or []))
         return False
 
+    # §20: two manifest lines with the same §4.3 identity collapse to one
+    # trigger (the first line wins) - never two entries sharing a stored id
+    # or two identical schedules.
+    seen: set[tuple] = set()
+    collapsed = []
+    for d in drafted:
+        if (key := _schedule_key(d)) is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        collapsed.append(d)
     out = [t for t in stored
            if _schedule_key(t) is None or t.get("source") == "user"]
-    for d in drafted:
+    for d in collapsed:
         if (key := _schedule_key(d)) is not None:
             kept = next((t for t in stored if _schedule_key(t) == key), None)
             if kept is None:
@@ -845,6 +869,16 @@ def cmd_automation_push(c: Client, args) -> None:
     agents, secrets = _grant_stores(c)
     d = Path(args.dir)
     files = read_workdir(d)
+    # §20: a stale workdir does not push silently - versions saved in the app
+    # since the pull would be overwritten unseen. A manifest without the key
+    # is never refused on this ground.
+    pulled = _pulled_from(files)
+    current = full.get("version")
+    if (pulled is not None and isinstance(current, int) and pulled < current
+            and not getattr(args, "force", False)):
+        sys.exit(f"{full['name']!r} is at v{current}; this workdir was pulled from "
+                 f"v{pulled} — pull again, or pass --force to save over "
+                 f"v{pulled + 1}..v{current}")
     _apply_lock_flags(files, getattr(args, "lock", None) or [],
                       getattr(args, "unlock", None) or [])
     draft = validate_workdir(d, agents, secrets, files=files)
@@ -1248,7 +1282,7 @@ def _print_import_summary(c: Client, r: dict) -> None:
 
 
 def cmd_automation_import(c: Client, args) -> None:
-    if args.path.startswith(("http://", "https://")):
+    if args.path.lower().startswith(("http://", "https://")):
         # §5.2: fetch + preview on the backend, confirm immediately - the typed
         # command is the user's explicit action (http:// gets the backend's 422).
         pr = c.req("POST", "/automations/import/url", {"url": args.path}, timeout=660)
@@ -1930,7 +1964,7 @@ def cmd_marketplace_list(c: Client, args) -> None:
 
 def cmd_marketplace_add(c: Client, args) -> None:
     ref = args.source.strip()
-    if ref.startswith(("http://", "https://")):
+    if ref.lower().startswith(("http://", "https://")):
         # §22.4: a link travels as { url } - http:// gets the backend's 422
         # rather than a second copy of the rule here.
         body = {"url": ref}
@@ -1959,7 +1993,7 @@ def cmd_marketplace_set(c: Client, args) -> None:
             sys.exit(f"unknown marketplace key {k!r} - have: {', '.join(SOURCE_KEYS)}")
         if SOURCE_KEYS[k] is bool:
             patch[k] = _toggle(k, raw)
-        elif raw and not raw.startswith(("http://", "https://")):
+        elif raw and not raw.lower().startswith(("http://", "https://")):
             # §22.5: a file path is made absolute against the current
             # directory before it travels, exactly as `add` does.
             patch[k] = os.path.abspath(os.path.expanduser(raw))
@@ -2695,6 +2729,9 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
                    help="a short note describing this version, shown in the version history")
     p.add_argument("--discard-draft", action="store_true",
                    help="replace an unsaved draft the automation has in the app")
+    p.add_argument("--force", action="store_true",
+                   help="save even when versions were saved in the app since this "
+                        "workdir was pulled (they stay restorable)")
     p.add_argument("--lock", action="append", default=[], metavar="NAME",
                    help="lock the step with this exact manifest name, so the app's "
                         "automation builder keeps it byte for byte (repeatable)")
@@ -3662,15 +3699,33 @@ def _utf8_stdio() -> None:
             pass
 
 
+def _quiet_closed_pipe() -> None:
+    """§20 exit codes: a reader that closed the pipe early (`| head`, a quit
+    `| less`) is a normal end for any command - exit 0, no traceback. Point
+    stdout at /dev/null first so the interpreter's final flush can't print
+    "Exception ignored" over the closed pipe."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
+    sys.exit(0)
+
+
+def _flush_stdout() -> None:
+    """Flushes stdout inside main's guard, so a reader that closed early is
+    caught here rather than at the interpreter's own exit flush."""
+    try:
+        sys.stdout.flush()
+    except OSError as e:
+        if not isinstance(e, BrokenPipeError) and e.errno != errno.EPIPE:
+            raise
+        _quiet_closed_pipe()
+
+
 def main() -> None:
     _utf8_stdio()
     args = build_parser().parse_args()
     c = Client() if args.client else None
     try:
         args.fn(c, args)
-        # Flushed here, inside the handler, so a reader that closed early is
-        # caught below rather than at the interpreter's own exit flush.
-        sys.stdout.flush()
     except KeyboardInterrupt:
         # §20/§3 guidance style: Ctrl-C anywhere (a slow delete, a hung
         # request) is a quiet exit 1, never a traceback. The follow loop's
@@ -3679,14 +3734,13 @@ def main() -> None:
     except OSError as e:
         if not isinstance(e, BrokenPipeError) and e.errno != errno.EPIPE:
             raise
-        # §20 exit codes: a reader that closed the pipe early (`| head`, a
-        # quit `| less`) is a normal end for any command - exit 0, no
-        # traceback. Point stdout at /dev/null first so the interpreter's
-        # final flush can't print "Exception ignored" over the closed pipe.
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        sys.exit(0)
-
+        _quiet_closed_pipe()
+    finally:
+        # §20: whichever way the command ends - a normal return or a
+        # `sys.exit` status (`execution tail` on a failed execution,
+        # `marketplace refresh` with a failed catalog) - the buffered output
+        # is flushed under the same closed-pipe guard.
+        _flush_stdout()
 
 if __name__ == "__main__":
     main()

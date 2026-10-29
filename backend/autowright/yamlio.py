@@ -75,6 +75,21 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
         raise
 
 
+def _represent_str(dumper: yaml.SafeDumper, value: str) -> yaml.Node:
+    """§5: a string holding U+0085 (NEL) is written double-quoted (the `\\N`
+    escape). PyYAML's default style leaves NEL raw inside a single-quoted
+    scalar and reads it back as a line break, so `a<NEL>b` would reload as
+    `a b`. Every other string keeps the default style."""
+    if "\x85" in value:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", value, style='"')
+    return yaml.SafeDumper.represent_str(dumper, value)
+
+
+# Registered on the class `yaml.safe_dump` uses, so every safe dump in the
+# process (the stored files and the §5.1 archive manifests alike) gets it.
+yaml.SafeDumper.add_representer(str, _represent_str)
+
+
 def dump_yaml(data: Any) -> str:
     """The one YAML dump: every stored file and the §19 version diff's manifest
     text go through it, so a diff reads as the on-disk file would."""

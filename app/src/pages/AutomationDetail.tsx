@@ -131,6 +131,23 @@ export default function AutomationDetail() {
       () => {})
     return () => { stale = true }
   }, [automationId, reconnects])
+  // §9.2 absorption: the §7 window keeps only the newest finished runs across
+  // every automation, so a run that arrived by event can be trimmed out of it
+  // by other automations' finishes — merge this automation's window rows into
+  // the fetched set (window wins by id) whenever the window changes, or that
+  // run vanishes and an older failure resurfaces as the latest.
+  useEffect(() => {
+    if (!automationId) return
+    const own = executions.filter((e) => e.automationId === automationId)
+    if (own.length === 0) return
+    setFetchedExecs((f) => {
+      const ids = new Set(own.map((e) => e.id))
+      const merged = [...own, ...f.filter((e) => !ids.has(e.id))]
+      // Same rows, same records: keep the identity so a window change that
+      // touched no row of this automation re-renders nothing.
+      return merged.length === f.length && merged.every((e) => f.includes(e)) ? f : merged
+    })
+  }, [executions, automationId])
   // §4.3: refresh the countdown every 30 s.
   useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 30000)
@@ -243,9 +260,16 @@ export default function AutomationDetail() {
   const confirmDelete = () => {
     setDelAsk(false)
     const nm = auto.name
+    // §9: the landing navigates only while the page that started it is still
+    // shown — a DELETE can wait on a cancelled execution (§19), and the user
+    // may have moved on meanwhile.
+    const clicked = useStore.getState()
+    const clickedPage = clicked.page
+    const clickedId = clicked.automationId
     runAction(auto.id, async () => {
       await api.deleteAutomation(auto.id)
-      go('automations')
+      const now = useStore.getState()
+      if (now.page === clickedPage && now.automationId === clickedId) go('automations')
       return `“${nm}” deleted — its past results stay in Executions.`
     }, { reload: false })
   }
@@ -690,11 +714,13 @@ export default function AutomationDetail() {
                   name: duplicateName.trim() || undefined,
                   copyMemory: duplicateMemory,
                 })
-                await loadAuto(created.id, { insert: true })
+                // §9: a copy the client failed to fetch stays put with its
+                // toast, never bouncing through the dead-record redirect.
+                const held = await loadAuto(created.id, { insert: true })
                 const now = useStore.getState()
                 if (now.page === clickedPage && now.automationId === clickedId) {
                   close()
-                  go('automation', { automationId: created.id })
+                  if (held) go('automation', { automationId: created.id })
                 }
                 // §19: a 201 with `warning` landed the copy without its memory -
                 // the warning replaces the success line, never an error.

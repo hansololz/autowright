@@ -9,13 +9,25 @@ const lineTextOf = (nodes: React.ReactNode[]) => nodes.map((n) =>
 
 export type CodeMatch = { line: number; start: number; end: number }
 
+// Case folding that keeps the UTF-16 length: a code point folds only when its
+// lowercase has the same length ("İ" lowercases to two code units and stays as
+// is), so match offsets in the folded text are offsets in the rendered line.
+const foldCase = (text: string) => {
+  let out = ''
+  for (const ch of text) {
+    const lower = ch.toLowerCase()
+    out += lower.length === ch.length ? lower : ch
+  }
+  return out
+}
+
 // Case-insensitive substring matches over the rendered lines, in document order.
 export function findInLines(lines: React.ReactNode[][], query: string): CodeMatch[] {
-  const q = query.toLowerCase()
+  const q = foldCase(query)
   if (!q) return []
   const out: CodeMatch[] = []
   lines.forEach((ln, line) => {
-    const t = lineTextOf(ln).toLowerCase()
+    const t = foldCase(lineTextOf(ln))
     for (let at = t.indexOf(q); at !== -1; at = t.indexOf(q, at + q.length)) out.push({ line, start: at, end: at + q.length })
   })
   return out

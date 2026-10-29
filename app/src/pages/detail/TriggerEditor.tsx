@@ -46,7 +46,13 @@ function ImsgPermissions() {
   const probe = () => {
     setProbing(true)
     api.imessageAutomationProbe()
-      .then((r) => setPerms((p) => (p ? { ...p, automation: r.automation } : p)))
+      // §19: `unknown` is a prompt left unanswered past the backend's wait — a
+      // timeout is not a denial, so the remembered state stays as it was.
+      .then((r) => {
+        if (r.automation === 'unknown') return
+        const automation = r.automation
+        setPerms((p) => (p ? { ...p, automation } : p))
+      })
       .catch(() => {})
       .finally(() => setProbing(false))
   }

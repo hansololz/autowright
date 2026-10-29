@@ -465,6 +465,14 @@ def _fetch_url(url: str, *, cap: int, deadline_s: int = FETCH_DEADLINE_S) -> byt
         # HTTPException covers a truncated chunked download (IncompleteRead),
         # which is not an OSError.
         raise MarketplaceError(f"download failed - {getattr(e, 'reason', e)}") from None
+    except MarketplaceError:
+        # MarketplaceError subclasses ValueError: it passes through before
+        # the clause below.
+        raise
+    except ValueError as e:
+        # A redirect to a malformed Location (an unbalanced IPv6 bracket):
+        # urllib's parse raises a bare ValueError, never a 500.
+        raise MarketplaceError(f"download failed - {e}") from None
     return b"".join(chunks)
 
 
@@ -1031,7 +1039,12 @@ class MarketplaceStore:
             # rather than swept long past the daemon's lifespan.
             if self._auto_stop.is_set():
                 break
-            fetched.append((source_id, location, *self._fetch_catalog(location)))
+            try:
+                fetched.append((source_id, location, *self._fetch_catalog(location)))
+            except Exception as e:
+                # One bad catalog records its `error` and the sweep goes on
+                # to the next row.
+                fetched.append((source_id, location, None, f"download failed - {e}"))
         swept = []
         if self._auto_stop.is_set():
             # A stopped sweeper writes nothing at all - not the copies, not
@@ -1226,6 +1239,11 @@ class MarketplaceStore:
             return self._read_location(location), None
         except MarketplaceError as e:
             return None, str(e)
+        except ValueError as e:
+            # MarketplaceError subclasses ValueError, so it is caught first;
+            # a bare one (a malformed link urllib couldn't parse) is a
+            # failed download, never a crash.
+            return None, f"download failed - {e}"
 
     def _apply_to_row(self, source_id: str, location: str, text: str | None,
                       error: str | None) -> bool:

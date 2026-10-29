@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -24,6 +26,10 @@ TICK_S = float(os.environ.get("AUTOWRIGHT_TICK_S", "15"))  # §15 knob, config o
 # notices it was slept through, not merely seen a tick late. Derived from the
 # tick period; no knob of its own (§15).
 GRACE_S = max(60.0, 4 * TICK_S)
+# §6: a backward clock step holds the last-fired baseline only while the
+# recorded instant lies at most this far ahead of the stepped-back clock — a
+# larger gap is a corrected forward glitch and the baseline resets to `now`.
+LAST_FIRED_HOLD = timedelta(minutes=15)
 def drop_note() -> str:
     """§6 drop-record note. "Mac" is the §9 per-OS machine noun, resolved when
     the record is written (a Windows or Linux record says "this PC")."""
@@ -96,6 +102,11 @@ class Scheduler:
         self._baseline_utc[key] = now_utc
 
     def _tick(self) -> None:
+        if hasattr(time, "tzset") and sys.platform != "darwin":
+            # §6: glibc caches /etc/localtime for the process's life — reload
+            # it every tick so a system-timezone change is seen (macOS
+            # reloads it on its own).
+            time.tzset()
         now = self._clock()
         now_utc = self._utc_clock()
         with self.store.lock:
@@ -201,9 +212,13 @@ class Scheduler:
                 # fall-back, where holding the baseline is what makes the
                 # repeated hour fire once (§4.3). §6: never below the last
                 # occurrence this trigger fired — a 09:00 fired at 09:00:10
-                # stays fired when the clock steps back to 08:59:50.
+                # stays fired when the clock steps back to 08:59:50. The hold
+                # applies only within LAST_FIRED_HOLD: a firing recorded
+                # further ahead came from a forward glitch now corrected,
+                # and holding it would silence the trigger until the wall
+                # clock re-reaches the bogus moment.
                 fired = self._last_fired.get(key)
-                if fired is not None and fired[1] > now_utc:
+                if fired is not None and now_utc < fired[1] <= now_utc + LAST_FIRED_HOLD:
                     base = fired[0]
                     self._set_baseline(key, fired[0], fired[1])
                 else:
@@ -295,12 +310,22 @@ class Scheduler:
             # slept through"; the fired execution covers the rest, a coalesced
             # one-shot included.
             due.sort(key=lambda p: p[0])
-            attempted = self._fire(a, due[0][1])
-            for occ, t in due:
+            # §6: a due trigger whose snapshot turned stale (disabled or
+            # removed mid-tick) is never attempted — the next due one in
+            # order is, rather than abandoning the whole group.
+            attempted = False
+            for _, t in due:
+                if self._fire(a, t):
+                    attempted = True
+                    break
+            for _, t in due:
                 key = (a["id"], t["id"])
                 if attempted:
-                    # §6: the fired execution covers every coalesced occurrence.
-                    self._last_fired[key] = (occ, occ.astimezone(timezone.utc))
+                    # §6: the fired execution covers every coalesced
+                    # occurrence; "last fired" is the baseline the firing set
+                    # (`now`), not the oldest occurrence it coalesced — a wake
+                    # catch-up that swallowed 09:00-12:00 holds 12:00 fired.
+                    self._last_fired[key] = (now, now_utc)
                 elif key in prior_baselines:
                     self._set_baseline(key, *prior_baselines[key])
             consumed = False
@@ -311,8 +336,11 @@ class Scheduler:
                     consumed = True
             if consumed:
                 self._publish_changed(a)
-        elif dropped:
-            # §6 drop record: nothing fired for this automation in this tick,
+        else:
+            attempted = False
+        if not attempted and dropped:
+            # §6 drop record: nothing fired for this automation in this tick
+            # (no trigger was due, or every due one's firing went unattempted),
             # so the drop is the only trace the user gets (for a one-shot, the
             # trigger itself is gone): one skipped record, naming the first
             # dropped trigger's kind. A catch-up by another trigger in the same
@@ -347,9 +375,10 @@ class Scheduler:
                 log.exception("recording a dropped occurrence on %r failed", a.get("name"))
 
     def _fire(self, a: dict, t: dict) -> bool:
-        """Fire `t` on `a`; False only when the engine refused the firing for
-        shutdown (§4.3: nothing attempted, so no one-shot is consumed). The
-        stale-snapshot returns below keep the consume-as-before answer."""
+        """Fire `t` on `a`; False when the firing was never attempted (§4.3:
+        no one-shot is consumed) — the snapshot turned stale (the automation
+        was deleted, or the trigger removed or disabled, mid-tick) or the
+        engine refused the firing for shutdown."""
         # The tick evaluated a snapshot taken outside the lock - a PATCH landing
         # mid-tick may have removed or disabled this trigger, and an occurrence
         # the API already confirmed off must not fire from the stale dict.

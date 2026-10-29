@@ -24,6 +24,7 @@ import time
 import unicodedata
 import uuid
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -462,6 +463,18 @@ class MissingStepScriptError(RuntimeError):
     def __init__(self, file: str) -> None:
         super().__init__(f"step script `{file}` is missing on disk")
         self.file = file
+
+
+class StepModifiedError(RuntimeError):
+    """§4.1/§19: the automation's current version holds a `step-modified` step
+    — its script on disk no longer matches the version's seal — so a duplicate
+    would seal an unvalidated script; the API answers 409. `name` is the first
+    such step's name."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"Step `{name}` was edited on disk — pull and push it, or save "
+                         "it from the editor, before duplicating")
+        self.name = name
 
 
 def name_key(name: str) -> str:
@@ -1544,6 +1557,49 @@ class Store:
             self.autos[automation_id] = a
             return a
 
+    def disk_modified_steps(self, a: dict) -> list[dict]:
+        """§4.1 `step-modified`, decided from the files on disk (the caller
+        holds `self.lock`): for `a`'s CURRENT version folder, each manifest
+        step whose script file's `step_script_sha` differs from the seal that
+        folder recorded (`sealed_step_sha`; an unsealed step never counts).
+        Returns those loaded step dicts (the same objects held in
+        `a["versions"][current]["steps"]`, in step order; empty when every
+        sealed file matches). Each one is marked as the engine's
+        execution-start check marks it: `modifiedOnDisk` set and `code`
+        refreshed to the newline-normalized disk text, so the problem shows
+        at once. Used by the duplicate and the §5.1 export gates — the
+        loaded flag alone misses a hand edit made after load with no
+        execution since."""
+        cur = a["versions"].get(a["current_version"]) or {}
+        vd = self.auto_dir(a) / "versions" / f"v{a['current_version']}"
+        modified: list[dict] = []
+        for s in cur.get("steps") or []:
+            if not isinstance(s, dict):
+                continue
+            file = s.get("file")
+            sealed = self.sealed_step_sha(vd, file)
+            if not sealed:
+                continue
+            path = vd / file
+            try:
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if step_script_sha(data) == sealed:
+                continue
+            s["modifiedOnDisk"] = True
+            # Newline-normalized as a load reads it (CRLF → LF), so the
+            # editor, `pull` and the next save hold what a restart would.
+            s["code"] = data.decode("utf-8", errors="replace").replace("\r\n", "\n") \
+                .replace("\r", "\n")
+            modified.append(s)
+        if modified:
+            # §4.1: the reference memo re-derives from the refreshed code.
+            a.pop("_ref_cache", None)
+        return modified
+
     def duplicate_automation(self, source_id: str, name: str | None = None) -> dict:
         """§5 store-level duplicate (never an export-then-import round trip):
         a fresh uuid, the §4.1 deduped name, the source's current version as
@@ -1558,6 +1614,11 @@ class Store:
             source = self.autos.get(source_id)
             if source is None:
                 raise AutomationGoneError(source_id)
+            # §5/§19: a copy never seals an unvalidated script — the source's
+            # current version is checked against the bytes on disk now, not
+            # only the loaded flag (set at load and at execution start).
+            if modified := self.disk_modified_steps(source):
+                raise StepModifiedError(str(modified[0].get("name") or ""))
             source_number = source["current_version"]
             source_vd = self.auto_dir(source) / "versions" / f"v{source_number}"
             manifest = load_yaml(source_vd / "automation.yaml")
@@ -2007,15 +2068,32 @@ class Store:
                     "agent_id": meta.get("agent_id"),
                     "triggers": meta.get("triggers", []) or []}
 
-    def delete_draft(self, a: dict | None) -> list[str]:
+    def delete_draft(self, a: dict | None,
+                     cancel: Callable[[str], Any] | None = None) -> list[str]:
         """§19: ONE delete path for both /draft/{owner} owners. Settles the
         container (discard, save, Create, or Start over); §11 test records die
         with it (automationId null for the pending owner). The §11 chat thread
         never dies with the draft (§4.4 thread lifetime): an automation's
         chat.jsonl lives outside draft/, and the pending slot's — at the slot
         root — is deliberately spared here. Returns the §4.5 test execution ids
-        that died with the container — §19 publishes one `execution.deleted` each."""
+        that died with the container — §19 publishes one `execution.deleted` each.
+
+        §19 settle gap: a test that started after the settle's cancels (and
+        before this delete) is still executing here — `delete_test_execs`
+        skips live records — so each one is marked `_draft_settled` under the
+        lock (testexec._run then deletes it when it lands instead of writing
+        test.yaml into the settled container) and handed to `cancel` (the
+        API passes the engine's cancel) to stop it."""
         with self.lock:
+            container_id = a["id"] if a is not None else None
+            live_tests = [h for h in self.execs.values()
+                          if is_test(h) and h["automation_id"] == container_id
+                          and h["status"] == "executing"]
+            for h in live_tests:
+                h["_draft_settled"] = True
+            if cancel is not None:
+                for h in live_tests:
+                    cancel(h["id"])
             dd = self.draft_dir(a)
             if a is None:
                 for child in list(dd.iterdir()) if dd.exists() else ():
@@ -2033,7 +2111,7 @@ class Store:
                 # aside here and reaped outside the lock, never walked under it.
                 self._remove_tree(dd)
                 a["draft"] = None
-            return self.delete_test_execs(a["id"] if a is not None else None)
+            return self.delete_test_execs(container_id)
 
     def pending_draft_summary(self) -> dict | None:
         """§19 GET /state `pendingDraft`: the slot's identity summary — backs
@@ -3407,13 +3485,15 @@ class Store:
         # The key comes from one linear pass, BEFORE any sort: on a memo hit
         # (the common /state case) the sort is never paid at all. `max` and a
         # reverse sort pick the same record among equal timestamps — both keep
-        # the first one encountered.
-        newest = max(hs, key=lambda x: x["started_at"] or "", default=None)
+        # the first one encountered. Ordered by the PARSED stamp (§7
+        # `exec_started_ms`, as `_latest_exec` orders): a raw string compare
+        # would rank a hand-edited space-form stamp below every T-form one.
+        newest = max(hs, key=exec_started_ms, default=None)
         key = (newest["id"] if newest else None, len(hs))
         memo = a.get("_latest_result")
         if memo is not None and memo[0] == key:
             return memo[1]
-        hs.sort(key=lambda x: x["started_at"] or "", reverse=True)
+        hs.sort(key=exec_started_ms, reverse=True)
         result = None
         for h in hs:
             r = self.result_json(h)

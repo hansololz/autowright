@@ -173,7 +173,7 @@ describe('mergeDraftTriggers', () => {
     expect(merged).toEqual([{ kind: 'cron', enabled: true, expression: '0 8 * * *' }])
   })
 
-  it('duplicate identical exprs consume distinct existing entries once each', () => {
+  it('drafted schedules sharing a §4.3 identity collapse to one trigger (the CLI manifest rule, 2026-10-28)', () => {
     const cur: DraftTrigger[] = [
       cron({ id: 'c1', expression: '0 8 * * *', enabled: false }),
       cron({ id: 'c2', expression: '0 8 * * *', enabled: true }),
@@ -181,9 +181,19 @@ describe('mergeDraftTriggers', () => {
     const drafted: DraftTrigger[] = [
       cron({ expression: '0 8 * * *' }),
       cron({ expression: '0 8 * * *' }),
+      { kind: 'interval', enabled: true, every: 'PT1H' } as DraftTrigger,
+      { kind: 'interval', enabled: true, every: 'PT1H' } as DraftTrigger,
+      // a different zone is a different identity
+      cron({ expression: '0 8 * * *', timezone: 'Europe/Paris' }),
     ]
     const merged = mergeDraftTriggers(cur, drafted)
-    expect(merged.map((t) => t.id)).toEqual(['c1', 'c2'])
+    // one cron keeps c1 (id and enabled); the spec-sourced duplicate c2 goes
+    expect(merged).toEqual([
+      cur[0],
+      { kind: 'interval', enabled: true, every: 'PT1H' },
+      { kind: 'cron', enabled: true, expression: '0 8 * * *', timezone: 'Europe/Paris' },
+    ])
+    expect(mergeDraftTriggers([], [cron({ expression: '5 * * * *' }), cron({ expression: '5 * * * *' })])).toHaveLength(1)
   })
 
   it('unmatched drafted cron becomes a new entry with enabled:true', () => {

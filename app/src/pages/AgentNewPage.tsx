@@ -366,11 +366,17 @@ export default function AgentNewPage() {
   const confirmDelete = async () => {
     if (!editAgent) return
     setDelOpen(false)
+    // §9: the landing navigates only while the page that started it is still
+    // shown — the user may have moved on while the DELETE was in flight.
+    const clicked = useStore.getState()
+    const clickedPage = clicked.page
+    const clickedId = clicked.agentEditId
     try {
       await api.deleteAgent(editAgent.id)
       const { [editAgent.id]: _gone, ...rest } = useStore.getState().agentChecks
       useStore.setState({ agentChecks: rest })
-      go('agents')
+      const now = useStore.getState()
+      if (now.page === clickedPage && now.agentEditId === clickedId) go('agents')
       showToast('Agent removed. Automations it wrote still execute on schedule.')
     } catch (e) { showToast((e as Error).message) }
   }

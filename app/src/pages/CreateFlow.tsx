@@ -485,8 +485,9 @@ export default function CreateFlow() {
       // §7 Fix with AI: the redirect leaves the editor, so the pending
       // failure never seeds a later, unrelated editor session.
       useStore.setState({ fixExec: null })
-      setSurface('app')
-      go('agents')
+      // §9: the redirect replaces the history entry (go() leaves the create
+      // surface), so back never re-enters an editor that can't run.
+      go('agents', {}, { replace: true })
       showToast('No agent yet — add one here first. Creating and editing automations needs an AI.', 3600)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -528,22 +529,18 @@ export default function CreateFlow() {
   // another window, a stale history entry restored before the list loaded) —
   // bail out to the list, like the §9.2 detail page's own vanished-record
   // redirect. The save paths guard on it too: neither may fall into create.
+  // §9: it replaces the history entry (go() leaves the create surface), so
+  // back never traps on the dead page.
   useEffect(() => {
-    if (isEdit && !auto) {
-      setSurface('app')
-      go('automations')
-    }
-  }, [isEdit, auto, go, setSurface])
+    if (isEdit && !auto) go('automations', {}, { replace: true })
+  }, [isEdit, auto, go])
 
   useEffect(() => {
     if (!isEdit || seededRef.current || !auto || !auto.spec) return
     seededRef.current = true
-    const seeded = seedFromAuto(auto, agents, secrets.map((s) => s.id))
-    // §9.2 Needs-fixing `step-modified` → Edit: the editor opens with the
-    // draft already touched, so Save is available at once (the widening
-    // cast keeps this compiling before and after the kind joins the union)
-    const stepModified = (auto.problems ?? []).some((p) => (p.kind as string) === 'step-modified')
-    setRev(stepModified ? { ...seeded, touched: true } : seeded)
+    // §9.2 Needs-fixing `step-modified` → Edit opens here like any edit:
+    // nothing is pre-touched, so a look without an edit keeps no phantom draft
+    setRev(seedFromAuto(auto, agents, secrets.map((s) => s.id)))
     if (auto.agentId) setAgentId(auto.agentId)
   }, [auto, isEdit, agents, secrets])
 
@@ -906,6 +903,11 @@ export default function CreateFlow() {
       const chip = newEntry({ kind: 'system', icon: 'fa-arrows-up-down', text: `Step '${effect.name}' moved to position ${effect.to}.` })
       chips.push(chip)
       setOrderOffer({ chipId: chip.id, names: steps.map((s) => s.name) })
+    } else {
+      // §11: a later add, remove or rename (any non-move edit) retires the
+      // offer for good — latched, so steps that come back to the moved names
+      // never revive it
+      setOrderOffer(null)
     }
     setRev((r) => r && ({
       ...r, steps, touched: true, undo: null,
@@ -935,7 +937,9 @@ export default function CreateFlow() {
   const stepEditing: StepEditing = {
     disabled: anyJobBusy || viewingOld,
     // §19 POST /validate-steps: the draft as it would be after the edit
-    validate: async (steps) => (rev ? (await api.validateSteps(serializeDraft({ ...rev, steps }))).errors : []),
+    // (edit mode names the automation, so the pass reads its context exactly
+    // as its save would)
+    validate: async (steps) => (rev ? (await api.validateSteps(serializeDraft({ ...rev, steps }), isEdit && auto ? auto.id : undefined)).errors : []),
     commit: commitStepEdit,
   }
 

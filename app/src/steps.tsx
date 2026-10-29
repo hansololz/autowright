@@ -9,6 +9,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
+import { useStore } from './store'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
 import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, useOverlayThumb, validUrl } from './ui'
 
@@ -335,8 +336,11 @@ const beginEdit = (s: Step): StepEdit => {
   const orig = { code: s.code || '', name: s.name, description: s.description || '' }
   return { ...orig, orig, remember: false, rule: '', errors: [], saving: false }
 }
+// §11: name and description compare trimmed (Save trims them), so a
+// whitespace-only change is nothing to save and never flips authorship; the
+// code compares as-is.
 const stepEditDirty = (e: StepEdit) =>
-  e.code !== e.orig.code || e.name !== e.orig.name || e.description !== e.orig.description
+  e.code !== e.orig.code || e.name.trim() !== e.orig.name.trim() || e.description.trim() !== e.orig.description.trim()
 
 const DISCARD_SCRIPT_TITLE = 'Discard your script edits?'
 const DISCARD_SCRIPT_BODY = 'The changes you typed into the script editor will be lost.'
@@ -495,7 +499,7 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
             )}
             {tagNodes}
           </div>
-          <div style={{ fontSize: 11.5, lineHeight: 1.45, color: 'var(--text-muted)', marginTop: 1 }}>{step.description}</div>
+          <div style={{ fontSize: 11.5, lineHeight: 1.45, color: 'var(--text-muted)', marginTop: 1, whiteSpace: 'pre-wrap' }}>{step.description}</div>
         </div>
         {glyph}
       </button>
@@ -618,20 +622,26 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
               className="ad-input compact"
               aria-label="Step name"
               value={edit.name}
-              disabled={edit.saving}
+              readOnly={edit.saving}
+              aria-busy={edit.saving || undefined}
               onChange={(e) => { const name = e.target.value; setEdit((x) => x && { ...x, name }) }}
               style={{ width: '100%' }}
             />
             {!edit.name.trim() && (
               <div style={{ font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>Give the step a name</div>
             )}
-            <input
+            {/* §11: the description is a multi-line textarea — a step's
+                description may run to several lines, so Enter inserts a line
+                break here (the name above stays one-line). */}
+            <textarea
               className="ad-input compact"
               aria-label="Step description"
               value={edit.description}
-              disabled={edit.saving}
+              readOnly={edit.saving}
+              aria-busy={edit.saving || undefined}
+              rows={3}
               onChange={(e) => { const description = e.target.value; setEdit((x) => x && { ...x, description }) }}
-              style={{ width: '100%' }}
+              style={{ width: '100%', resize: 'vertical', fontFamily: 'var(--sans)', display: 'block' }}
             />
           </div>
         ) : (
@@ -642,7 +652,7 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
         {viewed && (
           <>
             {!editing && step.description && (
-              <div style={{ font: "400 11.5px/1.45 var(--sans)", color: 'var(--text-muted)', marginTop: 4 }}>{step.description}</div>
+              <div style={{ font: "400 11.5px/1.45 var(--sans)", color: 'var(--text-muted)', marginTop: 4, whiteSpace: 'pre-wrap' }}>{step.description}</div>
             )}
             {/* §9.2 tag row: the same chips the step row carries (tooltips
                 hold the detail), plus package chips in the detail modal. */}
@@ -907,7 +917,8 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                     data-testid="step-editor"
                     aria-label="Step script"
                     value={edit.code}
-                    disabled={saving}
+                    readOnly={saving}
+                    aria-busy={saving || undefined}
                     onChange={(e) => { const value = e.target.value; setEdit((x) => x && { ...x, code: value }) }}
                     onScroll={thumb.onScroll}
                     spellCheck={false}
@@ -1100,7 +1111,8 @@ export function StepList(props: StepListProps) {
   if (editing?.addRef) editing.addRef.current = add
   const saveEdit = async () => {
     const e = editRef.current
-    if (!editing || current === null || !e || !stepEditDirty(e) || !e.name.trim() || e.saving || modalClosing.current) return
+    // §11: Save honours the modal's disabled state like every other control
+    if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || e.saving || modalClosing.current) return
     // §11: a checked remember box needs its rule
     if (e.remember && !e.rule.trim()) return
     const at = current
@@ -1159,6 +1171,21 @@ export function StepList(props: StepListProps) {
     const view = next.length === 0 ? null : at < next.length ? at : at - 1
     commit(next, view, false, { kind: 'remove' })
   }
+  // §11: a cancelled swap guard keeps the edit open on the new step of the
+  // same name (the edit's original name, trim-compared), never on whatever
+  // step now sits at the old index; when no step carries it any more the
+  // edit is dropped with a toast.
+  const keepEditAfterSwap = () => {
+    setSwapAsk(false)
+    const e = editRef.current
+    if (!e) return
+    const name = e.orig.name.trim()
+    const at = stepsRef.current.findIndex((s) => s.name.trim() === name)
+    if (at >= 0) { setViewing(at); return }
+    dropEdit()
+    setViewing(null)
+    useStore.getState().showToast(`Step '${name}' is gone — your unsaved edit was discarded`)
+  }
   return (
     <>
       {steps.map((s, i) => (
@@ -1196,7 +1223,7 @@ export function StepList(props: StepListProps) {
           confirmLabel="Discard edits"
           danger
           onConfirm={() => { setSwapAsk(false); dropEdit(); setViewing(null) }}
-          onCancel={() => setSwapAsk(false)}
+          onCancel={keepEditAfterSwap}
         />
       )}
     </>

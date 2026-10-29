@@ -134,3 +134,23 @@ describe('About updates row, install answers (§9.4)', () => {
     expect(screen.getByText('Restart to update')).toBeTruthy()
   })
 })
+
+describe('About updates row, pending install (§9.4)', () => {
+  it('reads "Installing…" and is disabled while update-install is pending', async () => {
+    let answer: (r: unknown) => void = () => {}
+    updateInstall.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
+    fireEvent.click(await downloaded())
+    const pending = await screen.findByText('Installing…')
+    expect((pending.closest('button') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByText('Restart to update')).toBeNull()
+    // A second click on the disabled button starts nothing.
+    fireEvent.click(pending)
+    expect(updateInstall).toHaveBeenCalledTimes(1)
+    answer({ error: 'couldn\'t stop the background service — try again' })
+    expect(await screen.findByText(
+      'Update failed: couldn\'t stop the background service — try again',
+    )).toBeTruthy()
+    expect(screen.queryByText('Installing…')).toBeNull()
+    expect(screen.getByText('Check for updates')).toBeTruthy()
+  })
+})

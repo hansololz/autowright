@@ -120,6 +120,9 @@ export default function ExecutionsList() {
   const automations = useStore((s) => s.automations)
   const showToast = useStore((s) => s.showToast)
   const go = useStore((s) => s.go)
+  // §19 reconnect: an `execution.deleted` missed while the socket was down is
+  // never replayed — the page-owned fetch below re-runs on each reconnect.
+  const reconnects = useStore((s) => s.reconnects)
   // §7 filters: view state like the pager — reset on unmount, never stored.
   const [filters, setFilters] = useState<ExecutionFilters>(DEFAULT_FILTERS)
   const [modalOpen, setModalOpen] = useState(false)
@@ -207,7 +210,7 @@ export default function ExecutionsList() {
       setServerTotal(r.total)
     }, (err: Error) => { if (n === fetchSeq.current) showToast(err.message) })
       .finally(() => { if (n === fetchSeq.current) setFirstFetchDone(true) })
-  }, [filterKey])
+  }, [filterKey, reconnects])
 
   // §7 absorption: a /state refresh replaces the window wholesale, and new
   // finishes push old rows out of it — a row that leaves the window

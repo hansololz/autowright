@@ -272,9 +272,11 @@ applies unchanged; the chat pane never collapses.
     button, with the same gating.
   - **Remember this order** (`fa-list-check`) — while the thread's last entry is a
     "Step '<name>' moved to position N." chip landed by this page since it opened (the
-    offer is page state, not persisted: a reload, any later entry, or a step added,
-    removed, or renamed since the move retires it — the rule must name the steps as they
-    were moved). It
+    offer is page state, not persisted: a reload, any later entry, or any step edit
+    committed since the move — a step added, removed, renamed, or a script saved — retires
+    it, latched off at the commit rather than re-derived from the names, so an add
+    followed by a remove never revives it (2026-10-28); the rule must name the steps as
+    they were moved). It
     writes the draft's current step order as the one build rule `Step order: "<name
     1>", "<name 2>", …` under the spec's `## Build rules` section (the Step editing
     section rule) — replacing every existing `Step order:` bullet under any such
@@ -1029,8 +1031,11 @@ editors enter with
     lock toggle and Remove step stay visible but disabled (their commit would end the
     edit and drop the typed text).
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
-    **description** as two `.ad-input.compact` fields in edit mode (name required — a
-    blank name disables Save with the inline hint "Give the step a name"). Beneath the
+    **description** as two `.ad-input.compact` fields in edit mode: the name a one-line
+    input (required — a blank name disables Save with the inline hint "Give the step a
+    name"), the description a multi-line textarea (3 rows, vertical resize only, Enter
+    inserts a line break — a description may span several lines, and the viewed row and
+    the step row render its line breaks as typed, `pre-wrap`). Beneath the
     textarea a 36 px footer (the doc modal's hint style) carries a checkbox **Remember
     this edit as a build rule** and, enabled by it, a text field (placeholder "What every
     future sync must keep — one line"; checked with a blank field, Save disables with the
@@ -1087,7 +1092,12 @@ editors enter with
     (`fa-pen`), so a hand edit never disappears silently; locked steps need no chip — the
     §8 splice guarantees them. A sync, undo or restore that swaps the steps closes an open
     modal as before; under an unsaved edit the swap has already happened, so the guard asks
-    afterwards and a cancelled guard keeps the edit open on the new steps at the same index.
+    afterwards and a cancelled guard keeps the edit open on the new step **of the same
+    name** (the edit's original name, trim-compared) — when no step carries it any more the
+    edit is dropped with the toast "Step '<name>' is gone — your unsaved edit was
+    discarded", never saved onto whatever step now sits at the old index (2026-10-28,
+    replacing the same-index rule). Save honours the modal's disabled state like every
+    other control: it never writes while the modal is disabled.
 - **Document-editor modal** — the one editing surface for the two documents. Pressing Edit
   on the Spec or Notes card opens it over the page; the card stays in
   its view state behind the backdrop, and no card body ever turns into a textarea. It is the

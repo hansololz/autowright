@@ -38,6 +38,7 @@ from .events import hub
 from .imports_check import ALLOWED_IMPORTS, disallowed_imports
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import SECRET_REF_RE, step_json
+from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.drafting")
 
@@ -1668,6 +1669,7 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
 
 
 LOCKED_PREFLIGHT_FIX = "Unlock the step so the next sync can rewrite it, or restore what it needs"
+LOCKED_DUPLICATE_NAME_FIX = "Rename or unlock one of them"
 
 
 def locked_step_preflight(current: dict | None, grants: dict | None,
@@ -1679,7 +1681,27 @@ def locked_step_preflight(current: dict | None, grants: dict | None,
     when every locked step passes). Each step runs through `validate_steps`
     alone, under a position-1 filename (so the ordering rule stays quiet);
     only its own `step <name>:` / `<file>:` lines count, file names reported
-    as stored."""
+    as stored. A locked name shared by two current steps returns the
+    duplicate-name blockers alone, before any validator runs."""
+    # §8: a locked step whose name another current step shares (a
+    # pre-uniqueness version) blocks first — the by-name splice would keep
+    # only one of them. One blocker per such name, no agent call.
+    name_counts: dict[str, int] = {}
+    for s in (current or {}).get("steps") or []:
+        if isinstance(s, dict):
+            key = str(s.get("name") or "").strip()
+            name_counts[key] = name_counts.get(key, 0) + 1
+    duplicate_blockers: list[dict] = []
+    for s in locked_steps(current):
+        name = str(s.get("name") or "").strip()
+        if name_counts.get(name, 0) > 1 and not any(
+                b["step"] == name for b in duplicate_blockers):
+            duplicate_blockers.append({
+                "reason": f"two steps are named `{name}` — the lock splice can't tell them apart",
+                "fix": LOCKED_DUPLICATE_NAME_FIX,
+                "details": "", "kind": "constraint", "step": name})
+    if duplicate_blockers:
+        return duplicate_blockers
     packages = [dict(p) for p in (current or {}).get("packages") or []
                 if isinstance(p, dict)]
     blockers: list[dict] = []
@@ -1689,7 +1711,7 @@ def locked_step_preflight(current: dict | None, grants: dict | None,
         suffix = stored_file.split("-", 1)[1] if "-" in stored_file else stored_file
         probe_file = f"01-{suffix}"
         manifest = {"steps": [locked_manifest_entry(s, probe_file)], "packages": packages}
-        files = {"manifest.yaml": yaml.safe_dump(manifest, sort_keys=False),
+        files = {"manifest.yaml": dump_yaml(manifest),
                  probe_file: str(s.get("code") or "")}
         _, errors = validate_steps(files, grants, unresolved=unresolved)
         lines = []

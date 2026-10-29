@@ -508,7 +508,12 @@ function sameNonCron(a: DraftTrigger, b: DraftTrigger): boolean {
 export function mergeDraftTriggers(cur: DraftTrigger[], drafted: DraftTrigger[]): DraftTrigger[] {
   const schedules = cur.filter(isSchedule)
   const used = new Set<number>()
-  const next = drafted.filter(isSchedule).map((d) => {
+  // §20 manifest rule, mirrored: drafted schedules sharing a §4.3 identity
+  // (same cron and zone, same interval) collapse to the first — never two
+  // identical schedules
+  const draftedSchedules = drafted.filter(isSchedule)
+    .filter((d, k, all) => all.findIndex((o) => sameSchedule(o, d)) === k)
+  const next = draftedSchedules.map((d) => {
     const i = schedules.findIndex((c, j) => !used.has(j) && sameSchedule(c, d))
     if (i < 0) return { ...d, enabled: true }
     used.add(i)

@@ -27,9 +27,10 @@ from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
 from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
-                      NameTakenError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
+                      NameTakenError, StepModifiedError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
                       size_label, store, strip_param_values)
 from . import testexec, versions_diff
+from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.api")
 
@@ -471,14 +472,23 @@ def _version_content(v: dict) -> dict:
             "notes": v.get("notes") or ""}
 
 
-def _validate_draft_steps(d: dict, a: dict | None = None) -> None:
-    """The save endpoints' 422 form of `_draft_step_errors` (below)."""
-    errors = _draft_step_errors(d, a)
+def _validate_draft_steps(d: dict, a: dict | None = None) -> dict:
+    """The save endpoints' 422 form of `_draft_step_check` (below). Returns the
+    validator's normalized draft — the save writes its params (§8: the §4.2
+    definition fields only, a `number`'s `min` defaulted), the same entries a
+    sync's version would hold."""
+    normalized, errors = _draft_step_check(d, a)
     if errors:
         raise HTTPException(422, "the draft doesn't validate: " + "; ".join(errors))
+    return normalized
 
 
 def _draft_step_errors(d: dict, a: dict | None = None) -> list[str]:
+    """The errors half of `_draft_step_check` (below)."""
+    return _draft_step_check(d, a)[1]
+
+
+def _draft_step_check(d: dict, a: dict | None = None) -> tuple[dict, list[str]]:
     """§19 server-side step validation: POST /automations and /versions run
     the §8 step validators (`drafting.validate_steps` — ast.parse, the §6.2
     import allowlist, manifest schema and step-file ordering, the
@@ -488,9 +498,8 @@ def _draft_step_errors(d: dict, a: dict | None = None) -> list[str]:
     agents + all stored secrets (ids; names ride along for error copy).
     `a` (the automation being saved, when one exists) supplies the §4.1
     unresolved_references map so a still-unfixed imported reference gets the
-    §8 imported-file error copy instead of a raw id."""
-    import yaml
-
+    §8 imported-file error copy instead of a raw id. Returns (the validator's
+    normalized draft, errors)."""
     files: dict[str, str] = {}
     man_steps: list[dict] = []
     for s in d.get("steps") or []:
@@ -506,13 +515,13 @@ def _draft_step_errors(d: dict, a: dict | None = None) -> list[str]:
                           and not (k in ("agents", "secrets", "packages", "why") and not v)})
     manifest = {"steps": man_steps, "params": d.get("params") or [],
                 "packages": d.get("packages") or []}
-    files["manifest.yaml"] = yaml.safe_dump(manifest, sort_keys=False)
+    files["manifest.yaml"] = dump_yaml(manifest)
     with store.lock:  # same rule as _check_agent_refs: never walk a store collection unlocked
         grants = {"agents": [{"id": g["id"], "name": harness.grant_name(g)} for g in store.agents],
                   "secrets": [{"id": s["id"], "name": s["name"]} for s in store.secrets]}
-    _, errors = drafting.validate_steps(
+    normalized, errors = drafting.validate_steps(
         files, grants, unresolved=(a or {}).get("unresolved_references"))
-    return list(errors or [])
+    return normalized or {}, list(errors or [])
 
 
 # The executions tree can be GBs across thousands of directories; the size
@@ -927,7 +936,9 @@ def create_auto(body: models.AutomationCreate) -> dict:
                                                   existing_ids=set())
     if err:
         raise HTTPException(422, err)
-    _validate_draft_steps(d)  # §19: the §8 validators run server-side
+    normalized = _validate_draft_steps(d)  # §19: the §8 validators run server-side
+    # §8: the version stores the validator's normalized param definitions.
+    d["params"] = normalized.get("params") or []
     if body.settlePending:
         _settle_draft(None)  # §11/§19: Create settles the pending slot — its live test and jobs die
     a = store.create_automation(
@@ -960,7 +971,7 @@ def create_auto(body: models.AutomationCreate) -> dict:
         store.append_chat_marker(a, "Created as v1.")
         # §4.4: Create consumes the pending create-mode slot — settled drafts are
         # never resurrected.
-        _publish_execs_deleted(store.delete_draft(None))
+        _publish_execs_deleted(store.delete_draft(None, cancel=engine.cancel))
         hub.publish("draft.changed")
     _publish_auto_changed(a)
     return _auto_json_locked(a)
@@ -1004,7 +1015,13 @@ def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict
             # anything is created (copy_memory_into re-checks at its commit).
             if source.get("_live"):
                 raise HTTPException(409, "an execution is in progress")
-    a = store.duplicate_automation(automation_id, name=_clean_name(body.name))
+    try:
+        a = store.duplicate_automation(automation_id, name=_clean_name(body.name))
+    except StepModifiedError as e:
+        # §19: the store's at-copy-time check read the files on disk and
+        # marked the source's step — published so the problem shows at once.
+        _publish_auto_changed(source)
+        raise HTTPException(409, str(e)) from None
     _publish_auto_changed(a)
     warning = None
     if body.copyMemory:
@@ -1047,11 +1064,17 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
             d["triggers"], existing_ids={t["id"] for t in a["triggers"]})
         if err:
             raise HTTPException(422, err)
-    _validate_draft_steps(d, a)  # §19: the §8 validators run server-side
+    normalized = _validate_draft_steps(d, a)  # §19: the §8 validators run server-side
+    # §8: the version stores the validator's normalized param definitions.
+    d["params"] = normalized.get("params") or []
     # A refused settle must be side-effect free: check the 409 condition
     # before the cancels (the in-lock check below stays authoritative).
     with store.lock:
         _reject_live_draft_exec(a)
+        if sent.get("name") and sent["name"] != a["name"]:
+            # §4.1/§19: a name taken since the up-front check answers 422
+            # here, before the settle kills the draft's jobs and test.
+            store.require_name_free(sent["name"], exclude_id=a["id"])
     _settle_draft(automation_id)  # §11/§19: saving settles the draft — its live test and jobs die
     ver = _draft_to_version(d)
     with store.lock:
@@ -1084,7 +1107,7 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
             patch.update(body.concurrency.model_dump(exclude_unset=True))
         if patch:
             store.patch_automation(a, patch)
-        settled_execs = store.delete_draft(a)
+        settled_execs = store.delete_draft(a, cancel=engine.cancel)
         # §4.4 boundary marker: saving settles the draft — the thread stays,
         # split so the settled session never reaches a later chat's agent.
         store.append_chat_marker(a, f"Draft saved as v{n}." if minted
@@ -1228,7 +1251,7 @@ def delete_draft_container(owner: str) -> dict:
     with store.lock:
         if a is not None:
             _reject_live_draft_exec(a)
-        settled_execs = store.delete_draft(a)
+        settled_execs = store.delete_draft(a, cancel=engine.cancel)
         # §4.4 thread lifetime: discarding settles the draft but keeps the
         # thread — behind the boundary marker, appended server-side so a
         # settled session never reaches a later chat's agent.
@@ -1263,7 +1286,10 @@ def export_auto(automation_id: str, values: int = 1):
     except transfer.TransferError as e:
         # §5.1: an export reference matching no stored record (a deleted secret
         # or agent, or a §4.1 unresolved import reference) answers 422 naming
-        # the step or trigger — never a 500.
+        # the step or trigger — never a 500. The at-export-time seal check may
+        # have marked a step modified on disk (§4.1) — published so the problem
+        # shows at once, like the duplicate gate.
+        _publish_auto_changed(a)
         raise HTTPException(422, str(e)) from e
     from urllib.parse import quote
 

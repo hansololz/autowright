@@ -63,9 +63,11 @@ def test_json_secret_reserialized_never_reaches_the_log(store):
     wait_done(engine, h["id"])
     assert h["status"] == "succeeded"
     text = "\n".join(line["text"] for line in read_all_logs(store, h["id"]))
-    for fragment in PEM_BODY + ["BEGIN PRIVATE KEY", "0123456789abcdef0123456789abcdef01234567",
-                                "robot@my-project-123456"]:
+    for fragment in PEM_BODY + ["BEGIN PRIVATE KEY", "0123456789abcdef0123456789abcdef01234567"]:
         assert fragment not in text
+    # §6 (2026-10-28): public leaves (client_email, token_uri, universe_domain)
+    # are not secret material and stay readable.
+    assert "robot@my-project-123456" in text
     assert "•••" in text
     assert "SERVICE_ACCOUNT" in h["redacted_secrets"]
 
@@ -86,8 +88,10 @@ def test_short_json_leaves_and_literals_never_redact():
     redactions = build_redactions({"s1": '{"a": true, "b": "short"}'}, {"s1": "FLAGS"})
     assert "true" not in redactions and "short" not in redactions
     assert redact_text("it is true and short", redactions) == "it is true and short"
-    assert "{" not in secret_probes('{\n  "k": "a-long-leaf-value"\n}')
-    assert "a-long-leaf-value" in secret_probes('{\n  "k": "a-long-leaf-value"\n}')
+    assert "{" not in secret_probes('{\n  "api_key": "a-long-leaf-value"\n}')
+    assert "a-long-leaf-value" in secret_probes('{\n  "api_key": "a-long-leaf-value"\n}')
+    # §6 (2026-10-28): a leaf under a non-secret key is not probed on its own.
+    assert "a-long-leaf-value" not in secret_probes('{\n  "k": "a-long-leaf-value"\n}')
 
 
 def test_multiline_line_stripped_and_escaped_forms_are_probes():
@@ -253,12 +257,14 @@ def test_stale_snapshot_firing_keeps_the_coalesced_one_shot(store, monkeypatch):
     monkeypatch.setattr(sched, "_fire", racing_fire)
     clock.now = datetime(2026, 7, 10, 8, 1)
     sched._tick()
-    assert fires == []
-    assert [t["id"] for t in a["triggers"]] == ["cron", "once"]  # one-shot survived
-    clock.now = datetime(2026, 7, 10, 8, 2)
-    sched._tick()
+    # §6 (2026-10-28): a stale first snapshot no longer abandons the coalesced
+    # group — the scheduler tries the next due trigger, so the one-shot fires
+    # in the same tick and is consumed by that attempt.
     assert fires == ["once"]
     assert [t["id"] for t in a["triggers"]] == ["cron"]  # consumed once it fired
+    clock.now = datetime(2026, 7, 10, 8, 2)
+    sched._tick()
+    assert fires == ["once"]  # nothing re-fires
 
 
 # ---------- §6: the retry pause runs on the monotonic clock ----------

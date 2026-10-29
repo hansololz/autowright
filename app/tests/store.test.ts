@@ -1605,3 +1605,65 @@ describe('boot generation under the StrictMode render tier (§19)', () => {
     }
   })
 })
+
+// §19 (2026-10-28 audit): an insert, and the unknown-id event that coalesces
+// behind an in-flight /state, both make that snapshot stale — it was
+// serialized before the new row existed, so applying it would drop the row.
+// §9: loadAuto resolves whether the store holds the row once it settles.
+describe('loadAuto inserts and the coalesced /state (§19, §9)', () => {
+  const row = (id: string) => ({ id, name: id, lastStatus: 'none', triggers: [], live: [], problems: [] }) as never
+  const snap = (automations: unknown[]) => ({
+    version: 'v', automations, executions: [], executionsTotal: 0, agents: [], secrets: [],
+    settings: null, pendingDraft: null, draftJobs: [],
+  }) as never
+
+  it('an insert landing while a coalesced refresh is pending keeps the inserted row', async () => {
+    const state = vi.mocked(apiMod.api.state)
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    state.mockReset()
+    let answer!: (v: unknown) => void
+    state.mockImplementationOnce(() => new Promise((r) => { answer = r }) as never)
+    state.mockResolvedValueOnce(snap([row('a1'), row('a-new')]))
+    state.mockImplementation(() => Promise.reject(new Error('offline')))
+    store.useStore.setState({ automations: [row('a1')] })
+    // an unknown id coalesces into one /state, serialized before a-new landed
+    store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'aX', automation: row('aX') })
+    expect(state).toHaveBeenCalledTimes(1)
+    getAutomation.mockResolvedValueOnce(row('a-new'))
+    expect(await store.useStore.getState().loadAuto('a-new', { insert: true })).toBe(true)
+    answer(snap([row('a1')]))
+    await vi.waitFor(() => expect(state).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(store.useStore.getState().automations.map((a) => a.id)).toEqual(['a1', 'a-new']))
+  })
+
+  it('an unknown-id event coalesced behind an in-flight refresh makes that refresh refetch', async () => {
+    const state = vi.mocked(apiMod.api.state)
+    state.mockReset()
+    let answer!: (v: unknown) => void
+    state.mockImplementationOnce(() => new Promise((r) => { answer = r }) as never)
+    state.mockResolvedValueOnce(snap([row('a1'), row('aX'), row('aNew')]))
+    state.mockImplementation(() => Promise.reject(new Error('offline')))
+    store.useStore.setState({ automations: [row('a1')] })
+    store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'aX', automation: row('aX') })
+    // a second unknown id coalesces behind the /state already on the wire
+    store.useStore.getState().applyEvent({ event: 'automation.changed', automationId: 'aNew', automation: row('aNew') })
+    expect(state).toHaveBeenCalledTimes(1)
+    // serialized before aNew existed
+    answer(snap([row('a1'), row('aX')]))
+    await vi.waitFor(() => expect(state).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(store.useStore.getState().automations.map((a) => a.id)).toEqual(['a1', 'aX', 'aNew']))
+  })
+
+  it('resolves false when an insert GET fails, true when the row is held', async () => {
+    const getAutomation = vi.mocked(apiMod.api.getAutomation)
+    store.useStore.setState({ automations: [row('a1')] })
+    getAutomation.mockRejectedValueOnce(new Error('offline'))
+    expect(await store.useStore.getState().loadAuto('a-gone', { insert: true })).toBe(false)
+    expect(store.useStore.getState().automations.map((a) => a.id)).toEqual(['a1'])
+    // update-only GET for an id the store never held: nothing lands
+    getAutomation.mockResolvedValueOnce(row('a-other'))
+    expect(await store.useStore.getState().loadAuto('a-other')).toBe(false)
+    getAutomation.mockResolvedValueOnce(row('a1'))
+    expect(await store.useStore.getState().loadAuto('a1')).toBe(true)
+  })
+})

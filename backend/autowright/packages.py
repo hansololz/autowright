@@ -461,6 +461,11 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None,
             if err:
                 r["status"] = "failed"
                 r["error"] = err
+            elif r.get("import") and not _import_present(r["import"]):
+                # §6.2: pip exited 0 but the declared import target is still
+                # absent — the distribution doesn't provide that module.
+                r["status"] = "failed"
+                r["error"] = f"distribution {r['pip']} has no module {r['import']}"
             else:
                 r["status"] = "installed"
                 r["version"] = _installed_versions().get(_norm(r["pip"]))

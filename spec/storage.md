@@ -342,7 +342,9 @@ it is the wrong tool for a same-machine copy. The copied version folders are sea
 from the copied bytes: each manifest step's `sha` (§4.1) is stamped over the file as
 copied — the same bytes the source sealed, because a source whose current version holds a
 `step-modified` step refuses to duplicate (§19 409 naming the step: pull and push it, or
-save it from the editor, first), so a copy never launders an unvalidated script (the
+save it from the editor, first — decided against the bytes on disk at copy time, not only
+the in-memory flag, since the flag is set at load and at execution start and a hand edit
+made in between would otherwise copy and re-seal clean, 2026-10-28), so a copy never launders an unvalidated script (the
 manifest `sha` keys are, with `when` and `note` below, the one exception to the
 byte-for-byte copy). The copy gets a fresh uuid and a name
 deduped by the §4.1 create rule (the smallest free "Name n" suffix, applied to the name the
@@ -618,6 +620,12 @@ Rules:
   or Notes) would vanish on reload and the next whole-file rewrite (a chat marker append,
   `PUT /chat`) would lose it from disk for good. The log tail/since fast paths already
   split on LF; every reader agrees.
+- **A YAML string holding U+0085 is written double-quoted.** PyYAML emits NEL raw inside a
+  single-quoted scalar and reads it back as a line break — an automation name `a<NEL>b`
+  reloads as `a b` (silent corruption, and a possible §4.1 name collision after a restart);
+  the one shared dumper forces the double-quoted style (`\N` escape) for any string that
+  contains U+0085, and every YAML the app writes — `automation.yaml`, version manifests,
+  executions, settings, the §5.1 archive manifests — goes through that dumper (2026-10-28).
 - **Lenient version read covers nested lists.** In a stored version's manifest, `packages`
   entries, and each step's `secrets` and `agents` entries, that aren't mappings are dropped
   at load with a warning (a hand-edited `packages: [requests]` would otherwise crash every
@@ -764,7 +772,14 @@ is not a stored id (a leftover `<id>` placeholder, a commented-out old reference
 422 naming the step — an archive the importer would reject is never produced, and the
 "re-export" guidance is never handed out for bytes that would re-export identically. For
 the same reason export refuses (422, naming the step) a version whose manifest can't travel
-— a step with no file name, a non-integer `timeout` or `retries` (an integer is ASCII
+— a step whose file on disk no longer matches its §4.1 seal (`step-modified`, compared at
+export time like `duplicate`: the archive would carry and the importer would seal an
+unvalidated script; "step '<name>' changed on disk since its version was saved — save the
+automation once before exporting it"), two steps sharing a trimmed name or a blank name
+(§4.1 uniqueness — the importer below refuses them, so a pre-rule version must be saved
+once from the editor or pushed with one renamed before it travels, 2026-10-28; the
+drafting uniqueness line plus " — rename one and save before exporting", and "step N needs
+a name — repair the automation first"), a step with no file name, a non-integer `timeout` or `retries` (an integer is ASCII
 digits only), a present `timeout` below 1 or `retries` outside 1–10 (a stored 0 or null
 reads as "none" and is simply not written, like an absent key), or `timeout` beside
 `no_timeout` / `retries` beside `infinite_retries` — every shape the importer below
@@ -826,7 +841,8 @@ answers 422 and writes nothing):
   definition rules: a step `agent: true` carries a nonempty `why`, every step `secrets:`
   entry carries one, a step listing several `agents:` entries carries one per entry (§8
   rule 7 — a single entry's is optional, as the app's own exports write it), and a
-  package has a nonempty `why` and a bare pip name — import rejects exactly what
+  package has a nonempty `why` and a bare pip name, and step names are non-blank and
+  unique once trimmed (§4.1, 2026-10-28) — import rejects exactly what
   `POST /versions` would),
   §4.7 agent configs
   (harness/mode/model rules), §4.8 secret names, trigger

@@ -27,7 +27,7 @@ from . import __version__, harness, packages as pkglib, paths, timefmt, triggers
 from .drafting import STEP_FILE_RE
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import (AGENT_REF_RE, SECRET_REF_RE, MissingStepScriptError, Store, new_id,
-                      strip_param_values)
+                      step_script_sha, strip_param_values)
 
 FORMAT_VERSION = 2
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -191,6 +191,48 @@ def _travelling_integer(step: dict, key: str) -> int:
     return int(value)
 
 
+def _disk_modified_steps(store: Store, a: dict, ver: dict, version_dir) -> list[dict]:
+    """§4.1 `step-modified` at export time, like `duplicate`: the current
+    version's steps whose script on disk no longer matches its seal. The
+    store's own helper answers when it has one; otherwise the bytes are
+    compared against the seal here."""
+    helper = getattr(store, "disk_modified_steps", None)
+    if callable(helper):
+        return helper(a)
+    modified = []
+    for s in ver["steps"]:
+        sealed = store.sealed_step_sha(version_dir, s.get("file"))
+        if not (isinstance(sealed, str) and sealed):
+            continue
+        path = version_dir / s["file"]
+        if path.is_file() and step_script_sha(path.read_bytes()) != sealed:
+            modified.append(s)
+    return modified
+
+
+def _check_travelling_steps(store: Store, a: dict, ver: dict, version_dir) -> None:
+    """§5.1 export: a version whose manifest can't travel is a 422 naming the
+    step - a script changed on disk since its seal (the importer would seal an
+    unvalidated script), or step names that are blank or shared once trimmed
+    (§4.1 uniqueness, which the importer refuses)."""
+    if modified := _disk_modified_steps(store, a, ver, version_dir):
+        step = modified[0]
+        raise TransferError(f"step {(step.get('name') or step.get('file'))!r} changed on "
+                            "disk since its version was saved — save the automation once "
+                            "before exporting it")
+    name_counts: dict[str, int] = {}
+    for i, s in enumerate(ver["steps"], 1):
+        name = s.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise TransferError(f"step {i} needs a name — repair the automation first")
+        name_counts[name.strip()] = name_counts.get(name.strip(), 0) + 1
+    for name, n in name_counts.items():
+        if n > 1:
+            raise TransferError(f"step names must be unique: `{name}` appears "
+                                + ("twice" if n == 2 else f"{n} times")
+                                + " — rename one and save before exporting")
+
+
 def export_automation(store: Store, a: dict, include_values: bool = True) -> bytes:
     """The §5.1 archive for an automation's current version, as zip bytes."""
     with store.lock:
@@ -344,6 +386,7 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
             if not (s.get("file") and (version_dir / s["file"]).is_file()):
                 # The §19 restore refusal, mapped to 409 by the API like it.
                 raise MissingStepScriptError(s.get("file") or f"step {i}")
+        _check_travelling_steps(store, a, ver, version_dir)
         for s in ver["steps"]:
             # §5.1: the code's id subscripts travel in ref form.
             files.append((f"automation/{s['file']}", refs.code(s.get("code", ""))))
@@ -612,9 +655,13 @@ def _validate(z: zipfile.ZipFile) -> dict:
     seen_files: set[str] = set()
     for i, s in enumerate(steps_meta, 1):
         if (not isinstance(s, dict) or not isinstance(s.get("file"), str)
-                or not s["file"] or not isinstance(s.get("name"), str)
-                or not s["name"].strip()):
+                or not s["file"] or not isinstance(s.get("name"), str)):
             raise TransferError(f"invalid step manifest entry: {s!r}")
+        # §4.1 / §5.1: step names are non-blank and unique once trimmed, in
+        # the wording `POST /versions` uses - import rejects exactly what the
+        # save path would.
+        if not s["name"].strip():
+            raise TransferError(f"step {i} needs a name")
         # §5.1: the archive is untrusted, so the text fields are typed, not
         # just truthy - a mapping/list/bool would land verbatim in the stored
         # version and white-screen the §9.2 detail page.
@@ -747,6 +794,14 @@ def _validate(z: zipfile.ZipFile) -> dict:
             if locked:
                 entry["locked"] = True
         steps.append(entry)
+    step_name_counts: dict[str, int] = {}
+    for s in steps_meta:
+        step_name = s["name"].strip()
+        step_name_counts[step_name] = step_name_counts.get(step_name, 0) + 1
+    for step_name, count in step_name_counts.items():
+        if count > 1:
+            raise TransferError(f"step names must be unique: `{step_name}` appears "
+                                + ("twice" if count == 2 else f"{count} times"))
 
     agents = _yaml_or_reject(z, "agents.yaml", required=False).get("agents") or []
     if not isinstance(agents, list):
@@ -1370,6 +1425,20 @@ class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise self._refuse()
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
+    def http_error_302(self, req, fp, code, msg, headers):
+        # A malformed `Location` (an unbalanced IPv6 bracket) makes urllib's
+        # own parse raise a bare ValueError before `redirect_request` runs;
+        # the 3xx response is closed here so the raise doesn't leak the
+        # socket, and each fetch path turns the ValueError into its
+        # "download failed" error.
+        try:
+            return super().http_error_302(req, fp, code, msg, headers)
+        except ValueError:
+            fp.close()
+            raise
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
 
 SHORT_DOWNLOAD = ("download failed - the connection closed before the whole "
                   "file arrived")
@@ -1439,6 +1508,10 @@ def _github_api(path: str):
         # A captive portal / proxy answering HTML where the API's JSON belongs.
         raise TransferError("GitHub's answer wasn't readable — check the network "
                             "and try again") from None
+    except ValueError as e:
+        # A redirect to a malformed Location: urllib's parse raises a bare
+        # ValueError (after the JSON clause above, which subclasses it).
+        raise TransferError(f"couldn't reach GitHub — {e}") from None
 
 
 def github_raw_url(url: str) -> str:
@@ -1543,4 +1616,8 @@ def fetch_archive(url: str) -> tuple[bytes, str]:
         # HTTPException covers a truncated chunked download (IncompleteRead),
         # which is not an OSError.
         raise TransferError(f"download failed — {getattr(e, 'reason', e)}") from None
+    except ValueError as e:
+        # A redirect to a malformed Location (an unbalanced IPv6 bracket):
+        # urllib's parse raises a bare ValueError, never a 500.
+        raise TransferError(f"download failed — {e}") from None
     return b"".join(chunks), resolved

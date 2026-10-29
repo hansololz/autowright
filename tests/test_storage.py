@@ -2927,12 +2927,13 @@ def test_draft_container_is_never_sealed(store, home):
     assert manifest["steps"][0]["locked"] is True
 
 
-def test_duplicate_reseals_a_hand_edited_source(store, home):
-    """§5 duplicate: the copy's seals are stamped from the bytes actually
-    copied — a hand-edited source keeps its step-modified problem, the copy
-    has none."""
-    from autowright.storage import Store, step_script_sha
-    from autowright.yamlio import load_yaml
+def test_duplicate_refuses_a_hand_edited_source(store, home):
+    """§5 duplicate: a source whose current version holds a step-modified step
+    refuses to duplicate (2026-10-28) — the copy would seal an unvalidated
+    script; nothing is created and the source keeps its problem."""
+    import pytest
+
+    from autowright.storage import StepModifiedError, Store
 
     a = store.create_automation(make_version(), "Original", None)
     vd = home / "automations" / a["id"] / "versions" / "v1"
@@ -2942,10 +2943,8 @@ def test_duplicate_reseals_a_hand_edited_source(store, home):
     source = s2.autos[a["id"]]
     assert [p["kind"] for p in s2.auto_json(source)["problems"]] == ["step-modified"]
 
-    copy = s2.duplicate_automation(a["id"])
-    copied = home / "automations" / copy["id"] / "versions" / "v1"
-    assert (copied / "02-finish.py").read_bytes() == b"print('hand edit')\n"
-    for entry in load_yaml(copied / "automation.yaml")["steps"]:
-        assert entry["sha"] == step_script_sha((copied / entry["file"]).read_bytes())
-    assert s2.auto_json(copy)["problems"] == []
+    before = set(s2.autos)
+    with pytest.raises(StepModifiedError):
+        s2.duplicate_automation(a["id"])
+    assert set(s2.autos) == before
     assert [p["kind"] for p in s2.auto_json(source)["problems"]] == ["step-modified"]

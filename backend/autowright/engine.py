@@ -184,6 +184,32 @@ def _step_sha(s: dict) -> str:
     return hashlib.sha256((s.get("code") or "").encode()).hexdigest()[:16]
 
 
+def _crlf_step_sha(s: dict) -> str:
+    """§4.1/§8: `_step_sha` of the step's code written with CRLF line ends —
+    the raw-bytes record sha of a Windows-written file whose LF text is the
+    loaded code."""
+    return hashlib.sha256((s.get("code") or "").replace("\n", "\r\n").encode()).hexdigest()[:16]
+
+
+def _pass_elapsed_ms(state: dict) -> int:
+    """§7: this pass's elapsed time — the monotonic difference from the
+    start kept beside the wall `pass_start`, never negative (a state without
+    the monotonic start falls back to the wall clock, clamped at 0)."""
+    started = state.get("pass_start_monotonic")
+    if started is not None:
+        return max(0, int((time.monotonic() - started) * 1000))
+    pass_start = state.get("pass_start")
+    return max(0, int((time.time() - pass_start) * 1000)) if pass_start else 0
+
+
+def _script_text(data: bytes) -> str:
+    """§4.1/§7: a step script's bytes as a load reads them — UTF-8 (bad bytes
+    replaced) with universal newlines (CRLF and a lone CR become LF), the
+    same text `read_text` gives storage's load, so a Windows-written file
+    never compares as an edit. The record `sha` stays the raw bytes' hash."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def build_redactions(values_by_id: dict[str, str],
                      names_by_id: dict[str, str]) -> dict[str, str]:
     """value → secret name, plus each substantive line of a multi-line value
@@ -328,7 +354,8 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                      carry_len: int = 0, cut_guards: list[str] = ()) -> int:
     """One step as a §6.1 executor subprocess — shared by real executions and
     §11 tests. Streams control lines: `log(k, text)` gets every log line,
-    `result` collects §4.5 result ops, `holder` gets error/notify/result_touched,
+    `result` collects §4.5 result ops, `holder` gets error/notify/result_touched
+    (and chip_touched once a `result.chip` op arrives),
     `on_reply(text)` gets each §6.1 reply() call (None → replies are dropped).
     `state['proc']` holds the live Popen so a caller can cancel. `timeout_s`
     is the resolved §6 step limit (`step_timeout_for`); None = no watchdog.
@@ -527,6 +554,7 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                             result["status"] = v
                         elif f == "chip":
                             result["chip"] = v
+                            holder["chip_touched"] = True
                     elif op == "notify":
                         holder["text"] = msg.get("text")
                     elif op == "reply":
@@ -955,8 +983,12 @@ class Engine:
         # the row, so the §7 total timer has its clock from the first frame.
         # In-memory only — `write_exec_yaml` whitelists its keys.
         h["_pass_start"] = time.time()
+        # §7: durations come from the monotonic clock kept beside the wall
+        # start — a wall-clock step back (NTP, a manual change) can't make a
+        # pass negative.
         state = {"proc": None, "cancel": False, "on_spawn": _on_spawn,
-                 "on_agent_groups": _on_agent_groups, "pass_start": h["_pass_start"]}
+                 "on_agent_groups": _on_agent_groups, "pass_start": h["_pass_start"],
+                 "pass_start_monotonic": time.monotonic()}
         t = threading.Thread(target=self._execute, args=(auto, ver, h, state), daemon=True)
         state["thread"] = t
         with self._lock:
@@ -1131,16 +1163,12 @@ class Engine:
         base = self.store.auto_dir(auto)
         return base / "draft" / "automation" if kind == "draft" else base / "versions" / f"v{version}"
 
-    def _read_version_steps(self, ver: dict, h: dict, vdir: Path) -> dict[int, str]:
-        """§4.1/§7 execution-start seal check: each step this pass will run
-        is read from disk once; its record `sha` becomes the hash of those
-        bytes, and a hash that differs from the folder's §5 seal marks the
-        loaded step `modifiedOnDisk` exactly as load does — published at once
-        so the `step-modified` problem shows without a restart. Returns step
-        index → the script text read (steps whose file can't be read are left
-        to `_execute_step`'s missing-script path)."""
-        codes: dict[int, str] = {}
-        marked = False
+    def _read_step_files(self, ver: dict, h: dict, vdir: Path) -> dict[int, tuple[str, bytes]]:
+        """§7: the steps this pass will run, each read from disk once — step
+        index → (file name, raw bytes). Steps already succeeded or skipped are
+        left out, as are steps whose file can't be read (`_execute_step`'s
+        missing-script path reports those)."""
+        files: dict[int, tuple[str, bytes]] = {}
         for i, s in enumerate(ver["steps"]):
             if i >= len(h["steps"]) or h["steps"][i]["status"] in ("succeeded", "skipped"):
                 continue
@@ -1151,21 +1179,52 @@ class Engine:
                 path = vdir / file
                 if not path.is_file():
                     continue
-                data = path.read_bytes()
+                files[i] = (file, path.read_bytes())
             except OSError:
                 continue
+        return files
+
+    def _read_version_steps(self, ver: dict, h: dict, vdir: Path) -> dict[int, str]:
+        """§4.1/§7 execution-start seal check: each step this pass will run
+        is read from disk once; its record `sha` becomes the hash of those
+        bytes, and a hash that differs from the folder's §5 seal marks the
+        loaded step `modifiedOnDisk` exactly as load does — published at once
+        so the `step-modified` problem shows without a restart. Two-way: a
+        flagged step whose file matches its seal again has the flag cleared.
+        Either way the loaded `code` becomes the newline-normalized disk text
+        (`_script_text`) and the automation's §4.1 reference memo is dropped.
+        Returns step index → the script text read."""
+        codes: dict[int, str] = {}
+        marked = False
+        for i, (file, data) in self._read_step_files(ver, h, vdir).items():
+            s = ver["steps"][i]
             sha = step_script_sha(data)
             h["steps"][i]["sha"] = sha
-            codes[i] = data.decode("utf-8", errors="replace")
+            codes[i] = _script_text(data)
             sealed = self.store.sealed_step_sha(vdir, file)
-            if sealed and sha != sealed and (not s.get("modifiedOnDisk")
-                                             or s.get("code") != codes[i]):
+            if not sealed:
+                continue
+            if sha != sealed and (not s.get("modifiedOnDisk") or s.get("code") != codes[i]):
                 # §4.1: the loaded step now holds what a restart's load would —
                 # the bytes on disk — so the editor's Save (and pull) seal the
                 # script that actually ran instead of silently reverting it.
                 with self.store.lock:
                     s["modifiedOnDisk"] = True
+                    code_changed = s.get("code") != codes[i]
                     s["code"] = codes[i]
+                    if code_changed:
+                        self._drop_reference_memo(h)
+                marked = True
+            elif sha == sealed and s.get("modifiedOnDisk"):
+                # §4.1 two-way: the hand edit was reverted — the flag clears so
+                # it never lingers as a problem, blocks a restore, or gets
+                # minted by the next save.
+                with self.store.lock:
+                    s.pop("modifiedOnDisk", None)
+                    code_changed = s.get("code") != codes[i]
+                    s["code"] = codes[i]
+                    if code_changed:
+                        self._drop_reference_memo(h)
                 marked = True
         if marked:
             with self.store.lock:
@@ -1174,6 +1233,23 @@ class Engine:
                     hub.publish("automation.changed", automationId=a["id"],
                                 automation=self.store.auto_json(a, full=False))
         return codes
+
+    def _drop_reference_memo(self, h: dict) -> None:
+        """§4.1: a refreshed step `code` invalidates the owning automation's
+        reference memo so `problems` re-derive. Caller holds `store.lock`."""
+        a = self.store.autos.get(h["automation_id"])
+        if a is not None:
+            a.pop("_ref_cache", None)
+
+    def _read_draft_steps(self, ver: dict, h: dict, vdir: Path) -> dict[int, str]:
+        """§4.1/§7: a draft or test execution reads each step it will run from
+        the file it is about to execute (`draft/automation/`, or a §11 test's
+        own steps folder) — the code and secret subscripts come from disk,
+        never from the draft loaded at boot. There is no seal, so nothing is
+        flagged and the loaded draft is left as it is. Returns step index →
+        the script text read."""
+        return {i: _script_text(data)
+                for i, (_file, data) in self._read_step_files(ver, h, vdir).items()}
 
     def _memory_dir(self, auto: dict, kind: str) -> Path:
         """§4.4: Draft executions get the draft's own memory — the live dir is
@@ -1299,8 +1375,13 @@ class Engine:
             # §7: duration_ms accumulates across retry passes — the pass clock is
             # the one _launch stamped (a direct _execute call stamps its own)
             state["pass_start"] = h["_pass_start"] = state.get("pass_start") or time.time()
+            if state.get("pass_start_monotonic") is None:
+                state["pass_start_monotonic"] = time.monotonic()
             result: dict[str, Any] = {"status": "ok", "chip": None}
             result_touched = False
+            # §7 retry: only a chip op from THIS pass replaces the record's
+            # kept chip — a status-only `result.status()` leaves it.
+            chip_touched = False
             notify_text: str | None = None
             # §3 per-execution idle-sleep hold, through the §2 platform layer —
             # the release is called in the finally below. Never raises; a platform
@@ -1338,6 +1419,8 @@ class Engine:
             step_code: dict[int, str] = {}
             if h["kind"] == "version" and not h.get("_test"):
                 step_code = self._read_version_steps(ver, h, vdir)
+            else:
+                step_code = self._read_draft_steps(ver, h, vdir)
             needed: set[str] = set()
             for i, s in enumerate(ver["steps"]):
                 needed |= set(SECRET_REF_RE.findall(step_code.get(i, s.get("code", ""))))
@@ -1486,6 +1569,8 @@ class Engine:
                         notify_text = notify_holder["text"]
                     if notify_holder.get("result_touched"):
                         result_touched = True
+                    if notify_holder.get("chip_touched"):
+                        chip_touched = True
                     dur = max(0, int((time.monotonic() - t0) * 1000))
                     step["duration_ms"] = dur
                     attempt["duration_ms"] = dur
@@ -1619,12 +1704,14 @@ class Engine:
             h["finished_at"] = timefmt.now_iso()
             h["pgid"] = None  # §3: no live step group to recover anymore
             h["agent_pgids"] = []
-            if result_touched and not cancelled and not interrupted:
+            if chip_touched and not cancelled and not interrupted:
                 # The chip is optional (§4.5): it lives on the execution header,
                 # tinted by the execution's result status. It is persisted and
                 # published, so it gets the same redaction a log line gets (§5:
                 # secret values never appear in any file). Redacted in place —
                 # _notify_end falls back to the chip for the notification body.
+                # §7 retry: a pass that set no chip keeps the record's own
+                # chip and its status (a re-executed step sets them anew).
                 if result["chip"]:
                     result["chip"] = self._redact(h, result["chip"], redactions)
                 h["chip"] = result["chip"]
@@ -1663,8 +1750,7 @@ class Engine:
             # would stay `executing` on a finished record, spinning forever on
             # the §7 page. Both land failed with the pass's elapsed time, the
             # only clock this path still has.
-            pass_start = state.get("pass_start")
-            elapsed = int((time.time() - pass_start) * 1000) if pass_start else 0
+            elapsed = _pass_elapsed_ms(state)
             for s in h["steps"]:
                 if s["status"] != "executing":
                     continue
@@ -1739,11 +1825,11 @@ class Engine:
         """§7 total duration: fold this pass's elapsed time into the record's
         `duration_ms` — once per pass, on every exit path (a pass that ended in
         an engine error counts too)."""
-        pass_start = state.get("pass_start")
-        if pass_start is None:
+        if state.get("pass_start") is None:
             return
-        h["duration_ms"] = (h["duration_ms"] or 0) + int((time.time() - pass_start) * 1000)
+        h["duration_ms"] = (h["duration_ms"] or 0) + _pass_elapsed_ms(state)
         state["pass_start"] = None
+        state["pass_start_monotonic"] = None
         h["_pass_start"] = None  # the pass is over; §4.5 passStartedMs reads 0 from here
 
     def _agents_for_step(self, auto: dict, s: dict) -> list[dict]:

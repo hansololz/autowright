@@ -268,11 +268,12 @@ export default function ExecutionPage() {
   const retry = () => {
     if (starting) return
     // §7 in-place retry: same execution record — stay on this page, the
-    // re-published exec.started flips the badge back to Executing.
-    setRetryKey((k) => k + 1)
+    // re-published exec.started flips the badge back to Executing. The key
+    // bumps only once the retry was accepted — a rejected one keeps the view's
+    // selection and auto-follow as they were.
     setStarting('retry')
     void api.retryExecution(e.id)
-      .catch((err: Error) => showToast(err.message))
+      .then(() => setRetryKey((k) => k + 1), (err: Error) => showToast(err.message))
       .finally(() => setStarting(null))
   }
   const executeAgain = () => {
