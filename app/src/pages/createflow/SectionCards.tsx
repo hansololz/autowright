@@ -9,7 +9,7 @@ import { SecretModal } from '../../SecretModal'
 import { useTriggerPreview } from '../../triggers'
 import { StepList, type StepEditing, type StepHistory } from '../../steps'
 import type { Agent, SecretMeta, UnresolvedRefs } from '../../types'
-import { Caret, CheckBox, Collapse, EmptyLine, Eyebrow, MetaChip, MiniBadge, Notice, ScrollArea, agName, dispModel, paramSummary } from '../../ui'
+import { Caret, CheckBox, Collapse, EmptyLine, Eyebrow, MetaChip, MiniBadge, Notice, ScrollArea, TipButton, agName, dispModel, paramSummary } from '../../ui'
 import { Markdown, SpecMarkdown } from '../../result'
 import { type AgentRef, type Rev, type SecretRef, applyTestValues, shortId, specToText, stepList, textToSpec } from './model'
 import { DocEditorModal } from './DocEditorModal'
@@ -531,15 +531,16 @@ export function RightCards({
             it in the step-script modal's edit mode */}
         {editing && (
           <div style={{ padding: '10px 18px', borderTop: '1px solid var(--hairline-dim)' }}>
-            <button
+            <TipButton
               className="ad-btn-ghost"
+              tip="Add a step you write yourself; it opens in the editor"
               disabled={editing.disabled}
               onClick={() => addStepRef.current?.()}
               style={{ padding: '5px 12px', fontSize: 12 }}
             >
               <i className="fa-solid fa-plus" style={{ marginRight: 6, fontSize: 10.5 }} />
               Add step
-            </button>
+            </TipButton>
           </div>
         )}
       </div>

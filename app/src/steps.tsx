@@ -11,7 +11,7 @@ import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import { useStore } from './store'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
-import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, useOverlayThumb, validUrl } from './ui'
+import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, TipButton, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, useOverlayThumb, validUrl } from './ui'
 
 // §4.1/§6.1 code-reference scan: literal quoted uuid subscripts only.
 const SECRET_REF_RE = /\bsecrets\[\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']\s*\]/g
@@ -258,7 +258,14 @@ export type { CodeMatch } from './find'
 // modal's chips and the editor's lock toggle.
 export const STEP_LOCKED_TITLE = 'Locked — a sync keeps this step byte for byte'
 export const STEP_AUTHORED_TITLE = 'Written by you — the agent keeps it unless the spec requires a change'
-export const STEP_LOCK_TOGGLE_TITLE = 'A locked step is kept byte for byte by every sync — the agent builds the other steps around it'
+export const STEP_LOCK_TITLE = 'Lock this step: every sync keeps it byte for byte and builds the other steps around it'
+export const STEP_UNLOCK_TITLE = 'Unlock this step: the next sync may rewrite it'
+
+/** §14 shortcut labels in tooltips: the Mac glyphs, or the Windows / Linux
+ * key names, by the §9 store's `platformOs` token. */
+export function shortcutKeys(os: string): { mod: string; alt: string } {
+  return os === 'windows' || os === 'linux' ? { mod: 'Ctrl+', alt: 'Alt+' } : { mod: '⌘', alt: '⌥' }
+}
 
 // ---------- §11 step editing (editor variant) ----------
 
@@ -580,13 +587,17 @@ export function StepKeys({ i, count, closing, paused, onNav, onFind, onMove }: {
 // script in its own scroll pane. Only the code pane remounts through the §14
 // keyed fade (resetting its scroll) when the step switches; the navigator and
 // the toolbar stay put, so nothing under the pointer flashes.
-function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, edit, setEdit }: {
+function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, edit, setEdit, controls }: {
   step: Step; j: number; viewed: boolean; editor: boolean; tags: StepTagDesc[]; facts: StepFactSection[]; onNav: () => void
   // §11 edit mode: unviewed rows stop flipping, and the viewed row shows the
   // step's name and description as fields
   navDisabled?: boolean
   edit?: StepEdit | null
   setEdit?: (fn: (e: StepEdit | null) => StepEdit | null) => void
+  // §11 step controls (move / lock / remove) — rendered on the viewed row of
+  // the editor variant, beneath the tag row: the row is what moves, so the
+  // arrows sit on the thing they move, away from the toolbar's ‹ › chevrons
+  controls?: React.ReactNode
 }) {
   // §9.2: the viewed row is a plain, text-selectable, unfocusable block — a
   // button would stop the user from dragging over its description, chips and
@@ -662,6 +673,11 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
                 return <Tag key={t.key} icon={t.icon} c={v.c} title={t.title} style={v.style}>{t.label}</Tag>
               })}
             </div>
+            {controls && (
+              <div style={{ display: 'flex', alignItems: 'center', marginTop: 6, marginLeft: -7, userSelect: 'none' }}>
+                {controls}
+              </div>
+            )}
             {/* §9.2 fact list: what the script reaches and touches, from a
                 literal-only scan — labeled sections of bullets, not chips
                 (hosts, prompts and file names are too long for a chip). */}
@@ -780,46 +796,52 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   }
   const startEdit = () => { find.close(); onStartEdit() }
   const handsOff = !editing || editing.disabled
+  // §11 step controls: rendered on the navigator's viewed row (not the code
+  // toolbar, whose ‹ › chevrons they would be mistaken for)
+  // §14 tooltips: every button in the modal explains itself in a plain line
+  // through the tooltip bubble (native `title` dies after a click), with the
+  // shortcut in the platform's key names
+  const keys = shortcutKeys(useStore((st) => st.platformOs))
   const controls = editing ? (
     <span data-testid="step-controls" style={{ display: 'contents' }}>
       {/* §11 Move up / Move down: disabled at the ends and in edit mode */}
-      <button
+      <TipButton
         className="ad-btn-icon"
         aria-label="Move step up"
-        title="Move step up"
+        tip={`Run this step one position earlier (${keys.alt}↑)`}
         disabled={handsOff || editActive || i === 0}
         onClick={() => onMove(-1)}
       >
         <i className="fa-solid fa-arrow-up" />
-      </button>
-      <button
+      </TipButton>
+      <TipButton
         className="ad-btn-icon"
         aria-label="Move step down"
-        title="Move step down"
+        tip={`Run this step one position later (${keys.alt}↓)`}
         disabled={handsOff || editActive || i === steps.length - 1}
         onClick={() => onMove(1)}
       >
         <i className="fa-solid fa-arrow-down" />
-      </button>
-      <button
+      </TipButton>
+      <TipButton
         className="ad-btn-icon"
         aria-label={step.locked ? 'Unlock step' : 'Lock step'}
-        title={STEP_LOCK_TOGGLE_TITLE}
+        tip={step.locked ? STEP_UNLOCK_TITLE : STEP_LOCK_TITLE}
         aria-pressed={!!step.locked}
         disabled={handsOff || editActive}
         onClick={onToggleLock}
       >
         <i className={`fa-solid ${step.locked ? 'fa-lock' : 'fa-lock-open'}`} />
-      </button>
-      <button
+      </TipButton>
+      <TipButton
         className="ad-btn-icon danger"
         aria-label="Remove step"
-        title="Remove step"
+        tip="Remove this step from the automation (you will be asked to confirm)"
         disabled={handsOff || editActive}
         onClick={() => setRemoveAsk(true)}
       >
         <i className="fa-solid fa-trash" />
-      </button>
+      </TipButton>
     </span>
   ) : null
   return (
@@ -851,6 +873,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                   <StepNavRow
                     key={j} step={s} j={j} viewed={j === i} editor={editor} tags={tagsByStep[j]} facts={factsByStep[j]} onNav={() => onNav(j)}
                     navDisabled={editActive} edit={j === i ? edit : null} setEdit={setEdit}
+                    controls={j === i ? controls : undefined}
                   />
                 ))}
               </div>
@@ -874,33 +897,32 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
               </span>
               {editActive && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 6 }}>
-                  <button className="ad-btn-text dim small ad-focus-inset" disabled={saving} onClick={cancelEdit}>
+                  <TipButton className="ad-btn-text dim small ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit}>
                     Cancel
-                  </button>
-                  <button className="ad-btn-link small ad-focus-inset" disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
+                  </TipButton>
+                  <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
                     {saving ? 'Saving…' : 'Save'}
-                  </button>
+                  </TipButton>
                 </div>
               )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', marginLeft: 4 }}>
                 {editing && !editActive && (
-                  <button className="ad-btn-icon" aria-label="Edit script" title="Edit script" disabled={editing.disabled} onClick={startEdit}>
+                  <TipButton className="ad-btn-icon" aria-label="Edit script" tip="Edit this script, its name and description by hand" disabled={editing.disabled} onClick={startEdit}>
                     <i className="fa-solid fa-pen" />
-                  </button>
+                  </TipButton>
                 )}
-                {controls}
-                <button className="ad-btn-icon" aria-label="Find in script" aria-pressed={find.open} disabled={editActive} onClick={find.show}>
+                <TipButton className="ad-btn-icon" aria-label="Find in script" tip={`Find in this script (${keys.mod}F)`} aria-pressed={find.open} disabled={editActive} onClick={find.show}>
                   <i className="fa-solid fa-magnifying-glass" />
-                </button>
-                <button className="ad-btn-icon" aria-label="Previous step" disabled={editActive || i === 0} onClick={() => onNav(i - 1)}>
+                </TipButton>
+                <TipButton className="ad-btn-icon" aria-label="Previous step" tip="Previous step (←)" disabled={editActive || i === 0} onClick={() => onNav(i - 1)}>
                   <i className="fa-solid fa-chevron-left" />
-                </button>
-                <button className="ad-btn-icon" aria-label="Next step" disabled={editActive || i === steps.length - 1} onClick={() => onNav(i + 1)}>
+                </TipButton>
+                <TipButton className="ad-btn-icon" aria-label="Next step" tip="Next step (→)" disabled={editActive || i === steps.length - 1} onClick={() => onNav(i + 1)}>
                   <i className="fa-solid fa-chevron-right" />
-                </button>
-                <button className="ad-btn-icon" aria-label="Close" disabled={saving} onClick={() => { if (savingRef.current) return; if (dirtyRef.current) setDiscardAsk('close'); else close() }}>
+                </TipButton>
+                <TipButton className="ad-btn-icon" aria-label="Close" tip="Close (Esc)" disabled={saving} onClick={() => { if (savingRef.current) return; if (dirtyRef.current) setDiscardAsk('close'); else close() }}>
                   <i className="fa-solid fa-xmark" />
-                </button>
+                </TipButton>
               </div>
             </div>
             {edit ? (

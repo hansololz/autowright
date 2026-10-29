@@ -72,15 +72,14 @@ export function Badge({ status, style }: { status: Status | string; style?: Reac
   return <MiniBadge c={b.c} bg={b.bg} style={style}>{b.label}</MiniBadge>
 }
 
-/** §14 step-row info tag (agent / secret / timeout tags) — one geometry for the
- * create-flow review, detail-page STEPS card, and import preview alike.
- * `title` renders the §14 Tag tooltip — a custom bubble, never the native
- * `title` attribute: Chromium suppresses native tooltips after clicks and
- * scrolls (both constant on the step rows), so they read as broken. */
-export function Tag({ icon, children, c, title, style }: {
-  icon?: string; children: React.ReactNode; c?: string; title?: string; style?: React.CSSProperties
-}) {
-  const anchor = useRef<HTMLSpanElement>(null)
+/** §14 tooltip bubble — the one tooltip the app draws: a custom portal bubble,
+ * never the native `title` attribute (Chromium suppresses native tooltips after
+ * clicks and scrolls, both constant on step rows and in the step-script modal,
+ * so they read as broken). Shared by `Tag` and `TipButton`: 200 ms hover delay,
+ * centered over the anchor (below it when near the top edge), clamped 8 px
+ * inside the window, hidden on leave, mousedown and any scroll. */
+export function useTip(title?: string) {
+  const anchor = useRef<HTMLElement | null>(null)
   const bubble = useRef<HTMLDivElement>(null)
   const timer = useRef<number | null>(null)
   const [tip, setTip] = useState<{ x: number; y: number; below: boolean } | null>(null)
@@ -114,13 +113,57 @@ export function Tag({ icon, children, c, title, style }: {
     return () => window.removeEventListener('scroll', off, true)
   }, [tip])
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+  const node = title && tip ? createPortal(
+    <div style={{
+      position: 'fixed', left: tip.x, top: tip.y, zIndex: 120, pointerEvents: 'none',
+      transform: `translate(-50%, ${tip.below ? '0' : '-100%'})`,
+    }}>
+      <div ref={bubble} role="tooltip" style={{
+        background: 'var(--bg-menu)', border: '1px solid var(--border-input)',
+        borderRadius: 10, boxShadow: 'var(--shadow-menu)', padding: '6px 10px',
+        font: '400 11.5px/1.5 var(--sans)', color: 'var(--text-2)',
+        maxWidth: 320, width: 'max-content',
+        animation: ENTER_UP,
+      }}>
+        {title}
+      </div>
+    </div>,
+    document.body,
+  ) : null
+  return { anchor, handlers: { onMouseEnter: enter, onMouseLeave: hide, onMouseDown: hide }, node }
+}
+
+/** §14 button with the tooltip bubble: a plain `<button>` (class and the rest
+ * pass through) whose `tip` renders through `useTip` and is mirrored on
+ * `data-tip` for tests. Icon-only call sites still set `aria-label` — the tip
+ * is the longer, plain-language line, not the name. The hover lives on a
+ * same-size wrapper span, and a disabled button drops its pointer events, so
+ * the tip still shows while the button is disabled (a disabled button swallows
+ * hover itself) — Save before an edit, the chevrons at the ends. */
+export function TipButton({ tip, children, style, disabled, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { tip?: string }) {
+  const t = useTip(tip)
+  return (
+    <span ref={t.anchor as React.RefObject<HTMLSpanElement>} {...t.handlers} style={{ display: 'inline-flex', flex: 'none' }}>
+      <button data-tip={tip} disabled={disabled} style={disabled ? { ...style, pointerEvents: 'none' } : style} {...rest}>
+        {children}
+      </button>
+      {t.node}
+    </span>
+  )
+}
+
+/** §14 step-row info tag (agent / secret / timeout tags) — one geometry for the
+ * create-flow review, detail-page STEPS card, and import preview alike.
+ * `title` renders the §14 tooltip bubble (`useTip`), never the native `title`. */
+export function Tag({ icon, children, c, title, style }: {
+  icon?: string; children: React.ReactNode; c?: string; title?: string; style?: React.CSSProperties
+}) {
+  const t = useTip(title)
   return (
     <span
-      ref={anchor}
+      ref={t.anchor as React.RefObject<HTMLSpanElement>}
       aria-label={title}
-      onMouseEnter={enter}
-      onMouseLeave={hide}
-      onMouseDown={hide}
+      {...t.handlers}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 5,
         fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 500,
@@ -131,23 +174,7 @@ export function Tag({ icon, children, c, title, style }: {
     >
       {icon && <i className={`fa-solid ${icon}`} style={{ fontSize: 9 }} />}
       {children}
-      {title && tip && createPortal(
-        <div style={{
-          position: 'fixed', left: tip.x, top: tip.y, zIndex: 120, pointerEvents: 'none',
-          transform: `translate(-50%, ${tip.below ? '0' : '-100%'})`,
-        }}>
-          <div ref={bubble} role="tooltip" style={{
-            background: 'var(--bg-menu)', border: '1px solid var(--border-input)',
-            borderRadius: 10, boxShadow: 'var(--shadow-menu)', padding: '6px 10px',
-            font: '400 11.5px/1.5 var(--sans)', color: 'var(--text-2)',
-            maxWidth: 320, width: 'max-content',
-            animation: ENTER_UP,
-          }}>
-            {title}
-          </div>
-        </div>,
-        document.body,
-      )}
+      {t.node}
     </span>
   )
 }

@@ -12,7 +12,7 @@ import { useRef, useState } from 'react'
 import type { Agent, Step } from '../src/types'
 import { useStore } from '../src/store'
 import {
-  STEP_AUTHORED_TITLE, STEP_LOCKED_TITLE, STEP_LOCK_TOGGLE_TITLE, StepList,
+  STEP_AUTHORED_TITLE, STEP_LOCKED_TITLE, STEP_LOCK_TITLE, STEP_UNLOCK_TITLE, StepList,
   type StepEditEffect, type StepEditing, appendNewStep, newStepName, renumberStepFiles,
 } from '../src/steps'
 
@@ -261,12 +261,14 @@ describe('step editing in the step-script modal (§11)', () => {
     render(<Harness initial={[step()]} onCommit={onCommit} />)
     openRow('Fetch page')
     const toggle = within(screen.getByTestId('step-controls')).getByLabelText('Lock step')
-    expect(toggle.getAttribute('title')).toBe(STEP_LOCK_TOGGLE_TITLE)
+    expect(toggle.getAttribute('title')).toBeNull()
+    expect(toggle.getAttribute('data-tip')).toBe(STEP_LOCK_TITLE)
     fireEvent.click(toggle)
     expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'lock', name: 'Fetch page', locked: true })
     expect(onCommit.mock.calls[0][0][0].locked).toBe(true)
     // the modal stays open on the step, now showing Locked
     expect(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step').getAttribute('aria-pressed')).toBe('true')
+    expect(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step').getAttribute('data-tip')).toBe(STEP_UNLOCK_TITLE)
     fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step'))
     expect(onCommit.mock.calls[1][1]).toEqual({ kind: 'lock', name: 'Fetch page', locked: false })
     expect('locked' in onCommit.mock.calls[1][0][0]).toBe(false)
@@ -328,8 +330,8 @@ describe('step editing in the step-script modal (§11)', () => {
     openRow('A')
     const control = (label: string) => within(screen.getByTestId('step-controls')).getByLabelText(label) as HTMLButtonElement
     expect(control('Move step up').disabled).toBe(true)
-    expect(control('Move step up').getAttribute('title')).toBe('Move step up')
-    expect(control('Move step down').getAttribute('title')).toBe('Move step down')
+    expect(control('Move step up').getAttribute('data-tip')).toBe('Run this step one position earlier (⌥↑)')
+    expect(control('Move step down').getAttribute('data-tip')).toBe('Run this step one position later (⌥↓)')
     fireEvent.click(control('Move step down'))
     expect(onCommit).toHaveBeenCalledTimes(1)
     const [next, effect] = onCommit.mock.calls[0]

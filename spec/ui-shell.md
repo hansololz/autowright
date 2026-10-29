@@ -326,8 +326,15 @@ animation animates `transform` and would knock the toast off-center while it pla
   overflow-menu button), the menu-bar panel's automation row (nests the inline Execute-now
   button), and the §11 section-card header (nests its `right`-slot action buttons).
   Everything else stays a real `<button>` — no other `div onClick`.
-- Icon-only buttons always carry an `aria-label` (the `title` tooltip stays for sighted
-  users). `Toggle` renders `role="switch"` + `aria-checked`; radio groups (`RadioRing`
+- Icon-only buttons always carry an `aria-label`. A button's tooltip is the §14 tooltip
+  bubble (`TipButton`, the `useTip` hook `Tag` shares; the text is mirrored on `data-tip`),
+  never the native `title` — Chromium drops native tooltips after a click or a scroll, so
+  they read as broken on anything that gets clicked. The tip is a plain-language line
+  saying what the button does, with the shortcut in parentheses in the platform's key
+  names (`⌘` / `⌥` on macOS, `Ctrl+` / `Alt+` on Windows and Linux, by the §9 `platformOs`
+  token), never a repeat of the aria-label. The hover sits on a same-size wrapper, so a
+  disabled button keeps its tip (Save before an edit, a chevron at the end of the list).
+  Legacy `title` tooltips on buttons migrate to the bubble as those buttons are touched. `Toggle` renders `role="switch"` + `aria-checked`; radio groups (`RadioRing`
   rows) render `role="radio"`/`aria-checked` inside a `role="radiogroup"`; checkboxes are
   either real `<input type="checkbox">` elements inside a `<label>` or, where the whole row
   is the button (§11 grant rows built from the §14 `CheckBox` glyph), a `role="checkbox"` +
@@ -984,10 +991,12 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   place that filename appears in the UI) and, right, a "`<n>` lines" count ("1 line" in
   the singular; a script's single trailing final newline is neither rendered nor counted)
   and the control cluster — a find button (`fa-magnifying-glass`, "Find in script",
-  `aria-pressed` while the find bar is open), previous / next step chevrons as
-  `.ad-btn-icon` buttons (disabled at the ends; the ↑ / ↓ and ← / → arrow keys navigate
+  `aria-pressed` while the find bar is open; tip "Find in this script (⌘F)"), previous /
+  next step chevrons as `.ad-btn-icon` buttons (disabled at the ends; tips "Previous step
+  (←)" / "Next step (→)"; the ↑ / ↓ and ← / → arrow keys navigate
   too - ↑ / ↓ because the navigator is a vertical list, ← / → the chevrons' own axis) and a
-  close ✕ (Escape and backdrop click also close, standard `Modal` behavior). The toolbar
+  close ✕ (tip "Close (Esc)"; Escape and backdrop click also close, standard `Modal`
+  behavior). Every one is a `TipButton` (§14 bubble, never native `title`). The toolbar
   never scrolls, so the filename and the controls stay put through a long script and
   never overlap code.
   **Find in script.** (The bar, its hook and its match/marking helpers are one shared

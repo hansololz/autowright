@@ -996,7 +996,8 @@ editors enter with
   `locked` step (tooltip "Locked — a sync keeps this step byte for byte") and a
   pen-icon `Tag` reading "Written by you" on an unlocked `authoredBy: user` step (tooltip
   "Written by you — the agent keeps it unless the spec requires a change"). The card's
-  footer carries an **Add step** ghost button (`fa-plus`; disabled while a §8 job is in
+  footer carries an **Add step** ghost button (`fa-plus`; tip "Add a step you write
+  yourself; it opens in the editor"; disabled while a §8 job is in
   flight or an old version is viewed): it appends a step `{ name: "New step" ("New step
   2", … when the name is taken), description: "", file: NN-new-step.py, code: the
   §6.1 SDK import line `from autowright import params, log, result` under the two
@@ -1007,29 +1008,45 @@ editors enter with
   agent-written and unlocked; once any step is locked or user-written it reads plain
   "STEPS" — the steps are no longer purely generated. The editor variant of the §9.2 step-script modal is where every hand edit
   happens:
-  - Its toolbar cluster (top right of the code pane) gains five `.ad-btn-icon` buttons
-    before the find button, in order: **Edit** (`fa-pen`, "Edit script"), **Move up**
-    (`fa-arrow-up`, aria-label and tooltip "Move step up") and **Move down**
-    (`fa-arrow-down`, "Move step down"), the **lock
-    toggle** (`fa-lock` when locked / `fa-lock-open` when not, `aria-pressed` = locked,
-    aria-label "Unlock step" / "Lock step", tooltip "A locked step is kept byte for byte
-    by every sync — the agent builds the other steps around it") and **Remove step**
-    (`fa-trash`, the `.danger` icon variant — muted at rest, red on hover; aria-label and
-    tooltip "Remove step"). The navigator's viewed row carries no controls — it stays
-    the read-only table of contents. All five are disabled while a §8 job is in flight
-    or an old version is viewed; Move up is also disabled on the first step and Move
-    down on the last.
+  - Its toolbar cluster (top right of the code pane) gains one `.ad-btn-icon` button
+    before the find button: **Edit** (`fa-pen`, "Edit script"; tip "Edit this script, its
+    name and description by hand"). Every button the editor adds — here, in the navigator's
+    action row below, and the edit-mode Cancel / Save — is a §14 `TipButton`: the tip is a
+    plain line saying what happens, with the shortcut in the platform's key names (§14),
+    never the native `title`. The toolbar stays about
+    the script alone (Edit, Find, the ‹ › step chevrons, Close) — the step-position
+    controls never sit there, where an up/down arrow pair next to the left/right
+    flipping chevrons reads as a second way to navigate.
+    The **step controls** live in the navigator instead, on the viewed row, as a
+    `.ad-btn-icon` action row (`data-testid="step-controls"`) beneath the tag row,
+    left-aligned with the row's text (buttons flush, no gap, the cluster inset 7 px so
+    the glyphs align optically with the name): in order **Move up** (`fa-arrow-up`,
+    aria-label "Move step up", tip "Run this step one position earlier (⌥↑)") and **Move
+    down** (`fa-arrow-down`, "Move step down", tip "Run this step one position later
+    (⌥↓)") — the row itself is what moves, so the arrows sit on the thing they
+    move — the **lock toggle** (`fa-lock` when locked / `fa-lock-open` when not,
+    `aria-pressed` = locked, aria-label "Unlock step" / "Lock step"; the tip names the
+    action the click takes: unlocked, "Lock this step: every sync keeps it byte for byte
+    and builds the other steps around it"; locked, "Unlock this step: the next sync may
+    rewrite it"), beside its own Locked chip in the tag row above, and **Remove step**
+    (`fa-trash`, the `.danger` icon variant — muted at rest, red on hover; aria-label
+    "Remove step", tip "Remove this step from the automation (you will be asked to
+    confirm)"). Unviewed rows carry no controls. The detail page's modal
+    (no editor) shows no action row. All five buttons are disabled while a §8 job is in
+    flight or an old version is viewed; Move up is also disabled on the first step and
+    Move down on the last.
   - **Edit mode**: the code pane's body becomes the document-editor modal's textarea
     (same rhythm, padding, inset, focus-on-open with the caret at the end); the find bar
     closes and ⌘F is inert; flipping steps (chevrons, arrow keys, navigator rows) is
     disabled; the toolbar's right side shows the live line count and **Cancel** / **Save**
-    (accent link, disabled while nothing changed), ⌘S / Ctrl+S saves; ✕, Escape and the
+    (accent link, disabled while nothing changed; tips "Drop your edits and go back to
+    the saved script" / "Save your edits (⌘S)"), ⌘S / Ctrl+S saves; ✕, Escape and the
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
     changes you typed into the script editor will be lost.", confirm "Discard edits"),
     while Cancel returns to view mode through the same guard. In edit mode the find and
-    chevron buttons stay visible but disabled, Edit is hidden, and the move buttons, the
-    lock toggle and Remove step stay visible but disabled (their commit would end the
-    edit and drop the typed text).
+    chevron buttons stay visible but disabled, Edit is hidden, and the navigator's
+    action row (the move buttons, the lock toggle and Remove step) stays visible but
+    disabled (their commit would end the edit and drop the typed text).
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
     **description** as two `.ad-input.compact` fields in edit mode: the name a one-line
     input (required — a blank name disables Save with the inline hint "Give the step a
