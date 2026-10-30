@@ -49,6 +49,9 @@ export interface PlatformCopy {
   // §11 review card: the phrase after "executes only via " — the same manual
   // surfaces, in the short form.
   manualOnlyShort: string
+  // §9.2 NOTIFICATIONS / §4.9 notify row: the caption under `never` — where a
+  // failure still surfaces. Linux drops the surface clause (no §13 tray).
+  failuresStillShow: string
   // §4.9 keepAwake row: the §3 sleep disclaimer sentence — what the idle-sleep
   // assertion cannot do (a closed-lid laptop runs nothing until it wakes).
   sleepNote: string
@@ -72,6 +75,7 @@ const MACOS: PlatformCopy = {
   manualStillWorks: 'Execute now and the menu bar still work.',
   manualOnlyLong: 'when you press Execute now or use the menu bar',
   manualOnlyShort: 'Execute now and the menu bar',
+  failuresStillShow: 'Failures still show on the Automations list and the menu bar.',
   sleepNote: 'Works best on an always-on Mac like a Mac mini or Mac Studio. A MacBook that is asleep would not trigger the automation.',
   sleepMissNote: 'This is not an issue on Mac mini or Mac Studio, but a MacBook that is asleep will not fire on schedule.',
 }
@@ -93,6 +97,7 @@ const WINDOWS: PlatformCopy = {
   manualStillWorks: 'Execute now and the tray still work.',
   manualOnlyLong: 'when you press Execute now or use the tray',
   manualOnlyShort: 'Execute now and the tray',
+  failuresStillShow: 'Failures still show on the Automations list and the tray.',
   sleepNote: 'Works best on an always-on desktop PC. A laptop that is asleep would not trigger the automation.',
   sleepMissNote: 'This is not an issue on an always-on desktop PC, but a laptop that is asleep will not fire on schedule.',
 }
@@ -118,6 +123,7 @@ const LINUX: PlatformCopy = {
   manualStillWorks: 'Execute now still works.',
   manualOnlyLong: 'when you press Execute now',
   manualOnlyShort: 'Execute now',
+  failuresStillShow: 'Failures still show on the Automations list.',
   sleepNote: 'Works best on an always-on desktop PC. A laptop that is asleep would not trigger the automation.',
   sleepMissNote: 'This is not an issue on an always-on desktop PC, but a laptop that is asleep will not fire on schedule.',
 }

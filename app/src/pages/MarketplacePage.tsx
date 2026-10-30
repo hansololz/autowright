@@ -219,9 +219,13 @@ function AddMarketplaceModal({ onClose, onAdded }: {
   const [over, setOver] = useState(false)
   const [error, setError] = useState<{ msg: string; src: 'field' | 'drop' } | null>(null)
   const added = useRef<MarketplaceSource | null>(null)
+  // §9 in-flight rule: Escape and the backdrop wait while the add is on the
+  // wire — its toast (or its error line) is never lost to an early close.
+  const busyRef = useRef(busy)
+  busyRef.current = busy
 
   return (
-    <Modal onClose={() => (added.current ? onAdded(added.current) : onClose())} width={460}>
+    <Modal onClose={() => (added.current ? onAdded(added.current) : onClose())} width={460} guardClose={() => !busyRef.current}>
       {(close) => {
         // §22.4: a 422 (bad catalog) or 409 (already added) shows inline under
         // whichever control produced it.
@@ -351,8 +355,12 @@ function CatalogSettingsModal({ source, onClose, onSaved }: {
   const [error, setError] = useState<string | null>(null)
   const noLocation = !location.trim()
   const saved = useRef(false)
+  // §9 in-flight rule: Escape and the backdrop wait while the save is on the
+  // wire — its result (or its error line) is never lost to an early close.
+  const busyRef = useRef(busy)
+  busyRef.current = busy
   return (
-    <Modal onClose={() => (saved.current ? onSaved() : onClose())} width={460} ariaLabel="Catalog settings">
+    <Modal onClose={() => (saved.current ? onSaved() : onClose())} width={460} ariaLabel="Catalog settings" guardClose={() => !busyRef.current}>
       {(close) => {
         const save = async () => {
           if (busy) return

@@ -223,7 +223,10 @@ def test_an_unreferenced_agent_record_is_never_granted(store):
                 _ag("4", "Coder")],
         agent="1",
         steps=[{"file": "01-a.py", "name": "A", "description": "", "agent": True,
-                "why": "w", "agents": [{"ref": "2"}], "code": 'y = agents["4"]\n'}]))
+                "why": "w",
+                # §8 rule 7 (2026-10-30): a subscripted agent is one the step declares
+                "agents": [{"ref": "2", "why": "helps"}, {"ref": "4", "why": "codes"}],
+                "code": 'y = agents["4"]\n'}]))
     assert ids["Bystander"] not in a["enabled_agents"]
     assert a["enabled_agents"] == [ids["Author"], ids["Helper"], ids["Coder"]]
     assert "Bystander" not in [g["name"] for g in summary["agentsMatched"]]

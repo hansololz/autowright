@@ -18,7 +18,6 @@ import {
   BackLink, BtnPrimary, ConfirmModal, HeaderActions, MenuItemRow, Notice, PageLoading, PageTitle,
   PopMenu, ScrollArea, Spinner, usePopover,
 } from '../ui'
-import { nextTriggerShort, useTriggerPreview } from '../triggers'
 import {
   type Rev, amendSpec, analyzeTestMessage, appendBuildRule, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
   jobStageTitle, loadVersionInto,
@@ -67,9 +66,6 @@ export default function CreateFlow() {
   const testFull = useStore((s) => (s.test ? s.executionFull[s.test.executionId] : undefined))
   const isEdit = createFrom === 'edit'
   const auto = isEdit ? automations.find((a) => a.id === automationId) ?? null : null
-  // §19: the live-execution banner's "next execution" label reads from
-  // POST /triggers/preview — no local trigger math in the renderer (§4.3)
-  const trigPreviews = useTriggerPreview(auto?.triggers ?? [])
 
   const [agentId, setAgentId] = useState<string | null>(() =>
     isEdit ? (auto?.agentId ?? null) : ((agents.find((g) => g.default) ?? agents[0])?.id ?? null))
@@ -1480,7 +1476,7 @@ export default function CreateFlow() {
             {/* live-execution note */}
             {isEdit && !!auto?.live.length && (
               <Notice tone="cyan" className="ad-anim-item" style={{ margin: '0 0 18px' }}>
-                {`An execution is happening right now on v${auto.version}. Saving won’t interrupt it — that execution finishes on v${auto.version}. v${auto.version + 1} takes over from the next execution (${nextTriggerShort(auto.triggers, trigPreviews) ?? auto.triggerChip}).`}
+                {`An execution is happening right now on v${auto.version}. Saving won’t interrupt it — that execution finishes on v${auto.version}. v${auto.version + 1} takes over from the next execution (${auto.nextTriggerShort ?? auto.triggerChip}).`}
               </Notice>
             )}
 

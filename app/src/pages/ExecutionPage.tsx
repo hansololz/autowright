@@ -4,7 +4,7 @@
 // (../executionView) — and the WORKSPACE card at the bottom; plus
 // skip-live-step, Cancel / Retry / Execute again. A §6 `queued` record renders
 // the waiting state instead of that body.
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
@@ -185,6 +185,11 @@ export default function ExecutionPage() {
   // §9 busy rule: Execute again / Retry disable and show busy feedback while
   // their request is in flight — a double-click never starts two runs.
   const [starting, setStarting] = useState<'again' | 'retry' | null>(null)
+  // Skip step is in-flight guarded too: the ref blocks a second click in the
+  // same tick (before the disabled render lands), so a double-click can never
+  // skip the step that starts after the killed one.
+  const [skipping, setSkipping] = useState(false)
+  const skippingRef = useRef(false)
 
   const steps = full?.steps ?? []
   const executing = e?.status === 'executing'
@@ -263,7 +268,12 @@ export default function ExecutionPage() {
     void api.cancelExecution(e.id).catch((err: Error) => showToast(err.message))
   }
   const skipStep = (i: number) => {
-    void api.skipStep(e.id, i).catch((err: Error) => showToast(err.message))
+    if (skippingRef.current) return
+    skippingRef.current = true
+    setSkipping(true)
+    void api.skipStep(e.id, i)
+      .catch((err: Error) => showToast(err.message))
+      .finally(() => { skippingRef.current = false; setSkipping(false) })
   }
   const retry = () => {
     if (starting) return
@@ -347,6 +357,7 @@ export default function ExecutionPage() {
               <button
                 className="ad-btn-ghost"
                 onClick={() => skipStep(liveIdx)}
+                disabled={skipping}
                 title="Skip this step — kills it and continues with the next one"
               >
                 Skip step

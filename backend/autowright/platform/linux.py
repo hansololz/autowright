@@ -57,12 +57,36 @@ def _unit_quote(s: str) -> str:
             .replace("$", "$$") + '"')
 
 
+# §3: the root-locating variables the unit pins from the installing process.
+# The GUI runs with the desktop session's environment and the backend with the
+# systemd user manager's, and a profile-only XDG_DATA_HOME would otherwise send
+# the two to different data and log roots.
+UNIT_ENVIRONMENT = ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME",
+                    "AUTOWRIGHT_HOME")
+
+
+def _environment_lines() -> str:
+    """One `Environment=NAME="value"` line per UNIT_ENVIRONMENT variable set
+    (and non-empty) here. The value is double-quoted with embedded quotes and
+    backslashes escaped; `%` is a specifier introducer in Environment= too.
+    systemd never expands `$` in Environment=, so it stays literal."""
+    lines = []
+    for name in UNIT_ENVIRONMENT:
+        value = os.environ.get(name)
+        if not value:
+            continue
+        quoted = _unit_escape(value).replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'Environment={name}="{quoted}"\n')
+    return "".join(lines)
+
+
 def unit_text() -> str:
     """§3 unit contents for this interpreter. `Restart=always` +
     `StartLimitIntervalSec=0` is KeepAlive's never-give-up restart,
     `RestartSec=2` its throttle; `WantedBy=default.target` is RunAtLoad.
     `append:` log routing (systemd ≥ 240) matches launchd's file capture, so
-    the §9.3 overlay and `main.py`'s startup trim work unchanged."""
+    the §9.3 overlay and `main.py`'s startup trim work unchanged.
+    `Environment=` pins the install-time root variables (`_environment_lines`)."""
     logs = paths.logs_dir()
     return (
         "[Unit]\n"
@@ -70,6 +94,7 @@ def unit_text() -> str:
         "StartLimitIntervalSec=0\n"
         "\n"
         "[Service]\n"
+        f"{_environment_lines()}"
         f"ExecStart={_unit_quote(sys.executable)} -m autowright.main\n"
         "Restart=always\n"
         "RestartSec=2\n"

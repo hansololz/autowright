@@ -30,7 +30,7 @@ def test_health_and_instructions_are_async_handlers(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["app"] == "Autowright"
-    assert set(r.json()) == {"version", "app", "os", "capabilities"}
+    assert set(r.json()) == {"version", "app", "pid", "os", "capabilities"}
     assert set(client.get("/instructions").json()) == {"framework", "build"}
 
 
@@ -169,9 +169,15 @@ def test_test_scratch_is_created_under_the_app_storage(client, monkeypatch):
     (`<app-support>/tests/<execution id>/`, never the OS temp dir)"."""
     from autowright import api, paths, testexec
 
-    monkeypatch.setattr(testexec, "_run", lambda *a, **kw: None)  # keep the record parked
+    import threading
+
+    # keep the record parked; the scratch copy runs on the test thread
+    # (§19 2026-10-30), so wait for its setup to reach `_run`
+    set_up = threading.Event()
+    monkeypatch.setattr(testexec, "_run", lambda *a, **kw: set_up.set())
     execution_id = testexec.start(api.engine, _draft(), None, [], [], {})
     try:
+        assert set_up.wait(10)
         scratch = paths.tests_scratch_dir() / execution_id
         assert (scratch / "memory").is_dir()
         assert scratch.parent == paths.app_support() / "tests"

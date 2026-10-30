@@ -19,7 +19,8 @@ from typing import Any
 from . import harness, keychain, listeners, notify, packages as pkglib, paths, platform, timefmt
 from .events import hub
 from .executor import CLIP_MARKER, CTRL, ERROR_MESSAGE_CAP, _LineWriter, secret_probes
-from .firing import DATA_PATH_UNREACHABLE, finish_queued
+from .firing import DATA_PATH_UNREACHABLE, admission_blocked, finish_queued
+from .versions_diff import parse_version_label
 from .storage import (DRAFT_MEM_STAGE_PREFIX, SECRET_REF_RE, Store,
                       clamp_max_parallel, effective_notifications, exec_version_label,
                       is_test, new_id, step_script_sha,
@@ -763,7 +764,11 @@ class Engine:
             ver = self._resolve_version(auto, kind, version)
             if ver is None:
                 raise VersionNotFound(f"version {version_label or f'v{version}'} not found")
-            if self.at_capacity(auto):
+            # §6: a promotion (`adopt`, the queue head itself) only needs a
+            # free slot; any other start also yields to waiting entries.
+            blocked = (self.at_capacity(auto) if adopt is not None
+                       else admission_blocked(self.store, self, auto))
+            if blocked:
                 raise CapacityError("already executing")
             pre_snapshot = self._needs_pre_version(auto, kind, version)
             # `sha` snapshots each step's script (§4.5) so a Draft retry can
@@ -794,10 +799,10 @@ class Engine:
             return "draft", None
         if not label:
             return "version", auto["current_version"]
-        try:
-            return "version", int(label.lower().lstrip("v"))
-        except ValueError:
-            return "version", -1
+        # §19: the diff route's `vN` grammar — a bare "3", "vv3" or "v+3" is
+        # not a label (and resolves to no version, the 404).
+        number = parse_version_label(label)
+        return "version", -1 if number is None else number
 
     def _needs_pre_version(self, auto: dict, kind: str, version: int | None) -> bool:
         """§6.3 pre-version snapshot: first execution of a real version with no
@@ -818,13 +823,32 @@ class Engine:
             # it if its copy is skipped or fails.
             owed.discard(version)
             return True
+        # §6.3: only a record that started at least one step attempt counts
+        # as the version's recorded execution — one cancelled or interrupted
+        # before step 1 (zero attempts, whatever its status) never does, so the
+        # rule holds across a restart that lost the owed mark. A header row
+        # carries no steps: its body is read to decide. A record still
+        # `executing` counts too: it is this session's (§3 repairs every
+        # leftover one at boot), it either took this decision itself or was
+        # admitted behind one that did, and a cancel before its step 1 re-owes
+        # the snapshot through the mark — so two parallel first-executions
+        # still take exactly one.
         if any(x["automation_id"] == auto["id"] and x.get("kind") == "version"
                and x.get("version") == version
                and not self.store.never_ran(x)
+               and (x["status"] == "executing" or self._started_an_attempt(x))
                for x in self.store.execs.values()):
             return False
         # Belt and braces after a retention sweep removed the version's records.
         return not self.store.pre_version_snapshot_exists(auto, f"v{version}")
+
+    def _started_an_attempt(self, h: dict) -> bool:
+        """§6.3: True when some step of the record has a non-empty `attempts`
+        list. A header row read back from the index has no `steps` — the full
+        record (`exec_full`) decides it."""
+        if "steps" not in h:
+            h = self.store.exec_full(h["id"]) or h
+        return any(s.get("attempts") for s in h.get("steps") or ())
 
     def _seed_draft_memory(self, auto: dict) -> bool:
         """§4.4: the first Draft execution seeds draft/memory as a copy of the
@@ -925,7 +949,8 @@ class Engine:
             h = self.store.execs.get(h["id"]) or h
             if self.is_live(h["id"]):
                 raise RuntimeError("already executing")
-            if self.at_capacity(auto):
+            # §6: a retry is a new admission — it never jumps waiting entries.
+            if admission_blocked(self.store, self, auto):
                 raise CapacityError("already executing")
             if h["status"] != "failed":
                 raise RuntimeError("only failed executions can be retried")
@@ -1041,6 +1066,13 @@ class Engine:
         kill_step_group(proc, signal.SIGTERM)
         hard_kill = state.get("hard_kill")
         if hard_kill is None:
+            return
+        # §7 skip kills only the skipped step: read before this check, the
+        # handle is `proc`'s own whenever `proc` still owns the state (state
+        # moves forward only — proc, then hard_kill — and the teardown drops
+        # proc before hard_kill). Once the step has ended, a later step's
+        # handle must never be armed against it.
+        if state.get("proc") is not proc:
             return
         t = threading.Timer(cls.KILL_GRACE, hard_kill)
         t.daemon = True
@@ -1383,6 +1415,20 @@ class Engine:
             # kept chip — a status-only `result.status()` leaves it.
             chip_touched = False
             notify_text: str | None = None
+
+            def fold_attempt(ops: dict, holder: dict) -> None:
+                """§7: what one attempt said through `result` (status, chip)
+                and `notify` is buffered per attempt and folded into the
+                execution's only when that attempt succeeds or is the step's
+                final one — a failed attempt that is retried leaves nothing."""
+                nonlocal result_touched, chip_touched, notify_text
+                result.update(ops)
+                if holder.get("text"):
+                    notify_text = holder["text"]
+                if holder.get("result_touched"):
+                    result_touched = True
+                if holder.get("chip_touched"):
+                    chip_touched = True
             # §3 per-execution idle-sleep hold, through the §2 platform layer —
             # the release is called in the finally below. Never raises; a platform
             # with no mechanism holds nothing.
@@ -1527,7 +1573,55 @@ class Engine:
                 forever = step_retries_forever(s)
                 budget = step_retries_for(s)
                 pass_tries = 0  # §7: automatic re-attempts count per execution pass
+                # The retried attempt's buffered result ops: folded only when
+                # a skip, cancel, or shutdown makes it the step's final attempt.
+                retried: tuple[dict, dict] | None = None
                 while True:
+                    if pass_tries:
+                        # §7: Cancel and Skip step win over a pending retry —
+                        # re-checked here, before the next attempt is appended
+                        # and the retry marker logged, so no attempt is ever
+                        # created only to be killed.
+                        skip = state.pop("skip", None)
+                        if state.get("shutdown"):
+                            # §7: a shutdown during the retry wait — the
+                            # step and its latest attempt land interrupted.
+                            step["status"] = "interrupted"
+                            attempt["status"] = "interrupted"
+                            fold_attempt(*retried)
+                            self._step_event(h, i)
+                            break
+                        if state["cancel"]:
+                            # §7: cancel wins over the pending retry exactly
+                            # as over a running attempt — the step lands
+                            # cancelled, and its latest attempt with it (§4.5:
+                            # the step's status is the latest attempt's; the
+                            # attempt keeps its error either way).
+                            # Left `failed`, a last-step cancel would slip
+                            # past finalize's cancelled-detection and the
+                            # record would finish `succeeded`.
+                            step["status"] = "cancelled"
+                            attempt["status"] = "cancelled"
+                            state["cancel_logged"] = True
+                            fold_attempt(*retried)
+                            self._log(h, "sys",
+                                      "execution cancelled by you — nothing else will happen",
+                                      redactions)
+                            self._step_event(h, i)
+                            break
+                        if skip == i:
+                            # §7: skip wins over a pending retry — the step is
+                            # skipped, spending nothing further, and its latest
+                            # attempt goes with it (§4.5: the step's status is
+                            # the latest attempt's; the attempt keeps its error).
+                            step["status"] = "skipped"
+                            attempt["status"] = "skipped"
+                            fold_attempt(*retried)
+                            self._log(h, "sys",
+                                      "step skipped by you — continuing with the next step",
+                                      redactions)
+                            self._step_event(h, i)
+                            break
                     n = _next_attempt_n(step)
                     attempt = {"number": n, "status": "executing",
                                "started_at": timefmt.now_iso(),
@@ -1549,6 +1643,7 @@ class Engine:
                     agent_cfgs: list[dict] = []
                     rc = 1
                     notify_holder: dict = {}
+                    attempt_result: dict[str, Any] = {}  # §7: this attempt's result ops
                     if s.get("agent"):
                         agent_cfgs = self._agents_for_step(auto, s)
                         if not agent_cfgs:
@@ -1564,13 +1659,8 @@ class Engine:
                     if not (s.get("agent") and not agent_cfgs):
                         rc = self._execute_step(auto, ver, h, s, i + 1, vdir, params, secret_values,
                                                 secret_names, agent_cfgs, state, redactions,
-                                                result, notify_holder, code=step_code.get(i))
-                    if notify_holder.get("text"):
-                        notify_text = notify_holder["text"]
-                    if notify_holder.get("result_touched"):
-                        result_touched = True
-                    if notify_holder.get("chip_touched"):
-                        chip_touched = True
+                                                attempt_result, notify_holder,
+                                                code=step_code.get(i))
                     dur = max(0, int((time.monotonic() - t0) * 1000))
                     step["duration_ms"] = dur
                     attempt["duration_ms"] = dur
@@ -1617,49 +1707,18 @@ class Engine:
                             attempt["status"] = status
                             self._step_event(h, i)
                             pass_tries += 1
+                            # §7: this attempt's result ops are held back — a
+                            # retry that succeeds drops them; the loop top
+                            # folds them if a skip/cancel/shutdown ends here.
+                            retried = (attempt_result, notify_holder)
                             self._await_retry(state, i, forever)
-                            skip = state.pop("skip", None)
-                            if state.get("shutdown"):
-                                # §7: a shutdown during the retry wait — the
-                                # step and its latest attempt land interrupted.
-                                step["status"] = "interrupted"
-                                attempt["status"] = "interrupted"
-                                self._step_event(h, i)
-                                break
-                            if state["cancel"]:
-                                # §7: cancel wins over the pending retry exactly
-                                # as over a running attempt — the step lands
-                                # cancelled, and its latest attempt with it (§4.5:
-                                # the step's status is the latest attempt's; the
-                                # attempt keeps its error either way).
-                                # Left `failed`, a last-step cancel would slip
-                                # past finalize's cancelled-detection and the
-                                # record would finish `succeeded`.
-                                step["status"] = "cancelled"
-                                attempt["status"] = "cancelled"
-                                state["cancel_logged"] = True
-                                self._log(h, "sys",
-                                          "execution cancelled by you — nothing else will happen",
-                                          redactions)
-                                self._step_event(h, i)
-                                break
-                            if skip == i:
-                                # §7: skip wins over a pending retry — the step is
-                                # skipped, spending nothing further, and its latest
-                                # attempt goes with it (§4.5: the step's status is
-                                # the latest attempt's; the attempt keeps its error).
-                                step["status"] = "skipped"
-                                attempt["status"] = "skipped"
-                                self._log(h, "sys",
-                                          "step skipped by you — continuing with the next step",
-                                          redactions)
-                                self._step_event(h, i)
-                                break
                             continue
                         failed = True
                         h["error"] = {"step": s["name"], "message": message, "reason": reason}
                     step["status"] = status
                     attempt["status"] = status
+                    # §7: the step's final attempt — what it reported stands.
+                    fold_attempt(attempt_result, notify_holder)
                     self._step_event(h, i)
                     break
                 h["_cur_step"] = None

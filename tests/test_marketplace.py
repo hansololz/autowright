@@ -22,7 +22,11 @@ SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
 
 
 def catalog_text(entries, **top) -> str:
-    body = {"format_version": 1, **top, "entries": entries}
+    # One copy per entry: a repeated object would dump as a YAML anchor and
+    # alias, which a catalog may not carry (§5 untrusted-YAML rule).
+    import copy
+
+    body = {"format_version": 1, **top, "entries": [copy.deepcopy(e) for e in entries]}
     return yaml.safe_dump(body, sort_keys=False)
 
 

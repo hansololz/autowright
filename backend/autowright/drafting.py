@@ -689,6 +689,16 @@ def build_steps_prompt(spec_md: str, current: dict | None,
                 + (yaml.safe_dump([_trigger_ref(t) for t in trigs],
                                   sort_keys=False, allow_unicode=True).strip()
                    if trigs else "none"))
+        # §8: the stored package declarations — the manifest must re-declare
+        # every package a kept or locked step imports, and only the stored
+        # `pip` name gets it right (`cv2` is `opencv-python`).
+        pkgs = [{"pip": p.get("pip"), "import": p.get("import"), "why": p.get("why") or ""}
+                for p in current.get("packages") or []
+                if isinstance(p, dict) and p.get("pip") and p.get("import")]
+        if pkgs:
+            parts.append("=== CURRENT packages (declared today — re-declare each one a "
+                         "kept or locked step still imports, under this stored pip name) ===\n"
+                         + yaml.safe_dump(pkgs, sort_keys=False, allow_unicode=True).strip())
         for s in current.get("steps", []):
             # §8 rule 7: a user-written step is kept unless the SPEC requires a
             # change; a locked one is frozen (the LOCKED STEPS section below).
@@ -769,8 +779,11 @@ def clip_response(text: str, head: int = 60_000, tail: int = 20_000) -> str:
 
 def _strip_fence(content: str) -> str:
     """§8: a block whose whole content sits inside one markdown code fence loses
-    the fence lines — models love wrapping step code in ```python."""
-    lines = content.splitlines()
+    the fence lines — models love wrapping step code in ```python. Split on
+    "\n" only, never `splitlines()`: that also breaks on U+2028/U+2029/U+0085
+    and \x0b/\x0c/\x1c-\x1e, and the rejoin would rewrite those code bytes
+    (a string literal or a form feed) as newlines."""
+    lines = content.split("\n")
     body = [i for i, l in enumerate(lines) if l.strip()]
     if len(body) < 2:
         return content
@@ -822,7 +835,53 @@ def parse_envelope(text: str) -> dict[str, str]:
 _blocked_mark_outside_fences = harness.blocked_mark_outside_fences
 
 
-def parse_blockers(text: str, locked_names: set[str] | None = None
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+
+
+def build_rules_bullets(spec_md: str | None) -> list[str]:
+    """§8: the bullets under the SPEC's first h2 titled "Build rules" (case
+    ignored, a trailing colon ignored), up to the next heading of the same or
+    a higher level — the texts a constraint blocker's `rule` must quote. An
+    indented non-bullet line continues the bullet above it; fenced code is
+    never a heading or a bullet."""
+    bullets: list[str] = []
+    inside = False
+    fenced = False
+    current: str | None = None
+    for line in (spec_md or "").split("\n"):
+        if line.strip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            level, title = len(heading.group(1)), heading.group(2).strip()
+            if inside and level <= 2:
+                break
+            if not inside and level == 2 and title.rstrip(":").strip().lower() == "build rules":
+                inside = True
+            continue
+        if not inside:
+            continue
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            if current is not None:
+                bullets.append(current)
+            current = bullet.group(1).strip()
+        elif current is not None and line.strip() and line[:1].isspace():
+            current += " " + line.strip()
+        elif current is not None:
+            bullets.append(current)
+            current = None
+    if current is not None:
+        bullets.append(current)
+    return [b for b in bullets if b]
+
+
+def parse_blockers(text: str, locked_names: set[str] | None = None,
+                   build_rules: list[str] | None = None
                    ) -> tuple[list[dict] | None, str | None]:
     """§8 blocker envelope → (blockers, notes). (None, None) when the response
     isn't one; the parsed nonempty blocker list when it is, plus the optional
@@ -832,7 +891,12 @@ def parse_blockers(text: str, locked_names: set[str] | None = None
     malformed (which sends it through the normal repair round like any invalid
     response). `locked_names` is the draft's §4.1 locked step names: a
     `kind: constraint` entry's `step` must be one of them (None = the set is
-    unknown, so the check is skipped)."""
+    unknown, so the check is skipped); names compare trimmed. `build_rules`
+    is the SPEC's `## Build rules` bullets (`build_rules_bullets`): a
+    constraint entry's `rule` must be a case-insensitive substring of one of
+    them, so §11 "Remove the rule" can find it (None = skipped)."""
+    if locked_names is not None:
+        locked_names = {str(n).strip() for n in locked_names}
     m = _blocked_mark_outside_fences(text)
     if not m:
         return None, None
@@ -898,6 +962,12 @@ def parse_blockers(text: str, locked_names: set[str] | None = None
                     f"a constraint blocker's `step` must name a locked step — `{step}` "
                     "isn't one (locked: "
                     + (", ".join(f"`{n}`" for n in sorted(locked_names)) or "none") + ")")
+            if rule and build_rules is not None and not any(
+                    rule.lower() in b.lower() for b in build_rules):
+                raise ValueError(
+                    f"a constraint blocker's `rule` must quote a bullet under the SPEC's "
+                    f"`## Build rules` — `{rule}` isn't part of one"
+                    + ("" if build_rules else " (the SPEC has no Build rules bullets)"))
             workaround = str(b.get("workaround") or "").strip()
             if b.get("workaround") is not None and not workaround:
                 raise ValueError("a constraint blocker's `workaround`, when present, "
@@ -1232,6 +1302,91 @@ SECRET_SUBSCRIPT_RE = re.compile(r"\bsecrets\[\s*[\"']([^\"']+)[\"']\s*\]")
 AGENT_SUBSCRIPT_RE = re.compile(r"\bagents\[\s*[\"']([^\"']+)[\"']\s*\]")
 
 
+def _granted_list(names: dict) -> str:
+    """§8 error copy: the granted entries as `Name (id)` — the agent thinks in
+    names but must copy ids."""
+    return ", ".join(f"{n} ({i})" for i, n in names.items()) or "none"
+
+
+def _imported_no_match_copy(unresolved: dict | None, kind: str, entry_id: str,
+                            pick: str) -> str | None:
+    """§8/§5.1: the specialized copy for an id the import minted for a
+    reference with no local match — the same words the §9.2/§11 red
+    surfaces use, so the user and the agent see one explanation."""
+    entry = (unresolved or {}).get(entry_id)
+    if entry and entry.get("kind") == kind:
+        return (f"this step still uses {entry['name']}, which came from the "
+                f"imported file and has no match on this {paths.machine_noun()}. "
+                f"Pick one of your {pick} or remove the reference.")
+    return None
+
+
+def validate_step_refs(s: dict, code: str, declared_agent_ids: set[str],
+                       declared_package_imports: list[str],
+                       allowed_secret_names: dict | None = None,
+                       unresolved: dict | None = None) -> list[str]:
+    """§8 rules 5-7, the per-step reference checks shared by `validate_steps`
+    (the save and sync path) and the §5.1 import: the code's
+    `secrets["<id>"]` literals against the allowed secrets
+    (`allowed_secret_names`, id → name; skipped when None), its
+    `agents["<id>"]` literals against the step's OWN declared agent ids, and
+    the step's `packages` entries against the manifest's declared package
+    imports, each with its per-use why. Not the §6.2 import allowlist — that
+    stays `validate_steps`'s own. Returns the error lines in order."""
+    errors: list[str] = []
+    secret_names = allowed_secret_names
+    declared_agents = declared_agent_ids
+    pkg_imports = declared_package_imports
+
+    def _granted(names: dict) -> str:
+        return _granted_list(names)
+
+    def _imported_no_match(kind: str, entry_id: str, pick: str) -> str | None:
+        return _imported_no_match_copy(unresolved, kind, entry_id, pick)
+
+    # §8 rule 6: every secrets["<id>"] literal in code must be an allowed
+    # secret's id — at runtime it would raise, so it fails validation here.
+    for ref in sorted(set(SECRET_SUBSCRIPT_RE.findall(code))
+                      if secret_names is not None else ()):
+        if ref not in secret_names:
+            errors.append(f"step {s.get('name')}: "
+                          + (_imported_no_match("secret", ref, "secrets")
+                             or f"code subscripts secrets[{ref!r}], which isn't among "
+                                f"the allowed secrets — allowed: {_granted(secret_names)}"))
+    # §8 rule 7: agents["<id>"] in code only resolves against the step's OWN
+    # declared entries at runtime — the runtime container holds nothing
+    # else. The scan runs on EVERY step, beside the secrets one: a step
+    # that declares no entries (an agent step with no `agents` list, or a
+    # plain step that is not an agent step at all) dangles the same way,
+    # and only this scan catches it.
+    for ref in sorted(set(AGENT_SUBSCRIPT_RE.findall(code))):
+        if ref in declared_agents:
+            continue
+        errors.append(
+            f"step {s.get('name')}: code subscripts agents[{ref!r}], "
+            "which isn't among this step's declared agents entries"
+            if declared_agents else
+            f"step {s.get('name')}: code subscripts agents[{ref!r}] but the "
+            "step declares no agents entries")
+    pkgs = s.get("packages")
+    if pkgs is not None:
+        if (not isinstance(pkgs, list)
+                or not all(isinstance(x, dict) and isinstance(x.get("import"), str) for x in pkgs)):
+            errors.append(f"step {s.get('name')}: packages must be a list of "
+                          "{ import, why } declared-package entries")
+        else:
+            for x in pkgs:
+                if x["import"] not in pkg_imports:
+                    errors.append(f"step {s.get('name')}: package {x['import']!r} isn't among "
+                                  "the manifest's declared packages")
+                # §8 rule 5: every per-step entry carries its per-use note —
+                # one package can serve different jobs in different steps.
+                if not str(x.get("why") or "").strip():
+                    errors.append(f"step {s.get('name')}: package {x['import']!r} needs a why — "
+                                  "one line on what this step uses it for")
+    return errors
+
+
 def validate_steps(files: dict[str, str], grants: dict | None = None,
                    trigger_secret_ids: set[str] | None = None,
                    unresolved: dict | None = None,
@@ -1436,21 +1591,13 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
     secret_names = {g.get("id"): g.get("name") for g in (grants or {}).get("secrets", [])}
 
     def _granted(names: dict) -> str:
-        return ", ".join(f"{n} ({i})" for i, n in names.items()) or "none"
+        return _granted_list(names)
 
     def _label(names: dict, entry_id: str) -> str:
         return names.get(entry_id) or entry_id
 
     def _imported_no_match(kind: str, entry_id: str, pick: str) -> str | None:
-        """§8/§5.1: the specialized copy for an id the import minted for a
-        reference with no local match — the same words the §9.2/§11 red
-        surfaces use, so the user and the agent see one explanation."""
-        entry = (unresolved or {}).get(entry_id)
-        if entry and entry.get("kind") == kind:
-            return (f"this step still uses {entry['name']}, which came from the "
-                    f"imported file and has no match on this {paths.machine_noun()}. "
-                    f"Pick one of your {pick} or remove the reference.")
-        return None
+        return _imported_no_match_copy(unresolved, kind, entry_id, pick)
 
     for i, s in enumerate(steps, 1):
         if not isinstance(s, dict) or not isinstance(s.get("file", ""), str):
@@ -1544,45 +1691,9 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                         errors.append(f"step {s.get('name')}: secret "
                                       f"{_label(secret_names, x['id'])!r} needs a why — "
                                       "one line on why the step uses it")
-        # §8 rule 6: every secrets["<id>"] literal in code must be an allowed
-        # secret's id — at runtime it would raise, so it fails validation here.
-        for ref in sorted(set(SECRET_SUBSCRIPT_RE.findall(files.get(s.get("file", ""), "")))):
-            if ref not in secret_names:
-                errors.append(f"step {s.get('name')}: "
-                              + (_imported_no_match("secret", ref, "secrets")
-                                 or f"code subscripts secrets[{ref!r}], which isn't among "
-                                    f"the allowed secrets — allowed: {_granted(secret_names)}"))
-        # §8 rule 7: agents["<id>"] in code only resolves against the step's OWN
-        # declared entries at runtime — the runtime container holds nothing
-        # else. The scan runs on EVERY step, beside the secrets one: a step
-        # that declares no entries (an agent step with no `agents` list, or a
-        # plain step that is not an agent step at all) dangles the same way,
-        # and only this scan catches it.
-        for ref in sorted(set(AGENT_SUBSCRIPT_RE.findall(files.get(s.get("file", ""), "")))):
-            if ref in declared_agents:
-                continue
-            errors.append(
-                f"step {s.get('name')}: code subscripts agents[{ref!r}], "
-                "which isn't among this step's declared agents entries"
-                if declared_agents else
-                f"step {s.get('name')}: code subscripts agents[{ref!r}] but the "
-                "step declares no agents entries")
-        pkgs = s.get("packages")
-        if pkgs is not None:
-            if (not isinstance(pkgs, list)
-                    or not all(isinstance(x, dict) and isinstance(x.get("import"), str) for x in pkgs)):
-                errors.append(f"step {s.get('name')}: packages must be a list of "
-                              "{ import, why } declared-package entries")
-            else:
-                for x in pkgs:
-                    if x["import"] not in pkg_imports:
-                        errors.append(f"step {s.get('name')}: package {x['import']!r} isn't among "
-                                      "the manifest's declared packages")
-                    # §8 rule 5: every per-step entry carries its per-use note —
-                    # one package can serve different jobs in different steps.
-                    if not str(x.get("why") or "").strip():
-                        errors.append(f"step {s.get('name')}: package {x['import']!r} needs a why — "
-                                      "one line on what this step uses it for")
+        errors.extend(validate_step_refs(
+            s, files.get(s.get("file", ""), ""), declared_agents, pkg_imports,
+            secret_names, unresolved))
 
     norm_steps = []
     for s in steps:
@@ -1597,19 +1708,26 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             errors.append(f"{s.get('file')}: syntax error — {e.msg} (line {e.lineno})")
         t = s.get("timeout")
         r = s.get("retries")
-        norm_steps.append({
-            "file": s.get("file"), "name": s.get("name", ""), "description": s.get("description", ""),
+        # §8 rule 3: a scalar `secrets` / `packages` / `agents` is already an
+        # error line from the type checks above — only a list is iterated
+        # here, so a stray `secrets: 3` never escapes as a TypeError.
+        ags, secs, pkgs = s.get("agents"), s.get("secrets"), s.get("packages")
+        entry = {
+            # §4.1: names are compared trimmed (uniqueness, the lock splice),
+            # so they are stored trimmed.
+            "file": s.get("file"), "name": str(s.get("name") or "").strip(),
+            "description": s.get("description", ""),
             "agent": bool(s.get("agent")), "why": s.get("why", ""),
             "agents": [{"id": x["id"],
                         **({"why": str(x["why"]).strip()} if str(x.get("why") or "").strip() else {})}
-                       for x in (s.get("agents") or [])
+                       for x in ags
                        if isinstance(x, dict) and isinstance(x.get("id"), str)]
-                      if s.get("agent") else [],
+                      if s.get("agent") and isinstance(ags, list) else [],
             "secrets": [{"id": x["id"], "why": str(x.get("why") or "").strip()}
-                        for x in (s.get("secrets") or [])
+                        for x in (secs if isinstance(secs, list) else [])
                         if isinstance(x, dict) and isinstance(x.get("id"), str)],
             "packages": [{"import": x["import"], "why": str(x.get("why") or "").strip()}
-                         for x in (s.get("packages") or [])
+                         for x in (pkgs if isinstance(pkgs, list) else [])
                          if isinstance(x, dict) and isinstance(x.get("import"), str)],
             **({"timeout": t} if isinstance(t, int) and not isinstance(t, bool) and t > 0 else {}),
             **({"no_timeout": True} if s.get("no_timeout") is True else {}),
@@ -1620,7 +1738,10 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                == "user" else {}),
             **({"locked": True} if s.get("locked") is True else {}),
             "code": code,
-        })
+        }
+        if syncing and s.get("locked") is not True and entry.get("authored_by") == "user":
+            _carry_kept_user_settings(entry, code, current_steps)
+        norm_steps.append(entry)
     trigs = manifest.get("triggers") or []
     norm_trigs: list[dict] = []
     if not isinstance(trigs, list):
@@ -1708,22 +1829,39 @@ def locked_step_preflight(current: dict | None, grants: dict | None,
     for s in locked_steps(current):
         name = str(s.get("name") or "")
         stored_file = str(s.get("file") or "")
-        suffix = stored_file.split("-", 1)[1] if "-" in stored_file else stored_file
-        probe_file = f"01-{suffix}"
+        probe_file = f"01-{_stored_suffix(stored_file)}"
         manifest = {"steps": [locked_manifest_entry(s, probe_file)], "packages": packages}
         files = {"manifest.yaml": dump_yaml(manifest),
                  probe_file: str(s.get("code") or "")}
         _, errors = validate_steps(files, grants, unresolved=unresolved)
+        # §8: every validator line about the locked step counts — its named
+        # and file-labelled lines, its positional `step 1` lines (a blank
+        # name), and the NN-name.py file-name rule (a bad or missing file).
+        # Only lines about the draft's shared `packages` list stay out.
         lines = []
         for e in errors:
             if e.startswith(f"step {name}: "):
                 lines.append(e[len(f"step {name}: "):])
             elif e.startswith(f"{probe_file}: "):
                 lines.append(f"{stored_file}: " + e[len(f"{probe_file}: "):])
+            elif e.startswith("step 1: "):
+                lines.append(e[len("step 1: "):])
+            elif e == "step 1 needs a name":
+                lines.append("the step needs a name")
+            elif e.startswith(f"step file {probe_file!r} "):
+                lines.append(f"step file {stored_file!r} " + e[len(f"step file {probe_file!r} "):]
+                             if stored_file else "the step's file is missing")
         if lines:
             blockers.append({"reason": "; ".join(lines), "fix": LOCKED_PREFLIGHT_FIX,
-                             "details": "", "kind": "constraint", "step": name})
+                             "details": "", "kind": "constraint", "step": name.strip()})
     return blockers
+
+
+def _stored_suffix(stored_file: str) -> str:
+    """§8 rule 3: the part of a stored step file the lock splice keeps behind
+    the agent's `NN-` position prefix — what follows a leading digits-and-dash
+    prefix only; a name without that prefix is kept whole."""
+    return re.sub(r"^\d+-", "", stored_file, count=1)
 
 
 def _same_code(a: str, b: str) -> bool:
@@ -1745,11 +1883,12 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
     `files` gets the stored code under the spliced name, so every later check
     reads the spliced script. Mutates `files` and `errors`; returns the
     spliced step list."""
-    by_name = {s.get("name"): s for s in locked}
+    # §4.1: names compare trimmed, like the uniqueness rule.
+    by_name = {str(s.get("name") or "").strip(): s for s in locked}
     counts: dict = {}
     for s in steps:
         if isinstance(s, dict) and isinstance(s.get("name"), str):
-            counts[s["name"]] = counts.get(s["name"], 0) + 1
+            counts[s["name"].strip()] = counts.get(s["name"].strip(), 0) + 1
     for name in by_name:
         n = counts.get(name, 0)
         if n == 0:
@@ -1757,9 +1896,17 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
                           "constraint blocker explaining why the spec can't be met with it")
         elif n > 1:
             errors.append(f"locked step `{name}` is listed twice — list it exactly once")
+    # §8: the agent's own returned blocks, snapshotted before any splice
+    # writes into `files` — a later locked step whose stored filename equals
+    # an earlier step's spliced name must not mistake that splice for a
+    # returned block. A block is checked by one locked step only.
+    returned = dict(files)
+    spliced: set[str] = set()
     out = []
     for s in steps:
         name = s.get("name") if isinstance(s, dict) else None
+        if isinstance(name, str):
+            name = name.strip()
         if not isinstance(s, dict):
             out.append(s)
             continue
@@ -1773,7 +1920,7 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
         stored = by_name[name]
         agent_file = s.get("file") or ""
         stored_file = str(stored.get("file") or "")
-        suffix = stored_file.split("-", 1)[1] if "-" in stored_file else stored_file
+        suffix = _stored_suffix(stored_file)
         prefix = re.match(r"(\d+)-", agent_file)
         spliced_file = f"{prefix.group(1)}-{suffix}" if prefix else agent_file
         code = str(stored.get("code") or "")
@@ -1784,12 +1931,14 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
         candidates = (agent_file, spliced_file) + (
             (stored_file,) if stored_file and stored_file not in others else ())
         for fname in dict.fromkeys(candidates):
-            if fname in files:
-                if not _same_code(files[fname], code):
+            if fname in returned:
+                if not _same_code(returned.pop(fname), code):
                     errors.append(f"step `{name}` is locked — do not return its file")
-                del files[fname]
+                if fname not in spliced:
+                    files.pop(fname, None)
         if counts.get(name) == 1:
             files[spliced_file] = code
+            spliced.add(spliced_file)
         out.append(locked_manifest_entry(stored, spliced_file))
     return out
 
@@ -1802,12 +1951,44 @@ def _output_authored_by(s: dict, code: str, syncing: bool,
     user-written step's name AND byte-identical code."""
     if not syncing or s.get("locked") is True:
         return "user" if s.get("authored_by") == "user" else "agent"
+    return "user" if _kept_user_step(s.get("name"), code, current_steps) else "agent"
+
+
+def _kept_user_step(name, code: str, current_steps: list[dict] | None) -> dict | None:
+    """§4.1 keep-`user` rule: the current user-written step a sync output step
+    keeps — same name (compared trimmed) and byte-identical code — or None."""
+    key = str(name or "").strip()
     for prev in current_steps or []:
-        if (isinstance(prev, dict) and prev.get("name") == s.get("name")
+        if (isinstance(prev, dict) and str(prev.get("name") or "").strip() == key
                 and step_authored_by(prev) == "user"
                 and _same_code(str(prev.get("code") or ""), code)):
-            return "user"
-    return "agent"
+            return prev
+    return None
+
+
+def _carry_kept_user_settings(entry: dict, code: str,
+                              current_steps: list[dict] | None) -> None:
+    """§8 rule 3 keep-`user`: a kept unlocked user-written step keeps the
+    stored step's `timeout` / `no_timeout` and `retries` / `infinite_retries`
+    pairs and its `description` over the agent's entry — re-emitting the
+    script minus a manifest key must not silently drop a setting the user
+    made in the §11 editor. `secrets`, `packages` and `agents` stay the
+    agent's. Reads the stored flags in both spellings."""
+    prev = _kept_user_step(entry.get("name"), code, current_steps)
+    if prev is None:
+        return
+    for key in ("timeout", "no_timeout", "retries", "infinite_retries", "description"):
+        entry.pop(key, None)
+    t, r = prev.get("timeout"), prev.get("retries")
+    if isinstance(t, int) and not isinstance(t, bool) and t > 0:
+        entry["timeout"] = t
+    if prev.get("no_timeout") is True or prev.get("noTimeout") is True:
+        entry["no_timeout"] = True
+    if isinstance(r, int) and not isinstance(r, bool) and r > 0:
+        entry["retries"] = r
+    if prev.get("infinite_retries") is True or prev.get("infiniteRetries") is True:
+        entry["infinite_retries"] = True
+    entry["description"] = str(prev.get("description") or "")
 
 
 # ---------- background jobs ----------
@@ -1815,7 +1996,8 @@ def _output_authored_by(s: dict, code: str, syncing: bool,
 class DraftRefused(Exception):
     """§19: `DraftJobs.start`'s `admit` check refused the new job inside the
     registry lock — before it superseded anything. `reason` is the admit
-    callable's string ("deleting" | "discarded")."""
+    callable's string ("deleting" | "discarded"), or "stopping" once
+    `kill_all_building` has run (the backend is shutting down)."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -1843,6 +2025,8 @@ class DraftJobs:
     def __init__(self) -> None:
         self.jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
+        # §3 shutdown: set by `kill_all_building`; `start` then refuses.
+        self._stopping = False
 
     @staticmethod
     def _ref(j: dict) -> dict:
@@ -1900,6 +2084,10 @@ class DraftJobs:
         # each scan before the other inserts and both survive building.
         superseded: list[dict] = []
         with self._lock:
+            if self._stopping:
+                # §3: the backend is shutting down — refused like an admit
+                # refusal, before anything is superseded.
+                raise DraftRefused("stopping")
             if admit is not None and (reason := admit()):
                 raise DraftRefused(reason)
             cancelled = [v for v in self.jobs.values()
@@ -2082,6 +2270,9 @@ class DraftJobs:
         the process is exiting, so cancel()'s term-then-kill grace thread would
         never get to fire."""
         with self._lock:
+            # §3: from here on every `start` is refused — a job admitted
+            # after this sweep would run a harness nothing kills.
+            self._stopping = True
             live = [j for j in self.jobs.values() if j["status"] == "building"]
             for j in live:
                 j["_cancel"] = True
@@ -2089,7 +2280,9 @@ class DraftJobs:
         for j in live:
             proc = j["_proc"].get("proc")
             # §8: whether or not the CLI leader has already exited — the
-            # group may still hold a helper and the pipes.
+            # group may still hold a helper and the pipes. A finished call
+            # never leaves its proc here (`_invoke` clears it), so a held
+            # proc is always a live call's.
             if proc:
                 harness.kill_group(proc)
                 # §8/§3: release the pipes too, so a drafting thread is never
@@ -2166,7 +2359,8 @@ class DraftJobs:
                 files, grants, trig_secrets,
                 unresolved=(current or {}).get("unresolved_references"),
                 locked_steps=locked, current_steps=current_steps), "steps",
-            locked_names={str(s.get("name")) for s in locked})
+            locked_names={str(s.get("name") or "").strip() for s in locked},
+            build_rules=build_rules_bullets(spec_md))
         if blockers:
             # The blocker response's optional notes.md rides the payload (§8) —
             # the caller already holds the spec, a sync never changes it.
@@ -2221,11 +2415,13 @@ class DraftJobs:
                   if p.get("name")]
         tcount = len((current or {}).get("triggers") or [])
         # §8: a constraint blocker's `step` must name a §4.1 locked step.
-        lnames = {str(s.get("name")) for s in locked_steps(current)}
+        lnames = {str(s.get("name") or "").strip() for s in locked_steps(current)}
+        # §8: a constraint blocker's `rule` must quote a SPEC Build rules bullet.
+        rules = build_rules_bullets(spec_as_md(current))
         on_chunk, on_file = self._chat_cb(job)
         raw = self._invoke(job, agent, prompt, on_chunk=on_chunk, on_file=on_file)
         outcome, payload, kept, answer, failed = self._chat_classify(
-            raw, pnames, tcount, locked_names=lnames)
+            raw, pnames, tcount, locked_names=lnames, build_rules=rules)
         rounds: list[dict] = []
         for i in range(1, repair_rounds() + 1):
             if outcome != "invalid":
@@ -2237,10 +2433,12 @@ class DraftJobs:
             raw = self._invoke(job, agent, repair,
                                on_chunk=on_chunk, on_file=on_file)
             outcome, payload, kept, answer, failed = self._chat_classify(
-                raw, pnames, tcount, kept, answer, locked_names=lnames)
+                raw, pnames, tcount, kept, answer, locked_names=lnames,
+                build_rules=rules)
         if outcome == "invalid":
             diag = self._diagnose(job, agent, prompt, raw, payload,
-                                  attempts=len(rounds) + 1, locked_names=lnames)
+                                  attempts=len(rounds) + 1, locked_names=lnames,
+                                  build_rules=rules)
             self._record_failure(job, agent, "chat", "diagnosed", prompt,
                                  rounds + [{"errors": payload, "response": raw}], diag)
             return self._block(job, "chat", diag, None, diagnosed=True)
@@ -2259,7 +2457,8 @@ class DraftJobs:
     def _chat_classify(raw: str, param_names: list[str] | None = None,
                        triggers_count: int | None = None,
                        kept: dict[str, str] | None = None, answer: str = "",
-                       locked_names: set[str] | None = None):
+                       locked_names: set[str] | None = None,
+                       build_rules: list[str] | None = None):
         """Classify a chat-call response (§8), merging its blocks over `kept` —
         the valid blocks carried forward from earlier rounds (per-block
         repair). Returns (outcome, payload-or-errors-or-blockers, kept2,
@@ -2280,10 +2479,11 @@ class DraftJobs:
         blocks settles them with that prose as the answer. Round 1 (no kept
         blocks) behaves exactly like the unmerged classification: prose is
         always an answer, never invalid. `locked_names` is parse_blockers'
-        constraint-`step` reference set."""
+        constraint-`step` reference set, `build_rules` its constraint-`rule`
+        one (the SPEC's Build rules bullets)."""
         kept = kept or {}
         try:
-            blockers, bnotes = parse_blockers(raw, locked_names)
+            blockers, bnotes = parse_blockers(raw, locked_names, build_rules)
             if blockers is not None:
                 # §8: blocked payload = {blockers, notes?} — the optional
                 # notes.md riding the blocker envelope.
@@ -2375,12 +2575,23 @@ class DraftJobs:
         self._check_cancel(job)
         if harness.writes_files(agent.get("harness") or ""):
             prompt = prompt + "\n\n" + FILE_OUTPUT_BLOCK
+
+        def call() -> str:
+            try:
+                return harness.invoke(agent, prompt, proc_holder=job["_proc"],
+                                      on_chunk=on_chunk, on_tool=self._tool_cb(job),
+                                      on_file=on_file,
+                                      should_abort=lambda: job["_cancel"],
+                                      web=True)
+            finally:
+                # §8: the harness call is over and its process reaped — a
+                # cancel during the package installs or between rounds must
+                # never killpg a pgid the OS may already have reused.
+                job["_proc"].pop("proc", None)
+                job["_proc"].pop("release", None)
+
         try:
-            out = harness.invoke(agent, prompt, proc_holder=job["_proc"],
-                                 on_chunk=on_chunk, on_tool=self._tool_cb(job),
-                                 on_file=on_file,
-                                 should_abort=lambda: job["_cancel"],
-                                 web=True)
+            out = call()
         except harness.HarnessError as e:
             self._check_cancel(job)
             if not getattr(e, "retryable", False):
@@ -2395,16 +2606,13 @@ class DraftJobs:
             reset = getattr(on_chunk, "reset", None)
             if reset:
                 reset()
-            out = harness.invoke(agent, prompt, proc_holder=job["_proc"],
-                                 on_chunk=on_chunk, on_tool=self._tool_cb(job),
-                                 on_file=on_file,
-                                 should_abort=lambda: job["_cancel"],
-                                 web=True)
+            out = call()
         self._check_cancel(job)
         return out
 
     def _call_with_repair(self, job: dict, agent: dict, prompt: str,
-                          validator, call: str, locked_names: set[str] | None = None
+                          validator, call: str, locked_names: set[str] | None = None,
+                          build_rules: list[str] | None = None
                           ) -> tuple[dict, list[str], list[dict] | None, bool, str | None]:
         """One harness call + up to §15 AUTOWRIGHT_REPAIR_ROUNDS automatic
         repair rounds against `validator` — each round the same prompt plus the
@@ -2417,10 +2625,12 @@ class DraftJobs:
         (checked before every spawn there): a cancel between calls never lets a
         fresh full-timeout harness call start. `call` names the pipeline call
         ("steps") for the §5 build-failure record; `locked_names` is the
-        draft's §4.1 locked step names a constraint blocker may name."""
+        draft's §4.1 locked step names a constraint blocker may name,
+        `build_rules` the SPEC's Build rules bullets its `rule` must quote."""
         on_chunk, on_file = self._progress_cb(job)
         raw = self._invoke(job, agent, prompt, on_chunk=on_chunk, on_file=on_file)
-        result, errors, blockers, notes = self._parse_validate(raw, validator, locked_names)
+        result, errors, blockers, notes = self._parse_validate(
+            raw, validator, locked_names, build_rules)
         rounds: list[dict] = []
         for i in range(1, repair_rounds() + 1):
             if not errors:
@@ -2433,10 +2643,12 @@ class DraftJobs:
             on_chunk, on_file = self._progress_cb(job, prefix=try_prefix(i))
             raw = self._invoke(job, agent, repair,
                                on_chunk=on_chunk, on_file=on_file)
-            result, errors, blockers, notes = self._parse_validate(raw, validator, locked_names)
+            result, errors, blockers, notes = self._parse_validate(
+                raw, validator, locked_names, build_rules)
         if errors:
             diag = self._diagnose(job, agent, prompt, raw, errors,
-                                  attempts=len(rounds) + 1, locked_names=locked_names)
+                                  attempts=len(rounds) + 1, locked_names=locked_names,
+                                  build_rules=build_rules)
             self._record_failure(job, agent, call, "diagnosed", prompt,
                                  rounds + [{"errors": errors, "response": raw}], diag)
             return {}, [], diag, True, None
@@ -2461,14 +2673,15 @@ class DraftJobs:
 
     def _diagnose(self, job: dict, agent: dict, prompt: str, raw: str,
                   errors: list[str], attempts: int = 2,
-                  locked_names: set[str] | None = None) -> list[dict]:
+                  locked_names: set[str] | None = None,
+                  build_rules: list[str] | None = None) -> list[dict]:
         """§8 build diagnosis: one blocker-envelope-only call explaining why the
         build failed validation every round (`attempts` = total invalid
         responses, driving the twice/N-times wording); on any failure of the
         diagnosis itself, a deterministic fallback blocker built from the
         validation errors. `locked_names` is the calling parse's §4.1 locked
         step names — a constraint blocker naming any other step is a parse
-        error here too."""
+        error here too; `build_rules` likewise for a constraint `rule`."""
         self._event(job, f"The response didn't validate{attempts_phrase(attempts)}"
                          " — analyzing what went wrong…")
         diagnose = (prompt + "\n\n=== YOUR PREVIOUS RESPONSE ===\n" + clip_response(raw)
@@ -2481,7 +2694,7 @@ class DraftJobs:
             # The diagnosis call is never offered the notes.md option — its
             # optional notes are ignored.
             blockers, _notes = parse_blockers(self._invoke(job, agent, diagnose),
-                                              locked_names)
+                                              locked_names, build_rules)
         except (harness.HarnessError, ValueError) as e:
             log.warning("build-diagnosis call failed: %s", e)
         if not blockers:
@@ -2854,16 +3067,24 @@ class DraftJobs:
                      diagnosed=diagnosed)
 
     @staticmethod
-    def _parse_validate(raw: str, validator, locked_names: set[str] | None = None
+    def _parse_validate(raw: str, validator, locked_names: set[str] | None = None,
+                        build_rules: list[str] | None = None
                         ) -> tuple[dict, list[str], list[dict] | None, str | None]:
         try:
-            blockers, notes = parse_blockers(raw, locked_names)
+            blockers, notes = parse_blockers(raw, locked_names, build_rules)
             if blockers is not None:
                 return {}, [], blockers, notes
             files = parse_envelope(raw)
         except ValueError as e:
             return {}, [str(e)], None, None
-        result, errors = validator(files)
+        try:
+            result, errors = validator(files)
+        except (TypeError, AttributeError) as e:
+            # §8 "a surviving validation failure never fails the job": a
+            # validator tripping over an unexpected shape is one more error
+            # line feeding the repair round, never a failed job.
+            log.exception("drafting validator crashed on the response")
+            return {}, [f"the response has an unexpected shape — {e}"], None, None
         return result, errors, None, None
 
 

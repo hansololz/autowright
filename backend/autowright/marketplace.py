@@ -30,6 +30,7 @@ import yaml
 
 from . import paths, timefmt, transfer
 from .storage import new_id
+from .untrusted_yaml import excerpt, load_untrusted
 from .yamlio import atomic_write_text, load_yaml_checked, save_yaml
 
 log = logging.getLogger("autowright.marketplace")
@@ -66,8 +67,14 @@ _read_slots = threading.BoundedSemaphore(MAX_CONCURRENT_READS)
 MAX_CONCURRENT_ARCHIVE_DOWNLOADS = 2
 _archive_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ARCHIVE_DOWNLOADS)
 # §22.3: how long an image read waits for a slot before the route answers 503
-# (the page shows the no-image icon). Catalog reads keep the blocking wait.
+# (the page shows the no-image icon).
 IMAGE_SLOT_WAIT_S = 30
+# §20/§22.7: how long the editor's catalog read (`GET .../catalog`, behind
+# `marketplace catalog set|add|remove`) waits for a slot before it answers
+# CATALOG_BUSY - well inside the CLI's 30 s client timeout, so a slot held by
+# image traffic never reads as "restart the backend".
+CATALOG_SLOT_WAIT_S = 10
+CATALOG_BUSY = "the backend is busy — try again"
 
 # §22.2: one deadline bounds a whole POST /marketplace/refresh - with a
 # per-catalog 60 s deadline, a table of slow locations would otherwise keep the
@@ -339,7 +346,8 @@ def parse_catalog(text: str, *, location: str | None = None,
     rather than making the whole copy unreadable. The entries left keep their
     positions as their index."""
     try:
-        raw = yaml.safe_load(text)
+        # §5 untrusted-YAML rule: anchors and aliases refused (a ValueError).
+        raw = load_untrusted(text)
     except Exception as e:  # noqa: BLE001 - untrusted text: a deeply nested
         # document raises RecursionError rather than a YAMLError, and the route
         # must answer 422 with the reason either way, never 500.
@@ -349,7 +357,7 @@ def parse_catalog(text: str, *, location: str | None = None,
     if raw.get("format_version") != FORMAT_VERSION:
         # §22.1: the only hard gate, exactly like the §5.1 archive.
         raise MarketplaceError(
-            f"this marketplace catalog is format {raw.get('format_version')!r}; "
+            f"this marketplace catalog is format {excerpt(raw.get('format_version'))}; "
             f"this version of Autowright reads format {FORMAT_VERSION}")
     remote = isinstance(location, str) and is_link(location)
     name = _text(raw, "name", "", MAX_NAME) or default_name(location)
@@ -715,7 +723,13 @@ class MarketplaceStore:
             self.sources = sources
             self._unreadable = unreadable
             if (seeded or renamed or migrated) and not unreadable:
-                self._save()
+                try:
+                    self._save()
+                except MarketplaceUnwritable as e:
+                    # §5: a table that can't be written never bricks startup —
+                    # the in-memory table stands; the next write retries it.
+                    log.warning("couldn't save the marketplace table at load (%s) — "
+                                "keeping it in memory", e)
         # After the migration named its rows: the sweep compares against them.
         if sweep:
             self._sweep_orphan_dirs()
@@ -1395,8 +1409,12 @@ class MarketplaceStore:
         unresolved."""
         with self.lock:
             source = self._editable(source_id)
-        text = _decode(_read_reference(str(self._editor_file(source)), cap=MAX_CATALOG_BYTES,
-                                       what="catalog file"))
+        try:
+            raw = _read_reference(str(self._editor_file(source)), cap=MAX_CATALOG_BYTES,
+                                  what="catalog file", slot_wait_s=CATALOG_SLOT_WAIT_S)
+        except MarketplaceBusy:
+            raise MarketplaceBusy(CATALOG_BUSY) from None
+        text = _decode(raw)
         catalog = parse_catalog(text, location=source["location"])
         return {"name": catalog["name"], "description": catalog["description"],
                 "entries": [{"index": e["index"], "title": e["title"],

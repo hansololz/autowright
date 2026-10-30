@@ -32,13 +32,41 @@ from . import paths, service
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _exit_http(e: urllib.error.HTTPError) -> None:
+def _exit_unreachable(base: str | None, error) -> None:
+    """§20: the one "backend isn't reachable" message - a dead backend, a
+    socket timeout, or a reply that isn't JSON (another server now owns the
+    stale port named in backend.json)."""
+    where = f" at {base}" if base else ""
+    sys.exit(f"backend isn't reachable{where} ({error}) — restart it with "
+             "`autowright service restart` or `autowright-backend`")
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|.)")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _console_safe(text) -> str:
+    """§20 untrusted text on the console: what the CLI prints from a catalog,
+    an archive or a marketplace entry has its ANSI escape sequences (ESC `[`
+    ... final byte, or ESC plus one character) stripped and every other C0
+    control character but newline and tab, DEL, and the C1 range 0x80-0x9f
+    shown as a `\\xNN` escape, so a lone carriage return or a cursor move
+    can't hide a line the user is reading."""
+    text = _ANSI_ESCAPE_RE.sub("", str(text))
+    return _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+def _exit_http(e: urllib.error.HTTPError, base: str | None = None) -> None:
     # §20: print the API's detail message, never the raw JSON body.
     body = e.read().decode("utf-8", errors="replace")
     try:
-        detail = json.loads(body).get("detail")
-    except (ValueError, AttributeError):
-        detail = None
+        parsed = json.loads(body)
+    except ValueError:
+        # §20: an error body that isn't JSON (an HTML page from a stale port
+        # another server now owns, a truncated reply) is the backend not being
+        # reachable - never printed raw.
+        _exit_unreachable(base, e)
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
     if isinstance(detail, str):
         message = detail
     elif isinstance(detail, list) and detail and isinstance(detail[0], dict):
@@ -85,15 +113,14 @@ class Client:
             with _opener.open(r, timeout=timeout) as resp:
                 return json.loads(resp.read().decode() or "{}")
         except urllib.error.HTTPError as e:
-            _exit_http(e)
+            _exit_http(e, self.base)
         except (urllib.error.URLError, http.client.HTTPException,
                 TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
             # §3: backend.json can be well-formed yet point at a dead backend
             # (SIGKILL leftovers) — same clean guidance as a stale file, no traceback.
             # §20: so can a reply that isn't JSON (another server now owns the
             # stale port) — never a decode traceback.
-            sys.exit(f"backend isn't reachable at {self.base} ({e}) — restart it with "
-                     "`autowright service restart` or `autowright-backend`")
+            _exit_unreachable(self.base, e)
 
     def req_raw(self, method: str, path: str, data: bytes | None = None,
                 timeout: int = 30) -> bytes:
@@ -108,11 +135,20 @@ class Client:
             with _opener.open(r, timeout=timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
-            _exit_http(e)
+            _exit_http(e, self.base)
         except (urllib.error.URLError, http.client.HTTPException,
                 TimeoutError, OSError) as e:
-            sys.exit(f"backend isn't reachable at {self.base} ({e}) — restart it with "
-                     "`autowright service restart` or `autowright-backend`")
+            _exit_unreachable(self.base, e)
+
+
+def _json_reply(c: Client, reply: bytes):
+    """A `req_raw` reply that is JSON (the §19 import), parsed under the same
+    guard `req` has: a reply that isn't JSON is the backend not being
+    reachable, never a decode traceback."""
+    try:
+        return json.loads(reply.decode() or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        _exit_unreachable(getattr(c, "base", None), e)
 
 
 # ---------------------------------------------------------------- lookups
@@ -340,11 +376,14 @@ def _exit_invalid(d: Path, errors: list[str]) -> None:
 
 
 def validate_workdir(d: Path, agents: list[dict], secrets: list[dict],
-                     files: dict[str, str] | None = None) -> dict:
+                     files: dict[str, str] | None = None,
+                     unresolved: dict | None = None) -> dict:
     """§8 validation of a workdir; prints every error and exits 1 on failure.
     Returns the draft payload (spec blocks + steps/params/packages/triggers).
     `files` is the workdir as `read_workdir` returned it, when the caller has
-    already read (and, for `push --lock`, edited) it."""
+    already read (and, for `push --lock`, edited) it. `unresolved` is the
+    automation's §5.1 unresolved-reference map (its `unresolvedReferences`),
+    so the local pass words an imported reference the way the server does."""
     from . import drafting
 
     if files is None:
@@ -357,8 +396,9 @@ def validate_workdir(d: Path, agents: list[dict], secrets: list[dict],
     else:
         errors.append("spec.md is missing")
     step_files = {n: t for n, t in files.items() if n not in ("spec.md", "notes.md")}
-    # §20: `pulled_from` is push's own bookkeeping, lifted out before any
-    # validator (local or the server's) sees the manifest.
+    # §20: `pulled_from` and the other `pulled_*` keys are push's own
+    # bookkeeping, lifted out before any validator (local or the server's)
+    # sees the manifest.
     step_files = _lift_pulled_from(step_files)
     # §20: the manifest's cron and every entries may carry `run_if_missed`
     # (§4.3), a key the §8 rule-9 dialect does not know; lifted out before
@@ -366,7 +406,8 @@ def validate_workdir(d: Path, agents: list[dict], secrets: list[dict],
     # (a cron's (expression, timezone), an interval's canonical `every`).
     step_files, opted_out, errs = _lift_run_if_missed(step_files)
     errors += errs
-    draft, errs = drafting.validate_steps(step_files, _all_grants(agents, secrets))
+    draft, errs = drafting.validate_steps(step_files, _all_grants(agents, secrets),
+                                          unresolved=unresolved or None)
     errors += errs
     for t in draft.get("triggers") or []:
         if _schedule_key(t) in opted_out:
@@ -426,10 +467,126 @@ def _pulled_from(files: dict[str, str]) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+# §20: the workdir manifest's top-level bookkeeping keys `pull` writes - the
+# version, id, name, description and schedule lines it wrote. Push reads them
+# and never saves them.
+PULLED_KEYS = ("pulled_from", "pulled_id", "pulled_name", "pulled_description",
+               "pulled_triggers")
+
+
+def _pulled_baseline(files: dict[str, str]) -> dict:
+    """§20: the `pulled_*` keys the workdir manifest carries ({} when none, or
+    when the manifest doesn't parse)."""
+    import yaml
+
+    try:
+        manifest = yaml.safe_load(files.get("manifest.yaml") or "")
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return {}
+    if not isinstance(manifest, dict):
+        return {}
+    return {k: manifest[k] for k in PULLED_KEYS if k in manifest}
+
+
+def _manifest_schedule_key(t) -> tuple | None:
+    """§4.3 schedule identity (_schedule_key) of one manifest schedule line
+    (`cron` + optional `timezone`, or `every`); None for anything else."""
+    if not isinstance(t, dict):
+        return None
+    if t.get("cron") is not None:
+        return _schedule_key(
+            {"kind": "cron", "expression": str(t["cron"]).strip(),
+             "timezone": str(t["timezone"]) if t.get("timezone") else None})
+    if t.get("every") is not None:
+        return _schedule_key({"kind": "interval", "every": t["every"]})
+    return None
+
+
+def _pulled_schedule_keys(baseline: dict) -> set:
+    """§20: the §4.3 schedule identities of the manifest's `pulled_triggers`
+    lines - the schedules the pull (or the last push) wrote."""
+    lines = baseline.get("pulled_triggers")
+    return {key for t in (lines if isinstance(lines, list) else [])
+            if (key := _manifest_schedule_key(t)) is not None}
+
+
+def _rewrite_pulled_baseline(d: Path, text: str | None, updates: dict) -> None:
+    """§20: rewrite the workdir manifest's `pulled_*` keys after a push - the
+    `pulled_from` of the version it minted, and the `pulled_name` /
+    `pulled_description` / `pulled_triggers` of a manifest-side edit it
+    applied - so the next push is judged against this push, not the pull.
+    `text` is the manifest as read from disk; only keys the manifest already
+    carries are rewritten. A scalar key on a plain one-line `key: value` line
+    is replaced in place so the rest of the file stays byte for byte; when
+    that is not clean (a list, a multi-line value, a result that doesn't read
+    back as intended) the manifest is re-dumped through the yaml writer."""
+    import yaml
+
+    if not text or not updates:
+        return
+    try:
+        manifest = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return
+    if not isinstance(manifest, dict):
+        return
+    updates = {k: v for k, v in updates.items() if k in manifest}
+    if not updates:
+        return
+    expected = {**manifest, **updates}
+    updated = text
+    for key, value in updates.items():
+        line = yaml.safe_dump({key: value}, allow_unicode=True, width=float("inf"))
+        pattern = re.compile(rf"^{key}:[^\n]*(?:\n(?![ \t-])|\Z)", re.MULTILINE)
+        if (isinstance(value, list) or line.count("\n") != 1
+                or len(pattern.findall(updated)) != 1):
+            updated = None
+            break
+        updated = pattern.sub(lambda _m, line=line: line, updated)
+    if updated is not None:
+        try:
+            if yaml.safe_load(updated) != expected:
+                updated = None
+        except (yaml.YAMLError, ValueError, RecursionError):
+            updated = None
+    if updated is None:
+        updated = yaml.safe_dump(expected, sort_keys=False, allow_unicode=True)
+    path = d / "manifest.yaml"
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError as e:
+        # The version has already landed - say the workdir is behind rather
+        # than fail a save that succeeded.
+        print(f"warning: couldn't update the pulled_* keys in {path}: "
+              f"{e.strerror or e}", file=sys.stderr)
+
+
+def _manifest_trigger_lines(text: str | None) -> list[dict]:
+    """The workdir manifest's schedule lines (cron / every entries) as
+    written, or [] when there are none or the manifest doesn't parse."""
+    import yaml
+
+    try:
+        manifest = yaml.safe_load(text or "")
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return []
+    entries = manifest.get("triggers") if isinstance(manifest, dict) else None
+    return [dict(t) for t in entries if _manifest_schedule_key(t) is not None] \
+        if isinstance(entries, list) else []
+
+
+def _read_manifest_text(d: Path) -> str | None:
+    """The workdir manifest as it is on disk now, or None when unreadable."""
+    try:
+        return (d / "manifest.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _lift_pulled_from(step_files: dict[str, str]) -> dict[str, str]:
-    """Strip the top-level `pulled_from` key from the manifest (§20: push
-    reads it and never saves it). A manifest without the key passes through
-    byte-for-byte."""
+    """Strip the top-level `pulled_*` keys (PULLED_KEYS) from the manifest
+    (§20: push reads them and never saves them). A manifest without any of
+    them passes through byte-for-byte."""
     import yaml
 
     text = step_files.get("manifest.yaml")
@@ -439,9 +596,10 @@ def _lift_pulled_from(step_files: dict[str, str]) -> dict[str, str]:
         manifest = yaml.safe_load(text)
     except (yaml.YAMLError, ValueError, RecursionError):
         return step_files  # the drafting validator reports the parse error
-    if not isinstance(manifest, dict) or "pulled_from" not in manifest:
+    if not isinstance(manifest, dict) or not any(k in manifest for k in PULLED_KEYS):
         return step_files
-    manifest.pop("pulled_from")
+    for k in PULLED_KEYS:
+        manifest.pop(k, None)
     return {**step_files,
             "manifest.yaml": yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True)}
 
@@ -545,13 +703,20 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     # §20: a stored step whose `file` is not a plain step file name (missing,
     # a path with separators, absolute - a hand-edited manifest) is refused
     # before anything is written, since writing it would land outside the
-    # workdir. The check is the store's own step-file rule.
+    # workdir. The check is the store's own step-file rule, with one taken set
+    # across all steps: two steps sharing a file name would overwrite one
+    # script with the other on disk, so that is refused too.
+    owners: dict[str, object] = {}
     for i, s in enumerate(auto.get("steps") or [], 1):
         fname = s.get("file")
+        if isinstance(fname, str) and fname in owners:
+            sys.exit(f"can't pull: steps {owners[fname]!r} and {s.get('name')!r} share "
+                     f"the file {fname!r}")
         if not isinstance(fname, str) or safe_step_filename(fname, i, s.get("name"),
-                                                            set()) != fname:
+                                                            set(owners)) != fname:
             sys.exit(f"can't pull: step {s.get('name')!r} has file {fname!r}, which is "
                      "not a plain step file name - fix the automation's manifest first")
+        owners[fname] = s.get("name")
     d.mkdir(parents=True, exist_ok=True)
     written = ["spec.md", "manifest.yaml"]
     (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
@@ -560,6 +725,13 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
         # §20: the version this pull wrote - push compares the scripts against
         # it (authorship), reads it, and never saves it.
         manifest["pulled_from"] = auto["version"]
+    # §20: the identity and schedules as pulled - push applies only the
+    # manifest-side changes against them, so an in-app rename, description
+    # edit or schedule delete since the pull is never reverted.
+    if isinstance(auto.get("id"), str):
+        manifest["pulled_id"] = auto["id"]
+    manifest["pulled_name"] = auto["name"]
+    manifest["pulled_description"] = auto.get("description", "")
     # §20: pull writes the stored spec-sourced schedules — crons and intervals
     # — so an untouched manifest round-trips them through push unchanged.
     # User-minted schedules (source: user, the trigger verbs' affair) stay out,
@@ -572,6 +744,7 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
                   **({"run_if_missed": False} if t.get("runIfMissed") is False else {})}
                  for t in auto.get("triggers") or []
                  if t["kind"] in ("cron", "interval") and t.get("source") != "user"]
+    manifest["pulled_triggers"] = [dict(t) for t in schedules]
     if schedules:
         manifest["triggers"] = schedules
     params = [{k: v for k, v in p.items() if k not in PARAM_VALUE_KEYS}
@@ -869,6 +1042,10 @@ def cmd_automation_push(c: Client, args) -> None:
     agents, secrets = _grant_stores(c)
     d = Path(args.dir)
     files = read_workdir(d)
+    # Read before --lock/--unlock edit it in memory: the manifest as it is on
+    # disk, which is what the pulled_from rewrite after the save starts from.
+    manifest_on_disk = files.get("manifest.yaml")
+    baseline = _pulled_baseline(files)
     # §20: a stale workdir does not push silently - versions saved in the app
     # since the pull would be overwritten unseen. A manifest without the key
     # is never refused on this ground.
@@ -881,11 +1058,30 @@ def cmd_automation_push(c: Client, args) -> None:
                  f"v{pulled + 1}..v{current}")
     _apply_lock_flags(files, getattr(args, "lock", None) or [],
                       getattr(args, "unlock", None) or [])
-    draft = validate_workdir(d, agents, secrets, files=files)
+    draft = validate_workdir(d, agents, secrets, files=files,
+                             unresolved=full.get("unresolvedReferences"))
     _apply_step_authorship(draft, files, _pulled_steps(full, files))
     if args.note:
         draft["note"] = args.note
-    draft["triggers"] = merge_draft_triggers(full.get("triggers") or [], draft["triggers"])
+    # §20: a manifest schedule that was among the pulled lines but is no
+    # longer stored was deleted in the app since the pull - never re-added.
+    stored_triggers = full.get("triggers") or []
+    pulled_keys = _pulled_schedule_keys(baseline)
+    stored_keys = {_schedule_key(t) for t in stored_triggers}
+    drafted = [t for t in draft["triggers"]
+               if (key := _schedule_key(t)) is None
+               or key not in pulled_keys or key in stored_keys]
+    draft["triggers"] = merge_draft_triggers(stored_triggers, drafted)
+    # §20: the baseline this push leaves behind - the manifest-side edits it
+    # applies become the workdir's new `pulled_*` values.
+    baseline_updates: dict = {}
+    if "pulled_triggers" in baseline:
+        manifest_lines = _manifest_trigger_lines(manifest_on_disk)
+        applied_lines = [t for t in manifest_lines
+                         if (key := _manifest_schedule_key(t)) not in pulled_keys
+                         or key in stored_keys]
+        if {_manifest_schedule_key(t) for t in applied_lines} != pulled_keys:
+            baseline_updates["pulled_triggers"] = applied_lines
     # §20 grant model: stored grants plus explicit --grant-* flags, never
     # widened by what the pushed steps happen to reference.
     step_agents, allowed_secrets = _grants(args, draft, agents, secrets,
@@ -895,12 +1091,17 @@ def cmd_automation_push(c: Client, args) -> None:
     # §20: the workdir manifest's identity fields apply on push — a changed
     # name rides the version save (§19 name patch), a changed description
     # lands via the §19 PATCH after it; absent/blank values change nothing.
-    if draft.get("name"):
+    # With a pulled baseline only a manifest-side edit applies: a name equal
+    # to `pulled_name` is the one pulled, so an in-app rename since stands.
+    if draft.get("name") and ("pulled_name" not in baseline
+                              or draft["name"] != str(baseline["pulled_name"] or "")):
         body["name"] = draft["name"]
+        if "pulled_name" in baseline:
+            baseline_updates["pulled_name"] = draft["name"]
     r = c.req("POST", f"/automations/{a['id']}/versions", body)
     # Reported before the description PATCH — a failing PATCH exits, and the
     # version has already landed either way.
-    name = draft.get("name") or full["name"]
+    name = body.get("name") or full["name"]
     if r["version"] == full.get("version"):
         # §19/§20: the operational-only rule minted nothing — say that rather
         # than announce a version that was already there.
@@ -909,9 +1110,23 @@ def cmd_automation_push(c: Client, args) -> None:
             print("note not stored - a note needs a content change", file=sys.stderr)
     else:
         print(f"saved {name!r} as v{r['version']}")
+        # §20: the workdir now matches the version this push minted.
+        if isinstance(r.get("version"), int):
+            baseline_updates["pulled_from"] = r["version"]
     description = draft.get("description")
-    if description and description != (full.get("description") or ""):
+    if ("pulled_description" in baseline
+            and description == str(baseline["pulled_description"] or "")):
+        description = None  # the description as pulled - an in-app edit since stands
+    patch_description = bool(description) and description != (full.get("description") or "")
+    if description and "pulled_description" in baseline and not patch_description:
+        baseline_updates["pulled_description"] = description
+    _rewrite_pulled_baseline(d, manifest_on_disk, baseline_updates)
+    if patch_description:
         c.req("PATCH", f"/automations/{a['id']}", {"description": description})
+        # Only once the PATCH landed - a refused one leaves the baseline as it was.
+        if "pulled_description" in baseline:
+            _rewrite_pulled_baseline(d, _read_manifest_text(d),
+                                     {"pulled_description": description})
     ensure_packages(c, draft.get("packages") or [])
 
 
@@ -1012,9 +1227,18 @@ def cmd_automation_validate(c: Client, args) -> None:
     d = Path(args.dir)
     agents, secrets = _grant_stores(c)
     files = read_workdir(d)
-    draft = validate_workdir(d, agents, secrets, files=files)
+    # §20: the workdir's `pulled_id` is the §19 automationId, and that
+    # automation's §5.1 unresolved-reference map rides the local pass too, so
+    # both word an imported reference the way a refused save does.
+    pulled_id = _pulled_baseline(files).get("pulled_id")
+    body: dict = {}
+    unresolved = None
+    if isinstance(pulled_id, str) and pulled_id:
+        unresolved = c.req("GET", f"/automations/{pulled_id}").get("unresolvedReferences")
+        body["automationId"] = pulled_id
+    draft = validate_workdir(d, agents, secrets, files=files, unresolved=unresolved)
     _apply_step_authorship(draft, files, None)
-    r = c.req("POST", "/validate-steps", {"draft": draft})
+    r = c.req("POST", "/validate-steps", {"draft": draft, **body})
     errors = r.get("errors") or []
     if errors:
         _exit_invalid(d, errors)
@@ -1249,10 +1473,12 @@ def _print_import_summary(c: Client, r: dict) -> None:
     shared verbatim by `automation import` and §22.5 `marketplace install`,
     so an install reads exactly like an import."""
     s = r.get("summary", {})
-    print(f"imported {r.get('automation', {}).get('name', '?')!r} [{r.get('automation', {}).get('id', '')[:8]}]")
+    # §20: names here come from the archive - untrusted text on the console.
+    print(f"imported {_console_safe(repr(r.get('automation', {}).get('name', '?')))} "
+          f"[{r.get('automation', {}).get('id', '')[:8]}]")
     if s.get("renamedFrom"):
         # §5.1 name dedupe — the archive's name was taken.
-        print(f"  renamed from {s['renamedFrom']!r} - that name already exists")
+        print(f"  renamed from {_console_safe(repr(s['renamedFrom']))} - that name already exists")
     if s.get("osMismatch"):
         # §5.1: the archive was exported on another platform. §20 names it the
         # §4.1 display way ("macOS"), never the raw §5.1 token ("macos").
@@ -1264,7 +1490,7 @@ def _print_import_summary(c: Client, r: dict) -> None:
         label = m["name"] + (f" -> {m['matchedTo']}" if m["matchedTo"] != m["name"] else "")
         if ready_suffix and not m.get("ready", True):
             label += " (needs setup)"
-        return label
+        return _console_safe(label)
 
     if s.get("secretsMatched"):
         print("  secrets matched: " + ", ".join(_match_label(m) for m in s["secretsMatched"]))
@@ -1273,7 +1499,7 @@ def _print_import_summary(c: Client, r: dict) -> None:
             _match_label(m, ready_suffix=True) for m in s["agentsMatched"]))
     if s.get("unresolved"):
         print("  no match on this machine: " + ", ".join(
-            f"{u['kind']} {u['name']}" for u in s["unresolved"]))
+            _console_safe(f"{u['kind']} {u['name']}") for u in s["unresolved"]))
     ensure_packages(c, s.get("packages") or [])
     if s.get("unresolved"):
         print("  this automation needs attention - open it and fix the "
@@ -1307,8 +1533,7 @@ def cmd_automation_import(c: Client, args) -> None:
             # §20: an unreadable archive is a plain message on stderr, never a
             # raw OSError.
             sys.exit(f"can't read {args.path}: {e.strerror or e}")
-        r = json.loads(c.req_raw("POST", "/automations/import", data,
-                                 timeout=660).decode() or "{}")
+        r = _json_reply(c, c.req_raw("POST", "/automations/import", data, timeout=660))
     _print_import_summary(c, r)
 
 
@@ -1933,7 +2158,8 @@ def cmd_marketplace_list(c: Client, args) -> None:
             flags += " collapsed"
         if s.get("autoRefresh"):
             flags += " auto-refresh"
-        print(f"{s['name']} [{s['id'][:8]}]  {location}{flags}")
+        # §20: catalog fields are untrusted text on the console.
+        print(f"{_console_safe(s['name'])} [{s['id'][:8]}]  {_console_safe(location)}{flags}")
         if (s.get("builtin") and not s.get("cached") and not s.get("error")
                 and not s.get("refreshedAt")):
             # §22.2 pending: the built-in catalog seeded but not read yet - the
@@ -1942,7 +2168,7 @@ def cmd_marketplace_list(c: Client, args) -> None:
         elif s.get("error"):
             # §22.2: a failed refresh leaves the copy alone - the entries
             # below are still the last good one.
-            print(f"  couldn't refresh: {s['error']}")
+            print(f"  couldn't refresh: {_console_safe(s['error'])}")
         elif not s.get("location"):
             # §22.2: nothing to refresh from - say when the row was made.
             print(f"  added {s.get('addedAt') or '?'} (no location to refresh from)")
@@ -1959,7 +2185,7 @@ def cmd_marketplace_list(c: Client, args) -> None:
             # §22.1 entries are addressed by position - `marketplace install`
             # takes the number printed here.
             description = f" - {e['description']}" if e.get("description") else ""
-            print(f"  {n}. {e['title']}{description}")
+            print(_console_safe(f"  {n}. {e['title']}{description}"))
 
 
 def cmd_marketplace_add(c: Client, args) -> None:
@@ -1975,7 +2201,8 @@ def cmd_marketplace_add(c: Client, args) -> None:
     # §20 HTTP timeouts: add fetches the catalog and its images over the
     # network, so it takes the long timeout the import calls take.
     s = c.req("POST", "/marketplace/sources", body, timeout=660)
-    print(f"added {s['name']} [{s['id'][:8]}] - {len(s.get('entries') or [])} automation(s)")
+    print(f"added {_console_safe(s['name'])} [{s['id'][:8]}] - "
+          f"{len(s.get('entries') or [])} automation(s)")
 
 
 # §22.5: the three keys `marketplace set` takes, in the order it names them.
@@ -2003,7 +2230,7 @@ def cmd_marketplace_set(c: Client, args) -> None:
             patch[k] = raw
     # §22.4: one PATCH carrying only the keys that were typed.
     updated = c.req("PATCH", f"/marketplace/sources/{s['id']}", patch)
-    print(f"updated {updated['name']}")
+    print(f"updated {_console_safe(updated['name'])}")
 
 
 def cmd_marketplace_refresh(c: Client, args) -> None:
@@ -2028,16 +2255,17 @@ def cmd_marketplace_refresh(c: Client, args) -> None:
     for s in sources:
         if not s.get("location"):
             # §22.5: refresh-all skips a catalog with no location; not a failure.
-            print(f"skipped {s['name']} - no location to refresh from")
+            print(f"skipped {_console_safe(s['name'])} - no location to refresh from")
             continue
         # §22.4: a single-source refresh answers 200 either way - the failure
         # is in `error`, not in the status code.
         s = c.req("POST", f"/marketplace/sources/{s['id']}/refresh", timeout=660)
         if s.get("error"):
             failed = True
-            print(f"couldn't refresh {s['name']}: {s['error']}")
+            print(f"couldn't refresh {_console_safe(s['name'])}: {_console_safe(s['error'])}")
         else:
-            print(f"refreshed {s['name']} - {len(s.get('entries') or [])} automation(s)")
+            print(f"refreshed {_console_safe(s['name'])} - "
+                  f"{len(s.get('entries') or [])} automation(s)")
     if failed:
         # §22.5: a refresh-all never stops at the first bad source, but the
         # exit code says one of them failed.
@@ -2047,7 +2275,7 @@ def cmd_marketplace_refresh(c: Client, args) -> None:
 def cmd_marketplace_remove(c: Client, args) -> None:
     s = find_source(c, args.source)
     c.req("DELETE", f"/marketplace/sources/{s['id']}")
-    print(f"removed {s['name']}")
+    print(f"removed {_console_safe(s['name'])}")
 
 
 def _entry_index(n: int, entries: list, name: str) -> int:
@@ -2091,8 +2319,10 @@ def cmd_marketplace_audit(c: Client, args) -> None:
     if args.json:
         _pjson(r)
         return
+    # §20: the archive's paths and lines are untrusted text on the console -
+    # a lone carriage return or an escape sequence must not hide a line.
     for f in r.get("files") or []:
-        print(f"== {f['path']}")
+        print(f"== {_console_safe(f['path'])}")
         if f.get("text") is None:
             print("  (not text)")
             continue
@@ -2102,7 +2332,7 @@ def cmd_marketplace_audit(c: Client, args) -> None:
         if lines and lines[-1] == "":
             lines.pop()
         for line in lines:
-            print(line)
+            print(_console_safe(line))
 
 
 def cmd_marketplace_create(c: Client, args) -> None:
@@ -2114,7 +2344,7 @@ def cmd_marketplace_create(c: Client, args) -> None:
     # and builds its copy - the long timeout the other marketplace calls take.
     s = c.req("POST", "/marketplace/catalogs", body, timeout=660)
     where = f"at {s['location']}" if s.get("location") else "(kept by Autowright)"
-    print(f"created {s['name']} [{s['id'][:8]}] {where}")
+    print(f"created {_console_safe(s['name'])} [{s['id'][:8]}] {_console_safe(where)}")
 
 
 # §22.7: the two keys `catalog set` takes, in the order it names them.
@@ -2167,7 +2397,7 @@ def cmd_marketplace_catalog_set(c: Client, args) -> None:
         # §22.5: an empty value clears the key.
         catalog[k] = raw
     saved = _save_catalog(c, s, catalog, _catalog_entries(catalog))
-    print(f"saved {saved['name']}")
+    print(f"saved {_console_safe(saved['name'])}")
 
 
 def cmd_marketplace_catalog_add(c: Client, args) -> None:
@@ -2200,7 +2430,8 @@ def cmd_marketplace_catalog_add(c: Client, args) -> None:
     catalog = _read_catalog(c, s)
     entries = _catalog_entries(catalog) + [entry]
     saved = _save_catalog(c, s, catalog, entries, export_folder)
-    print(f"added {entry['title']} to {saved['name']} - entry {len(entries)}")
+    print(f"added {_console_safe(entry['title'])} to {_console_safe(saved['name'])} - "
+          f"entry {len(entries)}")
 
 
 def cmd_marketplace_catalog_remove(c: Client, args) -> None:
@@ -2211,8 +2442,8 @@ def cmd_marketplace_catalog_remove(c: Client, args) -> None:
     dropped = entries.pop(_entry_index(args.n, entries, s.get("name", "?")))
     saved = _save_catalog(c, s, catalog, entries)
     # §22.7: removing an entry never deletes the archive it named.
-    print(f"removed entry {args.n} ({dropped['title']}) from {saved['name']} - "
-          "its archive file stays")
+    print(f"removed entry {args.n} ({_console_safe(dropped['title'])}) from "
+          f"{_console_safe(saved['name'])} - its archive file stays")
 
 
 # ---------------------------------------------------------------- settings

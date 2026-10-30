@@ -354,6 +354,9 @@ const stepEditDirty = (e: StepEdit) =>
   e.code !== e.orig.code || e.name.trim() !== e.orig.name.trim() || e.description.trim() !== e.orig.description.trim()
   || stepTimeoutKey(e.timeout) !== stepTimeoutKey(e.orig.timeout)
   || stepRetriesKey(e.retries) !== stepRetriesKey(e.orig.retries)
+// §11 close guard: a typed remember rule is unsaved work too (the guard asks
+// before dropping it), though it never enables Save on its own
+const stepEditUnsaved = (e: StepEdit) => stepEditDirty(e) || (e.remember && e.rule.trim() !== '')
 // §11: a timeout or retries value the field grammar rejects blocks Save (inline hint)
 const stepEditTimeoutBad = (e: StepEdit) => parseStepTimeout(e.timeout) === null
 const stepEditRetriesBad = (e: StepEdit) => parseStepRetries(e.retries) === null
@@ -805,22 +808,23 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const editLines = useMemo(() => (edit ? edit.code.split('\n') : []), [edit?.code])
   // §9.2: the height is fixed for the life of the open modal — a hand edit
   // that lengthens the longest script never resizes the frame
-  const frame = useRef(stepModalFrame(steps)).current
+  const frame = useState(() => stepModalFrame(steps))[0]
   // §9.2 find in script (find.tsx): the bar and its query survive step
   // flips; the current match resets to the first on a new query or a new step.
   const scroller = useRef<HTMLDivElement | null>(null)
   const find = useFind(lines, scroller, i)
   const editActive = !!edit
   const dirty = !!edit && stepEditDirty(edit)
-  const dirtyRef = useRef(dirty)
-  dirtyRef.current = dirty
+  const unsaved = !!edit && stepEditUnsaved(edit)
+  const dirtyRef = useRef(unsaved)
+  dirtyRef.current = unsaved
   // §11: while Save's validation is in flight the editor is inert
   const saving = !!edit && edit.saving
   const savingRef = useRef(saving)
   savingRef.current = saving
   // §11: a checked remember box with a blank rule disables Save
   const ruleMissing = !!edit && edit.remember && !edit.rule.trim()
-  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving
+  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving && !editing?.disabled
   // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
   // backdrop close the modal) and the Remove step confirm
   const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
@@ -829,20 +833,23 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const saveRef = useRef<() => void>(() => {})
   saveRef.current = () => { if (canSave && !closingRef.current) onSave() }
   const ta = useRef<HTMLTextAreaElement | null>(null)
-  // §11 edit mode: the textarea takes focus with the caret at the end
+  // §11 edit mode: the textarea takes focus with the caret at the end — on
+  // entering edit mode only: a move during the edit changes `i` but leaves
+  // focus and the caret where they are (so a second ⌥↓ still moves)
   useEffect(() => {
     if (!editActive) return
     const el = ta.current
     if (!el) return
     el.focus()
     el.setSelectionRange(el.value.length, el.value.length)
-  }, [editActive, i])
+  }, [editActive]) // eslint-disable-line react-hooks/exhaustive-deps
   // ⌘S / Ctrl+S saves while editing (swallowed while Save is disabled); it
-  // yields to a card stacked above this one, like the Modal's Escape.
+  // yields to a card stacked above this one and to the §9.3 developer-log
+  // overlay, like the Modal's Escape.
   useEffect(() => {
     if (!editActive) return
     const onKey = (e: KeyboardEvent) => {
-      if (!isTopModal()) return
+      if (!isTopModal() || devlogOverlayOpen()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveRef.current() }
     }
     document.addEventListener('keydown', onKey)
@@ -1212,6 +1219,10 @@ export function StepList(props: StepListProps) {
     if (mode !== 'keep') {
       editSeq.current++
       setEditState(mode === 'open' && view !== null ? beginEdit(next[view]) : null)
+    } else {
+      // §11: the last Save attempt's validation lines named positions and
+      // `NN-` files that no longer hold
+      setEditState((x) => x && (x.errors.length ? { ...x, errors: [] } : x))
     }
     editing.commit(next, effect)
   }
@@ -1263,7 +1274,9 @@ export function StepList(props: StepListProps) {
     commit(next, at, 'drop', { kind: 'save', rule })
   }
   const toggleLock = () => {
-    if (!editing || editing.disabled || current === null) return
+    // §11: inert while Save's validation is in flight (the keyboard path —
+    // the buttons are already disabled)
+    if (!editing || editing.disabled || current === null || editRef.current?.saving) return
     const at = current
     const s = stepsRef.current[at]
     const { locked: _wasLocked, ...rest } = s
@@ -1273,7 +1286,9 @@ export function StepList(props: StepListProps) {
   // §11 Move up / Move down: swap with the neighbour, renumber the `NN-`
   // prefixes from the new positions, keep the moved step viewed
   const moveStep = (dir: -1 | 1) => {
-    if (!editing || editing.disabled || current === null) return
+    // §11: inert while Save's validation is in flight (the keyboard path —
+    // the buttons are already disabled)
+    if (!editing || editing.disabled || current === null || editRef.current?.saving) return
     const at = current
     const to = at + dir
     const base = stepsRef.current
@@ -1284,7 +1299,9 @@ export function StepList(props: StepListProps) {
     commit(renumberStepFiles(swapped), to, editRef.current ? 'keep' : 'drop', { kind: 'move', name: base[at].name, from: at + 1, to: to + 1 })
   }
   const removeStep = () => {
-    if (!editing || editing.disabled || current === null) return
+    // §11: inert while Save's validation is in flight (the keyboard path —
+    // the buttons are already disabled)
+    if (!editing || editing.disabled || current === null || editRef.current?.saving) return
     const at = current
     const next = renumberStepFiles(stepsRef.current.filter((_, j) => j !== at))
     // §11: view the next step, the previous at the end, or close when none is left

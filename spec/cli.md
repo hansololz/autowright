@@ -283,7 +283,22 @@ whatever the user is drafting in the app. Files:
   never saves, falling back to the current version when the key is absent or that version
   is gone; steps pair by name, k-th of a name to k-th for pre-uniqueness duplicates; a
   byte-identical script keeps its stored authorship) — unless the manifest states
-  `authored_by` explicitly. **A stale workdir does not push silently** (2026-10-28): when
+  `authored_by` explicitly. A push that minted `vM` rewrites the workdir manifest's
+  `pulled_from` to `M` (a push that minted nothing leaves it) — 2026-10-30: before, the
+  user's own last push counted as "versions saved in the app since the pull" and the
+  edit-push-edit-push loop was refused on its second push. `pull` also records the
+  automation's id (`pulled_id`), its `name` and `description` as pulled (`pulled_name`,
+  `pulled_description`) and the schedule lines it wrote (`pulled_triggers`): push applies
+  the manifest's `name` / `description` only when they differ from the **pulled** value
+  (a manifest-side edit), so an in-app rename or description edit made since the pull —
+  neither mints a version — is never reverted by a later push; and a manifest schedule
+  that was among the pulled lines but is no longer stored (deleted in the app since)
+  is not re-added. A push that applied a manifest-side `name`, `description` or schedule
+  edit rewrites the matching `pulled_*` baseline to what it applied (beside `pulled_from`),
+  so a later in-app edit is judged against the workdir's last push, not its last pull. A
+  manifest without those keys (an older pull) keeps the earlier behaviour. `pulled_id` is what `validate` and `push` send as the §19 `automationId`,
+  and the §5.1 unresolved-reference map rides the local pre-pass too, so their lines
+  match a refused save word for word. **A stale workdir does not push silently** (2026-10-28): when
   `pulled_from` is below the automation's current version — versions were saved in the app
   since the pull — `push` exits 1 with `'<name>' is at v<cur>; this workdir was pulled from
   v<pulled> — pull again, or pass --force to save over v<pulled+1>..v<cur>`; `--force` saves
@@ -292,9 +307,23 @@ whatever the user is drafting in the app. Files:
   has file '<file>', which is not a plain step file name - fix the automation's manifest
   first" — the store's own step-filename rule) a stored step whose `file` is not a plain
   step filename (missing, a path with separators, or absolute — a hand-edited manifest),
-  since writing it would land outside the workdir; nothing is written when any step fails.
+  since writing it would land outside the workdir, and likewise two stored steps sharing
+  one file name ("can't pull: steps '<a>' and '<b>' share the file '<file>'", 2026-10-30 —
+  one script would overwrite the other on disk); nothing is written when any step fails.
 - `NN-name.py` — one file per step, matching `steps[].file`.
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
+
+**Untrusted text on the console** (2026-10-30): whatever the CLI prints from a catalog, an
+archive or a marketplace entry (`marketplace list`, `marketplace audit`, catalog fields) has
+its control characters (C0 other than newline and tab, DEL, and the C1 range) shown as
+`\xNN` escapes and ANSI
+escape sequences stripped, so a lone carriage return or an escape sequence cannot hide a
+line from an audit the user is reading. **A reply that is not JSON** — an HTML error page
+from a stale port another server now owns, a truncated body — is reported as the backend
+not being reachable (the §20 wording), never printed raw; `automation import` parses its
+reply under that same guard. A catalog read that cannot get a read slot within 10 s (the
+§22 image traffic holds the slots) answers "the backend is busy — try again", never a
+wait without end behind the 30 s client timeout's false "restart the backend".
 
 There is no `instructions.md`: build rules are the app's §8 `build-instructions.md`, and a
 rule an automation needs changed is stated in its `spec.md` (§8). `push` and `create`

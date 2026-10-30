@@ -179,6 +179,14 @@ class Scheduler:
                 self._set_baseline((a["id"], t["id"]), now, now_utc)
             return
         self._warned_unreachable = False
+        # §6: drain here as well as on every execution finish — a raised
+        # maxParallel, or a finish whose drain lost a race, is picked up
+        # within a tick rather than waiting for the next firing; and stale
+        # message entries expire every tick, whatever the capacity. Before
+        # any firing: nothing jumps the queue, so a slot freed since the last
+        # tick goes to the head, never to this tick's occurrence.
+        if drain:
+            drain_queue(self.store, self.engine, a["id"])
         due: list[tuple[datetime, dict]] = []
         dropped: list[dict] = []  # §6 runIfMissed-off triggers whose span was slept through
         # Baselines of due triggers before this tick advanced them — restored
@@ -196,6 +204,13 @@ class Scheduler:
             key = (a["id"], t["id"])
             since = triggerlib.enabled_since(t)
             since_utc = triggerlib.enabled_instant(t)
+            if since_utc is not None and \
+                    triggerlib.credible_enabled_instant(t, now_utc) is None:
+                # §6: a stamp minted while the clock was wrongly ahead (more
+                # than 15 min past now) is ignored as if absent — in the
+                # first-seen baseline and the clamp below alike — so the
+                # trigger is not silenced until the wall clock re-reaches it.
+                since = since_utc = None
             if key not in self._baseline:
                 # §6: a first-seen trigger counts from the previous tick (or
                 # its own enable stamp, if later) — never from `now`, which
@@ -263,7 +278,8 @@ class Scheduler:
                 a naive local rendering inside the fall-back fold would read
                 an hour early."""
                 if t["kind"] == "interval":
-                    instant = triggerlib.interval_instant(t, after_utc, run_baseline_utc)
+                    instant = triggerlib.interval_instant(t, after_utc, run_baseline_utc,
+                                                          now=now_utc)
                     return instant.astimezone().replace(tzinfo=None), instant <= now_utc
                 nxt = triggerlib.trigger_next(t, after=after, run_baseline=run_baseline)
                 # §4.3: compared as the instant — a naive reading inside the
@@ -279,8 +295,13 @@ class Scheduler:
                     # §6 opt-out: fire only when an occurrence landed within
                     # the grace window; anything older was slept through and
                     # is dropped, never fired late.
-                    fresh, fresh_due = occurrence(now - timedelta(seconds=GRACE_S),
-                                                  now_utc - timedelta(seconds=GRACE_S))
+                    # The probe is derived from the instant, never by naive
+                    # wall arithmetic: `now - grace` resets `fold`, so in the
+                    # second pass of the fall-back hour it would read as the
+                    # first-pass instant an hour earlier (§6: fold honoured).
+                    probe_utc = now_utc - timedelta(seconds=GRACE_S)
+                    probe = datetime.fromtimestamp(probe_utc.timestamp())
+                    fresh, fresh_due = occurrence(probe, probe_utc)
                     if (fresh is None or not fresh_due) and \
                             occ.astimezone() >= now_utc - timedelta(seconds=GRACE_S):
                         # §4.3 gap rule: an occurrence shifted forward by a
@@ -346,11 +367,6 @@ class Scheduler:
             # dropped trigger's kind. A catch-up by another trigger in the same
             # tick covers the drop silently (the one-per-wake rule).
             self._record_drop(a, dropped[0])
-        # §6: drain here as well as on every execution finish — a raised
-        # maxParallel, or a finish whose drain lost a race, is picked up
-        # within a tick rather than waiting for the next firing.
-        if drain:
-            drain_queue(self.store, self.engine, a["id"])
 
     def _retention_sweep(self) -> None:
         """§5 hourly retention pass, off the tick thread (§6): deletes expired

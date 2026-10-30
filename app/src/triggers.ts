@@ -35,18 +35,3 @@ export function useTriggerPreview(triggers: object[]): TriggerPreview[] {
   }, [key])
   return held.kinds === kinds ? held.entries : []
 }
-
-/** Short label of the soonest enabled trigger (§4.3 nextAtMs's trigger), read
- * from its §19 preview results; null when none has an upcoming occurrence.
- * Pure minimum over the endpoint's nextAtMs values — no trigger math here. */
-export function nextTriggerShort(
-  triggers: Array<{ enabled?: boolean }>, previews: TriggerPreview[],
-): string | null {
-  let best: TriggerPreview | undefined
-  for (let i = 0; i < triggers.length; i++) {
-    const p = previews[i]
-    if (triggers[i].enabled === false || !p || !p.valid || p.nextAtMs == null) continue
-    if (!best || p.nextAtMs < (best.nextAtMs as number)) best = p
-  }
-  return best ? best.short : null
-}

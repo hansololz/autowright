@@ -146,7 +146,10 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   pair, both are written by the authoring agent per the §8 retry rule. On disk and in the §8
   manifest the keys are spelled `no_timeout`, `infinite_retries` (§5 yaml is snake_case); the
   API serialization is `noTimeout`, `infiniteRetries` in every payload that carries steps,
-  the §19 draft-job result included.
+  the §19 draft-job result included. On **input** the §19 step model accepts either
+  spelling for these and for `authored_by` (the §20 CLI hands the §8 validator's
+  snake_case output straight to `/versions` and `/automations`); output is camelCase only
+  (2026-10-30, decided rather than rejecting the alias).
   **Authorship and lock** (2026-10-27, §21 additive): `authoredBy: agent | user` — who wrote
   the step's current `code`: `agent` (absent = agent) for a §8 sync's output, `user` for a
   script the user wrote or edited by hand in the §11 step editor or pushed through the §20
@@ -291,7 +294,9 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
     macOS / Windows / Linux; an unrecognized stored token shows verbatim and always
     mismatches.)
   - `step-modified` — a current-version step whose script file on disk no longer matches
-    the `sha` its §5 version manifest recorded when the version was written (an on-disk
+    the `sha` its §5 version manifest recorded when the version was written — a sealed
+    file that is **missing** counts as modified too (2026-10-30: a deleted script showed
+    no problem until the execution failed, and `duplicate` copied the step unsealed) (an on-disk
     hand edit of an "immutable" version folder — the one way a script can run without
     passing the §8/§19 validators; the engine executes the file on disk, §7). One entry
     per step, sorted by step order. "Step NAME was edited on disk after v<N> was saved —
@@ -366,6 +371,11 @@ a stripped default would make a §11 test resolve an unset param to empty instea
 default).
 
 ### 4.3 Triggers
+
+A stored trigger without an `id`, or sharing one with another trigger of the automation,
+is given a fresh id at load (persisted by the next top-level write; 2026-10-30 — a missing
+id was re-minted on every load, and a duplicate id made one-shot consumption remove every
+trigger that shared it).
 
 An automation carries an ordered list of **triggers** — independent conditions that each start
 an execution. Triggers are user-owned operational state (§5): editing them on the detail page
@@ -697,7 +707,11 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   never a dangling countdown
 - else → "Next execution in `<countdown>` (`<short label of the next trigger>`) · executes even
   when the app is closed." (clock icon); the chip reads "`<triggerChip>` · next in
-  `<countdown>`"
+  `<countdown>`". The label names the trigger behind `nextAtMs`: the automation row
+  carries it as `nextTriggerShort` from the same backend computation (2026-10-30 — the
+  renderer used to take the minimum of a `/triggers/preview` answer, which anchors an
+  interval at the request moment and is never refetched, so a detail page left open
+  past one cron's time kept naming it while the countdown had moved to the next)
 
 ### 4.4 Versions and drafts
 
@@ -1092,7 +1106,10 @@ with 422 ("an agent named X already exists - agent names must be unique"); the �
 shows the same rule inline. Enforcement is write-time only - duplicates already on disk
 still load. A stored entry without an `id` cannot be referenced and is skipped at load
 with a warning, like any record that fails to resolve (§5 lenient load) — never healed,
-never fatal. Steps bind agents by id (§4.1), so a rename never repoints a step; uniqueness
+never fatal, and **never erased**: the raw entry is kept aside and written back unchanged
+by the next save of the file (2026-10-30 — a save that wrote only the rows it had loaded
+dropped the damaged row, orphaning its data behind a typo the user could have fixed).
+Steps bind agents by id (§4.1), so a rename never repoints a step; uniqueness
 exists for the §8 grants yaml, the §20 case-insensitive name flags, and unambiguous display.
 Import (§5.1) never creates an agent record: an archive reference either matches an
 existing agent or lands unresolved (§4.1 `unresolvedReferences`).
@@ -1105,7 +1122,9 @@ local-model mode) and help the user sign in when the harness needs an account (�
 `{ id, name, description, set, usedBy }` — the value itself is never part of the entity (Keychain-only,
 below). `id` is a uuid minted when the secret is created; a stored entry without one cannot be
 referenced and is skipped at load with a warning, like any record that fails to resolve
-(§5 lenient load) — never healed, never fatal. **The id is the
+(§5 lenient load) — never healed, never fatal, never erased (the raw row is written back
+unchanged by the next save, as for agents above — here the orphan would be a Keychain
+value no row names, 2026-10-30). **The id is the
 reference identity everywhere**: steps bind secrets by it (§4.1), discord triggers reference
 it (§4.3), the §19 routes address it (`PUT`/`DELETE /secrets/{id}`; only `POST /secrets`
 carries a name — creation), and the Keychain entry is keyed by it (the keyring account is

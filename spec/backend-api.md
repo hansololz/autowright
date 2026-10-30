@@ -38,7 +38,7 @@ store state the models
 never see). Pydantic shapes **requests only** — response bodies
 remain plain dicts (§2).
 
-- `GET /health` → `{ version, app, os, capabilities }` (unauthenticated; used for
+- `GET /health` → `{ version, app, os, capabilities, pid }` (unauthenticated; used for
   discovery/liveness). It is served on the event loop (an `async` handler that touches
   no I/O), never on the request worker pool: a pool saturated by long blocking routes
   (package installs, imports, probes) must not make the liveness probe time out, or the §3
@@ -269,7 +269,9 @@ remain plain dicts (§2).
   definitions, packages — equals the current version's over the stored serialization, no
   version is minted (a current step modified on disk, §4.1 `step-modified`, never compares
   equal: the save always mints, validates the edited script, and seals it); the triggers replacement, `paramValues`, `concurrency`, and the identity/grant patch
-  still apply, and the response is the same automation JSON either way. Saving settles the
+  still apply, and the response is `{ version, automation }` either way — `version` the
+  minted number, or the unchanged current one on an operational-only save (the editor
+  compares it to tell the two apart); restore answers the same shape. Saving settles the
   draft (the container is deleted) and appends the §4.4 boundary marker to the
   automation's thread — "Draft saved as vN." when a version was minted, "Changes saved —
   no new version." on the operational-only save
@@ -283,13 +285,23 @@ remain plain dicts (§2).
 - `POST /validate-steps` `{ draft, automationId? }` — the §8 step validators (the same pass the save
   endpoints run, below) over a draft-shaped body, answering **200** `{ errors: string[] }`
   — an empty list means it would save; validation failures are the response body, never
-  a 422, because the caller is asking, not saving. It writes nothing. Backs the §11 step
+  a 422, because the caller is asking, not saving — and that holds for a mistyped step
+  field too (`timeout: "60"`, `retries: 2.5`, `locked: "yes"`): the request-model error
+  is rendered into the list as `step N: <field> <message>` rather than refusing the ask,
+  since the §20 `automation validate` verb exists to check a hand-edited manifest
+  (2026-10-30; the one route exempt from the §19 wrong-type 422). It writes nothing. Backs the §11 step
   editor's Save (which shows the lines inline) and the §20 `automation validate` verb; the
   step keys `authoredBy` / `locked` ride the body like every other step field (§4.1).
   With an `automationId` the pass reads that automation's context exactly as its save
   would (the §5.1 `unresolved_references` wording for an imported reference), so the
   editor's strip and `automation validate` match a refused save word for word; a stale id
   answers 404.
+- **An unreadable current version** (its folder failed to load, §5) answers 422 "the
+  current version can't be read — restore an earlier version" from export, and 409 with
+  the same wording from `POST /drafts` (sync without a `current`) and duplicate — never
+  a 500 (2026-10-30). Execute and retry answer 404 only for a version label that doesn't
+  resolve (the §7 label grammar, the same `vN` parser the diff route uses — bare `3`
+  or `vv3` is not a label); any other lookup failure inside a start is an internal error.
 - **Server-side step validation** — `POST /automations` and `POST /automations/{id}/versions`
   run the §8 step validators (`ast.parse`, the §6.2 import allowlist, manifest schema and
   step-file ordering, §4.1 step-name uniqueness, the timeout/retry rules, the §8 rule-6/7 id checks — step `agents:` /
@@ -494,7 +506,16 @@ remain plain dicts (§2).
   steps (§4.5 kind `test`, trigger kind `test` — serialized as `test: true`, `versionLabel: "Test"`,
   `trigger: "Test"`; a stale `automationId` answers 404; 409
   while a test for the same draft container is executing; starting a test deletes the
-  container's previous test record). Scratch memory is copied to a temp dir — when `automationId`
+  container's previous test record). The route answers as soon as the record and its
+  live-engine entry exist — in one lock hold, so a cancel, draft discard or automation
+  delete landing during setup finds the entry, marks it, and the test thread finishes
+  `cancelled` at registration without running a step (2026-10-30: a setup gap of seconds
+  to minutes used to let a cancelled test run every step after the draft was gone);
+  the step-file writes and the memory copy happen on the test thread after that, so a
+  large memory folder never stalls the request past the 30 s client timeout (a setup
+  failure there — a memory copy that cannot complete — deletes the record and publishes
+  `execution.deleted`, so the row vanishes and the app log carries the error; the route
+  has already answered, so there is no error body to give). Scratch memory is copied to a temp dir — when `automationId`
   is given, from its `draft/memory/` if present else its memory dir, else from the pending
   slot's `memory/` if present else empty — and discarded at test end. Grant arrays as in
   `/drafts`; param resolution uses the automation's stored values when `automationId` is given
@@ -680,7 +701,9 @@ remain plain dicts (§2).
   the queue and finishes `skipped`, with its sender told — the same endpoint covers both, and
   the queue check and the live check share one lock so an entry promoted between the click and
   the call can never be cancelled twice or missed by both) ·
-  `POST /executions/{id}/retry` (§7 in-place retry; 409 unless failed and not live) ·
+  `POST /executions/{id}/retry` (§7 in-place retry; 409 unless failed and not live, and
+  409 "version vN no longer exists" when its version is gone — never a 404, the record
+  itself resolved) ·
   `POST /executions/{id}/skip-step` `{ index }` (§7 skip; 409 unless that step is executing)
 - `GET/POST /agents` · `PATCH/DELETE /agents/{id}` (DELETE: §5 per-automation re-point —
   a failed automation write is logged and skipped, both events still publish) · POST and a PATCH whose merged result

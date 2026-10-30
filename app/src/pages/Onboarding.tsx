@@ -26,6 +26,9 @@ interface Card {
   method: 'browser' | 'terminal' | null
   error: string | null          // failed-install first error line
   notReady: string | null       // failed connection check, shown on the idle card
+  // §9 Linux nuance: a fresh install left this provider signed out and no
+  // sign-in help applies — a failed check shows the manual sign-in line.
+  installedSignedOut: boolean
   queue: LocalPiece[]           // local card: missing pieces being installed
   qi: number                    // local card: index into queue
 }
@@ -88,7 +91,7 @@ interface Ob {
 
 const freshCard = (): Card => ({
   phase: 'idle', percent: null, line: '', pullPct: 0, method: null, error: null, notReady: null,
-  queue: [], qi: 0,
+  installedSignedOut: false, queue: [], qi: 0,
 })
 
 function freshOb(): Ob {
@@ -349,7 +352,11 @@ export default function Onboarding() {
     void api.signinStatus(id)
       // No sign-in help for this provider here (§9 Linux nuance): the check
       // reports the signed-out state and the card offers the manual line.
-      .then((s) => { if (s.signedIn === false && signinHelpOn(id)) startSignin(p); else startCheck(p) })
+      .then((s) => {
+        if (s.signedIn === false && signinHelpOn(id)) { startSignin(p); return }
+        if (s.signedIn === false) setCard(id, { installedSignedOut: true })
+        startCheck(p)
+      })
       .catch(() => startCheck(p))
   }
 
@@ -900,6 +907,10 @@ export default function Onboarding() {
             </div>
           ) : manual ? (
             <ManualInstallLine id={manualId as string} style={{ flex: 'none', maxWidth: 340 }} />
+          ) : c.notReady && c.installedSignedOut && !signinHelpOn(p.id) ? (
+            // §9 Linux nuance: installed but signed out with no sign-in help —
+            // the manual sign-in line, never the install button again.
+            <ManualInstallLine id={p.id} name={p.name} signin style={{ flex: 'none', maxWidth: 340 }} />
           ) : (
             <button
               className={s.primary ? 'ad-btn-primary' : 'ad-btn-ghost'}

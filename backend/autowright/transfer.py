@@ -24,10 +24,11 @@ from urllib.parse import urlsplit
 import yaml
 
 from . import __version__, harness, packages as pkglib, paths, timefmt, triggers as triggerlib
-from .drafting import STEP_FILE_RE
+from .drafting import STEP_FILE_RE, validate_step_refs
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import (AGENT_REF_RE, SECRET_REF_RE, MissingStepScriptError, Store, new_id,
-                      step_script_sha, strip_param_values)
+                      _kind_ok, step_script_sha, strip_param_values)
+from .untrusted_yaml import excerpt, load_untrusted
 
 FORMAT_VERSION = 2
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -56,6 +57,11 @@ MODES = ("default", "ollama", "custom")
 # Any well-formed uuid passes the §4.3 field validator — the archive form
 # carries the secret's NAME instead, checked separately (§5.1).
 _PROBE_SECRET_ID = "00000000-0000-4000-8000-000000000000"
+
+
+# §19: an unreadable current version (its folder failed to load, §5) — export
+# answers 422 with this wording, `POST /drafts` and duplicate 409.
+CURRENT_VERSION_UNREADABLE = "the current version can't be read — restore an earlier version"
 
 
 class TransferError(Exception):
@@ -236,7 +242,11 @@ def _check_travelling_steps(store: Store, a: dict, ver: dict, version_dir) -> No
 def export_automation(store: Store, a: dict, include_values: bool = True) -> bytes:
     """The §5.1 archive for an automation's current version, as zip bytes."""
     with store.lock:
-        ver = a["versions"][a["current_version"]]
+        ver = a["versions"].get(a["current_version"])
+        if ver is None:
+            # §19/§5: a current version whose folder failed to load is
+            # absent — the 422, never a KeyError 500.
+            raise TransferError(CURRENT_VERSION_UNREADABLE)
         refs = _ExportRefs(store, a.get("unresolved_references"))
         # §5.1: collect the referenced sets first (dangling ids raise here,
         # nothing half-built), then assign the per-kind refs in listing order.
@@ -396,7 +406,17 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for path, text in files:
             z.writestr(path, text)
-    return buf.getvalue()
+    data = buf.getvalue()
+    # §5.1: an archive the importer would reject is never produced — the
+    # importer's own definition checks run over the built archive (a blank
+    # agent-step or secret-entry why, a package without why, a parameter
+    # without a default, …) before the bytes are returned.
+    try:
+        with _open_archive(data) as z:
+            _validate(z)
+    except TransferError as e:
+        raise TransferError(f"{e} — repair the automation first") from None
+    return data
 
 
 # ---------- import ----------
@@ -459,7 +479,8 @@ def _yaml_or_reject(z: zipfile.ZipFile, path: str, required: bool = True) -> dic
             raise TransferError(f"the archive is missing {path}") from None
         return {}
     try:
-        data = yaml.safe_load(raw.decode("utf-8"))
+        # §5: untrusted — anchors and aliases refused (a ValueError below).
+        data = load_untrusted(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError, ValueError) as e:
         # ValueError: an impossible unquoted date (`2026-13-45`) — PyYAML
         # raises it outside its own error family.
@@ -515,7 +536,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
                                 "and import again")
         # §5.1/§21.3: the numeric-reference break carried no migration — any
         # lower format (the retired format 1 included) gets re-export guidance.
-        raise TransferError(f"unsupported archive format {format_version!r} - "
+        raise TransferError(f"unsupported archive format {excerpt(format_version)} - "
                             f"this app reads format {FORMAT_VERSION}; re-export the "
                             "automation with the current version and import that file")
     name = manifest.get("name")
@@ -535,7 +556,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
     for t in triggers_in:
         if not isinstance(t, dict) or t.get("kind") not in ("cron", "interval", "app_start",
                                                             "discord", "imessage"):
-            raise TransferError(f"unsupported trigger in the archive: {t!r} — "
+            raise TransferError(f"unsupported trigger in the archive: {excerpt(t)} — "
                                 "only cron, interval, app_start, discord, and "
                                 "imessage travel")
         if t["kind"] == "app_start" and any(x["kind"] == "app_start" for x in triggers):
@@ -613,7 +634,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
     for p in params:
         if (not isinstance(p, dict) or not isinstance(p.get("name"), str)
                 or not p["name"].strip() or p.get("kind") not in PARAM_KINDS):
-            raise TransferError(f"invalid parameter definition: {p!r}")
+            raise TransferError(f"invalid parameter definition: {excerpt(p)}")
         # §5.1/§8 rule 3: the save path's own rule (drafting's copy) - two
         # definitions of one name would silently collapse in the editor.
         if p["name"] in seen_params:
@@ -623,7 +644,13 @@ def _validate(z: zipfile.ZipFile) -> dict:
         # save path enforces, so the first edit of an imported version can never
         # 422 on a definition the user never wrote.
         if "default" not in p:
-            raise TransferError(f"param {p['name']!r}: missing default")
+            raise TransferError(f"param {excerpt(p['name'])}: missing default")
+        # §5 untrusted-YAML rule: the default is type-checked against its
+        # kind with the §4.2 value check (`_kind_ok`), so a structure that is
+        # no value of that kind never lands verbatim in the version.
+        if p["default"] is not None and not _kind_ok(p["kind"], p["default"]):
+            raise TransferError(f"param {excerpt(p['name'])}: the default isn't a "
+                                f"{p['kind']} value")
     # §5.1: definitions only — an archive exported before the §4.2 save-side
     # strip can carry resolved values inside its definitions; they never land.
     params = strip_param_values(params)
@@ -643,7 +670,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
     for p in packages:
         pip_name = p["pip"].strip()
         if not pkglib.PIP_NAME_RE.match(pip_name):
-            raise TransferError(f"packages: {pip_name!r} must be a bare distribution "
+            raise TransferError(f"packages: {excerpt(pip_name)} must be a bare distribution "
                                 "name — no version specifier")
         if not str(p.get("why") or "").strip():
             raise TransferError(f"packages: {pip_name} needs a why — one line on what "
@@ -656,7 +683,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
     for i, s in enumerate(steps_meta, 1):
         if (not isinstance(s, dict) or not isinstance(s.get("file"), str)
                 or not s["file"] or not isinstance(s.get("name"), str)):
-            raise TransferError(f"invalid step manifest entry: {s!r}")
+            raise TransferError(f"invalid step manifest entry: {excerpt(s)}")
         # §4.1 / §5.1: step names are non-blank and unique once trimmed, in
         # the wording `POST /versions` uses - import rejects exactly what the
         # save path would.
@@ -667,23 +694,26 @@ def _validate(z: zipfile.ZipFile) -> dict:
         # version and white-screen the §9.2 detail page.
         if any(s.get(key) is not None and not isinstance(s[key], str)
                for key in ("description", "why")):
-            raise TransferError(f"invalid step manifest entry: {s!r}")
+            raise TransferError(f"invalid step manifest entry: {excerpt(s)}")
         if ("/" in s["file"] or "\\" in s["file"] or s["file"].startswith(".")
                 or s["file"] in ("automation.yaml", "spec.md", "instructions.md", "notes.md")):
             # Reserved names would let a step's code overwrite (or be
             # overwritten by) the version folder's own files at write time.
-            raise TransferError(f"invalid step filename: {s['file']!r}")
+            raise TransferError(f"invalid step filename: {excerpt(s['file'])}")
         # §5.1/§8: the NN-name.py rule in listed order, like every other ingest
         # path — a looser name would land a version the app's own save
         # endpoints later 422 on (and `automation pull` would silently drop).
         m = STEP_FILE_RE.match(s["file"])
         if not m or int(m.group(1)) != i:
             raise TransferError(
-                f"step filename {s['file']!r} must follow NN-name.py in listed order ({i:02d}-…)")
+                f"step filename {excerpt(s['file'])} must follow NN-name.py in listed order ({i:02d}-…)")
         if s["file"] in seen_files:
-            raise TransferError(f"duplicate step filename: {s['file']!r}")
+            raise TransferError(f"duplicate step filename: {excerpt(s['file'])}")
         seen_files.add(s["file"])
-        code = _text(z, f"automation/{s['file']}")
+        # §5: step code lands with LF line endings — a CRLF member written
+        # through the text-mode writer on Windows would reload as `\r\r\n`,
+        # every blank line doubled.
+        code = _text(z, f"automation/{s['file']}").replace("\r\n", "\n").replace("\r", "\n")
         # §5.1: syntactically broken code answers 422 here — the app's own
         # save endpoints would otherwise reject the user's first edit of code
         # they never wrote. The §6.2 allowlist is deliberately not enforced
@@ -691,7 +721,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
         try:
             ast.parse(code or "")
         except SyntaxError as e:
-            raise TransferError(f"step {s['file']!r} isn't valid Python "
+            raise TransferError(f"step {excerpt(s['file'])} isn't valid Python "
                                 f"(line {e.lineno}): {e.msg}") from None
         entry = {"file": s["file"], "name": s["name"],
                  "description": s.get("description") or "", "code": code}
@@ -699,7 +729,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
         # answer 422, not iterate into a TypeError 500.
         for key in ("agents", "secrets", "packages"):
             if s.get(key) is not None and not isinstance(s[key], list):
-                raise TransferError(f"step {s['file']!r} {key} must be a list")
+                raise TransferError(f"step {excerpt(s['file'])} {key} must be a list")
         # §5.1: agent grants travel as {ref, why?} entries — the §4.1 id
         # form and the retired name form are rejected (local ids never
         # travel); other malformed foreign entries are dropped, not
@@ -707,7 +737,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
         # a uuid/name-form list is never silently dropped.
         if any(isinstance(g, dict) and ("id" in g or "name" in g)
                for g in s.get("agents") or []):
-            raise TransferError(f"step {s['file']!r} lists agents by id or name - "
+            raise TransferError(f"step {excerpt(s['file'])} lists agents by id or name - "
                                 "archives carry numbered references; re-export the "
                                 "automation with the current version")
         if s.get("agent"):
@@ -720,7 +750,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
                 for g in listed:
                     if not str(g.get("why") or "").strip():
                         raise TransferError(
-                            f"step {s['name']}: agent {_entry_ref(g)!r} needs a why — "
+                            f"step {s['name']}: agent {excerpt(_entry_ref(g))} needs a why — "
                             "one line on its role (required when a step lists several agents)")
             entry["agent"] = True
             entry["why"] = s.get("why") or ""
@@ -734,7 +764,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
             # the id and name forms are rejected; malformed foreign entries
             # are dropped.
             if any(isinstance(g, dict) and ("id" in g or "name" in g) for g in s["secrets"]):
-                raise TransferError(f"step {s['file']!r} lists secrets by id or name - "
+                raise TransferError(f"step {excerpt(s['file'])} lists secrets by id or name - "
                                     "archives carry numbered references; re-export the "
                                     "automation with the current version")
             # §5.1/§8 rule 6: every declared secret carries its per-use note
@@ -742,7 +772,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
             for g in s["secrets"]:
                 if (isinstance(g, dict) and _entry_ref(g) is not None
                         and not str(g.get("why") or "").strip()):
-                    raise TransferError(f"step {s['name']}: secret {_entry_ref(g)!r} needs "
+                    raise TransferError(f"step {s['name']}: secret {excerpt(_entry_ref(g))} needs "
                                         "a why — one line on why the step uses it")
             entry["secrets"] = [
                 {"ref": r,
@@ -760,7 +790,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
         t = s.get("timeout")
         if t is not None:
             if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
-                raise TransferError(f"invalid step timeout: {t!r}")
+                raise TransferError(f"invalid step timeout: {excerpt(t)}")
             entry["timeout"] = t
         if s.get("no_timeout"):
             # §5.1: steps obey the §8 bounds — an archive can't land a step no
@@ -771,7 +801,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
         r = s.get("retries")
         if r is not None:
             if not isinstance(r, int) or isinstance(r, bool) or not 1 <= r <= 10:
-                raise TransferError(f"invalid step retries: {r!r}")
+                raise TransferError(f"invalid step retries: {excerpt(r)}")
             entry["retries"] = r
         if s.get("infinite_retries"):
             if r is not None:
@@ -782,15 +812,15 @@ def _validate(z: zipfile.ZipFile) -> dict:
         authored_by = s.get("authored_by")
         if authored_by is not None:
             if authored_by not in ("agent", "user"):
-                raise TransferError(f"step {s['name']!r} authored_by must be agent or user, "
-                                    f"not {authored_by!r}")
+                raise TransferError(f"step {excerpt(s['name'])} authored_by must be agent or user, "
+                                    f"not {excerpt(authored_by)}")
             if authored_by == "user":
                 entry["authored_by"] = "user"
         locked = s.get("locked")
         if locked is not None:
             if not isinstance(locked, bool):
-                raise TransferError(f"step {s['name']!r} locked must be true or false, "
-                                    f"not {locked!r}")
+                raise TransferError(f"step {excerpt(s['name'])} locked must be true or false, "
+                                    f"not {excerpt(locked)}")
             if locked:
                 entry["locked"] = True
         steps.append(entry)
@@ -808,23 +838,23 @@ def _validate(z: zipfile.ZipFile) -> dict:
         raise TransferError("agents.yaml agents must be a list")
     for g in agents:
         if not isinstance(g, dict) or (ref := _entry_ref(g)) is None:
-            raise TransferError(f"invalid agent in the archive: {g!r} - every entry "
+            raise TransferError(f"invalid agent in the archive: {excerpt(g)} - every entry "
                                 "needs a numbered ref")
         g["ref"] = ref
         if (not isinstance(g.get("name"), str) or not g["name"]
                 or g.get("harness") not in harness.HARNESS_ID):
-            raise TransferError(f"invalid agent in the archive: {g!r}")
+            raise TransferError(f"invalid agent in the archive: {excerpt(g)}")
         if g.get("description") is not None and not isinstance(g["description"], str):
-            raise TransferError(f"invalid agent in the archive: {g!r} - the "
+            raise TransferError(f"invalid agent in the archive: {excerpt(g)} - the "
                                 "description must be text")
         mode = g.get("mode", "default")
         if mode not in MODES:
-            raise TransferError(f"invalid agent mode {mode!r}")
+            raise TransferError(f"invalid agent mode {excerpt(mode)}")
         if mode == "ollama" and g["harness"] not in harness.LOCAL_MODEL_HARNESSES:
             raise TransferError(
                 "a local-model agent needs Claude Code, Codex, or OpenCode")
         if mode != "default" and not g.get("model"):
-            raise TransferError(f"agent {g['name']!r} needs a model for mode {mode!r}")
+            raise TransferError(f"agent {excerpt(g['name'])} needs a model for mode {excerpt(mode)}")
     agent_refs = [g["ref"] for g in agents]
     if len(set(agent_refs)) != len(agent_refs):
         raise TransferError("duplicate agent refs in the archive - refs must be unique")
@@ -833,14 +863,14 @@ def _validate(z: zipfile.ZipFile) -> dict:
         raise TransferError("secrets.yaml secrets must be a list")
     for s in secrets:
         if not isinstance(s, dict) or (ref := _entry_ref(s)) is None:
-            raise TransferError(f"invalid secret in the archive: {s!r} - every entry "
+            raise TransferError(f"invalid secret in the archive: {excerpt(s)} - every entry "
                                 "needs a numbered ref")
         s["ref"] = ref
         if (not isinstance(s.get("name"), str)
                 or not SECRET_NAME_RE.match(s["name"])):
-            raise TransferError(f"invalid secret in the archive: {s!r}")
+            raise TransferError(f"invalid secret in the archive: {excerpt(s)}")
         if s.get("description") is not None and not isinstance(s["description"], str):
-            raise TransferError(f"invalid secret in the archive: {s!r} - the "
+            raise TransferError(f"invalid secret in the archive: {excerpt(s)} - the "
                                 "description must be text")
     secret_refs = [s["ref"] for s in secrets]
     if len(set(secret_refs)) != len(secret_refs):
@@ -860,24 +890,34 @@ def _validate(z: zipfile.ZipFile) -> dict:
     for s in steps:
         for g in s.get("agents") or []:
             if g["ref"] not in agent_ref_set:
-                raise TransferError(f"step {s['file']!r} references agent {g['ref']} "
+                raise TransferError(f"step {excerpt(s['file'])} references agent {g['ref']} "
                                     "that isn't listed in the archive's agents.yaml")
         for g in s.get("secrets") or []:
             if g["ref"] not in secret_ref_set:
-                raise TransferError(f"step {s['file']!r} references secret {g['ref']} "
+                raise TransferError(f"step {excerpt(s['file'])} references secret {g['ref']} "
                                     "that isn't listed in the archive's secrets.yaml")
         for m in _ANY_AGENT_SUBSCRIPT_RE.finditer(s["code"]):
             if m.group(1) not in agent_ref_set:
-                raise TransferError(f"step {s['file']!r} subscripts agents[{m.group(1)!r}], "
+                raise TransferError(f"step {excerpt(s['file'])} subscripts agents[{excerpt(m.group(1))}], "
                                     "which is not one of the archive's numbered "
                                     "references - re-export the automation with the "
                                     "current version")
         for m in _ANY_SECRET_SUBSCRIPT_RE.finditer(s["code"]):
             if m.group(1) not in secret_ref_set:
-                raise TransferError(f"step {s['file']!r} subscripts secrets[{m.group(1)!r}], "
+                raise TransferError(f"step {excerpt(s['file'])} subscripts secrets[{excerpt(m.group(1))}], "
                                     "which is not one of the archive's numbered "
                                     "references - re-export the automation with the "
                                     "current version")
+        # §5.1/§8 rules 5-7: the save path's own per-step reference checks
+        # (drafting's shared `validate_step_refs`, refs standing in for ids):
+        # an agents["<ref>"] subscript resolves only against the step's OWN
+        # declared agents — the runtime container holds nothing else — and a
+        # per-step package entry names a declared package and carries a why.
+        # Secret subscripts were resolved against secrets.yaml above.
+        if step_errors := validate_step_refs(
+                s, s["code"], {g["ref"] for g in s.get("agents") or []},
+                [p["import"].strip() for p in packages]):
+            raise TransferError(step_errors[0])
 
     agent_ref = manifest.get("agent")
     if isinstance(agent_ref, int) and not isinstance(agent_ref, bool):

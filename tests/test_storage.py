@@ -84,6 +84,7 @@ def test_no_triggers_roundtrip(store, home):
     assert j["triggerChip"] == "No triggers"
     assert j["allTriggersOff"] is False
     assert j["nextAtMs"] is None
+    assert j["nextTriggerShort"] is None
 
 
 def test_step_timeout_roundtrip(store, home):

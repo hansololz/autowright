@@ -15,11 +15,26 @@ from pathlib import Path
 APP_NAME = "Autowright"
 
 
+# Windows reserved device names: a file whose stem (the part before the first
+# dot, any extension, any case) is one of these opens the device, not a file.
+_WINDOWS_DEVICE_STEMS = frozenset(
+    ["con", "prn", "aux", "nul"]
+    + [f"com{n}" for n in range(1, 10)] + [f"lpt{n}" for n in range(1, 10)])
+
+
+def is_windows_device_name(name: str) -> bool:
+    """True when `name` would address a Windows device (con, prn, aux, nul,
+    com1-com9, lpt1-lpt9, case-insensitive, with any extension)."""
+    return str(name).split(".", 1)[0].strip().lower() in _WINDOWS_DEVICE_STEMS
+
+
 def safe_filename(name: str) -> str:
     """§19: the automation name sanitized for a filesystem filename. Lives here
     rather than in `transfer` so the §20 CLI can reach it without importing the
     store (§15 leaf rule); `transfer.safe_filename` re-exports it."""
     cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", name).strip().strip(".")
+    if is_windows_device_name(cleaned):
+        return "automation"
     return cleaned or "automation"
 
 

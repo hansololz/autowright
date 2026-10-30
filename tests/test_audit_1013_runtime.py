@@ -75,6 +75,11 @@ def test_a_test_meeting_the_shutdown_flag_ends_interrupted_and_spawns_nothing(st
                         lambda *args, **kwargs: spawned.append(1) or 0)
 
     eid = tr.start(engine, ver, a, [], [], {})
+    # §19 (2026-10-30): setup runs on the test thread — wait for it to land.
+    deadline = time.time() + 10
+    while time.time() < deadline and (eid in engine._live
+                                      or store.execs[eid]["status"] == "executing"):
+        time.sleep(0.02)
 
     assert spawned == []
     assert eid not in engine._live

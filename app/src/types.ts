@@ -205,6 +205,9 @@ export interface Automation {
   triggerChip: string        // one → its short label · several → "N triggers" · none → "No triggers"
   allTriggersOff: boolean    // nonempty list, every trigger off (drives the OFF tag)
   nextAtMs: number | null      // epoch ms of the next enabled occurrence
+  // §4.3 short label of the trigger behind nextAtMs, from the same backend
+  // computation; null when none. Optional: an older backend omits it.
+  nextTriggerShort?: string | null
   notes: string              // §4.1 — the current version's notes doc ("" when empty)
   lastStatus: Exclude<Status, 'queued' | 'skipped'>  // §4.1: those two can never be an automation's latest
   live: string[]             // §4.1 execution ids in progress, oldest first — maxParallel may allow several

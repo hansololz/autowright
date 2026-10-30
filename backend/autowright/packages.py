@@ -278,13 +278,20 @@ def outdated(entries: list[dict]) -> list[dict]:
 
 
 def _pip_install(name: str, pin_installed: bool = False,
-                 should_stop=None) -> str | None:
+                 should_stop=None, upgrade: bool = False,
+                 pin_only: set[str] | None = None) -> str | None:
     """One pip run into the §6.2 directory; returns an error string or None.
     Caller holds `_pip_lock`. `pin_installed` constrains every distribution
     already in the directory to its exact installed version — pip resolves
     with `--target` against its own env, not the directory, so without pins
     installing a new package silently *upgrades* shared dependencies already
     there (§6.2: an installed distribution is never touched by ensure).
+    `pin_only` (normalized names) narrows those pins to the listed
+    distributions — the §6.2 Update pins every *other declared* package.
+    `upgrade` adds `--upgrade`: with `--target` pip then deletes every item
+    already in the directory before moving the new build in, so only the
+    explicit Update passes it — ensure runs without it, and pip skips the
+    items already present while still moving in the missing ones (§6.2).
     `should_stop()` is polled while pip runs — a §7 cancel must not wait out
     a single pip run (up to INSTALL_TIMEOUT s) while the execution holds its
     §6 slot; on stop the pip process group is killed and 'cancelled' comes
@@ -293,7 +300,8 @@ def _pip_install(name: str, pin_installed: bool = False,
     target.mkdir(parents=True, exist_ok=True)
     # §2 console-interpreter rule: never pythonw — pip's helper children must
     # inherit the hidden console instead of opening terminal windows.
-    cmd = [paths.console_python(), "-m", "pip", "install", "--upgrade",
+    cmd = [paths.console_python(), "-m", "pip", "install",
+           *(["--upgrade"] if upgrade else []),
            "--no-input", "--disable-pip-version-check",
            # §6.2: wheels only — a source-only package would need a
            # compiler users don't have; fail fast with pip's clear
@@ -303,7 +311,8 @@ def _pip_install(name: str, pin_installed: bool = False,
     constraints = None
     try:
         if pin_installed:
-            pins = {n: v for n, v in _installed_versions().items() if n != _norm(name)}
+            pins = {n: v for n, v in _installed_versions().items()
+                    if n != _norm(name) and (pin_only is None or n in pin_only)}
             if pins:
                 fd, constraints = tempfile.mkstemp(prefix="autowright-pins-", suffix=".txt", text=True)
                 with os.fdopen(fd, "w") as f:
@@ -456,7 +465,8 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None,
                 continue
             if on_progress:
                 on_progress(r["pip"])
-            err = _pip_install(r["pip"], pin_installed=True, should_stop=should_stop)
+            err = _pip_install(r["pip"], pin_installed=True, should_stop=should_stop,
+                               upgrade=False)
             invalidate_scan()  # pip may have written even on failure
             if err:
                 r["status"] = "failed"
@@ -474,14 +484,19 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None,
     return results
 
 
-def upgrade(entries: list[dict], should_stop=None, wait: bool = True) -> list[dict]:
+def upgrade(entries: list[dict], should_stop=None, wait: bool = True,
+            declared=()) -> list[dict]:
     """§19 POST /packages/update — the §11 Update button: always runs pip
     (`install --upgrade name`), the one path that moves an installed
     distribution forward. A distribution that isn't installed is never
     installed by an update: it comes back failed, "not installed". Same result
     shape as `ensure`, the same `should_stop` between pip runs, and the same
     `wait` rule (`wait=False` raises `PackagesBusy` when another pip run holds
-    the lock)."""
+    the lock). `declared` is every distribution name any automation declares
+    (the union); each run pins all of them except the one being updated to
+    their installed versions, so an update never drags a neighbour's shared
+    dependencies along (§6.2)."""
+    declared_names = {_norm(n) for n in declared if n}
     results = check(entries)
     try:
         _acquire_pip_lock(wait, should_stop)
@@ -506,7 +521,8 @@ def upgrade(entries: list[dict], should_stop=None, wait: bool = True) -> list[di
                 r["error"] = "cancelled"
                 r.pop("version", None)
                 continue
-            err = _pip_install(r["pip"])
+            err = _pip_install(r["pip"], pin_installed=True, upgrade=True,
+                               pin_only=declared_names - {_norm(r["pip"])})
             invalidate_scan()
             if err:
                 r["status"] = "failed"

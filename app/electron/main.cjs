@@ -9,6 +9,7 @@ const path = require('path')
 // §2 platform layer (shell half): every OS-coupled value/helper comes from
 // the composed per-OS module — macOS today, a degraded fallback elsewhere.
 const plat = require('./platform/index.cjs')
+const { serviceFailureDetail, healthVersion } = require('./platform/serviceChecks.cjs')
 
 // §9: the shell asks its own platform module which surfaces exist before
 // wiring any of them — a module that declares a capability false is never
@@ -314,9 +315,11 @@ function bundledPython() {
 // name a stale port that any other local server now listens on, and treating
 // that stranger as our backend would mark ensure-backend 'ok', never install
 // the service, and wait forever. Only a /health body that identifies this app
-// (`app === 'Autowright'`) and carries a non-empty version counts as healthy;
-// non-JSON, a foreign app name and an empty version all read as unreachable,
-// so ensure-backend installs (or version-syncs) instead of hanging.
+// (`app === 'Autowright'`), carries a non-empty version and answers with the
+// backend.json pid (when one is recorded) counts as healthy; non-JSON, a
+// foreign app name, an empty version and another Autowright backend's pid all
+// read as unreachable, so ensure-backend installs (or version-syncs) instead
+// of hanging.
 async function backendVersion() {
   // §3: a backend busy under its store lock can miss a single probe, and
   // concluding "unreachable" there would bootout a live backend mid-execution.
@@ -341,9 +344,7 @@ async function backendVersion() {
     }
     try {
       if (!res.ok) return null
-      const body = await res.json()
-      if (body?.app !== 'Autowright') return null
-      return String(body.version ?? '') || null
+      return healthVersion(await res.json(), info)
     } catch {
       return null
     }
@@ -509,7 +510,11 @@ async function syncBackendVersion(py, running) {
   }
   runServiceInstall(py, (err, stdout, stderr) => {
     if (err) {
-      appLog(`ensure-backend: version-sync install failed: ${String(stderr || err.message).trim()}`)
+      // §3: the reinstall's _unload already booted the old backend out, so a
+      // failed sync is a failed ensure-backend, never a lingering 'ok'.
+      const detail = serviceFailureDetail(err, stdout, stderr)
+      ensureStatus = { state: 'failed', detail: `Backend install failed: ${detail}` }
+      appLog(`ensure-backend: version-sync install failed: ${detail}`)
       return
     }
     appLog(`ensure-backend: version-sync: ${String(stdout).trim()}`)
@@ -574,7 +579,7 @@ async function ensureBackend() {
   ensureStatus = { state: 'installing', detail: '' }
   runServiceInstall(py, (err, stdout, stderr) => {
     if (err) {
-      const detail = String(stderr || err.message).trim()
+      const detail = serviceFailureDetail(err, stdout, stderr)
       ensureStatus = { state: 'failed', detail: `Backend install failed: ${detail}` }
       appLog(`ensure-backend: install failed: ${detail}`)
       return
@@ -861,6 +866,14 @@ function createWindow(hash) {
   hardenWindow(win)
 }
 
+// §9 "a quit has begun": the before-quit flag, or a quit flight / native quit
+// still in its `service stop` (which can run for a minute before before-quit
+// sets the flag — a dock click meanwhile booted a window against a backend
+// being torn down).
+function quitBegun() {
+  return quitting || Boolean(quitFlight) || nativeQuitPending
+}
+
 function showApp(hash) {
   // Fresh window: load straight at the target. Existing window: hand the
   // target over IPC — a reload would drop the WS and all renderer state. A
@@ -872,7 +885,7 @@ function showApp(hash) {
   // §9: no window is created once a quit has begun: a relaunching update's
   // second-instance (or a deep link) mid-quit would leave one the quit then
   // has to fight.
-  if (quitting) return
+  if (quitBegun()) return
   if (!win) createWindow(hash)
   else if (hash) {
     if (winLoaded) win.webContents.send('open-target', hash)
@@ -1098,7 +1111,7 @@ function repositionPanel() {
 
 function togglePanel() {
   // §9: no panel is created once a quit has begun (before-quit destroyed it).
-  if (quitting) return
+  if (quitBegun()) return
   if (panel && panel.isVisible()) { panel.hide(); return }
   if (Date.now() - panelHiddenAt < 250) return
   if (!panel) {
@@ -1564,8 +1577,7 @@ function genericUpdater() {
   // installs are user-initiated, and nothing may install itself on quit — the
   // update-install handler's live-execution gate is the only way in. (On
   // darwin the off flag also keeps MacUpdater from engaging Squirrel during
-  // the download; the hand-off tail below runs that under the handler's
-  // control instead.)
+  // the download; update-install runs that hand-off behind its gate instead.)
   u.autoDownload = false
   u.autoInstallOnAppQuit = false
   // §15 dev parity: an unpackaged (dev/driven) launch runs the same real
@@ -1617,17 +1629,22 @@ async function fetchUpdateState() {
   }
 }
 
-// §3 darwin tail of update-download: after downloadUpdate(), MacUpdater has
+// §3 darwin head of update-install: after downloadUpdate(), MacUpdater has
 // verified the zip against the feed's sha512 and pointed Squirrel.Mac at its
 // own loopback proxy — but with the manual-only flags off it never engages
-// Squirrel. Engage it here and settle only once Squirrel staged the bundle:
-// the §9.4 bar holds 100% meanwhile, and an unsigned dev build surfaces
-// Squirrel's real signature error (no dev fork). Squirrel can also emit none
-// of its events (a hand-off it silently drops) — without the give-up timer
-// the §9.4 About page would wait on this promise forever. Resolves null on
-// staged, the error text otherwise.
-// The version Squirrel staged this run: downloadUpdate records it on an ok
-// staging; null until one is staged.
+// Squirrel, and neither does the download handler: a bundle Squirrel has
+// staged is one ShipIt installs on ANY termination of the app (the
+// session-end UI-only quit, the renderer-death quit, a crash), none of which
+// pass the live-execution gate. So update-install engages it, behind that
+// gate, and settles only once Squirrel staged the bundle: the §9.4 row reads
+// "Installing…" meanwhile (the invoke is still pending), and an unsigned dev
+// build surfaces Squirrel's real signature error (no dev fork). Squirrel can
+// also emit none of its events (a hand-off it silently drops) — without the
+// give-up timer the §9.4 About page would wait on this promise forever.
+// Resolves null on staged, the error text otherwise.
+// The version downloadUpdate verified this run (null until one is), and the
+// version Squirrel staged from it (null until update-install staged one).
+let downloadedVersion = null
 let stagedVersion = null
 
 function stageWithSquirrel(updater) {
@@ -1660,8 +1677,7 @@ function stageWithSquirrel(updater) {
 // percent math here. The check runs first — with autoDownload off it only
 // reads the feed yml — which is what arms downloadUpdate.
 // Single-flight: a second caller while one download runs gets the same
-// promise (a second click is a no-op), so stageWithSquirrel is never entered
-// twice at once.
+// promise (a second click is a no-op).
 let downloadInFlight = null
 
 function downloadUpdate() {
@@ -1677,24 +1693,22 @@ async function runDownloadUpdate() {
     const result = await updater.checkForUpdates()
     const version = String(result?.updateInfo?.version ?? '')
     if (!isNewerVersion(version, app.getVersion())) return { error: 'no update available' }
-    // §3 (macOS): Squirrel already staged a different version this run, and
-    // electron-updater's squirrelDownloadedUpdate flag never resets, so staging
-    // would "succeed" on that flag and install the older staged bundle. A flag
-    // already set with no version recorded is a staged bundle of a version we
-    // don't know — refused the same way.
-    const stagedOther = stagedVersion !== null
-      ? stagedVersion !== version
+    // §3 (macOS): a different version was already downloaded (or Squirrel
+    // already staged one) this run, and electron-updater's
+    // squirrelDownloadedUpdate flag never resets, so a later staging would
+    // "succeed" on that flag and install the older bundle. A flag already set
+    // with no version recorded is a staged bundle of a version we don't know —
+    // refused the same way.
+    const heldVersion = stagedVersion ?? downloadedVersion
+    const heldOther = heldVersion !== null
+      ? heldVersion !== version
       : Boolean(updater.squirrelDownloadedUpdate)
-    if (plat.UPDATER === 'mac' && stagedOther) {
+    if (plat.UPDATER === 'mac' && heldOther) {
       return { error: 'Restart to finish the update you already downloaded.' }
     }
     await updater.downloadUpdate(result?.cancellationToken)
     win?.webContents.send('update-progress', 100)
-    if (plat.UPDATER === 'mac') {
-      const error = await stageWithSquirrel(updater)
-      if (error) return { error }
-      stagedVersion = version
-    }
+    if (plat.UPDATER === 'mac') downloadedVersion = version
     return { ok: true }
   } catch (err) {
     return { error: String(err?.message || err) }
@@ -1794,6 +1808,18 @@ async function runInstallUpdate() {
   if (!UPDATE_FEED) return { error: NO_UPDATES_ERROR }
   if (brewManaged()) return { error: plat.MANAGED_COPY_ERROR }
   if (await executionsLive()) return { busy: true }
+  // §3 (macOS): Squirrel stages only here, behind the live-execution gate —
+  // an error (or the 10-minute give-up) answers { error } with nothing staged
+  // and nothing quit.
+  if (plat.UPDATER === 'mac') {
+    const updater = genericUpdater()
+    const error = await stageWithSquirrel(updater)
+    if (error) {
+      appLog(`update: staging failed: ${error}`)
+      return { error }
+    }
+    stagedVersion = downloadedVersion
+  }
   appLog('update: quitting to install')
   const stopsBackend = Boolean(plat.stopBackendBeforeInstall) && installerStaged()
   if (stopsBackend && !(await stopBackendBeforeInstall())) {
@@ -2159,6 +2185,12 @@ ipcMain.handle('reset-all', async () => {
   // in app.exit(0); every other way out — the busy/error answers and any
   // throw — clears the flag, so a reset that failed never leaves the app
   // unquittable.
+  // §3 step 0: one stop-and-quit at a time, in either direction — a second
+  // reset, a quit flight, a native quit or an update install already in
+  // progress refuses this one before anything is touched.
+  if (resetInFlight || quitFlight || nativeQuitPending || installInFlight) {
+    return { error: 'another operation is in progress' }
+  }
   resetInFlight = true
   if (await executionsLive()) {
     resetInFlight = false
@@ -2217,7 +2249,7 @@ app.whenReady().then(async () => {
   // §13: a minimized window is restored before it is shown, the same rule the
   // deep-link and second-instance paths follow.
   app.on('activate', () => {
-    if (quitting) return
+    if (quitBegun()) return
     if (win === null) createWindow()
     else if (winLoaded) { if (win.isMinimized()) win.restore(); win.show(); win.focus() }
   })

@@ -128,7 +128,9 @@ export default function AgentNewPage() {
   const [det, setDet] = useState<Record<string, { installed: boolean; signedIn: boolean | null }> | null>(null)
   // 'checking' is the beat between a finished install and the sign-in answer —
   // the card keeps the install notice, but the install branch can't re-enter.
-  const [hInst, setHInst] = useState<'idle' | 'installing' | 'checking' | 'signin' | 'failed'>('idle')
+  // 'manual' is an installed, signed-out harness with no sign-in help (§9
+  // Linux nuance, or a sign-in the backend refused): the manual sign-in line.
+  const [hInst, setHInst] = useState<'idle' | 'installing' | 'checking' | 'signin' | 'manual' | 'failed'>('idle')
   const [hPct, setHPct] = useState<number | null>(null)
   const [hErr, setHErr] = useState<string | null>(null)
   const [hMethod, setHMethod] = useState<'browser' | 'terminal'>('terminal')
@@ -137,6 +139,12 @@ export default function AgentNewPage() {
   // the actions are hidden and the card carries the manual-install line
   // instead. Detection and sign-in state keep working unchanged.
   const agentInstallOn = useStore((s) => s.platformCapabilities.agentInstall)
+  const platformOs = useStore((s) => s.platformOs)
+  // §9 Linux nuance on §2 `agentInstall` (as Onboarding): installs work there,
+  // but the Terminal-window sign-in is macOS-only — only codex's browser
+  // method works, so the TUI providers get the manual sign-in line.
+  const signinHelpOn = (h: HarnessId) =>
+    agentInstallOn && (platformOs !== 'linux' || h === 'codex')
   const pullingRef = useRef<string | null>(null)
   pullingRef.current = pulling
 
@@ -192,8 +200,12 @@ export default function AgentNewPage() {
     void api.loginHarness(h)
       .then((r) => { setHMethod(r.method); setHInst('signin') })
       .catch((e: Error & { status?: number }) => {
-        // 409 = already signed in (or no account needed) — setup is done.
-        if (e.status === 409) setupDone(h)
+        // "already signed in" (or no account needed) — setup is done. Any
+        // other 409 is a sign-in the backend can't help with (the Linux
+        // terminal instruction, Terminal not responding): its text is the
+        // instruction, and the card shows the manual sign-in line.
+        if (e.message.includes('already signed in')) setupDone(h)
+        else if (e.status === 409) { setHInst('manual'); showToast(e.message) }
         else { setHInst('idle'); void refreshDet(); showToast(e.message) }
       })
   }
@@ -225,7 +237,11 @@ export default function AgentNewPage() {
       const h = harness
       setHInst('checking')
       void api.signinStatus(h)
-        .then((s) => { if (s.signedIn === false) startHarnessSignin(h); else setupDone(h) })
+        .then((s) => {
+          if (s.signedIn !== false) setupDone(h)
+          else if (signinHelpOn(h)) startHarnessSignin(h)
+          else setHInst('manual')
+        })
         .catch(() => setupDone(h))
     } else {
       setHInst('failed')
@@ -234,9 +250,10 @@ export default function AgentNewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [harnessInstall])
 
-  // Sign-in poll (§12): every 2 s until the harness's sign-in rule flips.
+  // Sign-in poll (§12): every 2 s until the harness's sign-in rule flips —
+  // also behind the manual sign-in line, which promises automatic detection.
   useEffect(() => {
-    if (hInst !== 'signin' || !harness) return
+    if ((hInst !== 'signin' && hInst !== 'manual') || !harness) return
     const h = harness
     const id = setInterval(() => {
       void api.signinStatus(h).then((s) => {
@@ -601,6 +618,13 @@ export default function AgentNewPage() {
               </div>
             )}
           </div>
+        ) : hInst === 'manual' ? (
+          <ManualInstallLine
+            id={harness}
+            name={HARNESS_NAME[harness]}
+            signin
+            style={{ marginBottom: 16 }}
+          />
         ) : hInst === 'signin' ? (
           <AmberNotice
             body={`Finish signing in. Autowright opened ${hMethod === 'browser' ? 'your browser' : 'Terminal'}. Waiting for the sign-in…`}

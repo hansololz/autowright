@@ -83,7 +83,14 @@ the update bullets below).
   process polls `/health` every 2 s for up to 30 s of wall-clock time (a deadline, not an
   iteration count — each probe's own retries count against it). Success and failure both append to `app.log`;
   on failure the main process also captures `launchctl print gui/<uid>/ai.autowright.backend`
-  into `app.log` and records a failed ensure-backend status. The renderer reads that status over
+  into `app.log` and records a failed ensure-backend status whose detail is the verb's own
+  result line — `service install` reports its reason on **stdout** and exits 1, so the
+  detail is `stdout || stderr || the exec error`, never the bare "Command failed: <cmd>"
+  (2026-10-30; a failed version-sync reinstall records `failed` the same way instead of
+  leaving the status `ok` with the old backend booted out). The health check that ends the
+  wait also requires `/health`'s `pid` to equal the `backend.json` pid — a 200 from
+  another Autowright backend squatting the recorded port (another user's, an isolated
+  dev home's) is not ours (2026-10-30). The renderer reads that status over
   the preload bridge (`backend-status` IPC: `{ state: 'idle'|'installing'|'ok'|'failed', detail }`)
   and the §9 boot splash shows the failure detail instead of waiting silently. The renderer keeps
   retrying regardless — a late backend still connects. An install the shell drops because a
@@ -585,8 +592,21 @@ the update bullets below).
   to write there.
   A stopped backend returns at next login (`RunAtLoad`) or next app launch (ensure-backend
   re-heals) — stopped, never uninstalled.
+  On Linux the systemd user unit carries `Environment=` lines for `XDG_DATA_HOME`,
+  `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and `AUTOWRIGHT_HOME` whenever the installing
+  process has them set (2026-10-30): the GUI runs with the desktop session's environment
+  and the backend with the user manager's, and a profile-only `XDG_DATA_HOME` would
+  otherwise send the two to different data and log roots, with ensure-backend never seeing
+  a healthy backend. On Windows the NSIS uninstaller (`customUnInstall`, skipped on an
+  update-in-place) unregisters the `ai.autowright.backend` task and removes the
+  `%LOCALAPPDATA%\Autowright\bin\autowright.cmd` shim, as the macOS cask's `uninstall
+  launchctl:` does — an uninstall used to leave a logon task retrying a deleted
+  interpreter (2026-10-30; unverified on a host, ports.md).
 - **Reset — delete all data and quit app (§4.9 RESET card, decided).** The renderer confirm
   fires a `reset-all` IPC; the Electron main process orchestrates, in order:
+  0. A reset already in flight, or a quit flight, native quit or update install in
+     progress, refuses the call (`{ error }`) — one stop-and-quit at a time, in either
+     direction (2026-10-30: a second `reset-all` ran a second delete concurrently).
   1. The same live-execution gate as quit-all/update-install (busy → `{ busy: true }`,
      nothing touched; an unreachable backend counts as idle — but a reachable backend that
      answers the probe with anything but 200 (a stale token, a 500 mid-execution) is
@@ -797,18 +817,23 @@ the update bullets below).
     forwarded to the main window as `update-progress` IPC events (percent, or `null` when
     the download reports no total — the §9.4 bar goes indeterminate). `MacUpdater` then
     starts its loopback proxy and points Squirrel's feed URL at it, but — with
-    `autoInstallOnAppQuit` off — never engages Squirrel, so the darwin handler finishes
-    the hand-off itself: it subscribes to Electron's `autoUpdater`
+    `autoInstallOnAppQuit` off — never engages Squirrel, and **neither does the download
+    handler** (2026-10-30): a bundle Squirrel has staged is a bundle ShipIt installs on
+    *any* termination of the app — the session-end UI-only quit, the renderer-death
+    quit, a crash — none of which pass the live-execution gate below, so staging at
+    download time meant a swap could land under a backend mid-execution. The download
+    resolves `{ ok: true }` with the verified zip in electron-updater's cache (the
+    handler remembers the downloaded version; a later `update-download` for a different
+    version answers `{ error: "Restart to finish the update you already downloaded." }`
+    rather than resolving on electron-updater's never-reset `squirrelDownloadedUpdate`
+    flag and installing the older bundle). The Squirrel hand-off moves to `update-install`:
+    behind the gate, the darwin handler subscribes to Electron's `autoUpdater`
     `update-downloaded`/`error` events, calls its `checkForUpdates()` (Squirrel fetches
-    the zip from the proxy, verifies the code signature, stages the bundle), and resolves
-    `{ ok: true }` once Squirrel staged or `{ error }` on the first `error` event (the
-    handler remembers the version Squirrel staged; a later `update-download` for a
-    different version answers `{ error: "Restart to finish the update you already
-    downloaded." }` rather than resolving on electron-updater's never-reset
-    `squirrelDownloadedUpdate` flag and installing the older staged bundle); if
-    Squirrel emits neither within 10 minutes the handler settles with a plain-word error
-    instead of hanging the §9.4 flow forever. The §9.4 bar holds 100% while Squirrel
-    stages. There is no dev fork: `forceDevUpdateConfig` is set unconditionally (a
+    the zip from the proxy, verifies the code signature, stages the bundle) and only then
+    `quitAndInstall()`; the About row reads "Installing…" meanwhile (§9.4), an `error`
+    event settles `{ error }` with the bundle untouched, and if Squirrel emits neither
+    within 10 minutes the handler settles with a plain-word error instead of hanging
+    the flow forever. Unverified on a real host (ports.md). There is no dev fork: `forceDevUpdateConfig` is set unconditionally (a
     packaged app ignores it) so an unpackaged dev launch runs the same real path — the
     provider config always comes from the constructor options, never from a yml — and an
     unsigned dev build surfaces Squirrel's real signature error in the UI.
@@ -820,9 +845,9 @@ the update bullets below).
     `update-install` asks the backend for live executions
     (`GET /executions?status=executing&status=queued`) and answers `{ busy: true }` while any is running or queued —
     swapping the bundle mid-execution risks a step lazily importing mixed versions; an
-    unreachable backend counts as idle. Otherwise it calls electron-updater's
-    `quitAndInstall()` — Squirrel already staged during download, so this quits straight
-    into the swap. **The §13 panel is destroyed right before the call** (and its
+    unreachable backend counts as idle. Otherwise it stages with Squirrel (darwin, above)
+    and calls electron-updater's `quitAndInstall()`, which quits straight into the swap.
+    **The §13 panel is destroyed right before the call** (and its
     height/anchor state reset), not only in `before-quit`: Squirrel's `quitAndInstall`
     closes every window first and emits `before-quit` only once they have all closed, and
     the panel is deliberately non-closable — left alone, a panel that had ever been opened

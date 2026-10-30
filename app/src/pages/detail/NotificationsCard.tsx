@@ -1,6 +1,7 @@
 // §4.1 per-automation notification override (§9.2 NOTIFICATIONS card).
 import React, { useRef, useState } from 'react'
 import { api } from '../../api'
+import { usePlatformCopy } from '../../platformCopy'
 import { useStore } from '../../store'
 import type { Automation, AutomationNotifications } from '../../types'
 import { Eyebrow, MenuRow, PopMenu, settingsRow, settingsRowSub, settingsRowTitle, usePopover } from '../../ui'
@@ -28,6 +29,7 @@ export function NotificationsCard({ auto, showToast }: { auto: Automation; showT
   const notificationsOn = useStore((s) => s.platformCapabilities.notifications)
   const globalSetting = useStore((s) => s.settings?.notifications)
   const loadAuto = useStore((s) => s.loadAuto)
+  const copy = usePlatformCopy()
   const [open, setOpen, ref] = usePopover()
   // The committed choice while its PATCH (and the store refresh) is in flight;
   // `undefined` means nothing is pending and the record's value shows.
@@ -93,7 +95,7 @@ export function NotificationsCard({ auto, showToast }: { auto: Automation; showT
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={settingsRowTitle}>Notify me</div>
             {value === 'never' && (
-              <div style={settingsRowSub}>Failures still show on the Automations list and the menu bar.</div>
+              <div style={settingsRowSub}>{copy.failuresStillShow}</div>
             )}
           </div>
           <div ref={ref} style={{ position: 'relative', flex: 'none' }}>

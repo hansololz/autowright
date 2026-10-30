@@ -10,6 +10,7 @@ failure analysis is an ordinary chat job reading it (there is no separate
 analysis call)."""
 from __future__ import annotations
 
+import logging
 import shutil
 import threading
 from pathlib import Path
@@ -20,6 +21,8 @@ from .firing import DATA_PATH_UNREACHABLE
 from .events import hub
 from .storage import exec_version_label, is_test, safe_step_filename, store
 from .yamlio import atomic_write_text, save_yaml
+
+log = logging.getLogger("autowright.testexec")
 
 LOG_TAIL = 40      # lines per step handed to the §8 RECENT EXECUTIONS section
 EXECUTIONS_CAP = 5  # §8: newest settled executions included, across all §4.5 kinds
@@ -39,7 +42,15 @@ def start(engine: Engine, draft: dict, auto: dict | None,
           trigger_payload: dict | None = None,
           steps_fingerprint: str | None = None) -> str:
     """Create and launch the test execution record; returns its exec id.
-    Raises RuntimeError while the container already has a live test (§19 409)."""
+    Raises RuntimeError while the container already has a live test (§19 409).
+
+    §19: returns as soon as the record and its live-engine entry exist — both
+    created in ONE store.lock hold, so a cancel, draft settle or automation
+    delete landing during setup finds the entry (`engine.cancel` marks it)
+    instead of missing a test that then runs every step after the draft was
+    gone. The step-file writes and the scratch memory copy run on the test
+    thread (`_set_up_and_run`), so a large memory folder never stalls the
+    request past the client's 30 s timeout."""
     container_id = auto["id"] if auto else None  # §4.5: null automationId on create-mode tests
     with store.lock:
         # §3 shutdown: past the kill sweep nothing new may start — the same
@@ -92,49 +103,6 @@ def start(engine: Engine, draft: dict, auto: dict | None,
                                    params=store.merged_params(shadow, ver),
                                    trigger_payload=trigger_payload)
 
-    # §19 execution.deleted: the superseded test rows leave the §7 list live —
-    # published outside the lock, like every other event this module sends.
-    for superseded_id in superseded:
-        hub.publish("execution.deleted", executionId=superseded_id)
-
-    # Any setup failure past this point must take the record with it: a
-    # permanent "executing" test record trips the 409 above forever (and
-    # delete_test_execs skips executing records), so only a backend restart
-    # would ever unblock testing again.
-    scratch: Path | None = None
-    started_published = False
-    try:
-        # The sent draft's scripts, as executed (§5 steps/) — a real version
-        # folder serves this role for ordinary executions.
-        steps_dir = store.exec_dir(h["id"]) / "steps"
-        steps_dir.mkdir(parents=True, exist_ok=True)
-        for s in steps:
-            # §5: written atomically like every other file the app stores — a
-            # crash mid-write must never leave a half-written step script the
-            # engine would then execute.
-            atomic_write_text(steps_dir / s["file"], s.get("code", ""))
-
-        # §11 scratch memory: draft container's memory/ when present (edit mode
-        # falls back to the automation's), create mode the pending slot's — copied
-        # to a temp dir and discarded when the test ends.
-        dbase = (store.auto_dir(auto) / "draft") if auto is not None else paths.pending_draft_dir()
-        # §11: under the app's own storage, never the OS temp dir — the
-        # startup sweep (`clear_scratch`) can then clear what a crash left.
-        scratch = paths.tests_scratch_dir() / h["id"]
-        scratch.mkdir(parents=True, exist_ok=True)
-        mem_dir = scratch / "memory"
-        src = dbase / "memory"
-        if auto is not None and not src.exists():
-            src = store.auto_dir(auto) / "memory"
-        if src.exists():
-            shutil.copytree(src, mem_dir)
-        mem_dir.mkdir(parents=True, exist_ok=True)
-        (dbase / "test.yaml").unlink(missing_ok=True)  # wiped at each test start (§5)
-
-        # §11 stale-outcome rule: the renderer's opaque steps fingerprint rides
-        # the record to the summary write below (`steps_fingerprint`, §5).
-        h["_test"] = {"vdir": str(steps_dir), "mem": str(mem_dir), "fp": steps_fingerprint}
-
         def _on_spawn(pgid: int) -> None:
             # §7: a test run persists `pgid` exactly like a scheduled execution,
             # so §3 orphan recovery can kill its step group after a crash.
@@ -151,47 +119,159 @@ def start(engine: Engine, draft: dict, auto: dict | None,
 
         state = {"proc": None, "cancel": False, "on_spawn": _on_spawn,
                  "on_agent_groups": _on_agent_groups}
-        # §7: registered under store.lock — the lock `kill_all_live` flips the
-        # stopping flag beneath — and the flag re-checked there, so a test
-        # whose setup straddled the shutdown sweep never spawns a step group
-        # the sweep did not see.
-        with store.lock:
-            stopping = engine._stopping
-            if not stopping:
-                with engine._lock:
-                    engine._live[h["id"]] = state
-        # §4.5: test executions never change display state — no automation row.
-        hub.publish("execution.started", executionId=h["id"], automationId=container_id,
-                    execution=store.exec_json(h), automation=None)
-        started_published = True
-        if stopping:
-            # §7: finished the way the shutdown path finishes a live record —
-            # the engine's own shutdown arm marks every step and the record
-            # `interrupted` ("backend stopped mid-execution") and spawns nothing.
-            state["shutdown"] = True
-            _run(engine, shadow, ver, h, state, dbase, scratch)
-            return h["id"]
-        t = threading.Thread(target=_run, args=(engine, shadow, ver, h, state, dbase, scratch),
+        dbase = (store.auto_dir(auto) / "draft") if auto is not None else paths.pending_draft_dir()
+        t = threading.Thread(target=_set_up_and_run,
+                             args=(engine, auto, shadow, ver, h, state, dbase, steps_fingerprint),
                              daemon=True)
         # §19 delete waits on `engine.wait_finished`, which finds the thread
         # here - an unregistered one makes that wait a no-op and the rmtree can
         # race a step still dying.
         state["thread"] = t
-        t.start()
-        return h["id"]
+        # §7/§19: the live-engine entry lands in the SAME lock hold that
+        # created the record (and beneath the lock `kill_all_live` flips the
+        # stopping flag under), so every cancel path and the shutdown sweep
+        # see it from the first instant the record exists.
+        with engine._lock:
+            engine._live[h["id"]] = state
+        # §4.5: test executions never change display state — no automation row.
+        hub.publish("execution.started", executionId=h["id"], automationId=container_id,
+                    execution=store.exec_json(h), automation=None)
+        try:
+            # Started under the lock: the thread's first act is a store.lock
+            # re-check, so it simply waits for this hold to end.
+            t.start()
+        except BaseException:
+            # A permanent "executing" test record would trip the 409 above
+            # forever (delete_test_execs skips executing records).
+            with engine._lock:
+                engine._live.pop(h["id"], None)
+            store.delete_execution(h["id"])
+            # §19 execution.deleted: the row the `execution.started` above put
+            # in the §7 list has to leave it again.
+            hub.publish("execution.deleted", executionId=h["id"])
+            for superseded_id in superseded:
+                hub.publish("execution.deleted", executionId=superseded_id)
+            raise
+
+    # §19 execution.deleted: the superseded test rows leave the §7 list live —
+    # published outside the lock.
+    for superseded_id in superseded:
+        hub.publish("execution.deleted", executionId=superseded_id)
+    return h["id"]
+
+
+def _stopped_before_run(engine: Engine, auto: dict | None, h: dict, state: dict) -> str | None:
+    """§19 registration re-check (caller holds store.lock): why a test must
+    end before running anything — `"shutdown"` past the §3 kill sweep,
+    `"cancelled"` for a pending cancel, a settled draft (`_draft_settled`) or
+    an automation being deleted or gone — else None."""
+    if engine._stopping or state.get("shutdown"):
+        return "shutdown"
+    if (state.get("cancel") or h.get("_draft_settled")
+            or (auto is not None and (auto.get("_deleting")
+                                      or auto["id"] not in store.autos))):
+        return "cancelled"
+    return None
+
+
+def _finish_before_run(engine: Engine, h: dict, reason: str) -> None:
+    """End a test record that never ran a step — no step files written, no
+    memory copied. A cancel finishes `cancelled` ("cancelled before it ran");
+    the §3 shutdown sweep finishes `interrupted` with the shutdown line, as
+    the engine's own shutdown arm would (§7: a shutdown is not a cancel). A
+    record whose draft settled or whose automation is gone is then deleted,
+    exactly as `_run` deletes an orphaned test."""
+    with store.lock:
+        with engine._lock:
+            engine._live.pop(h["id"], None)
+        status = "interrupted" if reason == "shutdown" else "cancelled"
+        h["status"] = status
+        h["note"] = ("backend stopped mid-execution" if status == "interrupted"
+                     else "cancelled before it ran")
+        for step in h["steps"]:
+            if step["status"] in ("queued", "executing"):
+                step["status"] = status
+        h["duration_ms"] = 0
+        h["finished_at"] = timefmt.now_iso()
+        h["pgid"] = None
+        h["agent_pgids"] = []
+        store.update_execution(h)
+        hub.publish("execution.finished", executionId=h["id"], automationId=h["automation_id"],
+                    execution=store.exec_json(h), automation=None)
+        orphaned = (h.get("_draft_settled") or h["id"] not in store.execs
+                    or (h["automation_id"] is not None
+                        and h["automation_id"] not in store.autos))
+    if orphaned:
+        store.delete_execution(h["id"])
+        hub.publish("execution.deleted", executionId=h["id"])
+
+
+def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, h: dict,
+                    state: dict, dbase: Path, steps_fingerprint: str | None) -> None:
+    """The test thread: re-check at registration, write the sent draft's
+    scripts and the scratch memory copy, then execute through `_run`."""
+    scratch: Path | None = None
+    try:
+        with store.lock:
+            reason = _stopped_before_run(engine, auto, h, state)
+        if reason is not None:
+            _finish_before_run(engine, h, reason)
+            return
+
+        # The sent draft's scripts, as executed (§5 steps/) — a real version
+        # folder serves this role for ordinary executions.
+        steps_dir = store.exec_dir(h["id"]) / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        for s in ver["steps"]:
+            # §5: written atomically like every other file the app stores — a
+            # crash mid-write must never leave a half-written step script the
+            # engine would then execute.
+            atomic_write_text(steps_dir / s["file"], s.get("code", ""))
+
+        # §11 scratch memory: draft container's memory/ when present (edit mode
+        # falls back to the automation's), create mode the pending slot's — copied
+        # to a temp dir and discarded when the test ends.
+        # §11: under the app's own storage, never the OS temp dir — the
+        # startup sweep (`clear_scratch`) can then clear what a crash left.
+        scratch = paths.tests_scratch_dir() / h["id"]
+        scratch.mkdir(parents=True, exist_ok=True)
+        mem_dir = scratch / "memory"
+        src = dbase / "memory"
+        if auto is not None and not src.exists():
+            src = store.auto_dir(auto) / "memory"
+        if src.exists():
+            shutil.copytree(src, mem_dir)
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (dbase / "test.yaml").unlink(missing_ok=True)  # wiped at each test start (§5)
+
+        # §11 stale-outcome rule: the renderer's opaque steps fingerprint rides
+        # the record to the summary write below (`steps_fingerprint`, §5).
+        h["_test"] = {"vdir": str(steps_dir), "mem": str(mem_dir), "fp": steps_fingerprint}
+        # §7: a setup that straddled the §3 stopping flip runs nothing — the
+        # flag is re-read under the lock it flips beneath, and the engine's
+        # shutdown arm then finishes the record `interrupted`.
+        with store.lock:
+            if engine._stopping:
+                state["shutdown"] = True
     except BaseException:
+        # Any setup failure takes the record with it: a permanent "executing"
+        # test record trips the §19 409 forever (and delete_test_execs skips
+        # executing records), so only a backend restart would ever unblock
+        # testing again.
+        log.exception("test %s: setup failed", h["id"])
         with engine._lock:
             engine._live.pop(h["id"], None)
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
         store.delete_execution(h["id"])
-        if started_published:
-            # §19 execution.deleted: the row the `execution.started` above put
-            # in the §7 list has to leave it again — a failure between the two
-            # events would otherwise strand an executing row until the next
-            # fetch.
-            hub.publish("execution.deleted", executionId=h["id"])
-        raise
+        # §19 execution.deleted: the row `execution.started` announced leaves
+        # the §7 list again.
+        hub.publish("execution.deleted", executionId=h["id"])
+        return
+    # A cancel, settle or shutdown landing during setup is the engine's to
+    # observe from here: its step loop never starts a step once the entry is
+    # marked, and the §7 shutdown arm finishes the record `interrupted`.
+    _run(engine, shadow, ver, h, state, dbase, scratch)
 
 
 def _run(engine: Engine, shadow: dict, ver: dict, h: dict, state: dict,

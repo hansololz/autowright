@@ -721,7 +721,11 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    scripts, when it holds any ("rewrite them to match the SPEC, changing no more than the
    spec demands" — a fresh draft's first build holds none and simply omits them; a step
    with §4.1 `authoredBy: user` is headed "written by the user — keep it unless the SPEC
-   requires a change, and say so in notes when you change it"), along
+   requires a change, and say so in notes when you change it"), the draft's **CURRENT
+   packages** — the §6.2 declarations as `{ pip, import, why }` yaml (2026-10-30: the
+   manifest must re-declare every package a locked step imports, and without the stored
+   `pip` names the agent could only guess them — `cv2` is `opencv-python` — a wrong guess
+   failing only at install time), along
    with the automation's current trigger list rendered
    in the rule-9 dialect (`off` state and one-shot `time` entries marked — reference only), so
    the agent sees what already exists before judging a trigger missing (§19: the editor's
@@ -750,7 +754,10 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    locked step whose name another current step shares (a pre-uniqueness version) blocks the
    same way (`reason`: "two steps are named `X` — the lock splice can't tell them apart",
    `fix`: "Rename or unlock one of them"), since the by-name splice would otherwise keep
-   only one of them (2026-10-28).
+   only one of them (2026-10-28). The preflight surfaces **every** validator line about a
+   locked step — its file name failing the `NN-name.py` rule, a blank name, a missing
+   file — not only the grant and import lines (2026-10-30: a line the preflight filtered
+   out still failed every repair round and ended in a diagnosis blocker).
 9. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
    BUILD INSTRUCTIONS above wherever it says otherwise.
 10. **Closing envelope reminder** — one final line restating the response shape (return
@@ -818,7 +825,15 @@ notes rewrite (§11).
    spliced code is what the import, grant, and ordering rules below check. The guarantee
    is by construction — the agent never gets to rewrite a locked script, whatever it
    returns. Unlocked steps in the output are `authoredBy: agent`, except the §4.1
-   keep-`user` rule for a byte-identical same-named step.
+   keep-`user` rule for a byte-identical same-named step — and when that rule keeps a
+   step, the stored step's `timeout` / `noTimeout` and `retries` / `infiniteRetries`
+   pairs and its `description` are carried over the agent's entry too (2026-10-30: the
+   agent re-emitting the script it was told to keep, minus a manifest key, must not
+   silently drop a Timeout or Retries the user set in the §11 editor; `secrets`,
+   `packages` and `agents` stay the agent's — they describe grants the sync may
+   legitimately change). The stored suffix the splice keeps is what follows a leading
+   `NN-` (digits and one dash) only — a stored file without that prefix keeps its whole
+   name behind the agent's prefix, never a mangled tail.
 4. Every step file passes `ast.parse`; imports ⊆ stdlib + curated packages + `autowright` + the
    manifest's declared package imports (§6.2).
 5. `packages` is optional: a list of `{ pip, import, why }` entries — `pip` a bare distribution
@@ -956,6 +971,10 @@ blockers:
     kind: constraint    # the SPEC conflicts with a locked step or a stated build rule
     step: Fetch page    # the locked step's name — exactly one of step / rule
     rule: retry the fetch three times   # the build rule's text, quoted from the SPEC
+                        # (validated: it must be a case-insensitive substring of one
+                        # bullet under the SPEC's `## Build rules`, else the blocker is
+                        # a validation error and feeds a repair round — a paraphrase
+                        # would leave §11 "Remove the rule" unable to find it, 2026-10-30)
     workaround: Optional — the best build that keeps the constraint (markdown);
                 # omit when none exists
 ===END===

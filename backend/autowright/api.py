@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets as pysecrets
 import subprocess
@@ -14,25 +15,32 @@ from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import ValidationError
 
 from . import __version__, harness, imessage, installer, keychain, marketplace, models, paths, platform
 from . import drafting, packages as pkglib, reqlog, timefmt, transfer, triggers as triggerlib
 from .drafting import draft_jobs
-from .engine import CapacityError, Engine, kill_orphan_agent_group, kill_orphan_group
+from .engine import (CapacityError, Engine, VersionNotFound, kill_orphan_agent_group,
+                     kill_orphan_group)
 from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
 from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
-                      NameTakenError, StepModifiedError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms, iter_file_stats, new_id,
+                      NameTakenError, StepModifiedError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms,
+                      exec_version_label, iter_file_stats, new_id,
                       size_label, store, strip_param_values)
 from . import testexec, versions_diff
 from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.api")
+
+# §19: an unreadable current version (its folder failed to load, §5) — export
+# answers 422 with this wording (transfer.py), drafts and duplicate 409.
+CURRENT_VERSION_UNREADABLE = transfer.CURRENT_VERSION_UNREADABLE
 
 AUTH_TOKEN = pysecrets.token_hex(24)
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -99,9 +107,19 @@ _SHUTDOWN_FINALIZE_CAP_S = 3.0
 async def _lifespan(_: FastAPI):
     hub.bind_loop(asyncio.get_running_loop())
     _clear_import_spool()  # §5.2: spool files a crashed process left behind
-    harness.clear_scratch()  # §5/§8: scratch dirs a crashed process left behind
-    testexec.clear_scratch()  # §11: test scratch dirs a crashed process left behind
-    _repair_stale_executing()
+    # §3/§5 degrade, don't brick: each startup sweep is guarded on its own — an
+    # OSError from one (a full disk, an unwritable record) must not fail the
+    # lifespan into "Application startup failed" and a launchd restart loop.
+    # What a failed sweep left is simply swept again at the next boot.
+    for sweep_name, sweep in (
+            ("harness scratch sweep", harness.clear_scratch),  # §5/§8: crashed-process scratch dirs
+            ("test scratch sweep", testexec.clear_scratch),  # §11: crashed-process test scratch dirs
+            ("stale-execution repair", _repair_stale_executing)):
+        try:
+            sweep()
+        except Exception:  # noqa: BLE001
+            log.warning("startup: the %s failed — continuing startup", sweep_name,
+                        exc_info=True)
     for callback in _startup_callbacks:
         callback()
     hub.publish("automation.changed")
@@ -658,8 +676,10 @@ async def health() -> dict:
     # §2 platform layer: `os` is the §5.1 platform token; `capabilities` is
     # what this OS can honor — clients gate features here, never by sniffing
     # the platform at a call site.
+    # `pid`: the ensure-backend wait compares it with the backend.json pid, so
+    # another backend squatting the recorded port is never taken for ours.
     plat = platform.current()
-    return {"version": __version__, "app": "Autowright",
+    return {"version": __version__, "app": "Autowright", "pid": os.getpid(),
             "os": plat.os_token, "capabilities": plat.capabilities.as_dict()}
 
 
@@ -917,9 +937,20 @@ def _draft_to_version(d: dict) -> dict:
             # on param_values alone).
             "params": strip_param_values(d.get("params")),
             "packages": d.get("packages", []),
-            "steps": d.get("steps") or [],
+            # §5: step code lands with LF line endings, like an import's — a
+            # CRLF script written through the text-mode writer on Windows
+            # would reload with every blank line doubled.
+            "steps": [_lf_step(s) for s in d.get("steps") or []],
             "spec": d.get("spec") or [],
             "notes": d.get("notes") or ""}
+
+
+def _lf_step(s):
+    """A draft step with its `code` newline-normalized (CRLF/CR → LF)."""
+    code = s.get("code") if isinstance(s, dict) else None
+    if isinstance(code, str) and "\r" in code:
+        return {**s, "code": code.replace("\r\n", "\n").replace("\r", "\n")}
+    return s
 
 
 @app.post("/automations", dependencies=[Depends(auth)])
@@ -977,11 +1008,39 @@ def create_auto(body: models.AutomationCreate) -> dict:
     return _auto_json_locked(a)
 
 
+def _step_model_error(error: dict) -> str:
+    """§19 /validate-steps: one request-model error on a step rendered as a
+    validation line — `step N: <field> <message>` (N 1-based, the field path
+    after the step index, the model's own message)."""
+    loc = tuple(error.get("loc") or ())
+    field = ".".join(str(part) for part in loc[3:])
+    message = str(error.get("msg") or "is invalid")
+    return f"step {loc[2] + 1}: {field} {message}" if field else f"step {loc[2] + 1}: {message}"
+
+
 @app.post("/validate-steps", dependencies=[Depends(auth)])
-def validate_steps(body: models.StepsValidate) -> dict:
+def validate_steps(raw: dict = Body(...)) -> dict:
     """§19: the save endpoints' §8 step validators over a draft-shaped body,
     answered as 200 `{ errors }` — the caller is asking, not saving, so a
-    failure is the body, never a 422. Writes nothing, touches no draft."""
+    failure is the body, never a 422. That holds for a mistyped step field
+    too: the request model's error on a step is rendered into the list
+    (`_step_model_error`); only a body-level error (no `draft`, a `steps`
+    that is not a list, a wrong-typed `automationId`) stays the §19 422.
+    Writes nothing, touches no draft."""
+    try:
+        body = models.StepsValidate.model_validate(raw)
+    except ValidationError as e:
+        step_errors, other_errors = [], []
+        for error in e.errors():
+            loc = tuple(error.get("loc") or ())
+            if len(loc) >= 3 and loc[:2] == ("draft", "steps") and isinstance(loc[2], int):
+                step_errors.append(error)
+            else:
+                other_errors.append(error)
+        if other_errors:
+            raise RequestValidationError(
+                [{**error, "loc": ("body", *error.get("loc", ()))} for error in other_errors]) from None
+        return {"errors": [_step_model_error(error) for error in step_errors]}
     d = body.draft.plain()
     # §19: with an automationId the pass reads that automation's context as
     # its save would (the §5.1 unresolved_references wording).
@@ -1000,11 +1059,15 @@ def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict
     answers 201 with a `warning` saying so — never a 500."""
     source = _auto_or_404(automation_id)
     with store.lock:
+        # §19/§5: a current version whose folder failed to load is absent —
+        # a 409, never a KeyError 500.
+        if source["versions"].get(source["current_version"]) is None:
+            raise HTTPException(409, CURRENT_VERSION_UNREADABLE)
         # §19/§5: a copy would seal a hand-edited (§4.1 step-modified) script
-        # as validated — refused before anything is created.
-        cur = source["versions"].get(source["current_version"]) or {}
-        modified = next((s for s in cur.get("steps") or []
-                         if isinstance(s, dict) and s.get("modifiedOnDisk")), None)
+        # as validated — refused before anything is created. Decided from
+        # the files on disk against their seals (two-way: a reverted edit
+        # clears), never only the loaded flag.
+        modified = next(iter(store.disk_modified_steps(source)), None)
         if modified is not None:
             raise HTTPException(409, f"Step `{modified.get('name')}` was edited on disk — "
                                      "pull and push it, or save it from the editor, "
@@ -1501,8 +1564,12 @@ def restore(automation_id: str, body: models.VersionRestore) -> dict:
         # agent/secret stays restorable (the §4.1 `problems` audit reports
         # it). One gate: a step hand-edited on disk (§4.1 step-modified) must
         # not become a validated-looking new version by way of a restore.
-        modified = next((s for s in a["versions"][v].get("steps") or []
-                         if isinstance(s, dict) and s.get("modifiedOnDisk")), None)
+        # Decided from the files on disk (two-way: a reverted edit clears).
+        # A missing script is the restore's own §5 409 ("step script … is
+        # missing on disk", raised by restore_version) — not this gate's.
+        version_dir = store.auto_dir(a) / "versions" / f"v{v}"
+        modified = next((s for s in store.disk_modified_steps(a, v)
+                         if (version_dir / s["file"]).is_file()), None)
         if modified is not None:
             raise HTTPException(422, f"v{v}'s step `{modified.get('name')}` was edited "
                                      "on disk — pull and push it instead")
@@ -1551,7 +1618,9 @@ def execute_auto(automation_id: str, body: models.ExecuteBody | None = None) -> 
                                      version_label=body.version)
         else:
             h, queued = engine.start(a, body.trigger, version_label=body.version), False
-    except LookupError as e:  # unknown version label — not a liveness conflict
+    except VersionNotFound as e:  # unknown version label — not a liveness conflict
+        # §19: only an unresolvable label is a 404 — any other LookupError
+        # (a KeyError inside the start) propagates as an internal error.
         raise HTTPException(404, str(e)) from e
     except CapacityError as e:
         # §19: the no-free-slot 409 is the only one carrying `reason` — the §7
@@ -1712,7 +1781,10 @@ def packages_update(body: models.PackagesBody) -> dict:
     for e in entries:
         if not pkglib.PIP_NAME_RE.match(e["pip"].strip()):
             raise HTTPException(422, f"not a bare distribution name: {e['pip']!r}")
-    return {"packages": pkglib.upgrade(entries, wait=body.wait)}
+    # §6.2: the other declared packages stay pinned at what is installed, so
+    # one package's upgrade never drifts its neighbours' shared dependencies.
+    return {"packages": pkglib.upgrade(entries, wait=body.wait,
+                                       declared=store.declared_package_names())}
 
 
 @app.get("/automations/{automation_id}/memory/files", dependencies=[Depends(auth)])
@@ -1899,7 +1971,11 @@ def post_draft(body: models.DraftJobStart) -> dict:
             raise HTTPException(404, "automation not found")
     current = body.current.plain() if body.current is not None else None
     if auto and current is None:
-        current = auto["versions"][auto["current_version"]]
+        # §19/§5: a current version whose folder failed to load is absent —
+        # a 409, never a KeyError 500.
+        current = auto["versions"].get(auto["current_version"])
+        if current is None:
+            raise HTTPException(409, CURRENT_VERSION_UNREADABLE)
     if auto and (current or {}).get("triggers") is None:
         # §8: triggers are unversioned top-level state — attach the stored list
         # so the steps call's CURRENT-triggers reference has it (the editor's
@@ -1987,6 +2063,9 @@ def post_draft(body: models.DraftJobStart) -> dict:
     except drafting.DraftRefused as e:
         if e.reason == "deleting":
             raise HTTPException(404, "automation not found") from None
+        if e.reason == "stopping":
+            # §3: past the shutdown sweep no harness may start.
+            raise HTTPException(409, "the backend is shutting down") from None
         raise HTTPException(409, "the draft was discarded") from None
     # §19 belt-and-braces (now rarely hit — `admit` above refuses first): a
     # DELETE (or a draft discard) landing between the admit and here cancels
@@ -2189,12 +2268,17 @@ def retry_exec(execution_id: str) -> dict:
         # not a 404 for a record that plainly exists.
         raise HTTPException(409, "the draft may have changed — execute a new test from the editor")
     a = _auto_or_404(h["automation_id"])
+    with store.lock:
+        # §19: the record itself resolved, so a version that no longer loads
+        # is a 409 naming it — never a 404.
+        if engine._resolve_version(a, h["kind"], h.get("version")) is None:
+            raise HTTPException(409, f"version {exec_version_label(h)} no longer exists")
     try:
         h2 = engine.retry(a, h)
-    except LookupError as e:
-        # §19: a version that no longer loads (or a missing record) resolves to 404, like
-        # execute_auto's unknown-version mapping; not a liveness conflict.
-        raise HTTPException(404, str(e)) from e
+    except VersionNotFound as e:
+        # §19: only the version lookup maps — any other LookupError inside
+        # the retry propagates as an internal error.
+        raise HTTPException(409, f"version {exec_version_label(h)} no longer exists") from e
     except RuntimeError as e:
         # §7: retry answers 409 while live or when a re-saved draft's steps
         # drifted from the record.
@@ -2770,28 +2854,57 @@ def put_secret(secret_id: str, body: models.SecretPut) -> dict:
     sent = body.model_dump(exclude_unset=True)
     # §4.8: a blank value (empty or whitespace-only) keeps the stored state.
     has_value = bool(body.value and body.value.strip())
+    previous: str | None = None
     if has_value:
-        # Keychain IPC outside the lock — see create_secret.
+        # Keychain IPC outside the lock — see create_secret. §5: the previous
+        # value is read first, so a failed update can put it back.
         try:
+            previous = keychain.get_secret(secret_id)
             keychain.set_secret(secret_id, body.value)
         except Exception as e:  # noqa: BLE001 — keyring's error zoo is open-ended
             raise HTTPException(503, _secret_store_rejected(e)) from e
+    gone = False
+    was_placeholder = False
+    save_error: Exception | None = None
     with store.lock:
         # Re-find: the entry may have been deleted while the Keychain IPC ran.
         existing = next((s for s in store.secrets if s["id"] == secret_id), None)
         if existing is None:
-            raise HTTPException(404, "no such secret")
-        # §5 disk-first: the updated row is built as a copy, written, and
-        # only then swapped into memory.
-        updated = dict(existing)
-        if has_value:
-            updated["set"] = True
-        if "description" in sent:
-            updated["description"] = body.description or ""
-        secrets = [updated if s is existing else s for s in store.secrets]
-        store.save_secrets(secrets)
-        store.secrets = secrets
-        out = _secret_entity(updated)
+            gone = True
+        else:
+            was_placeholder = not existing.get("set", True)
+            # §5 disk-first: the updated row is built as a copy, written, and
+            # only then swapped into memory.
+            updated = dict(existing)
+            if has_value:
+                updated["set"] = True
+            if "description" in sent:
+                updated["description"] = body.description or ""
+            secrets = [updated if s is existing else s for s in store.secrets]
+            try:
+                store.save_secrets(secrets)
+            except Exception as e:  # noqa: BLE001 — re-raised below, after the undo
+                save_error = e
+            else:
+                store.secrets = secrets
+                out = _secret_entity(updated)
+    if has_value and (gone or save_error is not None):
+        # §5: the Keychain never holds a value the file does not account for
+        # — undone outside the lock (blocking IPC, see create_secret). A row
+        # deleted meanwhile loses the just-written value; a failed yaml write
+        # gets the previous value back, or none when the row was a
+        # placeholder (or had no value to restore).
+        try:
+            if gone or was_placeholder or previous is None:
+                keychain.delete_secret(secret_id)
+            else:
+                keychain.set_secret(secret_id, previous)
+        except Exception:  # noqa: BLE001 — keyring's error zoo is open-ended
+            log.warning("couldn't undo the keychain entry after the failed secret update")
+    if gone:
+        raise HTTPException(404, "no such secret")
+    if save_error is not None:
+        raise save_error
     hub.publish("secrets.changed")
     return out
 
@@ -2948,6 +3061,10 @@ def marketplace_catalog_read(source_id: str) -> dict:
         raise HTTPException(404, "marketplace not found") from None
     except marketplace.MarketplaceNotEditable as e:
         raise HTTPException(409, str(e)) from e
+    except marketplace.MarketplaceBusy as e:
+        # §22.1: no read slot came free within the bounded wait — the
+        # CLI's catalog verbs get a plain-word 503, never a client timeout.
+        raise HTTPException(503, str(e)) from e
     except marketplace.MarketplaceError as e:
         raise HTTPException(422, str(e)) from e
 

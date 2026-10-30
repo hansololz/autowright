@@ -125,7 +125,7 @@ function AddAutomationForm({ onAdd, onClose }: {
           onAdd(entry)
           close()
         }
-        const onEnter = (e: React.KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); add() } }
+        const onEnter = (e: React.KeyboardEvent) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); add() } }
         return (
           <div data-testid="catalog-picker">
             <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: 'var(--text)' }}>Add automation</h2>

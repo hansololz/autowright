@@ -188,7 +188,14 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   ≥ 1 s apart (`AUTOWRIGHT_STEP_RETRY_PAUSE_S`, §15 — a deterministically-crashing script
   must not hot-loop process spawns), while finite retries run back-to-back. Cancel and Skip
   step win over a pending retry exactly as they win over a running attempt — skip marks the
-  step `skipped` and moves on, spending nothing further. Only step failures retry: the
+  step `skipped` and moves on, spending nothing further (the retry loop re-checks skip and
+  cancel before it appends the next attempt and logs the retry marker, so no attempt is
+  ever created only to be killed, 2026-10-30). What a failed attempt said through
+  `result` — the chip, `status`, `notify` — is buffered per attempt and folded into the
+  record only when that attempt succeeds, or when it is the step's final attempt (so a
+  final failure still surfaces what the script reported); an attempt that failed and was
+  retried successfully leaves no chip, status or notification text behind (2026-10-30).
+  Only step failures retry: the
   pre-step gates (missing secret, package install) and engine-level failures are not attempts
   and never retry. Attempts beyond the newest 20 are pruned with their log files (§4.5/§5).
 - **Failure diagnostics:** when a step fails, the executor reports the exception as a structured

@@ -57,13 +57,23 @@ selectors, done via `app/e2e/harness.ts` `COPY`). Each remaining item moves into
   abort below on stock Ubuntu 24.04+. Users can reach it through the site's static
   latest-release fallback link. Delete the asset until a real `linux-scripts/release.sh`
   run publishes a working one.
-- **New-agent page swallows the Linux sign-in instruction.**
-  `app/src/pages/AgentNewPage.tsx:189-190` treats every 409 from `/agents/login` as
-  "already signed in — ready to save". On Linux, `installer.login` raises the "run this
-  command in your terminal" instruction for claude/gemini/opencode, which `api.py` turns
-  into a 409 — so the user gets a false success toast and never sees the command.
-  `Onboarding.tsx:289` already does this right by matching on the "already signed in"
-  message text; the page must use the same check.
+- ~~New-agent page swallows the Linux sign-in instruction.~~ **Resolved 2026-10-30:**
+  the page matches the "already signed in" message like Onboarding, toasts any other 409
+  with its text, and on Linux skips the automatic sign-in for the TUI providers and shows
+  the manual sign-in line (§9); Onboarding's suggestion card shows that same line (not the
+  install button again) when a freshly installed, signed-out TUI provider fails the
+  readiness check.
+- **Windows/Linux `app.asar` ships react-markdown's transitive packages.** `build.files`
+  excludes only the dependencies listed by name, so ~48 hoisted packages (~5 MB:
+  micromark, mdast, hast, unified, vfile…) still ride into the asar on those legs; the
+  macOS leg uses the computed electron-updater closure allowlist. Switch `build.files` to
+  that same allowlist and verify on a build host (needs a Windows or Linux build run;
+  logged 2026-10-30).
+- **Windows uninstall hook and macOS Squirrel staging order are unverified on real
+  hosts** (both changed 2026-10-30 by spec): the NSIS `customUnInstall` macro that
+  unregisters the Task Scheduler task and removes the `.cmd` shim, and the macOS
+  update-install step that stages with Squirrel only behind the live-execution gate.
+  Verify on the next release's smoke test.
 - ~~Tray stranding on GNOME / no context menu / unreliable `click`~~ — **resolved
   2026-09-01 by decision: Linux ships no tray surface at all** (`trayPanel` false in
   `linux.cjs`; §13 holds the rationale). No probe, menu, or residency rule needed —

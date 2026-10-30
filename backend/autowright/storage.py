@@ -164,7 +164,7 @@ def lenient_int(v: Any) -> int:
     every /state."""
     try:
         return int(v or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -181,12 +181,15 @@ def step_json(s: dict) -> dict:
         out["agent"] = True
         out["agents"] = list(s.get("agents") or [])
         out["why"] = s.get("why", "")
-    if s.get("timeout"):
-        out["timeout"] = lenient_int(s["timeout"])
+    # §19/§21.4 (2026-10-30): served only when it reads as a positive integer
+    # (retries 1-10) — a hand-edited `timeout: abc` degrades to the default
+    # (absent), never a `0` every later save would refuse.
+    if s.get("timeout") and (timeout := lenient_int(s["timeout"])) > 0:
+        out["timeout"] = timeout
     if s.get("no_timeout"):
         out["noTimeout"] = True
-    if s.get("retries"):
-        out["retries"] = lenient_int(s["retries"])
+    if s.get("retries") and 1 <= (retries := lenient_int(s["retries"])) <= 10:
+        out["retries"] = retries
     if s.get("infinite_retries"):
         out["infiniteRetries"] = True
     # §4.1 authorship and lock — omitted at their defaults. The in-memory
@@ -226,7 +229,7 @@ def clamp_max_parallel(v: Any) -> int:
     where a bad value must not cost the user their automation."""
     try:
         return max(1, int(v))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: `.inf`
         return DEFAULT_MAX_PARALLEL
 
 
@@ -234,7 +237,7 @@ def clamp_max_queued(v: Any) -> int:
     """§4.1 `maxQueued` — int ≥ 0 (0 restores skip-on-busy)."""
     try:
         return max(0, int(v))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: `.inf`
         return DEFAULT_MAX_QUEUED
 
 
@@ -292,7 +295,8 @@ def safe_step_filename(fname, i: int, name, taken: set[str]) -> str:
     falls back to the generated `NN-slug.py` name — a collision would
     silently overwrite the earlier step's script; a path-y value would
     escape the folder. Shared by version writes and §11 test executions."""
-    if fname and re.fullmatch(r"[a-z0-9][a-z0-9-]*\.py", str(fname)) and str(fname) not in taken:
+    if fname and re.fullmatch(r"[a-z0-9][a-z0-9-]*\.py", str(fname)) \
+            and not paths.is_windows_device_name(str(fname)) and str(fname) not in taken:
         return str(fname)
     slug = re.sub(r"[^a-z0-9]+", "-", str(name or "step").lower()).strip("-") or "step"
     out = f"{i:02d}-{slug}.py"
@@ -509,6 +513,10 @@ class Store:
         self.listener_status: dict[str, dict] = {}
         self.secrets: list[dict] = []             # {name, description, set} — values live in the Keychain;
                                                   # set: False = §4.8 placeholder, no Keychain entry
+        # §4.7/§4.8: rows skipped at load (no id / no name), kept raw so the
+        # next save writes them back unchanged instead of erasing them.
+        self._skipped_agents: list[dict] = []
+        self._skipped_secrets: list[dict] = []
         # §5 log line cap: (execution_id, file name) → lines written so far,
         # seeded from disk on first append (see append_log_line).
         self._log_counts: dict[tuple[str, str], int] = {}
@@ -619,10 +627,14 @@ class Store:
             # the default pointer) — the load path never reads a file twice.
             agents_doc = self._load_toplevel_mapping(paths.agents_file())
             self.agents = []
+            # §4.7: never erased — the raw row is written back unchanged by
+            # the next save_agents.
+            self._skipped_agents = []
             for g in self._toplevel_entries(agents_doc, paths.agents_file(), "agents"):
                 if not g.get("id"):
                     log.warning("skipping agents.yaml entry %r — it has no id and "
                                 "can't be referenced", g.get("name"))
+                    self._skipped_agents.append(g)
                     continue
                 self.agents.append(g)
             # §4.7 default pointer — a dangling/absent value (hand-edited file)
@@ -634,12 +646,16 @@ class Store:
             # bind by. An entry missing its id (or name) can't be referenced:
             # skipped with a warning (§5 lenient load), never healed, never fatal.
             self.secrets = []
+            # §4.8: never erased — the raw row is written back unchanged by
+            # the next save_secrets (its Keychain value stays accounted for).
+            self._skipped_secrets = []
             for s in self._load_toplevel_list(paths.secrets_file(), "secrets"):
                 if not s.get("name") or not s.get("id"):
                     log.warning("skipping secrets.yaml entry %r — it has no %s and "
                                 "can't be referenced",
                                 s.get("name") or s.get("id"),
                                 "id" if s.get("name") else "name")
+                    self._skipped_secrets.append(s)
                     continue
                 self.secrets.append({"id": s["id"], "name": s["name"],
                                      "description": s.get("description") or "",
@@ -980,6 +996,15 @@ class Store:
         if vdir.exists():
             for vd in vdir.iterdir():
                 m = re.fullmatch(r"v(\d+)", vd.name)
+                if m and int(m.group(1)) > a["current_version"]:
+                    # §5 crash orphan: the writer landed this folder's manifest
+                    # but the pointer flip never happened — the save failed as
+                    # a whole, so it is never adopted (left on disk; the next
+                    # save numbers past it).
+                    log.warning("version folder %s is above current version v%s — "
+                                "ignoring it (a save that never completed)",
+                                vd, a["current_version"])
+                    continue
                 if m and (vd / "automation.yaml").exists():
                     try:
                         ver = self._load_version_folder(vd)
@@ -1069,12 +1094,24 @@ class Store:
                 return False
 
         out = []
+        seen_ids: set = set()
+
+        def _trigger_id(t: dict):
+            # §4.3: a missing id, or one another trigger of this automation
+            # already holds, gets a fresh one — one-shot consumption removes
+            # by id, so a shared id would take every holder with it.
+            trigger_id = t.get("id")
+            if not trigger_id or not isinstance(trigger_id, (str, int)) or trigger_id in seen_ids:
+                trigger_id = new_id()
+            seen_ids.add(trigger_id)
+            return trigger_id
+
         for t in raw:
             if (isinstance(t, dict) and t.get("kind") == "app_start"
                     and any(x["kind"] == "app_start" for x in out)):
                 log.warning("dropping duplicate app-start trigger %r", t)  # §4.3: at most one
             elif isinstance(t, dict) and _valid(t):
-                out.append({"id": t.get("id") or new_id(), "kind": t["kind"],
+                out.append({"id": _trigger_id(t), "kind": t["kind"],
                             "enabled": bool(t.get("enabled", True)),
                             # §4.3: trimmed on load, like normalize_triggers — a
                             # hand-edited expression with stray spaces stores as
@@ -1204,6 +1241,10 @@ class Store:
                 if isinstance(sealed_sha, str) and sealed_sha \
                         and step_script_sha(f.read_bytes()) != sealed_sha:
                     s["modifiedOnDisk"] = True
+            elif s.get("file") and isinstance(sealed_sha, str) and sealed_sha:
+                # §4.1 `step-modified`: a sealed script that is missing on
+                # disk counts as modified too.
+                s["modifiedOnDisk"] = True
             steps.append({**s, "code": code})
         if seals:
             self._sealed_shas[self._seal_key(vd)] = seals
@@ -1493,6 +1534,14 @@ class Store:
                 n += 1
             return f"{name} {n}"
 
+    def declared_package_names(self) -> set[str]:
+        """§6.2 Update pins: every distribution name any automation's current
+        version declares (the union)."""
+        with self.lock:
+            return {p["pip"] for a in self.autos.values()
+                    for p in (a["versions"].get(a["current_version"]) or {}).get("packages", []) or []
+                    if isinstance(p, dict) and p.get("pip")}
+
     def automation_name_clash(self, name: str, exclude_id: str | None = None) -> dict | None:
         """§4.1 uniqueness: the automation (other than `exclude_id`) whose name
         is the same as `name` under `name_key`, or None."""
@@ -1557,23 +1606,28 @@ class Store:
             self.autos[automation_id] = a
             return a
 
-    def disk_modified_steps(self, a: dict) -> list[dict]:
+    def disk_modified_steps(self, a: dict, version: int | None = None) -> list[dict]:
         """§4.1 `step-modified`, decided from the files on disk (the caller
-        holds `self.lock`): for `a`'s CURRENT version folder, each manifest
-        step whose script file's `step_script_sha` differs from the seal that
-        folder recorded (`sealed_step_sha`; an unsealed step never counts).
-        Returns those loaded step dicts (the same objects held in
-        `a["versions"][current]["steps"]`, in step order; empty when every
-        sealed file matches). Each one is marked as the engine's
-        execution-start check marks it: `modifiedOnDisk` set and `code`
-        refreshed to the newline-normalized disk text, so the problem shows
-        at once. Used by the duplicate and the §5.1 export gates — the
-        loaded flag alone misses a hand edit made after load with no
-        execution since."""
-        cur = a["versions"].get(a["current_version"]) or {}
-        vd = self.auto_dir(a) / "versions" / f"v{a['current_version']}"
+        holds `self.lock`): for `a`'s version `version` (default: the CURRENT
+        version), each manifest step whose script file's `step_script_sha`
+        differs from the seal that folder recorded (`sealed_step_sha`; an
+        unsealed step never counts) — and each sealed step whose file is
+        MISSING, which counts as modified too. Returns those loaded step dicts
+        (the same objects held in `a["versions"][version]["steps"]`, in step
+        order; empty when every sealed file matches). Two-way, like the
+        engine's execution-start check: a modified step gets `modifiedOnDisk`
+        set and `code` refreshed to the newline-normalized disk text, and a
+        flagged step whose file matches its seal again (a reverted hand edit)
+        has the flag cleared and `code` refreshed the same way. Used by the
+        duplicate, restore and §5.1 export gates — the loaded flag alone
+        misses a hand edit made after load, or a revert, with no execution
+        since."""
+        number = a["current_version"] if version is None else version
+        ver = a["versions"].get(number) or {}
+        vd = self.auto_dir(a) / "versions" / f"v{number}"
         modified: list[dict] = []
-        for s in cur.get("steps") or []:
+        changed = False
+        for s in ver.get("steps") or []:
             if not isinstance(s, dict):
                 continue
             file = s.get("file")
@@ -1582,20 +1636,34 @@ class Store:
                 continue
             path = vd / file
             try:
-                if not path.is_file():
-                    continue
-                data = path.read_bytes()
+                data = path.read_bytes() if path.is_file() else None
             except OSError:
                 continue
-            if step_script_sha(data) == sealed:
+            if data is None:
+                # §4.1: a sealed script that is missing on disk is modified.
+                if not s.get("modifiedOnDisk"):
+                    s["modifiedOnDisk"] = True
+                    changed = True
+                modified.append(s)
                 continue
-            s["modifiedOnDisk"] = True
             # Newline-normalized as a load reads it (CRLF → LF), so the
             # editor, `pull` and the next save hold what a restart would.
-            s["code"] = data.decode("utf-8", errors="replace").replace("\r\n", "\n") \
+            text = data.decode("utf-8", errors="replace").replace("\r\n", "\n") \
                 .replace("\r", "\n")
+            if step_script_sha(data) == sealed:
+                if s.get("modifiedOnDisk"):
+                    # §4.1 two-way: the hand edit was reverted.
+                    s.pop("modifiedOnDisk", None)
+                    if s.get("code") != text:
+                        s["code"] = text
+                    changed = True
+                continue
+            if not s.get("modifiedOnDisk") or s.get("code") != text:
+                changed = True
+            s["modifiedOnDisk"] = True
+            s["code"] = text
             modified.append(s)
-        if modified:
+        if changed:
             # §4.1: the reference memo re-derives from the refreshed code.
             a.pop("_ref_cache", None)
         return modified
@@ -1679,13 +1747,18 @@ class Store:
             # §5 re-seal: each step's `sha` is stamped from the bytes actually
             # copied, so a hand-edited source yields a copy whose files and
             # seals agree (the step-modified problem stays on the original).
+            # A sealed step whose file is missing counts as step-modified
+            # (§4.1): the copy is refused, never written with the step unsealed.
             for entry in manifest.get("steps") or []:
                 if not isinstance(entry, dict):
                     continue
-                entry.pop("sha", None)
+                sealed = entry.pop("sha", None)
                 file = entry.get("file")
                 if isinstance(file, str) and file and (vd / file).is_file():
                     entry["sha"] = step_script_sha((vd / file).read_bytes())
+                elif isinstance(file, str) and file and isinstance(sealed, str) and sealed:
+                    shutil.rmtree(self.auto_dir(a), ignore_errors=True)
+                    raise StepModifiedError(str(entry.get("name") or ""))
             save_yaml(vd / "automation.yaml", manifest)
             (self.auto_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
             loaded = self._load_version_folder(vd)
@@ -1945,6 +2018,11 @@ class Store:
                 }, seal=False)
             else:
                 self._write_version_folder(new, ver, seal=False)
+            # §21.4 keep-on-disk: a legacy instructions.md (v0.6.0 through
+            # v0.11.1) rides into the staged copy before the old one is reaped.
+            legacy = dd / "instructions.md"
+            if legacy.is_file() and not (new / "instructions.md").exists():
+                shutil.copy2(legacy, new / "instructions.md")
             if dd.exists():
                 dd.rename(old)
             new.rename(dd)
@@ -2925,13 +3003,14 @@ class Store:
                     default_agent_id: Any = _UNSET) -> None:
         self.require_writable(paths.agents_file())
         save_yaml(paths.agents_file(), {
-            "agents": self.agents if agents is None else agents,
+            "agents": [*(self.agents if agents is None else agents), *self._skipped_agents],
             "default_agent": (self.default_agent_id if default_agent_id is self._UNSET
                               else default_agent_id)})
 
     def save_secrets(self, secrets: list[dict] | None = None) -> None:
         self.require_writable(paths.secrets_file())
-        save_yaml(paths.secrets_file(), {"secrets": self.secrets if secrets is None else secrets})
+        save_yaml(paths.secrets_file(), {
+            "secrets": [*(self.secrets if secrets is None else secrets), *self._skipped_secrets]})
 
     def save_settings(self, settings: dict | None = None) -> None:
         self.require_writable(paths.settings_file())
@@ -3682,8 +3761,23 @@ class Store:
         # §4.3: the epoch comes from the occurrence's instant — an interval's
         # occurrence is one, and a local naive reading in the fall-back fold
         # would hand the UI the earlier hour.
-        next_ms = triggerlib.next_at_ms(a["triggers"], run_baseline=self.run_baseline(a),
-                                        interval_baseline=self.run_baseline_instant(a))
+        run_baseline = self.run_baseline(a)
+        interval_baseline = self.run_baseline_instant(a)
+        next_ms = triggerlib.next_at_ms(a["triggers"], run_baseline=run_baseline,
+                                        interval_baseline=interval_baseline)
+        # §4.3 `nextTriggerShort`: the trigger whose own occurrence, through
+        # the same `next_at_ms`, is the soonest (the first in list order on a
+        # tie) — the one behind `nextAtMs`.
+        next_trigger: dict | None = None
+        if next_ms is not None:
+            soonest: int | None = None
+            for t in a["triggers"]:
+                if not t["enabled"]:
+                    continue
+                trigger_ms = triggerlib.next_at_ms([t], run_baseline=run_baseline,
+                                                   interval_baseline=interval_baseline)
+                if trigger_ms is not None and (soonest is None or trigger_ms < soonest):
+                    soonest, next_trigger = trigger_ms, t
         when = a["versions"].get(a["current_version"], {}).get("when")
         spec_meta = f"v{a['current_version']}"
         if when and (dt := lenient_local(when)):
@@ -3697,6 +3791,8 @@ class Store:
             "triggerChip": triggerlib.trigger_chip(a["triggers"]),
             "allTriggersOff": bool(a["triggers"]) and all(not t["enabled"] for t in a["triggers"]),
             "nextAtMs": next_ms,
+            "nextTriggerShort": (triggerlib.trigger_display(next_trigger)[1]
+                                 if next_trigger is not None else None),
             "notes": cur.get("notes") or "",
             "lastStatus": a.get("_last_status", "none"),
             "live": live_ids,

@@ -84,7 +84,7 @@ export function SecretModal({ modal, onClose, onSaved }: {
         }
 
         const onKeyDown = (e: React.KeyboardEvent) => {
-          if (e.key === 'Enter') void save()
+          if (e.key === 'Enter' && !e.nativeEvent.isComposing) void save()
         }
 
         // Value is a textarea (multi-line values are allowed): Enter inserts a

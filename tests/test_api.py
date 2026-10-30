@@ -1181,6 +1181,7 @@ def test_app_started_fires_enabled_app_start_triggers(client, monkeypatch):
     # §4.3 derived display: app_start contributes no nextAtMs
     j = client.get(f"/automations/{a['id']}").json()
     assert j["nextAtMs"] is None
+    assert j["nextTriggerShort"] is None
     assert j["triggers"][0]["label"] == "On app start"
     assert j["triggerChip"] == "App start"
 
@@ -3755,7 +3756,7 @@ def test_state_executions_window_and_total(client, monkeypatch):
 
 def test_retry_endpoint_reruns_and_answers_conflicts(client, monkeypatch):
     """§19 POST /executions/{id}/retry: a failed record re-executes in place
-    and answers its own id; an unresolvable version is the 404, not a 500."""
+    and answers its own id; a version that no longer resolves is the 409."""
     from autowright.storage import store
 
     events = _capture_events(monkeypatch)
@@ -3776,14 +3777,14 @@ def test_retry_endpoint_reruns_and_answers_conflicts(client, monkeypatch):
     assert _until_finished(events, eid)["execution"]["status"] == "succeeded"
 
     # a failed record whose version is gone (a folder removed by hand, §5) →
-    # 404 with the engine's words: the version no longer resolves — like
-    # execute's unknown-version mapping, not a liveness conflict
+    # 409 naming it (§19, 2026-10-30): the record itself resolved, so never
+    # a 404
     h2 = store.create_execution(a, "version", 99, "manual", [], status="failed")
     store.update_execution(h2)
     a["_live"].discard(h2["id"])
     r2 = client.post(f"/executions/{h2['id']}/retry")
-    assert r2.status_code == 404
-    assert "not found" in r2.json()["detail"]
+    assert r2.status_code == 409
+    assert r2.json()["detail"] == "version v99 no longer exists"
 
     assert client.post("/executions/nope/retry").status_code == 404
 

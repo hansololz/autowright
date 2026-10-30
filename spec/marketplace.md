@@ -102,7 +102,9 @@ entries:                             # required list, may be empty, max 200 entr
   found out only when the page asks for it (§22.4 image route), and a missing, unreadable,
   or oversized image simply shows the no-image icon - never a refresh failure, never
   stored.
-- Caps (untrusted input): a catalog is at most 1 MB; an image at most 5 MB; the archive
+- Caps (untrusted input): a catalog is loaded with YAML anchors and aliases refused and
+  its values never echoed whole into error text (§5 untrusted-YAML rule, 2026-10-30);
+  a catalog is at most 1 MB; an image at most 5 MB; the archive
   itself is capped by §5.1 (64 MB) at install time, and the §22.4 archive route serves at
   most **16 MB of text in total** per archive (members past the running total are served
   with `text` null, like a non-UTF-8 member — the §5.1 guards alone would allow 1,000

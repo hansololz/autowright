@@ -8,6 +8,7 @@
 // unchanged and raise the discard confirm otherwise (the Modal's guardClose);
 // every path plays the §14 exit before the caller's state changes.
 import React, { useEffect, useRef, useState } from 'react'
+import { devlogOverlayOpen } from '../../devlog'
 import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, Modal, docLineCount, isTopModal, useOverlayThumb } from '../../ui'
 
 export { docLineCount }
@@ -84,10 +85,11 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
   }, [])
   // ⌘S / Ctrl+S saves while the modal is open (swallowed while Save is
   // disabled). It yields to a card stacked above this one — the discard
-  // confirm — the way the Modal's own Escape handler yields to the stack.
+  // confirm — the way the Modal's own Escape handler yields to the stack —
+  // and to the §9.3 developer-log overlay, like every other shortcut.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!isTopModal()) return
+      if (!isTopModal() || devlogOverlayOpen()) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save() }
     }
     document.addEventListener('keydown', onKey)

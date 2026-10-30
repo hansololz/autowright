@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,25 @@ def _fsync_dir(d: Path) -> None:
         log.warning("can't fsync the directory %s (%s) — the write is committed anyway", d, e)
 
 
+# §5: on Windows the rename is retried on a sharing violation — a reader that
+# holds the target open without delete-sharing (the request-log settings read,
+# a GET /chat, the search indexer, an antivirus) makes it fail at random.
+_REPLACE_RETRY_DELAYS_S = (0.02, 0.05, 0.1, 0.2, 0.4)
+
+
+def _replace(source: str, target: Path) -> None:
+    if os.name != "nt":
+        os.replace(source, target)
+        return
+    for delay in _REPLACE_RETRY_DELAYS_S:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(source, target)
+
+
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ad-tmp-")
@@ -65,7 +85,7 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
             os.fsync(f.fileno())
         if mode is not None:
             os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        _replace(tmp, path)
         _fsync_dir(path.parent)
     except BaseException:
         try:

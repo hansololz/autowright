@@ -6,7 +6,7 @@ import { api } from '../../api'
 import { usePlatformCopy } from '../../platformCopy'
 import { SecretModal } from '../../SecretModal'
 import { useStore } from '../../store'
-import type { SecretMeta, Trigger, TriggerKindFields } from '../../types'
+import type { SecretMeta, Trigger, TriggerKindFields, TriggerPreview } from '../../types'
 import { Caret, Collapse, MenuItemRow, MenuRow, MiniBadge, PopMenu, ScrollArea, usePopover } from '../../ui'
 import { useTriggerPreview } from '../../triggers'
 
@@ -438,12 +438,16 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel, busy = f
   // fields differ from that entry (a keystroke inside the preview debounce)
   // the verdict is stale, and Add/Save waits for the fresh one — a valid
   // verdict for the old text never submits the new text.
-  const previewKey = JSON.stringify(previewEntry)
-  const [verdictKey, setVerdictKey] = useState(previewKey)
-  // a landed response is always for the entry current at landing (the hook
-  // drops superseded ones), so each new result stamps the key it answers
-  useEffect(() => { setVerdictKey(previewKey) }, [pv]) // eslint-disable-line react-hooks/exhaustive-deps
-  const verdictStale = verdictKey !== previewKey
+  // The key is `${kind}\u0000${text}`: a kind switch is never the same entry.
+  const previewKey = `${kind}\u0000${JSON.stringify(previewEntry)}`
+  // A landed response is always for the entry current at landing (the hook
+  // drops superseded ones), so a result object is stamped once, on its first
+  // render, with the key it answers — and keeps that key. A kind round trip
+  // hands back the earlier kind's held result object; it carries its own
+  // (old text's) key, so it reads as stale instead of being re-stamped.
+  const verdictKeys = useRef(new WeakMap<TriggerPreview, string>())
+  if (pv && !verdictKeys.current.has(pv)) verdictKeys.current.set(pv, previewKey)
+  const verdictStale = !!pv && verdictKeys.current.get(pv) !== previewKey
   const exprOk = kind === 'cron' && !!expression.trim() && !!pv?.valid
   const exprBad = kind === 'cron' && !!expression.trim() && !!pv && !pv.valid
   const everyOk = kind === 'interval' && !!every && !!pv?.valid
@@ -603,7 +607,12 @@ export function TriggerEditor({ hasAppStart, initial, onSave, onCancel, busy = f
             <SecretModal
               modal={{ mode: 'add' }}
               onClose={() => setSecretModal(false)}
-              onSaved={(saved) => setSecret(saved.id)}
+              onSaved={(saved) => {
+                // §9.2: into the store first, so the pill never shows the
+                // deleted-secret treatment before the /state refresh lands.
+                useStore.getState().upsertSecret(saved)
+                setSecret(saved.id)
+              }}
             />
           )}
           <input

@@ -203,6 +203,9 @@ def reset_module_globals():
     # §3 "shutting down" refusal (start -> 409); a fresh backend process never
     # inherits that flag, so neither may the next test in this worker.
     api.engine._stopping = False
+    # The same shutdown flips the drafting jobs' stopping flag (§3 refusal on
+    # POST /drafts) — reset alike.
+    api.draft_jobs._stopping = False
     for token in list(api._import_parked):  # §5.2 parked previews + their spool files
         api._drop_parked(token)
 

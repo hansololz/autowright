@@ -35,3 +35,22 @@
     ${endIf}
   ${endIf}
 !macroend
+
+; §3 Windows uninstall hook — electron-builder inserts `customUnInstall` in
+; the uninstall section, before the installed files are deleted. A real
+; uninstall (Settings > Apps) unregisters the backend's Task Scheduler task
+; and removes the user-local CLI shim, as the macOS cask's `uninstall
+; launchctl:` does — left alone, the -AtLogOn task kept retrying a deleted
+; interpreter at every logon and the shim pointed at nothing. An update in
+; place (${isUpdated}: electron-updater's run, which uninstalls the old
+; version first) keeps both: the new version reuses them. Failures are
+; ignored — a task that was never registered is not an uninstall error.
+!macro customUnInstall
+  ${ifNot} ${isUpdated}
+    nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -C "Unregister-ScheduledTask -TaskName ai.autowright.backend -Confirm:$$false -ErrorAction SilentlyContinue"`
+    Pop $0
+    ${if} ${FileExists} "$LOCALAPPDATA\Autowright\bin\autowright.cmd"
+      Delete "$LOCALAPPDATA\Autowright\bin\autowright.cmd"
+    ${endIf}
+  ${endIf}
+!macroend

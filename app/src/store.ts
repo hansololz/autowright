@@ -142,6 +142,10 @@ interface Model {
     options?: { replace?: boolean }): void
   setSurface(s: Surface, from?: CreateFrom): void
   showToast(msg: string, ms?: number): void
+  // §9.2: a secret the renderer just saved, written into `secrets` at once
+  // (replacing a same-id row) so a picker resolves its name before the
+  // secrets.changed → /state refresh lands; that refresh then supersedes it.
+  upsertSecret(secret: SecretMeta): void
   // §4.9 shared quit flow (§3 quit-entirely): null · 'stopping' (overlay up,
   // quit-all in flight or the app exiting) · 'force' (the busy question).
   quitStage: null | 'stopping' | 'force'
@@ -853,6 +857,10 @@ export const useStore = create<Model>((set, get) => ({
   },
 
   cancelQuit() { set({ quitStage: null }) },
+
+  upsertSecret(secret) {
+    set((s) => ({ secrets: [...s.secrets.filter((x) => x.id !== secret.id), secret] }))
+  },
 
   showToast(msg, ms = 2800) {
     set({ toast: msg })

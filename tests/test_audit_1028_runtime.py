@@ -315,7 +315,7 @@ def test_install_without_the_declared_module_fails(home, monkeypatch):
 
     calls = []
 
-    def fake_pip(name, pin_installed=False, should_stop=None):
+    def fake_pip(name, pin_installed=False, should_stop=None, **_):
         calls.append(name)
         d = home / "site-packages" / f"{name}-1.0.0.dist-info"
         d.mkdir(parents=True, exist_ok=True)

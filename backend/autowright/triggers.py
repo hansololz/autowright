@@ -95,13 +95,33 @@ def interval_display(every: str) -> tuple[str, str]:
     return long, f"Every {n}{short}"
 
 
-def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime) -> datetime:
+# §6: an enable stamp further than this ahead of now was minted while the
+# clock was wrongly ahead (a bad RTC, a date set ahead for a test) — ignored as
+# if absent, so the trigger is not silenced until the wall clock re-reaches it.
+FUTURE_STAMP_HOLD = timedelta(minutes=15)
+
+
+def credible_enabled_instant(t: dict, now: datetime | None = None) -> datetime | None:
+    """`enabled_instant`, or None when the stamp lies more than
+    FUTURE_STAMP_HOLD ahead of `now` (aware; the real clock when omitted)."""
+    stamp = enabled_instant(t)
+    if stamp is None:
+        return None
+    now = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+    return None if stamp.astimezone(UTC) > now + FUTURE_STAMP_HOLD else stamp
+
+
+def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime,
+                    now: datetime | None = None) -> datetime:
     """§4.3 interval semantics: the later of the trigger's enable stamp and
     the automation's run baseline; `fallback` (the request moment) when the
     caller has neither — the §19 preview, which anchors at now. Compared as
     aware UTC instants: the stamp is read exactly, and a caller may pass an
-    aware baseline (the §6 scheduler) or a local naive one."""
-    cands = [x.astimezone(UTC) for x in (enabled_instant(t), run_baseline) if x is not None]
+    aware baseline (the §6 scheduler) or a local naive one. A stamp more than
+    FUTURE_STAMP_HOLD ahead of `now` is dropped (§6), so the interval anchors
+    on the run baseline."""
+    cands = [x.astimezone(UTC) for x in (credible_enabled_instant(t, now), run_baseline)
+             if x is not None]
     return max(cands) if cands else fallback.astimezone(UTC)
 
 
@@ -124,14 +144,15 @@ def _baseline_instant(baseline: datetime | None, now: datetime) -> datetime | No
     return local_instant(baseline, now.astimezone())
 
 
-def interval_instant(t: dict, after: datetime, run_baseline: datetime | None) -> datetime:
+def interval_instant(t: dict, after: datetime, run_baseline: datetime | None,
+                     now: datetime | None = None) -> datetime:
     """The first `anchor + n × every` (n ≥ 1) strictly after `after`, as the
     aware UTC instant it really is. §4.3: the arithmetic runs on instants,
     never on local naive datetimes — a DST shift must not stretch or shrink an
     interval, and the epoch a fall-back reading would resolve wrongly comes
     from here."""
     every = timedelta(seconds=parse_duration(t["every"]))
-    anchor = interval_anchor(t, run_baseline, after).astimezone(UTC)
+    anchor = interval_anchor(t, run_baseline, after, now).astimezone(UTC)
     after = after.astimezone(UTC)
     if after < anchor:
         return anchor + every

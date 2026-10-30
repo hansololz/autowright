@@ -137,7 +137,19 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
     when a slot frees). Promotion, cancel, and the queued-execution page behave exactly as
     for a message entry — there is simply no sender to notify.
   Draining is FIFO by queue-entry time and happens whenever a slot frees — an execution
-  finishing, being cancelled, or `maxParallel` being raised. Promotion reuses the queued record:
+  finishing, being cancelled, or `maxParallel` being raised. **Nothing jumps the queue**
+  (2026-10-30): while any entry is queued for an automation, every new admission — a
+  message or cron firing, an app-start firing, a manual start, a retry — counts the
+  automation as at capacity and joins the tail (or is refused as a manual start would be),
+  and a scheduler tick drains before it fires, so a slot freed between a finish and its
+  drain is never taken by a newer arrival ahead of the head. **Staleness is checked on
+  every tick, not only at the head with a free slot**: a message entry past the TTL
+  finishes `skipped` and its sender is told then, even while every slot stays busy for
+  hours — the 120 s cap is a cap on the wait, not on the wait once a slot frees. A head
+  whose promotion fails for a reason that will not clear (anything but an `OSError`,
+  which the next finish or tick retries, or the engine's own refusals — slot taken,
+  shutting down, being deleted — which keep the head waiting) finishes `skipped` with the note "couldn't be
+  started" rather than wedging the queue behind it. Promotion reuses the queued record:
   the same record's steps are filled in and its status flips `queued` → `executing`, so a
   firing produces exactly one execution record from admission to finish. Cancelling a queued
   entry (individually, or via the §19 queue-clear endpoint) finishes it `skipped` — it never ran,
@@ -171,7 +183,11 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (2026-10-28); and that hold applies only while the recorded instant lies at most 15 min
   ahead of the stepped-back clock — a larger gap is a corrected forward glitch (a bad RTC,
   a date set ahead for a test) and the baseline resets to `now`, so the trigger is not
-  silenced until the wall clock re-reaches the bogus moment. In the repeated fall-back hour
+  silenced until the wall clock re-reaches the bogus moment. A trigger's enable stamp
+  (§4.3 `enabledAt`) that lies more than 15 min ahead of the clock is a stamp from the
+  same glitch and is **ignored as if absent** (dropped from the first-seen clamp and from
+  the interval anchor candidates, 2026-10-30) — never clamped to `now`, which would move
+  the baseline forward on every tick and silence the trigger for good. In the repeated fall-back hour
   a zone-less cron chooses, of the two readings of an ambiguous wall time, the one whose
   instant is strictly after the baseline's instant (`fold` honoured, as the zoned path
   already did), so a baseline that itself sits in the second pass (a boot, enable, or wake
@@ -592,7 +608,13 @@ directory **and** the declared `import` target present beside it — a `.dist-in
 module files a killed pip never finished copying counts as missing, so ensure can repair
 it instead of reporting installed forever; **any** version — the installed version is never compared against the manifest,
 which carries no version), pip runs only for missing distributions (installing the newest
-compatible wheel at that moment), and one process-wide lock serializes pip runs. pip's
+compatible wheel at that moment) and **without `--upgrade`** (2026-10-30: with `--target`
+pip builds the install in a scratch directory and moves it in; under `--upgrade` it first
+deletes every item already in the directory, shared dependencies included, so a cancel or
+crash between the delete and the move stranded a dependency no declared-package check
+would ever repair — without it pip leaves existing items alone and still moves in the
+ones that are missing, which is the repair the installed-check above relies on), and one
+process-wide lock serializes pip runs. pip's
 **exit**, not its pipes' EOF, ends the wait: a helper pip left holding the pipes gets a
 short drain after the exit and the real return code decides, so an install can't be
 reported as a timeout ten minutes after it succeeded while holding the pip lock. An installed
@@ -624,7 +646,11 @@ asks PyPI for updates (§19 `POST /packages/outdated`, read-only: per package, t
 stable non-yanked version that has a wheel compatible with the bundled interpreter — the
 wheels-only rule applies to the check too; a network failure just leaves the badges off),
 comparing against the **installed** version. An update runs `pip install --upgrade <name>`
-into the shared directory (§19 `POST /packages/update`) — no manifest is touched, because
+into the shared directory (§19 `POST /packages/update`) with a constraints file pinning
+every **other declared** distribution (across all automations) to its installed version
+(2026-10-30: an unpinned upgrade of one package moved its neighbours' shared
+dependencies too); an undeclared transitive dependency may still move on an explicit
+Update — that is the one moment the user asked for change — no manifest is touched, because
 manifests carry no version; every automation declaring the distribution picks up the new
 version at its next execution automatically.
 
@@ -714,7 +740,11 @@ destructive moments recoverable.
   `memory/` while the copy runs: in that one case the pre-version image is best-effort; it is
   exact whenever a version's first execution runs alone (the default `maxParallel` 1).
   Only an execution that started at least one step attempt counts as the version's
-  "recorded execution" for this decision: a record cancelled or interrupted before step 1,
+  "recorded execution" for this decision (the stored record decides it too — a settled
+  record with no step attempt never counts, so the rule holds across a restart as well as
+  within the owed mark below; an `executing` record of this session counts even before
+  its first attempt, since it is the one taking the snapshot and a second parallel first
+  run must not take another, 2026-10-30): a record cancelled or interrupted before step 1,
   or one whose own pre-version copy failed, leaves the snapshot still **owed** to the next
   execution — an in-memory owed mark on the automation, set by the worker that skipped or
   failed the copy and cleared when a copy lands (a backend restart in between loses the mark

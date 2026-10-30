@@ -199,9 +199,13 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     expect(src).toMatch(/\{ mac: MacUpdater, nsis: NsisUpdater, appimage: AppImageUpdater \}\[plat\.UPDATER\]/)
     expect(src).not.toContain("process.platform === 'win32'")
     expect(src).not.toContain("process.platform === 'linux'")
-    // The darwin Squirrel hand-off tail is the one per-OS fork, keyed on the
-    // marker, and it runs strictly inside the download handler's flow.
-    expect(src).toMatch(/if \(plat\.UPDATER === 'mac'\) \{\n\s*const error = await stageWithSquirrel\(updater\)/)
+    // The darwin Squirrel hand-off is the one per-OS fork, keyed on the
+    // marker, and it runs strictly inside update-install, behind the
+    // live-execution gate — never in the download handler (§3 2026-10-30).
+    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}\n[\s\S]{0,200}if \(plat\.UPDATER === 'mac'\) \{\n\s*const updater = genericUpdater\(\)\n\s*const error = await stageWithSquirrel\(updater\)/)
+    expect(src.match(/await stageWithSquirrel\(/g) ?? []).toHaveLength(1)
+    const download = src.slice(src.indexOf('async function runDownloadUpdate()'))
+    expect(download.slice(0, download.indexOf('\n}\n'))).not.toContain('stageWithSquirrel')
   })
 
   it('no auto-install: cli-install is reachable only via its IPC handler (§3)', () => {
@@ -218,8 +222,10 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // The probe now reads the body: our app name, and a version that isn't
     // empty. Anything else (non-JSON throws into the catch) answers null, so
     // ensureBackend falls through to the install branch.
-    expect(src).toMatch(/async function backendVersion\(\)[\s\S]{0,1200}body\?\.app !== 'Autowright'/)
-    expect(src).toMatch(/backendVersion\(\)[\s\S]{0,1300}String\(body\.version \?\? ''\) \|\| null/)
+    // The body check itself is the shared healthVersion helper (pinned on its
+    // own in the serviceChecks describe below), fed the same backend.json
+    // read the probe used for the port.
+    expect(src).toMatch(/async function backendVersion\(\)[\s\S]{0,1400}return healthVersion\(await res\.json\(\), info\)/)
     // …and every caller still reads "healthy" off exactly that answer, so the
     // stricter probe can't be routed around.
     expect(src).toContain('return (await backendVersion()) !== null')
@@ -312,9 +318,11 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
 // every class name — the same "patch the layer underneath, run the real
 // handler" rule as the electron stub itself. Canned answers live on the
 // record so a test can arm them before the handler ever constructs the
-// updater. Like the real MacUpdater, downloadUpdate flips
-// squirrelDownloadedUpdate, so the darwin hand-off tail settles immediately
-// instead of waiting on the stub autoUpdater's silence.
+// updater. Like the real MacUpdater (manual-only flags off), downloadUpdate
+// never engages Squirrel; the stub Electron autoUpdater models Squirrel.Mac
+// instead — its checkForUpdates stages "instantly" (flips
+// squirrelDownloadedUpdate and emits update-downloaded), emits `error` when
+// nativeError is armed, or stays silent when nativeSilent is set.
 interface UpdaterRecord {
   options: { provider?: string, url?: string } | null
   autoDownload: boolean | null
@@ -340,6 +348,11 @@ interface UpdaterRecord {
   installerPath: string | null
   // §3 macOS: MacUpdater's squirrelDownloadedUpdate (never resets once set).
   squirrelDownloadedUpdate: boolean
+  // §3 macOS Squirrel double: native checkForUpdates calls, the error it
+  // emits instead of staging, and a Squirrel that emits nothing at all.
+  nativeChecks: number
+  nativeError: Error | null
+  nativeSilent: boolean
 }
 
 // Per-window record: show/focus/load/destroy counts plus ways to fire the
@@ -497,6 +510,11 @@ function loadMain(options: LoadOptions = {}): MainStub {
     checkError: null, downloadError: null, listeners: new Map(),
     installResult: undefined, installError: null, installThrows: null, onInstall: null,
     installerPath: null, squirrelDownloadedUpdate: false,
+    nativeChecks: 0, nativeError: null, nativeSilent: false,
+  }
+  const nativeListeners = new Map<string, Set<(arg?: unknown) => void>>()
+  const nativeEmit = (event: string, arg?: unknown) => {
+    for (const fn of [...(nativeListeners.get(event) ?? [])]) fn(arg)
   }
 
   class FakeUpdater {
@@ -523,9 +541,6 @@ function loadMain(options: LoadOptions = {}): MainStub {
     async downloadUpdate() {
       updater.downloads += 1
       if (updater.downloadError) throw updater.downloadError
-      // The real MacUpdater sets this once Squirrel staged the bundle; the
-      // fake stages "instantly" so main.cjs's stageWithSquirrel resolves.
-      this.squirrelDownloadedUpdate = true
       updater.installerPath = 'installer.exe'
       return ['installer.exe']
     }
@@ -626,7 +641,23 @@ function loadMain(options: LoadOptions = {}): MainStub {
         },
       },
     },
-    autoUpdater: { on() {}, removeListener() {}, setFeedURL() {}, checkForUpdates() {}, quitAndInstall() {} },
+    autoUpdater: {
+      on(event: string, fn: (arg?: unknown) => void) {
+        if (!nativeListeners.has(event)) nativeListeners.set(event, new Set())
+        nativeListeners.get(event)!.add(fn)
+      },
+      removeListener(event: string, fn: (arg?: unknown) => void) { nativeListeners.get(event)?.delete(fn) },
+      setFeedURL() {},
+      checkForUpdates() {
+        updater.nativeChecks += 1
+        if (updater.nativeSilent) return
+        if (updater.nativeError) { nativeEmit('error', updater.nativeError); return }
+        // MacUpdater's own native listener flips its flag on update-downloaded.
+        updater.squirrelDownloadedUpdate = true
+        nativeEmit('update-downloaded')
+      },
+      quitAndInstall() {},
+    },
     BrowserWindow: FakeWindow,
     Notification: class {
       static isSupported() { return Boolean(options.notificationSupported) }
@@ -3367,5 +3398,279 @@ describe('main.cjs tray that failed to create (§13)', () => {
     m.invoke('apply-settings', { menuBarIcon: false })
     m.invoke('apply-settings', { menuBarIcon: true })
     expect(m.trayAttempts).toBe(2)
+  })
+})
+
+// ---- audit 2026-10-30: ensure-backend checks, macOS staging order, ---------
+// ---- reset re-entrancy, quit-begun window guard (§3/§9) --------------------
+
+describe('serviceChecks helpers (§3)', () => {
+  const checks = realRequire(join(PLATFORM_DIR, 'serviceChecks.cjs')) as {
+    serviceFailureDetail: (err: { message?: string } | null, stdout: string, stderr: string) => string
+    healthVersion: (body: unknown, info: unknown) => string | null
+  }
+
+  it('the failure detail is the verb\'s stdout result line first, never the bare exec error', () => {
+    const err = { message: 'Command failed: /py -m autowright.service install\n' }
+    expect(checks.serviceFailureDetail(err, 'install failed: launchctl timed out\n', ''))
+      .toBe('install failed: launchctl timed out')
+    expect(checks.serviceFailureDetail(err, '', 'Traceback: boom\n')).toBe('Traceback: boom')
+    expect(checks.serviceFailureDetail(err, '', '')).toBe('Command failed: /py -m autowright.service install')
+  })
+
+  it('/health is ours only with our app name, a version and the backend.json pid', () => {
+    const info = { port: 65000, pid: 4242 }
+    expect(checks.healthVersion({ app: 'Autowright', version: '1.2.3', pid: 4242 }, info)).toBe('1.2.3')
+    // Another Autowright backend squatting the recorded port.
+    expect(checks.healthVersion({ app: 'Autowright', version: '1.2.3', pid: 999 }, info)).toBeNull()
+    expect(checks.healthVersion({ app: 'Autowright', version: '1.2.3' }, info)).toBeNull()
+    expect(checks.healthVersion({ app: 'Other', version: '1.2.3', pid: 4242 }, info)).toBeNull()
+    expect(checks.healthVersion({ app: 'Autowright', version: '', pid: 4242 }, info)).toBeNull()
+    // A backend.json with no pid recorded keeps the name-and-version check.
+    expect(checks.healthVersion({ app: 'Autowright', version: '1.2.3', pid: 999 }, { port: 65000 })).toBe('1.2.3')
+    expect(checks.healthVersion(null, info)).toBeNull()
+  })
+})
+
+describe('main.cjs audit 2026-10-30 (§3/§9)', () => {
+  const savedCaskroom = process.env.AUTOWRIGHT_CASKROOM
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    restoreResourcesPath()
+    if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
+    else process.env.AUTOWRIGHT_HOME = savedHome
+    if (savedCaskroom === undefined) delete process.env.AUTOWRIGHT_CASKROOM
+    else process.env.AUTOWRIGHT_CASKROOM = savedCaskroom
+  })
+
+  function withBundledPython(): string {
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = platMod.bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    return resources
+  }
+
+  const commandFailed = () => Object.assign(
+    new Error('Command failed: /py -m autowright.service install\n'), { code: 1 })
+
+  it('a failed ensure-backend install records the verb\'s stdout reason', async () => {
+    vi.useFakeTimers()
+    const resources = withBundledPython()
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('nothing listening'))
+    try {
+      const m = loadMain({
+        ready: true,
+        execFile: (_py, args, _o, cb) => {
+          if (args[2] === 'status') cb(null, 'not installed\n', '')
+          else cb(commandFailed(), 'install failed: launchctl timed out\n', '')
+        },
+      })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(await m.invoke('backend-status'))
+        .toEqual({ state: 'failed', detail: 'Backend install failed: install failed: launchctl timed out' })
+      expect(m.log()).toContain('ensure-backend: install failed: install failed: launchctl timed out')
+      expect(m.log()).not.toContain('Command failed')
+    } finally {
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  it('a failed version-sync reinstall records failed with the stdout reason', async () => {
+    vi.useFakeTimers()
+    const resources = withBundledPython()
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.includes('/health')) {
+        // An older backend than the app (the stub's getVersion is 0.0.0).
+        return Promise.resolve({ ok: true, json: async () => ({ app: 'Autowright', version: '0.0.-1', pid: 4242 }) } as Response)
+      }
+      if (url.includes('/executions')) {
+        return Promise.resolve({ ok: true, json: async () => ({ executions: [], total: 0 }) } as Response)
+      }
+      return Promise.reject(new Error('offline in tests'))
+    })
+    const children: string[][] = []
+    try {
+      const m = loadMain({
+        ready: true,
+        execFile: (_py, args, _o, cb) => {
+          children.push(args)
+          cb(commandFailed(), 'install failed: couldn\'t write the plist\n', '')
+        },
+      })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3', pid: 4242 }))
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(children).toEqual([['-m', 'autowright.service', 'install']])
+      expect(await m.invoke('backend-status'))
+        .toEqual({ state: 'failed', detail: 'Backend install failed: install failed: couldn\'t write the plist' })
+      expect(m.log()).toContain('version-sync install failed: install failed: couldn\'t write the plist')
+    } finally {
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  it('another Autowright backend on the recorded port (wrong pid) is not ours: ensure-backend installs', async () => {
+    vi.useFakeTimers()
+    const resources = withBundledPython()
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (!String(input).includes('/health')) return Promise.reject(new Error('offline in tests'))
+      return Promise.resolve({ ok: true, json: async () => ({ app: 'Autowright', version: '0.0.0', pid: 999 }) } as Response)
+    })
+    const children: string[][] = []
+    try {
+      const m = loadMain({
+        ready: true,
+        execFile: (_py, args, _o, cb) => {
+          children.push(args)
+          if (args[2] === 'status') cb(null, 'not installed\n', '')
+        },
+      })
+      writeFileSync(join(m.home, 'backend.json'),
+        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3', pid: 4242 }))
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(children).toEqual([
+        ['-m', 'autowright.service', 'status'],
+        ['-m', 'autowright.service', 'install'],
+      ])
+    } finally {
+      rmSync(resources, { recursive: true, force: true })
+    }
+  })
+
+  it('macOS: update-download never engages Squirrel; update-install stages, then quits to install', async () => {
+    if (platMod.UPDATER !== 'mac') return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const m = loadMain()
+    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
+    m.updater.check = { updateInfo: { version: '0.14.0' } }
+    expect(await m.invoke('update-download')).toEqual({ ok: true })
+    expect(m.updater.nativeChecks).toBe(0)
+    expect(m.updater.squirrelDownloadedUpdate).toBe(false)
+    let stagedAtInstall: boolean | null = null
+    m.updater.onInstall = () => { stagedAtInstall = m.updater.squirrelDownloadedUpdate }
+    expect(await m.invoke('update-install')).toEqual({ ok: true })
+    expect(m.updater.nativeChecks).toBe(1)
+    expect(stagedAtInstall).toBe(true)
+    expect(m.updater.installs).toBe(1)
+  })
+
+  it('macOS: a busy backend stages nothing; a Squirrel error answers { error } and installs nothing', async () => {
+    if (platMod.UPDATER !== 'mac') return
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    let busy = true
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/executions')) {
+        return Promise.resolve({ ok: true, json: async () => ({ executions: busy ? [{ id: 'e1' }] : [], total: busy ? 1 : 0 }) } as Response)
+      }
+      return Promise.reject(new Error('offline in tests'))
+    })
+    const m = loadMain()
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
+    expect(await m.invoke('update-download')).toEqual({ ok: true })
+    expect(await m.invoke('update-install')).toEqual({ busy: true })
+    expect(m.updater.nativeChecks).toBe(0)
+    busy = false
+    m.updater.nativeError = new Error('Code signature at URL did not pass validation')
+    expect(await m.invoke('update-install'))
+      .toEqual({ error: 'Code signature at URL did not pass validation' })
+    expect(m.updater.nativeChecks).toBe(1)
+    expect(m.updater.installs).toBe(0)
+    expect(m.updater.squirrelDownloadedUpdate).toBe(false)
+  })
+
+  it('macOS: a Squirrel that never answers gives up after 10 minutes with nothing installed', async () => {
+    if (platMod.UPDATER !== 'mac') return
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const m = loadMain()
+    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
+    m.updater.nativeSilent = true
+    let answer: unknown = null
+    void (m.invoke('update-install') as Promise<unknown>).then((r) => { answer = r })
+    await vi.advanceTimersByTimeAsync(9 * 60_000)
+    expect(answer).toBeNull()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(answer).toEqual({ error: 'the updater stopped responding' })
+    expect(m.updater.installs).toBe(0)
+  })
+
+  it('reset-all refuses while another reset is in flight', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const stops: ((err: ServiceChildError | null, stdout: string, stderr: string) => void)[] = []
+    const m = loadMain({ execFile: (_py, _a, _o, cb) => { stops.push(cb) } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const first = m.invoke('reset-all') as Promise<unknown>
+    await vi.waitFor(() => expect(stops).toHaveLength(1))
+    expect(await m.invoke('reset-all')).toEqual({ error: 'another operation is in progress' })
+    expect(stops).toHaveLength(1)
+    stops[0](Object.assign(new Error('exit 1'), { code: 1 }), 'stop failed', '')
+    expect(await first).toEqual({ error: 'stop failed' })
+  })
+
+  it('reset-all refuses while a quit flight is in progress', async () => {
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const stops: ((err: ServiceChildError | null, stdout: string, stderr: string) => void)[] = []
+    const m = loadMain({ execFile: (_py, _a, _o, cb) => { stops.push(cb) } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    const quit = m.invoke('quit-all', { force: true }) as Promise<unknown>
+    await vi.waitFor(() => expect(stops).toHaveLength(1))
+    expect(await m.invoke('reset-all')).toEqual({ error: 'another operation is in progress' })
+    expect(stops).toHaveLength(1)
+    stops[0](Object.assign(new Error('exit 1'), { code: 1 }), 'stop failed', '')
+    expect(await quit).toEqual({ error: 'stop failed' })
+  })
+
+  it('macOS: reset-all refuses while an update install is in progress', async () => {
+    if (platMod.UPDATER !== 'mac') return
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const m = loadMain()
+    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
+    m.updater.nativeSilent = true
+    void m.invoke('update-install')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await m.invoke('reset-all')).toEqual({ error: 'another operation is in progress' })
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+  })
+
+  it('no window or panel is created while a quit flight is still stopping the backend (§9)', async () => {
+    vi.useFakeTimers()
+    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
+    const stops: ((err: ServiceChildError | null, stdout: string, stderr: string) => void)[] = []
+    const m = loadMain({ ready: true, execFile: (_py, _a, _o, cb) => { stops.push(cb) } })
+    writeFileSync(join(m.home, 'backend.json'),
+      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+    await vi.advanceTimersByTimeAsync(0)
+    if (caps.trayPanel) await m.invoke('apply-settings', { menuBarIcon: true })
+    m.wins[0].close()
+    const before = m.windows.length
+    const quit = m.invoke('quit-all', { force: true }) as Promise<unknown>
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stops.length).toBeGreaterThan(0)
+    m.secondInstance()
+    m.emit('activate')
+    if (caps.trayPanel) m.clickTray()
+    await m.invoke('open-app', '/app?automation=a1')
+    expect(m.windows).toHaveLength(before)
+    // A failed stop keeps the app up: the guard lifts with the flight.
+    stops[stops.length - 1](Object.assign(new Error('exit 1'), { code: 1 }), 'stop failed', '')
+    expect(await quit).toEqual({ error: 'stop failed' })
+    m.emit('activate')
+    expect(m.windows.length).toBeGreaterThan(before)
   })
 })

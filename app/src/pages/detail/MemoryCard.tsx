@@ -133,7 +133,7 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
                 className="ad-input compact"
                 value={snapName}
                 onChange={(e) => setSnapName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') doSnapshot() }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) doSnapshot() }}
                 placeholder="Name — optional"
                 autoFocus
                 style={{ width: 220 }}
@@ -207,7 +207,7 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
                       className="ad-input compact"
                       value={renameVal}
                       onChange={(e) => setRenameVal(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') doRenameSnap(s.id) }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) doRenameSnap(s.id) }}
                       placeholder="Name — optional"
                       autoFocus
                       style={{ width: 220 }}

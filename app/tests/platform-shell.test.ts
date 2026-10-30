@@ -379,6 +379,20 @@ describe('§3 Windows packaging config (electron-builder)', () => {
     expect(nsh).not.toMatch(/HKLM|SHELL_CONTEXT/)
   })
 
+  it('a real uninstall unregisters the backend task and removes the CLI shim (§3)', () => {
+    // NSIS never runs under vitest: this pins the hook's shape. electron-builder
+    // inserts customUnInstall into the uninstall section; an update in place
+    // (isUpdated) keeps both, and a missing task never fails the uninstall.
+    const nsh = readFileSync(join(ELECTRON_DIR, 'installer.nsh'), 'utf-8')
+    const macro = nsh.slice(nsh.search(/^!macro customUnInstall$/m))
+    expect(macro).toMatch(/^!macro customUnInstall\n/)
+    const body = macro.slice(0, macro.indexOf('!macroend'))
+    expect(body).toMatch(/\$\{ifNot\} \$\{isUpdated\}/)
+    expect(body).toContain('Unregister-ScheduledTask -TaskName ai.autowright.backend -Confirm:$$false -ErrorAction SilentlyContinue')
+    expect(body).toMatch(/nsExec::Exec [^\n]+\n\s+Pop \$0\n/)
+    expect(body).toContain('Delete "$LOCALAPPDATA\\Autowright\\bin\\autowright.cmd"')
+  })
+
   it('ships the renderer, the shell and the staged interpreter — and no more', () => {
     expect(build.files).toContain('dist/**/*')
     expect(build.files).toContain('electron/**/*')

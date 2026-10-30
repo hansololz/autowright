@@ -108,7 +108,9 @@ through the shared §4.9 `QuitFlow` when the main window is up and natively othe
 window of ours vetoes a quit — the non-closable §13 panel is destroyed in `before-quit` for
 exactly that reason — and no window or panel is created once a quit has begun: `showApp`
 (deep link, second instance), the dock/tray `activate` reopen, and the tray click all
-return early while the quit flag is set, so a relaunching update (the Linux AppImage
+return early while the quit flag is set **or a quit flight is in progress** (the native
+flow's `service stop` can run for a minute before `before-quit` sets the flag, and a dock
+click meanwhile booted a window against a backend being torn down, 2026-10-30), so a relaunching update (the Linux AppImage
 updater spawns the new instance before the old one exits, and the old one receives
 `second-instance`) or a stray click between `before-quit` and exit can't create a fresh
 window the quit then has to fight. The other side of that relaunch: the new instance,
@@ -845,7 +847,9 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   showing the committed label through the round-trip and only a failed PATCH reverts it
   alongside the error toast (two quick picks are request-counted: the first PATCH landing
   never clears the pending state of the second). Under the row, while the value is `never`, a quiet caption:
-  "Failures still show on the Automations list and the menu bar." (the §13 dot and the
+  "Failures still show on the Automations list and the menu bar." (per-OS through the §9
+  copy table like every platform noun: "tray" on Windows, and Linux — no tray surface —
+  drops the clause, 2026-10-30; the §13 dot and the
   §4.1 problems are not notifications).
 - **RECENT EXECUTIONS** — the automation's 5 newest execution history rows (status badge,
   then the execution id's first 8 chars in faint mono — same short id the Executions page rows show — then

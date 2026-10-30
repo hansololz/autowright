@@ -12,7 +12,6 @@ import {
 } from '../ui'
 import { StepList } from '../steps'
 import { VersionDiffModal } from '../versiondiff'
-import { nextTriggerShort, useTriggerPreview } from '../triggers'
 import { ResultSection, SpecMarkdown } from '../result'
 import { badgeAnim, runAction } from './detail/model'
 import { ConcurrencyCard } from './detail/ConcurrencyCard'
@@ -157,9 +156,6 @@ export default function AutomationDetail() {
   // history entry so back never lands on the dead page again (§9).
   useEffect(() => { if (!auto) go('automations', {}, { replace: true }) }, [auto, go])
 
-  // §19: per-trigger next occurrences come from POST /triggers/preview — the
-  // renderer holds no trigger math (must run before the early return: hooks).
-  const trigPreviews = useTriggerPreview(auto?.triggers ?? [])
   // §9.2 change badge: the current version's steps plus the stored history.
   // Also above the early return: when a delete lands while the page is open,
   // `auto` vanishes for one render and a hook below the return would make React
@@ -196,7 +192,9 @@ export default function AutomationDetail() {
   const noTrigs = trigs.length === 0
   const allOff = auto.allTriggersOff
   const countdown = auto.nextAtMs == null ? '' : nextIn(auto)
-  const nextShort = nextTriggerShort(trigs, trigPreviews)
+  // §4.3: the label of the trigger behind nextAtMs, serialized on the row by
+  // the same backend computation (an older backend omits it: no label).
+  const nextShort = auto.nextTriggerShort ?? null
   // §4.3: enabled app_start/message triggers have no computable next — nextAtMs stays null.
   const discordOn = trigs.some((t) => t.kind === 'discord' && t.enabled)
   const imsgOn = trigs.some((t) => t.kind === 'imessage' && t.enabled)
@@ -741,7 +739,7 @@ export default function AutomationDetail() {
                   className="ad-input"
                   value={duplicateName}
                   onChange={(e) => setDuplicateName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void doDuplicate() }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void doDuplicate() }}
                   aria-label="Name"
                   spellCheck={false}
                   autoFocus

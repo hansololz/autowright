@@ -106,6 +106,15 @@ export function removeRuleBlock(spec: SpecBlock[], rule: string): SpecBlock[] | 
   return at < 0 ? null : [...spec.slice(0, at), ...spec.slice(at + 1)]
 }
 
+// §11/§8: a step script's identity modulo the envelope's own newline framing
+// (the parser trims a block's surrounding blank lines and ends it with one
+// newline) — the same comparison as the backend's keep-`user` rule
+// (`_same_code`, a strip of leading/trailing newlines), so a faithfully kept
+// script never reads as rewritten.
+function codeKey(code: string): string {
+  return code.replace(/^\n+|\n+$/g, '')
+}
+
 // §11 "A sync keeps the user informed": for each previous unlocked
 // user-written step, a chip when the settled sync rewrote its script or
 // dropped it. Steps match by name (the k-th of a name against the k-th of the
@@ -119,7 +128,7 @@ export function userStepSyncChips(prev: Step[], next: Step[]): ChatEntry[] {
     if (s.locked || s.authoredBy !== 'user') continue
     const match = next.filter((n) => n.name === s.name)[k]
     if (!match) chips.push(newEntry({ kind: 'system', icon: 'fa-pen', text: `Your step '${s.name}' was removed.` }))
-    else if ((match.code ?? '') !== (s.code ?? '')) chips.push(newEntry({ kind: 'system', icon: 'fa-pen', text: `Your step '${s.name}' was rewritten.` }))
+    else if (codeKey(match.code ?? '') !== codeKey(s.code ?? '')) chips.push(newEntry({ kind: 'system', icon: 'fa-pen', text: `Your step '${s.name}' was rewritten.` }))
   }
   return chips
 }

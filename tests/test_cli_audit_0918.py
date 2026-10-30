@@ -151,7 +151,7 @@ def test_push_reports_the_saved_version_before_a_failing_description_patch(tmp_p
     d = tmp_path / "wd"
     cli.write_workdir(d, FULL_AUTO)
     manifest = (d / "manifest.yaml").read_text().replace(
-        "description: Reports daily", "description: Reports every single day")
+        "description: Reports daily", "description: Reports every single day", 1)
     (d / "manifest.yaml").write_text(manifest)
 
     with pytest.raises(SystemExit) as ei:
@@ -167,7 +167,7 @@ def test_push_patches_the_description_after_reporting_the_save(tmp_path, capsys)
     d = tmp_path / "wd"
     cli.write_workdir(d, FULL_AUTO)
     (d / "manifest.yaml").write_text((d / "manifest.yaml").read_text().replace(
-        "description: Reports daily", "description: Reports every single day"))
+        "description: Reports daily", "description: Reports every single day", 1))
 
     c = _WorkdirClient()
     _run(c, "automation", "push", "Daily Report", str(d))

@@ -27,6 +27,14 @@ DATA_PATH_UNREACHABLE = ("the data path isn't reachable — mount it and relaunc
                          "or choose another folder in Settings")
 
 
+def admission_blocked(store: Store, engine: Engine, a: dict) -> bool:
+    """§6 nothing jumps the queue: a new admission (a firing, a manual start,
+    a retry) counts the automation as at capacity while any entry is queued
+    for it — a slot freed between a finish and its drain is the queue head's,
+    never a newer arrival's. Caller holds store.lock."""
+    return engine.at_capacity(a) or bool(store.queued_execs(a["id"]))
+
+
 def finish_never_ran(store: Store, h: dict, note: str, *,
                      finished_at: str | None = None,
                      with_automation: bool = False) -> None:
@@ -104,7 +112,9 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
         # window above: no record, nothing started.
         if store.exec_dir_unreachable:
             return False
-        if engine.at_capacity(a):
+        # §6 nothing jumps the queue: waiting entries count as capacity, so
+        # a firing landing between a finish and its drain joins the tail.
+        if admission_blocked(store, engine, a):
             queued = store.queued_execs(a["id"]) if payload else []
             cap = clamp_max_queued(a.get("max_queued"))
             if payload and len(queued) < cap:
@@ -210,7 +220,9 @@ def queue_manual(store: Store, engine: Engine, a: dict, trigger: str,
         # §4.9 degraded session: no record of any kind (409 at the API).
         if store.exec_dir_unreachable:
             raise RuntimeError(DATA_PATH_UNREACHABLE)
-        if not engine.at_capacity(a):
+        # §6 nothing jumps the queue: with entries waiting, a queue request
+        # joins the tail even beside a free slot.
+        if not admission_blocked(store, engine, a):
             return engine.start(a, trigger, version_label=version_label), False
         # Same label parse/resolve as engine.start — a queue admission must
         # 404 the same labels a start would.
@@ -264,14 +276,34 @@ def cancel_unmatched_queue(store: Store, engine: Engine, automation_id: str) -> 
         engine.cancel(eid)  # queued → finish_queued: skipped, sender told
 
 
+def _is_stale(h: dict) -> bool:
+    """§6: the TTL applies to message firings only — a manual entry the user
+    chose to queue waits until promoted or cancelled."""
+    return bool(h.get("trigger_payload")) and _waited_s(h) > QUEUE_TTL_S
+
+
+def expire_stale(store: Store, automation_id: str) -> None:
+    """§6: every message entry past `AUTOWRIGHT_QUEUE_TTL_S` finishes `skipped`
+    ("waited too long in the queue") and its sender is told — whatever the
+    capacity, wherever it sits in the queue: the TTL caps the wait itself,
+    not the wait once a slot frees."""
+    with store.lock:
+        stale = [h for h in store.queued_execs(automation_id) if _is_stale(h)]
+    for h in stale:
+        # Outside store.lock: finish_queued replies to the sender.
+        finish_queued(store, h, "waited too long in the queue")
+
+
 def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
     """§6: hand every free slot to the longest-waiting firing. Entries that
     waited past the TTL are finished instead of executed — answering a stale
-    question is noise. Called whenever a slot frees (an execution finishing or
-    being cancelled) and on every scheduler tick, so a raised `maxParallel` or a
-    missed wake-up still gets picked up."""
+    question is noise — and they are expired first, whatever the capacity.
+    Called whenever a slot frees (an execution finishing or being cancelled)
+    and on every scheduler tick, so a raised `maxParallel` or a missed wake-up
+    still gets picked up."""
     from .engine import VersionNotFound  # deferred: engine imports firing
 
+    expire_stale(store, automation_id)
     while True:
         with store.lock:
             a = store.autos.get(automation_id)
@@ -281,10 +313,10 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
             if not queue:
                 return
             head = queue[0]
-            # §6: the TTL applies to message firings only — a manual entry the
-            # user chose to queue waits until promoted or cancelled.
-            stale = bool(head.get("trigger_payload")) and _waited_s(head) > QUEUE_TTL_S
-            if not stale:
+            note = None
+            if _is_stale(head):
+                note = "waited too long in the queue"
+            else:
                 try:
                     engine.start(a, head["trigger"],
                                  version_label=f"v{head['version']}",
@@ -294,7 +326,7 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
                     # The version this firing was admitted against is gone (§7
                     # restore/rollback). The entry can never execute — end it
                     # rather than blocking the queue behind it forever.
-                    pass
+                    note = f"version v{head['version']} no longer exists"
                 except Exception as e:  # noqa: BLE001 — any promotion failure
                     # Slot taken under us — but if the failure landed after
                     # the entry was already promoted (a §7 launch failure, a
@@ -306,10 +338,18 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
                         finish_never_ran(store, head, "the execution couldn't be started",
                                          finished_at=timefmt.now_iso(),
                                          with_automation=True)
-                    return  # the next finish drains again
-        finish_queued(store, head,
-                      "waited too long in the queue" if stale
-                      else f"version v{head['version']} no longer exists")
+                    if isinstance(e, (RuntimeError, OSError)):
+                        # A refusal (slot taken, shutdown, deletion, data path
+                        # gone) or a write error that may clear: the head stays
+                        # and the next finish or tick drains again.
+                        return
+                    if head["status"] != "queued":
+                        continue  # ended above — move on to the next entry
+                    # §6: a failure that will not clear (a damaged param
+                    # definition, …) would wedge the queue behind this head
+                    # forever — it ends instead, and the drain moves on.
+                    note = "couldn't be started"
+        finish_queued(store, head, note)
 
 
 def _waited_s(h: dict) -> float:

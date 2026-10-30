@@ -72,9 +72,11 @@ export default function SettingsPage() {
   }, [])
 
   // §4.9: the "Show in the menu bar" row exists only where the shell has a
-  // tray (trayPanel false on Linux, §13) — default true so macOS/Windows and
-  // the browser dev harness render it without waiting on the bridge.
-  const [trayPanel, setTrayPanel] = useState(true)
+  // tray (trayPanel false on Linux, §13). Seeded synchronously from the §9
+  // store's `platformOs` (known since boot's /health) so a Linux visit never
+  // flashes the row; the platform-info bridge only corrects it afterwards.
+  const platformOs = useStore((s) => s.platformOs)
+  const [trayPanel, setTrayPanel] = useState(() => platformOs !== 'linux')
   useEffect(() => {
     void window.autowright?.platformInfo?.()
       .then((p) => { if (p && p.trayPanel === false) setTrayPanel(false) })
@@ -279,7 +281,7 @@ export default function SettingsPage() {
                 })}
               </div>
               {settings.notifications === 'never' && (
-                <div style={{ ...rowSub, marginTop: 10 }}>Failures still show on the Automations list and the menu bar.</div>
+                <div style={{ ...rowSub, marginTop: 10 }}>{copy.failuresStillShow}</div>
               )}
             </div>
           )}

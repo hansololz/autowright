@@ -370,6 +370,11 @@ folder (manifest last, the commit point), `memory/`, then the top-level `automat
 then the in-memory insert and one single-row `automation.changed`; a uuid directory left
 without `automation.yaml` by a crash is swept at the next startup like any other.
 
+The draft swap carries a legacy `draft/automation/instructions.md` (written by v0.6.0
+through v0.11.1) into the staged folder before the old working copy is reaped
+(2026-10-30 — the §21.4 keep-on-disk rule for the retired document covers the draft copy
+as well as version folders).
+
 There is no top-level copy of the "current" spec or steps: the current version is simply
 `versions/v<current_version>/`, resolved through the `current_version` pointer in
 `automation.yaml`. Saving an edit writes a fresh `versions/vN+1/` folder, then atomically
@@ -384,7 +389,12 @@ just an incomplete directory the next save skips (it is never adopted and never
 overwritten; deleting the automation removes it). The new version's number is the
 first one past `current_version` that is free **both** in memory and on disk — a `vN`
 folder the startup walk skipped (unreadable manifest, a user's half-repaired folder) is
-never overwritten or, on a failed save, removed. A save whose pointer flip fails rolls
+never overwritten or, on a failed save, removed. A folder numbered **above**
+`current_version` is a crash orphan — the writer landed its manifest but the process died
+before the pointer flip (2026-10-30) — and the startup walk ignores it (logged, left on
+disk, never adopted into the history: the save it belonged to failed as a whole, and
+adopting the version without the top-level changes that rode the same save would be a
+half-save); the next save numbers past it like any skipped folder. A save whose pointer flip fails rolls
 back everything the attempt touched: the version leaves memory and disk, and the
 automation's cached reference ids (memoized per version number) are dropped too, so the
 next save — which reuses the same number — is judged on its own content, never on the
@@ -503,9 +513,24 @@ warning in the app log. Every top-level YAML file is hand-editable, so an unread
 invalid YAML, an impossible unquoted date (`2026-13-45`, which PyYAML raises as a
 `ValueError`, not a `YAMLError`), nesting too deep for the parser, or invalid text encoding
 alike — loads as its default with a warning in the app log; a damaged file never bricks
-startup into a launchd crash loop. That same error set is the rule wherever YAML from a
+startup into a launchd crash loop (a marketplace table whose seed or migration save fails
+at startup keeps its in-memory table and logs the failure, like any other damaged file,
+2026-10-30). That same error set is the rule wherever YAML from a
 hand-edited or untrusted source is parsed: a §5.1 archive member answers the ordinary 422,
-an agent's `manifest.yaml`/`actions.yaml` a validation error — never a 500. The same
+an agent's `manifest.yaml`/`actions.yaml` a validation error — never a 500. **Untrusted
+YAML — a §5.1 archive member, a §22 catalog — is loaded with anchors and aliases
+refused** (a document using either answers the same 422 / catalog error: a few hundred
+bytes of aliases can describe a billion-element structure that PyYAML's safe loader
+expands happily, hanging the request thread at preview or Audit time, 2026-10-30), error
+text never embeds an untrusted value's full repr (a capped, escaped excerpt at most), and
+a parameter `default` arriving by import is type-checked against its kind with the §19
+param-values check (null allowed) — stricter than a save, which checks presence only, since
+an imported default is the one place an untrusted value lands verbatim in a version. Step file names and the §5 archive/export file names also reject the Windows
+device stems (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any case, with
+any extension) — on Windows a write to `nul.py` goes to the device and seals over empty
+bytes. Imported step code is normalized to LF line endings (an archive member with CRLF
+would otherwise be written as `\r\r\n` through the text-mode writer on Windows and
+reload with every blank line doubled). The same
 leniency covers a hand-edited top-level field of the wrong type: an automation `name` that
 is not text loads as its text form when it is a plain scalar (`name: 2024` → "2024") and
 as the directory name otherwise (missing, empty, a list or mapping), so a name-collision
@@ -558,7 +583,10 @@ reach it.
 Rules:
 
 - Every write goes disk-first (atomic temp-write + rename for files — `execution.yaml`
-  included; on POSIX the parent directory is fsynced after the rename, so a committed
+  included; on Windows the rename is retried a few times over ~1 s on a sharing
+  violation (2026-10-30: a reader that holds the target open without delete-sharing —
+  the request-log settings read, a `GET /chat`, the search indexer or an antivirus on
+  `execution.yaml` — made the replace fail at random); on POSIX the parent directory is fsynced after the rename, so a committed
   write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index — WAL with `synchronous=NORMAL`: a
   process crash loses nothing, a power loss can drop the newest index rows, which the startup
   scan below rebuilds from the yaml; and a top-level `automation.yaml` write that fails
@@ -577,7 +605,11 @@ Rules:
   still re-pointed, and `agents.changed` plus each `automation.changed` publish regardless,
   so the UI never keeps showing a deleted agent — and
   a failed secret create never leaves a Keychain value behind a row that exists only in
-  memory), then the in-memory state
+  memory, and a secret **update** is held to the same discipline (2026-10-30): the
+  previous value is read before the new one is written, a row that turns out deleted
+  meanwhile has the just-written value removed again, and a yaml write that fails puts
+  the previous value back — or removes the value when the row was a placeholder — so the
+  Keychain never holds a value the file does not account for), then the in-memory state
   updates. A crash between the two self-heals at the next startup, since startup rebuilds
   everything from disk: after loading the DB index, startup scans `executions/` for
   directories the index doesn't know (crash between the yaml write and the DB upsert, or a
@@ -773,7 +805,7 @@ is not a stored id (a leftover `<id>` placeholder, a commented-out old reference
 "re-export" guidance is never handed out for bytes that would re-export identically. For
 the same reason export refuses (422, naming the step) a version whose manifest can't travel
 — a step whose file on disk no longer matches its §4.1 seal (`step-modified`, compared at
-export time like `duplicate`: the archive would carry and the importer would seal an
+export time like `duplicate`, a sealed file that is **missing** counting as modified: the archive would carry and the importer would seal an
 unvalidated script; "step '<name>' changed on disk since its version was saved — save the
 automation once before exporting it"), two steps sharing a trimmed name or a blank name
 (§4.1 uniqueness — the importer below refuses them, so a pre-rule version must be saved
@@ -784,7 +816,11 @@ digits only), a present `timeout` below 1 or `retries` outside 1–10 (a stored 
 reads as "none" and is simply not written, like an absent key), or `timeout` beside
 `no_timeout` / `retries` beside `infinite_retries` — every shape the importer below
 rejects, all hand-edited shapes the lenient loader tolerates — rather than writing a
-member named `None` or an archive that fails on arrival. Import validates every
+member named `None` or an archive that fails on arrival. The rule is the general one:
+before the bytes are returned, export runs the importer's own definition checks over the
+built archive (a blank agent-step or secret-entry `why`, a package entry without `why`,
+a parameter without a default — every shape the importer refuses) and answers 422 naming
+the field with " — repair the automation first" (2026-10-30). Import validates every
 parameter definition's `name` as non-empty text: a list-valued name passes a truthiness
 check, lands, and then breaks every read of the automation.
 

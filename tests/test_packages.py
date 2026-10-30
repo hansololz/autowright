@@ -290,7 +290,7 @@ def test_ensure_invalid_cancelled_and_missing_only(home, monkeypatch):
 
     calls = []
 
-    def fake_pip(name, pin_installed=False, should_stop=None):
+    def fake_pip(name, pin_installed=False, should_stop=None, **_):
         calls.append((name, pin_installed))
         _fake_dist(home, name, "1.0.0")  # what a successful install leaves behind
         return None
@@ -389,7 +389,7 @@ def test_ensure_reports_progress_and_pip_failure(home, monkeypatch):
     _fake_dist(home, "requests", "2.31.0")
     progressed = []
     monkeypatch.setattr(packages, "_pip_install",
-                        lambda name, pin_installed=False, should_stop=None:
+                        lambda name, pin_installed=False, should_stop=None, **_:
                         "no matching distribution")
     out = packages.ensure([{"pip": "requests", "import": "requests"},
                            {"pip": "leftpad", "import": "leftpad"}],
@@ -413,7 +413,7 @@ def test_upgrade_always_runs_pip_and_reports(home, monkeypatch):
     _fake_dist(home, "leftpad", "1.0.0")
     calls = []
 
-    def fake_pip(name, pin_installed=False, should_stop=None):
+    def fake_pip(name, pin_installed=False, should_stop=None, **_):
         calls.append((name, pin_installed))
         if name == "leftpad":
             return "no matching distribution"
@@ -427,8 +427,9 @@ def test_upgrade_always_runs_pip_and_reports(home, monkeypatch):
     out = packages.upgrade([{"pip": "bad name!", "import": "x"},
                             {"pip": "requests", "import": "requests"},
                             {"pip": "leftpad", "import": "leftpad"}])
-    # invalid name: no pip run; the others run unpinned (upgrade moves them)
-    assert calls == [("requests", False), ("leftpad", False)]
+    # invalid name: no pip run; the others run with the other declared
+    # packages pinned (none declared here) — §6.2 2026-10-30
+    assert calls == [("requests", True), ("leftpad", True)]
     assert out[0] == {"pip": "bad name!", "import": "x", "status": "failed",
                       "error": "not a bare distribution name"}
     assert out[1]["status"] == "installed" and out[1]["version"] == "9.9.9"
@@ -477,7 +478,7 @@ def test_ensure_invalidates_the_scan_after_installing(home, monkeypatch):
     reads back the installed version, even at an unchanged directory key."""
     from autowright import packages
 
-    def fake_pip(name, pin_installed=False, should_stop=None):
+    def fake_pip(name, pin_installed=False, should_stop=None, **_):
         _fake_dist(home, name, "1.2.3")
         return None
 
@@ -539,7 +540,7 @@ def test_upgrade_never_installs_what_isnt_installed(home, monkeypatch):
     _fake_dist(home, "requests", "2.31.0")
     calls = []
 
-    def fake_pip(name, pin_installed=False, should_stop=None):
+    def fake_pip(name, pin_installed=False, should_stop=None, **_):
         calls.append(name)
         return None
 
@@ -561,7 +562,7 @@ def test_upgrade_honors_should_stop_between_packages(home, monkeypatch):
     _fake_dist(home, "leftpad", "1.0.0")
     calls = []
     monkeypatch.setattr(packages, "_pip_install",
-                        lambda name, pin_installed=False, should_stop=None:
+                        lambda name, pin_installed=False, should_stop=None, **_:
                         calls.append(name) or None)
 
     out = packages.upgrade([{"pip": "requests", "import": "requests"},

@@ -223,8 +223,9 @@ def test_exit_http_renders_validation_list_detail():
 
 
 def test_exit_http_survives_a_body_that_is_not_utf8():
-    """§20: the error line is printed whatever bytes came back - a body that
-    isn't UTF-8 must not raise a UnicodeDecodeError over the HTTP error."""
+    """§20: whatever bytes came back, a body that isn't UTF-8 must not raise a
+    UnicodeDecodeError over the HTTP error - it isn't JSON either, so it is the
+    backend not being reachable (2026-10-30)."""
     import io
     import urllib.error
 
@@ -234,10 +235,11 @@ def test_exit_http_survives_a_body_that_is_not_utf8():
                                  io.BytesIO(b"boom \xff\xfe"))
     with pytest.raises(SystemExit) as ei:
         _exit_http(err)
-    assert str(ei.value.code).startswith("500: boom ")
+    assert str(ei.value.code).startswith("backend isn't reachable")
 
 
-def test_exit_http_falls_back_to_body_when_detail_not_string():
+def test_exit_http_never_prints_a_body_that_is_not_json():
+    """§20 (2026-10-30): a non-JSON error body is never printed raw."""
     import io
     import urllib.error
 
@@ -247,7 +249,8 @@ def test_exit_http_falls_back_to_body_when_detail_not_string():
                                  io.BytesIO(b"plain text error"))
     with pytest.raises(SystemExit) as ei:
         _exit_http(err)
-    assert "plain text error" in str(ei.value.code)
+    assert str(ei.value.code).startswith("backend isn't reachable")
+    assert "plain text error" not in str(ei.value.code)
 
 
 # ---------------------------------------------------------------- follow_exec

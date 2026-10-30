@@ -1045,8 +1045,12 @@ editors enter with
     "Remove step", tip "Remove this step from the automation (you will be asked to
     confirm)"). Unviewed rows carry no controls. The detail page's modal (no editor)
     shows neither the pen nor a footer. All of them are disabled while a §8 job is in
-    flight or an old version is viewed, and while Save's validation is in flight; Move
-    up is also disabled on the first step and Move down on the last.
+    flight or an old version is viewed, and while Save's validation is in flight (the
+    ⌥↑ / ⌥↓ shortcuts are inert then too — a move landing under an in-flight validation
+    would drop the Save with no word, 2026-10-30); Move
+    up is also disabled on the first step and Move down on the last. A move or lock
+    during the edit also clears any validation lines the last Save attempt left on the
+    code pane — they named positions and `NN-` files that no longer hold.
     The three step controls **work during the edit** — they are instant, visible
     changes, and Save covers only the fields: **Move** reorders at once and the edit
     rides along to the new position (the working copy is untouched; Save then applies
@@ -1056,7 +1060,9 @@ editors enter with
     "Your unsaved edits are dropped with it." while the edit is dirty, and confirming
     drops the edit with the step.
   - **Edit mode**: the code pane's body becomes the document-editor modal's textarea
-    (same rhythm, padding, inset, focus-on-open with the caret at the end) **with the
+    (same rhythm, padding, inset, focus-on-open with the caret at the end — on entering
+    edit mode only: a move during the edit leaves focus and the caret where they are,
+    so a second ⌥↓ still moves, 2026-10-30) **with the
     reader's line-number gutter kept beside it**: the same faint right-aligned mono
     numbers in the same column, one per line of the text being typed, tracking the text
     as it grows and as long lines wrap (a wrapped line keeps one number, as in the
@@ -1073,7 +1079,10 @@ editors enter with
     navigator row's edit footer (above), ⌘S / Ctrl+S saves; ✕, Escape and the
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
     changes you typed into the script editor will be lost.", confirm "Discard edits"),
-    while Cancel returns to view mode through the same guard. In edit mode the find and
+    while Cancel returns to view mode through the same guard. The guard counts a typed
+    remember rule as unsaved work too (a rule with no field change asks before it is
+    dropped, though it never enables Save on its own, 2026-10-30). ⌘S yields to the §9.3
+    developer-log overlay like every other shortcut. In edit mode the find and
     chevron buttons stay visible but disabled and the pen is hidden.
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
     **description** as two `.ad-input.compact` fields in edit mode: the name a one-line
@@ -1168,6 +1177,9 @@ editors enter with
     editor compares them with the previous draft: for each previous unlocked
     `authoredBy: user` step whose script changed it lands the chip "Your step '<name>'
     was rewritten." and for one that vanished "Your step '<name>' was removed."
+    ("changed" is judged the way the §8 keep-`user` rule judges it — up to the envelope
+    parser's trim of surrounding blank lines and the final newline — so a faithfully
+    kept script never earns the chip, 2026-10-30)
     (`fa-pen`), so a hand edit never disappears silently; locked steps need no chip — the
     §8 splice guarantees them. A sync, undo or restore that swaps the steps closes an open
     modal as before; under an unsaved edit the swap has already happened, so the guard asks
