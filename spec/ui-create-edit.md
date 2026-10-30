@@ -1017,7 +1017,8 @@ editors enter with
     `title`.
     Everything that changes a step lives in the navigator, on the viewed row. In view
     mode the row carries one control: **Edit** (`fa-pen`, `.ad-btn-icon`, aria-label
-    "Edit script", tip "Edit this step: its script, name, description and timeout"),
+    "Edit script", tip "Edit this step: its script, name, description, timeout and
+    retries"),
     right-aligned on the title line beside the step name (the name keeps `flex: 1` and
     wraps under a long title; the pen is 26 px and top-aligned to the first line). View
     mode is otherwise a reader: no move, lock or remove control shows until an edit
@@ -1055,7 +1056,18 @@ editors enter with
     "Your unsaved edits are dropped with it." while the edit is dirty, and confirming
     drops the edit with the step.
   - **Edit mode**: the code pane's body becomes the document-editor modal's textarea
-    (same rhythm, padding, inset, focus-on-open with the caret at the end); the find bar
+    (same rhythm, padding, inset, focus-on-open with the caret at the end) **with the
+    reader's line-number gutter kept beside it**: the same faint right-aligned mono
+    numbers in the same column, one per line of the text being typed, tracking the text
+    as it grows and as long lines wrap (a wrapped line keeps one number, as in the
+    reader). The pane lays the text out twice — an invisible mirror of the lines in the
+    reader's own two-column grid gives every row its height, and the textarea sits over
+    the mirror's text column at the mirror's full height, so it never scrolls on its own
+    and the pane scrolls both columns together — which is what keeps the numbers and the
+    typed lines on one rhythm. Typing reveals the caret as any editor does, and the pane
+    keeps its 24 px bottom padding under the caret's line (`scroll-padding-bottom`), so a
+    line typed at the end never sits flush on the footer divider. The gutter exists so a validation error's "line N" and the
+    reader's numbers point at the same line; the numbers stay unselectable. The find bar
     closes and ⌘F is inert; flipping steps (chevrons, arrow keys, navigator rows) is
     disabled; the toolbar keeps the live line count; **Cancel** / **Save** sit in the
     navigator row's edit footer (above), ⌘S / Ctrl+S saves; ✕, Escape and the
@@ -1071,7 +1083,9 @@ editors enter with
     the step row render its line breaks as typed, `pre-wrap`). Under the description a
     **Timeout** row — the word "Timeout" in the muted 11.5 px sans, then a 92 px
     `.ad-input.compact` field (aria-label "Step timeout") — edits the step's §4.1
-    `timeout` / `noTimeout` pair in the clock tag's own shorthand. The field opens holding
+    `timeout` / `noTimeout` pair in the clock tag's own shorthand (the word and the
+    Retries row's below share one 52 px label width, so the two fields share a left
+    edge). The field opens holding
     the stored value rendered by the clock-tag rule (`2h`, `5m`, `90s`, `no limit`), or
     empty when the step sets neither, with the engine default's label (`15m`) as its
     placeholder. Accepted (case-insensitive, trimmed): a positive whole number of seconds
@@ -1083,7 +1097,20 @@ editors enter with
     value, so retyping `900` as `15m` is nothing to save; typing the default `15m` on a step
     that set nothing pins `timeout: 900` (a value, not an absence). The §8 sync treats the
     pair like the rest of a user step's manifest: locked, byte for byte; unlocked, kept
-    unless the spec requires a change. Beneath the
+    unless the spec requires a change. Under the Timeout row a **Retries** row of the
+    same make — the word "Retries", then a 92 px `.ad-input.compact` field (aria-label
+    "Step retries") — edits the step's §4.1 `retries` / `infiniteRetries` pair. The field
+    opens holding the budget as a bare number (`3`), `infinite` for an `infiniteRetries`
+    step, or empty when the step sets neither, with `0` as its placeholder (the default:
+    the first failure fails the step). Accepted (case-insensitive, trimmed): a whole
+    number from 0 to 10, bare or in the retry chip's own words (`3`, `3 retries`,
+    `1 retry`) — 0 removes both keys, like blank; `infinite`, `unlimited`, `forever` or
+    `no limit`, bare or as `infinite retries`, for `infiniteRetries: true`; and blank.
+    Anything else (`11`, `2.5`, `-1`, `many`) disables Save with the inline red hint "Use
+    a whole number up to 10, or infinite" under the field. Dirtiness compares the parsed
+    value (`3` and `3 retries` are the same; `0` and blank are the same). Save replaces
+    the pair the way it replaces the timeout pair: `retries: n`, or
+    `infiniteRetries: true`, or neither. Beneath the
     textarea a 36 px footer (the doc modal's hint style) carries a checkbox **Remember
     this edit as a build rule** and, enabled by it, a text field (placeholder "What every
     future sync must keep — one line"; checked with a blank field, Save disables with the

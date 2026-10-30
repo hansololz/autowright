@@ -11,7 +11,7 @@ import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import { useStore } from './store'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
-import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, TipButton, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, STEP_TIMEOUT_DEFAULT_LABEL, STEP_TIMEOUT_HINT, parseStepTimeout, stepTimeoutKey, stepTimeoutText, useOverlayThumb, validUrl } from './ui'
+import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, TipButton, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, STEP_TIMEOUT_DEFAULT_LABEL, STEP_TIMEOUT_HINT, STEP_RETRIES_HINT, parseStepTimeout, stepTimeoutKey, stepTimeoutText, parseStepRetries, stepRetriesKey, stepRetriesText, validUrl } from './ui'
 
 // §4.1/§6.1 code-reference scan: literal quoted uuid subscripts only.
 const SECRET_REF_RE = /\bsecrets\[\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']\s*\]/g
@@ -335,14 +335,16 @@ export type StepEdit = {
   description: string
   // §11 the timeout field's text, in the clock tag's shorthand ('' = default)
   timeout: string
-  orig: { code: string; name: string; description: string; timeout: string }
+  // §11 the retries field's text: a bare number, 'infinite', or '' (= 0)
+  retries: string
+  orig: { code: string; name: string; description: string; timeout: string; retries: string }
   remember: boolean
   rule: string
   errors: string[]
   saving: boolean
 }
 const beginEdit = (s: Step): StepEdit => {
-  const orig = { code: s.code || '', name: s.name, description: s.description || '', timeout: stepTimeoutText(s) }
+  const orig = { code: s.code || '', name: s.name, description: s.description || '', timeout: stepTimeoutText(s), retries: stepRetriesText(s) }
   return { ...orig, orig, remember: false, rule: '', errors: [], saving: false }
 }
 // §11: name and description compare trimmed (Save trims them), so a
@@ -351,9 +353,13 @@ const beginEdit = (s: Step): StepEdit => {
 const stepEditDirty = (e: StepEdit) =>
   e.code !== e.orig.code || e.name.trim() !== e.orig.name.trim() || e.description.trim() !== e.orig.description.trim()
   || stepTimeoutKey(e.timeout) !== stepTimeoutKey(e.orig.timeout)
-// §11: a timeout the field grammar rejects blocks Save (inline hint)
+  || stepRetriesKey(e.retries) !== stepRetriesKey(e.orig.retries)
+// §11: a timeout or retries value the field grammar rejects blocks Save (inline hint)
 const stepEditTimeoutBad = (e: StepEdit) => parseStepTimeout(e.timeout) === null
+const stepEditRetriesBad = (e: StepEdit) => parseStepRetries(e.retries) === null
 
+// §11: the Timeout and Retries labels share one width so their fields share a left edge
+const STEP_FIELD_LABEL_WIDTH = 52
 const DISCARD_SCRIPT_TITLE = 'Discard your script edits?'
 const DISCARD_SCRIPT_BODY = 'The changes you typed into the script editor will be lost.'
 
@@ -669,7 +675,7 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
             {/* §11 timeout: the §4.1 pair in the clock tag's own shorthand;
                 blank = the engine default (shown as the placeholder) */}
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, font: "400 11.5px/1.4 var(--sans)", color: 'var(--text-muted)' }}>
-              <span style={{ flex: 'none' }}>Timeout</span>
+              <span style={{ flex: 'none', width: STEP_FIELD_LABEL_WIDTH }}>Timeout</span>
               <input
                 className="ad-input compact"
                 aria-label="Step timeout"
@@ -684,6 +690,25 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
             </label>
             {stepEditTimeoutBad(edit) && (
               <div style={{ font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>{STEP_TIMEOUT_HINT}</div>
+            )}
+            {/* §11 retries: the §4.1 retries / infiniteRetries pair — a bare
+                number, 'infinite', or blank for the 0 default (the placeholder) */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, font: "400 11.5px/1.4 var(--sans)", color: 'var(--text-muted)' }}>
+              <span style={{ flex: 'none', width: STEP_FIELD_LABEL_WIDTH }}>Retries</span>
+              <input
+                className="ad-input compact"
+                aria-label="Step retries"
+                value={edit.retries}
+                placeholder="0"
+                readOnly={edit.saving}
+                aria-busy={edit.saving || undefined}
+                spellCheck={false}
+                onChange={(e) => { const retries = e.target.value; setEdit((x) => x && { ...x, retries }) }}
+                style={{ width: 92 }}
+              />
+            </label>
+            {stepEditRetriesBad(edit) && (
+              <div style={{ font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>{STEP_RETRIES_HINT}</div>
             )}
           </div>
         ) : (
@@ -775,6 +800,9 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const code = (editor ? (step.code || '# script not written yet') : step.code || '').replace(/\n$/, '')
   const lines = useMemo(() => highlightPythonLines(code), [code])
   const lineCount = edit ? docLineCount(edit.code) : lines.length
+  // §11 edit-mode gutter rows: one per line of the text as typed (a trailing
+  // final newline still makes an empty last line — the caret can sit there)
+  const editLines = useMemo(() => (edit ? edit.code.split('\n') : []), [edit?.code])
   // §9.2: the height is fixed for the life of the open modal — a hand edit
   // that lengthens the longest script never resizes the frame
   const frame = useRef(stepModalFrame(steps)).current
@@ -782,7 +810,6 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   // flips; the current match resets to the first on a new query or a new step.
   const scroller = useRef<HTMLDivElement | null>(null)
   const find = useFind(lines, scroller, i)
-  const thumb = useOverlayThumb()
   const editActive = !!edit
   const dirty = !!edit && stepEditDirty(edit)
   const dirtyRef = useRef(dirty)
@@ -793,7 +820,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   savingRef.current = saving
   // §11: a checked remember box with a blank rule disables Save
   const ruleMissing = !!edit && edit.remember && !edit.rule.trim()
-  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !stepEditTimeoutBad(edit) && !edit.saving
+  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving
   // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
   // backdrop close the modal) and the Remove step confirm
   const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
@@ -844,7 +871,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   // (instant, and the edit rides along) left, Cancel / Save right. The code
   // toolbar stays the reader strip in both modes.
   const editButton = editing && !editActive ? (
-    <TipButton className="ad-btn-icon" aria-label="Edit script" tip="Edit this step: its script, name, description and timeout" disabled={editing.disabled} onClick={startEdit}>
+    <TipButton className="ad-btn-icon" aria-label="Edit script" tip="Edit this step: its script, name, description, timeout and retries" disabled={editing.disabled} onClick={startEdit}>
       <i className="fa-solid fa-pen" />
     </TipButton>
   ) : null
@@ -973,22 +1000,39 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                     {edit.errors.map((err, k) => <div key={k}>{err}</div>)}
                   </Notice>
                 )}
-                <div className="ad-scrollwrap" style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
-                  <textarea
-                    ref={(el) => { ta.current = el; thumb.attach(el) }}
-                    data-testid="step-editor"
-                    aria-label="Step script"
-                    value={edit.code}
-                    readOnly={saving}
-                    aria-busy={saving || undefined}
-                    onChange={(e) => { const value = e.target.value; setEdit((x) => x && { ...x, code: value }) }}
-                    onScroll={thumb.onScroll}
-                    spellCheck={false}
-                    className="ad-scrollhide"
-                    style={DOC_TEXTAREA_STYLE}
-                  />
-                  {thumb.node}
-                </div>
+                {/* §11 edit mode keeps the reader's gutter: the text is laid
+                    out twice in the reader's own grid — an invisible mirror of
+                    the lines gives every row its height (a wrapped line keeps
+                    one number) and the textarea is placed over the mirror's
+                    text column at the mirror's full height, so it never
+                    scrolls on its own: the pane scrolls both columns. */}
+                <ScrollArea wrapStyle={{ flex: 1, minHeight: 0 }} style={{ scrollPaddingBottom: 24 }} testId="step-editor-pane">
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', padding: '14px 28px 24px 0',
+                    font: "400 12px/1.65 var(--mono)", color: 'var(--text-2)',
+                  }}>
+                    {editLines.map((ln, n) => (
+                      <React.Fragment key={n}>
+                        <span aria-hidden style={{ gridRow: n + 1, gridColumn: 1, textAlign: 'right', padding: '0 16px 0 18px', color: 'var(--text-deco)', userSelect: 'none' }}>{n + 1}</span>
+                        <span aria-hidden style={{ gridRow: n + 1, gridColumn: 2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', visibility: 'hidden' }}>{ln.length ? ln : '\n'}</span>
+                      </React.Fragment>
+                    ))}
+                    <textarea
+                      ref={ta}
+                      data-testid="step-editor"
+                      aria-label="Step script"
+                      value={edit.code}
+                      readOnly={saving}
+                      aria-busy={saving || undefined}
+                      onChange={(e) => { const value = e.target.value; setEdit((x) => x && { ...x, code: value }) }}
+                      spellCheck={false}
+                      style={{
+                        ...DOC_TEXTAREA_STYLE, gridRow: `1 / span ${editLines.length}`, gridColumn: 2,
+                        padding: 0, minWidth: 0, minHeight: 0, height: '100%', overflow: 'hidden', flex: 'none',
+                      }}
+                    />
+                  </div>
+                </ScrollArea>
                 <div style={{ ...DOC_FOOTER_STYLE, gap: 12 }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none', cursor: 'pointer', color: 'var(--text-2)' }}>
                     <input
@@ -1180,7 +1224,7 @@ export function StepList(props: StepListProps) {
   const saveEdit = async () => {
     const e = editRef.current
     // §11: Save honours the modal's disabled state like every other control
-    if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || stepEditTimeoutBad(e) || e.saving || modalClosing.current) return
+    if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || stepEditTimeoutBad(e) || stepEditRetriesBad(e) || e.saving || modalClosing.current) return
     // §11: a checked remember box needs its rule
     if (e.remember && !e.rule.trim()) return
     const at = current
@@ -1193,7 +1237,10 @@ export function StepList(props: StepListProps) {
     const stripped: Step = { ...base[at] }
     delete stripped.timeout
     delete stripped.noTimeout
-    const edited: Step = { ...stripped, ...parseStepTimeout(e.timeout), code: e.code, name, description: e.description.trim(), authoredBy: 'user' }
+    // §11: the retries pair the same way — one key, the other, or neither
+    delete stripped.retries
+    delete stripped.infiniteRetries
+    const edited: Step = { ...stripped, ...parseStepTimeout(e.timeout), ...parseStepRetries(e.retries), code: e.code, name, description: e.description.trim(), authoredBy: 'user' }
     const next = base.map((s, j) => (j === at ? edited : s))
     const seq = ++editSeq.current
     setEditState((x) => x && { ...x, saving: true })

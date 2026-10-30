@@ -871,6 +871,39 @@ export function stepRetriesTitle(s: Step): string {
   return `If this step fails it runs again, up to ${n} more ${n === 1 ? 'time' : 'times'}`
 }
 
+/** §11 retries field: the budget as a bare number, 'infinite' for an
+ * infiniteRetries step, '' when the step sets neither (the field then shows
+ * the 0 default as its placeholder). */
+export function stepRetriesText(s: Step): string {
+  if (s.infiniteRetries) return 'infinite'
+  const n = s.retries ?? 0
+  return n > 0 ? String(n) : ''
+}
+export const STEP_RETRIES_MAX = 10
+export const STEP_RETRIES_HINT = `Use a whole number up to ${STEP_RETRIES_MAX}, or infinite`
+export type StepRetriesParse = { retries?: number; infiniteRetries?: true }
+/** §11 retries field grammar: blank or 0 → neither key (the first failure
+ * fails the step); "infinite" / "unlimited" / "forever" / "no limit", bare or
+ * as "infinite retries" → infiniteRetries; a whole number 1–10, bare or in the
+ * chip's words ("3 retries", "1 retry") → retries. null for anything else
+ * (11, 2.5, -1, "many"). */
+export function parseStepRetries(text: string): StepRetriesParse | null {
+  const t = text.trim().toLowerCase().replace(/\s+/g, ' ')
+  if (t === '') return {}
+  if (/^(infinite|unlimited|forever|no limit)( retries)?$/.test(t)) return { infiniteRetries: true }
+  const m = /^(\d+)( retry| retries)?$/.exec(t)
+  if (!m) return null
+  const n = Number(m[1])
+  if (n > STEP_RETRIES_MAX) return null
+  return n === 0 ? {} : { retries: n }
+}
+/** The parse as a comparable key — invalid text is its own key, so a bad value
+ * counts as dirty (Cancel asks) but never saves. */
+export function stepRetriesKey(text: string): string {
+  const p = parseStepRetries(text)
+  return p === null ? 'invalid' : p.infiniteRetries ? 'infinite' : p.retries == null ? 'default' : String(p.retries)
+}
+
 /** Display label for an agent's model — a null model means the harness's own
  *  configured default (§4.7). */
 export function dispModel(ag: { model: string | null }): string {

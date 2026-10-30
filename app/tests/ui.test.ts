@@ -7,6 +7,7 @@ import {
   nextIn, paramSummary, validUrl, badgeOf, resultChipColors, P, highlightPython, highlightPythonLines,
   executingToast, stepTimeoutLabel, stepRetriesLabel, stepRetriesTitle, waitedLabel, durationLabel, dispModel, agName, logColor,
   parseStepTimeout, stepTimeoutKey, stepTimeoutText, STEP_TIMEOUT_DEFAULT_LABEL,
+  parseStepRetries, stepRetriesKey, stepRetriesText, STEP_RETRIES_HINT, STEP_RETRIES_MAX,
 } from '../src/ui'
 import type { ParamDef, Step } from '../src/types'
 
@@ -154,6 +155,40 @@ describe('parseStepTimeout / stepTimeoutText (§11 timeout field)', () => {
     expect(stepTimeoutText({ name: 'a', noTimeout: true } as Step)).toBe('no limit')
     expect(stepTimeoutText({ name: 'a' } as Step)).toBe('')
     expect(STEP_TIMEOUT_DEFAULT_LABEL).toBe('15m')
+  })
+})
+
+describe('parseStepRetries / stepRetriesText (§11 retries field)', () => {
+  it('blank or 0 is the default, words are infinite, whole numbers 1–10 count retries', () => {
+    expect(parseStepRetries('')).toEqual({})
+    expect(parseStepRetries('  ')).toEqual({})
+    expect(parseStepRetries('0')).toEqual({})
+    for (const t of ['infinite', 'Unlimited', ' FOREVER ', 'no  limit', 'infinite retries', 'Unlimited Retries']) expect(parseStepRetries(t)).toEqual({ infiniteRetries: true })
+    expect(parseStepRetries('1')).toEqual({ retries: 1 })
+    expect(parseStepRetries('1 retry')).toEqual({ retries: 1 })
+    expect(parseStepRetries('3 retries')).toEqual({ retries: 3 })
+    expect(parseStepRetries(' 3  Retries ')).toEqual({ retries: 3 })
+    expect(parseStepRetries('10')).toEqual({ retries: STEP_RETRIES_MAX })
+  })
+  it('rejects over the cap, fractions, negatives and other words', () => {
+    for (const t of ['11', '2.5', '-1', 'many', '3 times', 'infinite retry', 'retries']) expect(parseStepRetries(t)).toBeNull()
+    expect(STEP_RETRIES_MAX).toBe(10)
+    expect(STEP_RETRIES_HINT).toBe('Use a whole number up to 10, or infinite')
+  })
+  it('the key equates 3 with 3 retries, blank with 0, and treats invalid text as its own value', () => {
+    expect(stepRetriesKey('3')).toBe(stepRetriesKey('3 retries'))
+    expect(stepRetriesKey('3')).toBe('3')
+    expect(stepRetriesKey('')).toBe(stepRetriesKey('0'))
+    expect(stepRetriesKey('')).toBe('default')
+    expect(stepRetriesKey('forever')).toBe('infinite')
+    expect(stepRetriesKey('11')).toBe('invalid')
+  })
+  it('the field text is the bare number or infinite when set, empty when the step sets neither', () => {
+    expect(stepRetriesText({ name: 'a', retries: 3 } as Step)).toBe('3')
+    expect(stepRetriesText({ name: 'a', infiniteRetries: true } as Step)).toBe('infinite')
+    expect(stepRetriesText({ name: 'a', infiniteRetries: true, retries: 2 } as Step)).toBe('infinite')
+    expect(stepRetriesText({ name: 'a', retries: 0 } as Step)).toBe('')
+    expect(stepRetriesText({ name: 'a' } as Step)).toBe('')
   })
 })
 

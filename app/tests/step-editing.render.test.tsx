@@ -11,6 +11,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { useRef, useState } from 'react'
 import type { Agent, Step } from '../src/types'
 import { useStore } from '../src/store'
+import { STEP_RETRIES_HINT } from '../src/ui'
 import {
   STEP_AUTHORED_TITLE, STEP_LOCKED_TITLE, STEP_LOCK_TITLE, STEP_UNLOCK_TITLE, StepList,
   type StepEditEffect, type StepEditing, appendNewStep, newStepName, renumberStepFiles,
@@ -323,7 +324,7 @@ describe('step editing in the step-script modal (§11)', () => {
     // view mode: the pen is the row's only control
     expect(screen.queryByTestId('step-controls')).toBeNull()
     const pen = screen.getByLabelText('Edit script')
-    expect(pen.getAttribute('data-tip')).toBe('Edit this step: its script, name, description and timeout')
+    expect(pen.getAttribute('data-tip')).toBe('Edit this step: its script, name, description, timeout and retries')
     fireEvent.click(pen)
     const controls = screen.getByTestId('step-controls')
     expect(within(controls).getAllByRole('button').map((b) => b.getAttribute('aria-label')))
@@ -602,6 +603,84 @@ describe('step editing in the step-script modal (§11)', () => {
     fireEvent.change(screen.getByLabelText('Step timeout'), { target: { value: '90s' } })
     expect(within(dialog()).queryByText('Use seconds, or 90s / 15m / 2h, or no limit')).toBeNull()
     expect(saveButton().disabled).toBe(false)
+  })
+
+  it('the retries field opens holding the bare number, infinite, or blank with the 0 placeholder (2026-10-29)', () => {
+    const cases: [Partial<Step>, string][] = [[{ retries: 3 }, '3'], [{ infiniteRetries: true }, 'infinite'], [{}, '']]
+    for (const [over, shown] of cases) {
+      render(<Harness initial={[step(over)]} />)
+      openRow('Fetch page')
+      fireEvent.click(screen.getByLabelText('Edit script'))
+      const field = screen.getByLabelText('Step retries') as HTMLInputElement
+      expect(field.value).toBe(shown)
+      expect(field.placeholder).toBe('0')
+      cleanup()
+    }
+  })
+
+  it('the retries field saves the parsed pair: a count, infinite, or blank for neither (2026-10-29)', async () => {
+    const onCommit = vi.fn()
+    render(<Harness initial={[step({ infiniteRetries: true })]} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: '3' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
+    expect(onCommit.mock.calls[0][0][0].retries).toBe(3)
+    expect('infiniteRetries' in onCommit.mock.calls[0][0][0]).toBe(false)
+    // infinite drops retries and sets the flag
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    expect((screen.getByLabelText('Step retries') as HTMLInputElement).value).toBe('3')
+    fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: 'infinite' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(2))
+    expect(onCommit.mock.calls[1][0][0].infiniteRetries).toBe(true)
+    expect('retries' in onCommit.mock.calls[1][0][0]).toBe(false)
+    // blank removes both keys
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    expect((screen.getByLabelText('Step retries') as HTMLInputElement).value).toBe('infinite')
+    fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: '' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(3))
+    expect('retries' in onCommit.mock.calls[2][0][0]).toBe(false)
+    expect('infiniteRetries' in onCommit.mock.calls[2][0][0]).toBe(false)
+  })
+
+  it('a retries value the grammar rejects disables Save with the inline hint (2026-10-29)', () => {
+    render(<Harness initial={[step()]} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: '11' } })
+    expect(saveButton().disabled).toBe(true)
+    expect(within(dialog()).getByText(STEP_RETRIES_HINT)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: '2' } })
+    expect(within(dialog()).queryByText(STEP_RETRIES_HINT)).toBeNull()
+    expect(saveButton().disabled).toBe(false)
+  })
+
+  it('retyping the same retries another way is nothing to save (2026-10-29)', () => {
+    render(<Harness initial={[step({ retries: 3 })]} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: '3 retries' } })
+    expect(saveButton().disabled).toBe(true)
+  })
+
+  it('edit mode keeps a line-number gutter that follows the typed text; the textarea never scrolls on its own (2026-10-29)', () => {
+    render(<Harness initial={[step({ code: 'a = 1\nb = 2\nlog(a + b)' })]} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    const gutter = (n: string) =>
+      Array.from(screen.getByTestId('step-editor-pane').querySelectorAll('span')).filter((el) => el.textContent === n)
+    for (const n of ['1', '2', '3']) expect(gutter(n).length).toBeGreaterThan(0)
+    expect(gutter('4')).toHaveLength(0)
+    const number = gutter('1')[0]
+    expect(number.getAttribute('aria-hidden')).not.toBeNull()
+    expect(number.style.userSelect).toBe('none')
+    fireEvent.change(editor(), { target: { value: 'a\nb\nc\nd\ne' } })
+    expect(gutter('5').length).toBeGreaterThan(0)
+    expect(gutter('6')).toHaveLength(0)
+    expect(editor().style.overflow).toBe('hidden')
   })
 
   it('a whitespace-only name or description change is nothing to save (2026-10-28)', () => {
