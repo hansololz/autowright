@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   nextIn, paramSummary, validUrl, badgeOf, resultChipColors, P, highlightPython, highlightPythonLines,
   executingToast, stepTimeoutLabel, stepRetriesLabel, stepRetriesTitle, waitedLabel, durationLabel, dispModel, agName, logColor,
+  parseStepTimeout, stepTimeoutKey, stepTimeoutText, STEP_TIMEOUT_DEFAULT_LABEL,
 } from '../src/ui'
 import type { ParamDef, Step } from '../src/types'
 
@@ -125,6 +126,34 @@ describe('executingToast (§7 409 no-free-slot copy)', () => {
   })
   it('multiple slots without a queue says skipped', () => {
     expect(executingToast(2, 0)).toBe('All 2 slots are busy. A trigger firing now would be skipped.')
+  })
+})
+
+describe('parseStepTimeout / stepTimeoutText (§11 timeout field)', () => {
+  it('blank is the default, words are no limit, numbers take s/m/h suffixes', () => {
+    expect(parseStepTimeout('')).toEqual({})
+    expect(parseStepTimeout('  ')).toEqual({})
+    for (const t of ['no limit', 'None', ' UNLIMITED ', 'No  Limit']) expect(parseStepTimeout(t)).toEqual({ noTimeout: true })
+    expect(parseStepTimeout('900')).toEqual({ timeout: 900 })
+    expect(parseStepTimeout('90s')).toEqual({ timeout: 90 })
+    expect(parseStepTimeout('15 min')).toEqual({ timeout: 900 })
+    expect(parseStepTimeout('2H')).toEqual({ timeout: 7200 })
+    expect(parseStepTimeout('3 hrs')).toEqual({ timeout: 10800 })
+  })
+  it('rejects zero, fractions, compound and spelled-out durations', () => {
+    for (const t of ['0', '0m', '1.5m', '1h30m', '30 minutes', '-5', 'abc', '5 d']) expect(parseStepTimeout(t)).toBeNull()
+  })
+  it('the key equates 900 with 15m and treats invalid text as its own value', () => {
+    expect(stepTimeoutKey('900')).toBe(stepTimeoutKey('15m'))
+    expect(stepTimeoutKey('')).toBe('default')
+    expect(stepTimeoutKey('none')).toBe('none')
+    expect(stepTimeoutKey('1.5m')).toBe('invalid')
+  })
+  it('the field text is the clock label when set, empty when the step sets neither', () => {
+    expect(stepTimeoutText({ name: 'a', timeout: 7200 } as Step)).toBe('2h')
+    expect(stepTimeoutText({ name: 'a', noTimeout: true } as Step)).toBe('no limit')
+    expect(stepTimeoutText({ name: 'a' } as Step)).toBe('')
+    expect(STEP_TIMEOUT_DEFAULT_LABEL).toBe('15m')
   })
 })
 

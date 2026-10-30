@@ -11,7 +11,7 @@ import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
 import { useStore } from './store'
 import type { Agent, PackageDep, ParamDef, SecretMeta, Step, UnresolvedRefs } from './types'
-import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, TipButton, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, useOverlayThumb, validUrl } from './ui'
+import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, MiniBadge, Modal, Notice, ScrollArea, Tag, TipButton, Toggle, agName, dispModel, docLineCount, highlightPythonLines, isTopModal, stepRetriesLabel, stepRetriesTitle, stepTimeoutLabel, stepTimeoutTitle, STEP_TIMEOUT_DEFAULT_LABEL, STEP_TIMEOUT_HINT, parseStepTimeout, stepTimeoutKey, stepTimeoutText, useOverlayThumb, validUrl } from './ui'
 
 // §4.1/§6.1 code-reference scan: literal quoted uuid subscripts only.
 const SECRET_REF_RE = /\bsecrets\[\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']\s*\]/g
@@ -333,21 +333,26 @@ export type StepEdit = {
   code: string
   name: string
   description: string
-  orig: { code: string; name: string; description: string }
+  // §11 the timeout field's text, in the clock tag's shorthand ('' = default)
+  timeout: string
+  orig: { code: string; name: string; description: string; timeout: string }
   remember: boolean
   rule: string
   errors: string[]
   saving: boolean
 }
 const beginEdit = (s: Step): StepEdit => {
-  const orig = { code: s.code || '', name: s.name, description: s.description || '' }
+  const orig = { code: s.code || '', name: s.name, description: s.description || '', timeout: stepTimeoutText(s) }
   return { ...orig, orig, remember: false, rule: '', errors: [], saving: false }
 }
 // §11: name and description compare trimmed (Save trims them), so a
 // whitespace-only change is nothing to save and never flips authorship; the
-// code compares as-is.
+// code compares as-is; the timeout compares parsed (900 vs 15m is the same).
 const stepEditDirty = (e: StepEdit) =>
   e.code !== e.orig.code || e.name.trim() !== e.orig.name.trim() || e.description.trim() !== e.orig.description.trim()
+  || stepTimeoutKey(e.timeout) !== stepTimeoutKey(e.orig.timeout)
+// §11: a timeout the field grammar rejects blocks Save (inline hint)
+const stepEditTimeoutBad = (e: StepEdit) => parseStepTimeout(e.timeout) === null
 
 const DISCARD_SCRIPT_TITLE = 'Discard your script edits?'
 const DISCARD_SCRIPT_BODY = 'The changes you typed into the script editor will be lost.'
@@ -530,33 +535,37 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
 // trail the commit by one passive-effect flush, and a key pressed in that gap
 // (right as the diff modal's files arrive, say) would hit the stale closure and
 // be dropped against the old count.
-export function StepKeys({ i, count, closing, paused, onNav, onFind, onMove }: {
+export function StepKeys({ i, count, closing, paused, flipsOff, onNav, onFind, onMove }: {
   i: number; count: number; closing: boolean; paused?: boolean; onNav: (i: number) => void; onFind?: () => void
-  // §11 editor: ⌥↑ / ⌥↓ move the viewed step (absent on the detail page)
+  // §11 edit mode: flipping and ⌘F are inert; only the ⌥ moves stay live
+  flipsOff?: boolean
+  // §11 editor: ⌥↑ / ⌥↓ move the viewed step (edit mode only; absent on the
+  // detail page)
   onMove?: (dir: -1 | 1) => void
 }) {
-  const live = useRef({ i, count, onNav, onFind, onMove })
-  live.current = { i, count, onNav, onFind, onMove }
+  const live = useRef({ i, count, flipsOff, onNav, onFind, onMove })
+  live.current = { i, count, flipsOff, onNav, onFind, onMove }
   useEffect(() => {
     if (closing || paused) return
     const onKey = (e: KeyboardEvent) => {
-      const { i, count, onNav, onFind, onMove } = live.current
+      const { i, count, flipsOff, onNav, onFind, onMove } = live.current
       // §9.3: both shortcuts yield to the developer-log overlay above the card
       if (devlogOverlayOpen()) return
       // …and to a card stacked above this one, the way the Modal's own Escape
       // handler yields to the stack.
       if (!isTopModal()) return
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { if (!onFind) return; e.preventDefault(); onFind(); return }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') { if (!onFind || flipsOff) return; e.preventDefault(); onFind(); return }
       if (e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable="true"], [role="listbox"], [role="menu"]')) return
-      // §11: ⌥↑ / ⌥↓ move the step in the editor's modal; the plain arrows
-      // keep flipping (and ⌥ with the arrows is inert where nothing can move)
+      // §11: ⌥↑ / ⌥↓ move the step in edit mode (focus outside the fields);
+      // the plain arrows keep flipping in view mode (and ⌥ with the arrows
+      // is inert where nothing can move)
       if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         if (!onMove) return
         e.preventDefault()
         onMove(e.key === 'ArrowUp' ? -1 : 1)
         return
       }
-      if (e.altKey) return
+      if (e.altKey || flipsOff) return
       const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp'
       const forward = e.key === 'ArrowRight' || e.key === 'ArrowDown'
       const flip = back ? (i > 0 ? i - 1 : null) : forward ? (i < count - 1 ? i + 1 : null) : null
@@ -587,17 +596,20 @@ export function StepKeys({ i, count, closing, paused, onNav, onFind, onMove }: {
 // script in its own scroll pane. Only the code pane remounts through the §14
 // keyed fade (resetting its scroll) when the step switches; the navigator and
 // the toolbar stay put, so nothing under the pointer flashes.
-function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, edit, setEdit, controls }: {
+function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, edit, setEdit, controls, editButton }: {
   step: Step; j: number; viewed: boolean; editor: boolean; tags: StepTagDesc[]; facts: StepFactSection[]; onNav: () => void
   // §11 edit mode: unviewed rows stop flipping, and the viewed row shows the
   // step's name and description as fields
   navDisabled?: boolean
   edit?: StepEdit | null
   setEdit?: (fn: (e: StepEdit | null) => StepEdit | null) => void
-  // §11 step controls (move / lock / remove) — rendered on the viewed row of
-  // the editor variant, beneath the tag row: the row is what moves, so the
-  // arrows sit on the thing they move, away from the toolbar's ‹ › chevrons
+  // §11 edit footer (move / lock / remove, Cancel / Save) — rendered on the
+  // viewed row of the editor variant in edit mode, beneath the tag row: the
+  // row is what moves, so the arrows sit on the thing they move, away from
+  // the toolbar's ‹ › chevrons
   controls?: React.ReactNode
+  // §11 the Edit pen, right-aligned on the viewed row's title line (view mode)
+  editButton?: React.ReactNode
 }) {
   // §9.2: the viewed row is a plain, text-selectable, unfocusable block — a
   // button would stop the user from dragging over its description, chips and
@@ -654,16 +666,48 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
               onChange={(e) => { const description = e.target.value; setEdit((x) => x && { ...x, description }) }}
               style={{ width: '100%', resize: 'vertical', fontFamily: 'var(--sans)', display: 'block' }}
             />
+            {/* §11 timeout: the §4.1 pair in the clock tag's own shorthand;
+                blank = the engine default (shown as the placeholder) */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, font: "400 11.5px/1.4 var(--sans)", color: 'var(--text-muted)' }}>
+              <span style={{ flex: 'none' }}>Timeout</span>
+              <input
+                className="ad-input compact"
+                aria-label="Step timeout"
+                value={edit.timeout}
+                placeholder={STEP_TIMEOUT_DEFAULT_LABEL}
+                readOnly={edit.saving}
+                aria-busy={edit.saving || undefined}
+                spellCheck={false}
+                onChange={(e) => { const timeout = e.target.value; setEdit((x) => x && { ...x, timeout }) }}
+                style={{ width: 92 }}
+              />
+            </label>
+            {stepEditTimeoutBad(edit) && (
+              <div style={{ font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>{STEP_TIMEOUT_HINT}</div>
+            )}
           </div>
         ) : (
-          <div style={{ font: `${viewed ? 600 : 500} 13px/18px var(--sans)`, color: viewed ? 'var(--text)' : 'var(--text-muted)' }}>
-            {step.name}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <div style={{ flex: 1, minWidth: 0, font: `${viewed ? 600 : 500} 13px/18px var(--sans)`, color: viewed ? 'var(--text)' : 'var(--text-muted)' }}>
+              {step.name}
+            </div>
+            {viewed && editButton && (
+              // 26 px pen centred on the 18 px title line
+              <span style={{ flex: 'none', margin: '-4px -6px -4px 0', userSelect: 'none' }}>{editButton}</span>
+            )}
           </div>
         )}
         {viewed && (
           <>
             {!editing && step.description && (
               <div style={{ font: "400 11.5px/1.45 var(--sans)", color: 'var(--text-muted)', marginTop: 4, whiteSpace: 'pre-wrap' }}>{step.description}</div>
+            )}
+            {/* §11 edit footer: step controls left, Cancel / Save right —
+                between the fields and the tag row (edit mode only). */}
+            {controls && (
+              <div style={{ display: 'flex', alignItems: 'center', marginTop: 8, marginLeft: -7, userSelect: 'none' }}>
+                {controls}
+              </div>
             )}
             {/* §9.2 tag row: the same chips the step row carries (tooltips
                 hold the detail), plus package chips in the detail modal. */}
@@ -673,11 +717,6 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
                 return <Tag key={t.key} icon={t.icon} c={v.c} title={t.title} style={v.style}>{t.label}</Tag>
               })}
             </div>
-            {controls && (
-              <div style={{ display: 'flex', alignItems: 'center', marginTop: 6, marginLeft: -7, userSelect: 'none' }}>
-                {controls}
-              </div>
-            )}
             {/* §9.2 fact list: what the script reaches and touches, from a
                 literal-only scan — labeled sections of bullets, not chips
                 (hosts, prompts and file names are too long for a chip). */}
@@ -754,7 +793,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   savingRef.current = saving
   // §11: a checked remember box with a blank rule disables Save
   const ruleMissing = !!edit && edit.remember && !edit.rule.trim()
-  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !edit.saving
+  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !stepEditTimeoutBad(edit) && !edit.saving
   // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
   // backdrop close the modal) and the Remove step confirm
   const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
@@ -796,53 +835,69 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   }
   const startEdit = () => { find.close(); onStartEdit() }
   const handsOff = !editing || editing.disabled
-  // §11 step controls: rendered on the navigator's viewed row (not the code
-  // toolbar, whose ‹ › chevrons they would be mistaken for)
   // §14 tooltips: every button in the modal explains itself in a plain line
   // through the tooltip bubble (native `title` dies after a click), with the
   // shortcut in the platform's key names
   const keys = shortcutKeys(useStore((st) => st.platformOs))
-  const controls = editing ? (
-    <span data-testid="step-controls" style={{ display: 'contents' }}>
-      {/* §11 Move up / Move down: disabled at the ends and in edit mode */}
-      <TipButton
-        className="ad-btn-icon"
-        aria-label="Move step up"
-        tip={`Run this step one position earlier (${keys.alt}↑)`}
-        disabled={handsOff || editActive || i === 0}
-        onClick={() => onMove(-1)}
-      >
-        <i className="fa-solid fa-arrow-up" />
+  // §11: everything that changes a step lives on the navigator's viewed row —
+  // the pen in view mode; in edit mode the edit footer: the step controls
+  // (instant, and the edit rides along) left, Cancel / Save right. The code
+  // toolbar stays the reader strip in both modes.
+  const editButton = editing && !editActive ? (
+    <TipButton className="ad-btn-icon" aria-label="Edit script" tip="Edit this step: its script, name, description and timeout" disabled={editing.disabled} onClick={startEdit}>
+      <i className="fa-solid fa-pen" />
+    </TipButton>
+  ) : null
+  const controls = editing && editActive ? (
+    <>
+      <span data-testid="step-controls" style={{ display: 'contents' }}>
+        {/* §11 Move up / Move down: disabled at the ends and while Save validates */}
+        <TipButton
+          className="ad-btn-icon"
+          aria-label="Move step up"
+          tip={`Run this step one position earlier (${keys.alt}↑)`}
+          disabled={handsOff || saving || i === 0}
+          onClick={() => onMove(-1)}
+        >
+          <i className="fa-solid fa-arrow-up" />
+        </TipButton>
+        <TipButton
+          className="ad-btn-icon"
+          aria-label="Move step down"
+          tip={`Run this step one position later (${keys.alt}↓)`}
+          disabled={handsOff || saving || i === steps.length - 1}
+          onClick={() => onMove(1)}
+        >
+          <i className="fa-solid fa-arrow-down" />
+        </TipButton>
+        <TipButton
+          className="ad-btn-icon"
+          aria-label={step.locked ? 'Unlock step' : 'Lock step'}
+          tip={step.locked ? STEP_UNLOCK_TITLE : STEP_LOCK_TITLE}
+          aria-pressed={!!step.locked}
+          disabled={handsOff || saving}
+          onClick={onToggleLock}
+        >
+          <i className={`fa-solid ${step.locked ? 'fa-lock' : 'fa-lock-open'}`} />
+        </TipButton>
+        <TipButton
+          className="ad-btn-icon danger"
+          aria-label="Remove step"
+          tip="Remove this step from the automation (you will be asked to confirm)"
+          disabled={handsOff || saving}
+          onClick={() => setRemoveAsk(true)}
+        >
+          <i className="fa-solid fa-trash" />
+        </TipButton>
+      </span>
+      <span style={{ flex: 1 }} />
+      <TipButton className="ad-btn-text dim small ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit} style={{ marginRight: 10 }}>
+        Cancel
       </TipButton>
-      <TipButton
-        className="ad-btn-icon"
-        aria-label="Move step down"
-        tip={`Run this step one position later (${keys.alt}↓)`}
-        disabled={handsOff || editActive || i === steps.length - 1}
-        onClick={() => onMove(1)}
-      >
-        <i className="fa-solid fa-arrow-down" />
+      <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
+        {saving ? 'Saving…' : 'Save'}
       </TipButton>
-      <TipButton
-        className="ad-btn-icon"
-        aria-label={step.locked ? 'Unlock step' : 'Lock step'}
-        tip={step.locked ? STEP_UNLOCK_TITLE : STEP_LOCK_TITLE}
-        aria-pressed={!!step.locked}
-        disabled={handsOff || editActive}
-        onClick={onToggleLock}
-      >
-        <i className={`fa-solid ${step.locked ? 'fa-lock' : 'fa-lock-open'}`} />
-      </TipButton>
-      <TipButton
-        className="ad-btn-icon danger"
-        aria-label="Remove step"
-        tip="Remove this step from the automation (you will be asked to confirm)"
-        disabled={handsOff || editActive}
-        onClick={() => setRemoveAsk(true)}
-      >
-        <i className="fa-solid fa-trash" />
-      </TipButton>
-    </span>
+    </>
   ) : null
   return (
     <Modal
@@ -855,7 +910,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
         return (
         <div className="ad-stepmodal" style={{ height: frame, display: 'flex', minWidth: 0 }}>
           {/* §11 edit mode: flipping and ⌘F are inert */}
-          <StepKeys i={i} count={steps.length} closing={closing} paused={editActive} onNav={onNav} onFind={find.show} onMove={editing ? onMove : undefined} />
+          <StepKeys i={i} count={steps.length} closing={closing} flipsOff={editActive} onNav={onNav} onFind={find.show} onMove={editing && editActive ? onMove : undefined} />
           {/* step navigator */}
           <div className="ad-stepnav" style={{
             width: 280, flex: 'none', minHeight: 0, display: 'flex', flexDirection: 'column',
@@ -873,7 +928,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                   <StepNavRow
                     key={j} step={s} j={j} viewed={j === i} editor={editor} tags={tagsByStep[j]} facts={factsByStep[j]} onNav={() => onNav(j)}
                     navDisabled={editActive} edit={j === i ? edit : null} setEdit={setEdit}
-                    controls={j === i ? controls : undefined}
+                    controls={j === i ? controls : undefined} editButton={j === i ? editButton : undefined}
                   />
                 ))}
               </div>
@@ -895,22 +950,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
               <span data-testid="step-lines" style={{ font: "500 11px var(--mono)", color: 'var(--text-faint)', flex: 'none' }}>
                 {lineCount} {lineCount === 1 ? 'line' : 'lines'}
               </span>
-              {editActive && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 'none', marginLeft: 6 }}>
-                  <TipButton className="ad-btn-text dim small ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit}>
-                    Cancel
-                  </TipButton>
-                  <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
-                    {saving ? 'Saving…' : 'Save'}
-                  </TipButton>
-                </div>
-              )}
               <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', marginLeft: 4 }}>
-                {editing && !editActive && (
-                  <TipButton className="ad-btn-icon" aria-label="Edit script" tip="Edit this script, its name and description by hand" disabled={editing.disabled} onClick={startEdit}>
-                    <i className="fa-solid fa-pen" />
-                  </TipButton>
-                )}
                 <TipButton className="ad-btn-icon" aria-label="Find in script" tip={`Find in this script (${keys.mod}F)`} aria-pressed={find.open} disabled={editActive} onClick={find.show}>
                   <i className="fa-solid fa-magnifying-glass" />
                 </TipButton>
@@ -1020,9 +1060,9 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
           {removeAsk && (
             <ConfirmModal
               title={`Remove step ${i + 1}, '${step.name}'?`}
-              body={!step.locked && step.authoredBy !== 'user'
+              body={(!step.locked && step.authoredBy !== 'user'
                 ? 'The script is deleted from the draft. The next sync may write it again unless the spec says otherwise.'
-                : 'The script is deleted from the draft.'}
+                : 'The script is deleted from the draft.') + (dirty ? ' Your unsaved edits are dropped with it.' : '')}
               confirmLabel="Remove step"
               danger
               onConfirm={() => { setRemoveAsk(false); onRemove() }}
@@ -1114,27 +1154,33 @@ export function StepList(props: StepListProps) {
     [steps, history, revision, params],
   )
   // ---- §11 hand edits: each commits the whole new steps list ----
-  const commit = (next: Step[], view: number | null, openEdit: boolean, effect: StepEditEffect) => {
+  // `mode`: 'drop' ends any edit, 'open' starts one on `view` (Add step), and
+  // 'keep' carries the open edit along untouched (§11 move / lock during an
+  // edit — the working copy rides to the new position or onto the locked
+  // step; Save then spreads the committed step underneath it).
+  const commit = (next: Step[], view: number | null, mode: 'drop' | 'open' | 'keep', effect: StepEditEffect) => {
     if (!editing) return
-    ownChange.current = { view, edit: openEdit }
+    ownChange.current = { view, edit: mode !== 'drop' }
     // Apply the view (and an Add step's edit mode) now, synchronously with
     // the commit: `current` range-guards the index until the parent's steps
     // land, and the swap effect above only consumes the marker.
     setViewing(view)
-    editSeq.current++
-    setEditState(openEdit && view !== null ? beginEdit(next[view]) : null)
+    if (mode !== 'keep') {
+      editSeq.current++
+      setEditState(mode === 'open' && view !== null ? beginEdit(next[view]) : null)
+    }
     editing.commit(next, effect)
   }
   const add = () => {
     if (!editing || editing.disabled) return
     const next = appendNewStep(stepsRef.current)
-    commit(next, next.length - 1, true, { kind: 'add' })
+    commit(next, next.length - 1, 'open', { kind: 'add' })
   }
   if (editing?.addRef) editing.addRef.current = add
   const saveEdit = async () => {
     const e = editRef.current
     // §11: Save honours the modal's disabled state like every other control
-    if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || e.saving || modalClosing.current) return
+    if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || stepEditTimeoutBad(e) || e.saving || modalClosing.current) return
     // §11: a checked remember box needs its rule
     if (e.remember && !e.rule.trim()) return
     const at = current
@@ -1142,7 +1188,12 @@ export function StepList(props: StepListProps) {
     const name = e.name.trim()
     // §4.1: the file keeps its name — a rename never renames the script;
     // `locked` is unchanged
-    const edited: Step = { ...base[at], code: e.code, name, description: e.description.trim(), authoredBy: 'user' }
+    // §11: the timeout pair is replaced by the field's parse — one key, the
+    // other, or neither (engine default)
+    const stripped: Step = { ...base[at] }
+    delete stripped.timeout
+    delete stripped.noTimeout
+    const edited: Step = { ...stripped, ...parseStepTimeout(e.timeout), code: e.code, name, description: e.description.trim(), authoredBy: 'user' }
     const next = base.map((s, j) => (j === at ? edited : s))
     const seq = ++editSeq.current
     setEditState((x) => x && { ...x, saving: true })
@@ -1162,7 +1213,7 @@ export function StepList(props: StepListProps) {
       return
     }
     const rule = e.remember ? { name, text: e.rule.trim() } : null
-    commit(next, at, false, { kind: 'save', rule })
+    commit(next, at, 'drop', { kind: 'save', rule })
   }
   const toggleLock = () => {
     if (!editing || editing.disabled || current === null) return
@@ -1170,7 +1221,7 @@ export function StepList(props: StepListProps) {
     const s = stepsRef.current[at]
     const { locked: _wasLocked, ...rest } = s
     const nextStep: Step = s.locked ? rest : { ...s, locked: true }
-    commit(stepsRef.current.map((x, j) => (j === at ? nextStep : x)), at, false, { kind: 'lock', name: s.name, locked: !s.locked })
+    commit(stepsRef.current.map((x, j) => (j === at ? nextStep : x)), at, editRef.current ? 'keep' : 'drop', { kind: 'lock', name: s.name, locked: !s.locked })
   }
   // §11 Move up / Move down: swap with the neighbour, renumber the `NN-`
   // prefixes from the new positions, keep the moved step viewed
@@ -1183,7 +1234,7 @@ export function StepList(props: StepListProps) {
     const swapped = base.slice()
     swapped[at] = base[to]
     swapped[to] = base[at]
-    commit(renumberStepFiles(swapped), to, false, { kind: 'move', name: base[at].name, from: at + 1, to: to + 1 })
+    commit(renumberStepFiles(swapped), to, editRef.current ? 'keep' : 'drop', { kind: 'move', name: base[at].name, from: at + 1, to: to + 1 })
   }
   const removeStep = () => {
     if (!editing || editing.disabled || current === null) return
@@ -1191,7 +1242,7 @@ export function StepList(props: StepListProps) {
     const next = renumberStepFiles(stepsRef.current.filter((_, j) => j !== at))
     // §11: view the next step, the previous at the end, or close when none is left
     const view = next.length === 0 ? null : at < next.length ? at : at - 1
-    commit(next, view, false, { kind: 'remove' })
+    commit(next, view, 'drop', { kind: 'remove' })
   }
   // §11: a cancelled swap guard keeps the edit open on the new step of the
   // same name (the edit's original name, trim-compared), never on whatever

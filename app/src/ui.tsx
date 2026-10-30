@@ -818,6 +818,37 @@ export function stepTimeoutLabel(s: Step): string {
   return `${secs}s`
 }
 
+/** §11 timeout field: the clock-tag label when the step sets either key, ''
+ * when it sets neither (the field then shows the default as its placeholder). */
+export function stepTimeoutText(s: Step): string {
+  return s.noTimeout || s.timeout != null ? stepTimeoutLabel(s) : ''
+}
+export const STEP_TIMEOUT_DEFAULT_LABEL = stepTimeoutLabel({ name: '' } as Step)
+export const STEP_TIMEOUT_HINT = 'Use seconds, or 90s / 15m / 2h, or no limit'
+export type StepTimeoutParse = { timeout?: number; noTimeout?: true }
+/** §11 timeout field grammar: blank → neither key (engine default); "no limit"
+ * / "none" / "unlimited" → noTimeout; a positive whole number, bare (seconds)
+ * or with an s / sec / m / min / h / hr suffix → timeout in seconds. null when
+ * the text is none of these (0, 1.5m, 1h30m, "30 minutes"). */
+export function parseStepTimeout(text: string): StepTimeoutParse | null {
+  const t = text.trim().toLowerCase().replace(/\s+/g, ' ')
+  if (t === '') return {}
+  if (t === 'no limit' || t === 'none' || t === 'unlimited') return { noTimeout: true }
+  const m = /^(\d+) ?(s|secs?|m|mins?|h|hrs?)?$/.exec(t)
+  if (!m) return null
+  const n = Number(m[1])
+  const unit = m[2]?.[0]
+  const secs = unit === 'h' ? n * 3600 : unit === 'm' ? n * 60 : n
+  if (!Number.isSafeInteger(secs) || secs <= 0) return null
+  return { timeout: secs }
+}
+/** The parse as a comparable key — invalid text is its own key, so a bad value
+ * counts as dirty (Cancel asks) but never saves. */
+export function stepTimeoutKey(text: string): string {
+  const p = parseStepTimeout(text)
+  return p === null ? 'invalid' : p.noTimeout ? 'none' : p.timeout == null ? 'default' : String(p.timeout)
+}
+
 export function stepTimeoutTitle(s: Step): string {
   return s.noTimeout
     ? 'No time limit — this step runs until it finishes or you cancel or skip it'

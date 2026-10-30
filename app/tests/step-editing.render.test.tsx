@@ -260,13 +260,15 @@ describe('step editing in the step-script modal (§11)', () => {
     const onCommit = vi.fn()
     render(<Harness initial={[step()]} onCommit={onCommit} />)
     openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
     const toggle = within(screen.getByTestId('step-controls')).getByLabelText('Lock step')
     expect(toggle.getAttribute('title')).toBeNull()
     expect(toggle.getAttribute('data-tip')).toBe(STEP_LOCK_TITLE)
     fireEvent.click(toggle)
     expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'lock', name: 'Fetch page', locked: true })
     expect(onCommit.mock.calls[0][0][0].locked).toBe(true)
-    // the modal stays open on the step, now showing Locked
+    // the modal stays open on the step and the edit stays open, now showing Locked
+    expect(screen.getByTestId('step-editor')).toBeTruthy()
     expect(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step').getAttribute('aria-pressed')).toBe('true')
     expect(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step').getAttribute('data-tip')).toBe(STEP_UNLOCK_TITLE)
     fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step'))
@@ -281,8 +283,11 @@ describe('step editing in the step-script modal (§11)', () => {
       onCommit={onCommit}
     />)
     openRow('A')
+    fireEvent.click(screen.getByLabelText('Edit script'))
     fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Remove step'))
     const ask = screen.getByRole('alertdialog')
+    // a clean edit's confirm says nothing about unsaved edits
+    expect(ask.textContent).not.toContain('Your unsaved edits are dropped with it.')
     expect(ask.getAttribute('aria-label')).toBe("Remove step 1, 'A'?")
     expect(ask.textContent).toContain('The script is deleted from the draft. The next sync may write it again unless the spec says otherwise.')
     fireEvent.click(within(ask).getByText('Remove step'))
@@ -291,8 +296,12 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(effect).toEqual({ kind: 'remove' })
     expect(next.map((s: Step) => [s.name, s.file])).toEqual([['B', '01-b.py'], ['C', '02-c.py']])
     expect(dialog().getAttribute('aria-label')).toBe('Step 1 of 2: B')
+    // the remove ended the edit: the next step is viewed in view mode
+    expect(screen.queryByTestId('step-editor')).toBeNull()
+    expect(screen.queryByTestId('step-controls')).toBeNull()
     // a user-written step's confirm drops the may-write-it-again sentence
     fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.click(screen.getByLabelText('Edit script'))
     fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Remove step'))
     expect(screen.getByRole('alertdialog').textContent).not.toContain('The next sync may write it again')
   })
@@ -300,25 +309,34 @@ describe('step editing in the step-script modal (§11)', () => {
   it('every hand-edit control disables while editing is gated', () => {
     render(<Harness initial={[step()]} disabled />)
     openRow('Fetch page')
-    expect((screen.getByLabelText('Edit script') as HTMLButtonElement).disabled).toBe(true)
-    const controls = screen.getByTestId('step-controls')
-    expect((within(controls).getByLabelText('Move step up') as HTMLButtonElement).disabled).toBe(true)
-    expect((within(controls).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(true)
-    expect((within(controls).getByLabelText('Lock step') as HTMLButtonElement).disabled).toBe(true)
-    expect((within(controls).getByLabelText('Remove step') as HTMLButtonElement).disabled).toBe(true)
+    // the pen is disabled, so edit mode (and its step controls) is out of reach
+    const pen = screen.getByLabelText('Edit script') as HTMLButtonElement
+    expect(pen.disabled).toBe(true)
+    fireEvent.click(pen)
+    expect(screen.queryByTestId('step-controls')).toBeNull()
+    expect(screen.queryByTestId('step-editor')).toBeNull()
   })
 
-  it('the controls read Move up, Move down, the lock toggle, Remove step; both moves disable in edit mode', () => {
+  it('the controls read Move up, Move down, the lock toggle, Remove step; the controls appear only in edit mode and stay enabled there', () => {
     render(<Harness initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' }), step({ name: 'C', file: '03-c.py' })]} />)
     openRow('B')
+    // view mode: the pen is the row's only control
+    expect(screen.queryByTestId('step-controls')).toBeNull()
+    const pen = screen.getByLabelText('Edit script')
+    expect(pen.getAttribute('data-tip')).toBe('Edit this step: its script, name, description and timeout')
+    fireEvent.click(pen)
     const controls = screen.getByTestId('step-controls')
     expect(within(controls).getAllByRole('button').map((b) => b.getAttribute('aria-label')))
       .toEqual(['Move step up', 'Move step down', 'Lock step', 'Remove step'])
     expect((within(controls).getByLabelText('Move step up') as HTMLButtonElement).disabled).toBe(false)
     expect((within(controls).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByLabelText('Edit script'))
-    expect((within(screen.getByTestId('step-controls')).getByLabelText('Move step up') as HTMLButtonElement).disabled).toBe(true)
-    expect((within(screen.getByTestId('step-controls')).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(true)
+    expect((within(controls).getByLabelText('Lock step') as HTMLButtonElement).disabled).toBe(false)
+    expect((within(controls).getByLabelText('Remove step') as HTMLButtonElement).disabled).toBe(false)
+    // Cancel and Save sit in the same edit footer as the controls
+    const footer = controls.parentElement!
+    expect(within(footer).getByText('Cancel')).toBeTruthy()
+    expect(within(footer).getByText('Save')).toBeTruthy()
+    expect(screen.queryByLabelText('Edit script')).toBeNull()
   })
 
   it('Move down swaps the step, renumbers the files, keeps it viewed and reports the move', () => {
@@ -328,6 +346,7 @@ describe('step editing in the step-script modal (§11)', () => {
       onCommit={onCommit}
     />)
     openRow('A')
+    fireEvent.click(screen.getByLabelText('Edit script'))
     const control = (label: string) => within(screen.getByTestId('step-controls')).getByLabelText(label) as HTMLButtonElement
     expect(control('Move step up').disabled).toBe(true)
     expect(control('Move step up').getAttribute('data-tip')).toBe('Run this step one position earlier (⌥↑)')
@@ -345,20 +364,91 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(control('Move step up').disabled).toBe(false)
   })
 
-  it('⌥↓ moves the step and plain ↓ flips', () => {
+  it('⌥↓ moves the step in edit mode only; plain ↓ flips in view mode only', () => {
     const onCommit = vi.fn()
     render(<Harness
       initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' }), step({ name: 'C', file: '03-c.py' })]}
       onCommit={onCommit}
     />)
     openRow('A')
+    // view mode: ⌥↓ is inert, plain ↓ flips to the next step
+    fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true })
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(dialog().getAttribute('aria-label')).toBe('Step 1 of 3: A')
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 3: B')
+    // edit mode: ⌥↓ (focus outside the fields) moves the step, plain ↓ does nothing
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    ;(document.activeElement as HTMLElement | null)?.blur()
     fireEvent.keyDown(document, { key: 'ArrowDown', altKey: true })
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'move', name: 'A', from: 1, to: 2 })
-    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 3: A')
-    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'move', name: 'B', from: 2, to: 3 })
+    expect(dialog().getAttribute('aria-label')).toBe('Step 3 of 3: B')
+    expect(screen.getByTestId('step-editor')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(dialog().getAttribute('aria-label')).toBe('Step 3 of 3: C')
+    expect(dialog().getAttribute('aria-label')).toBe('Step 3 of 3: B')
+  })
+
+  it('a move during an edit keeps the typed fields and saves them onto the moved step (2026-10-29)', async () => {
+    const onCommit = vi.fn()
+    render(<Harness
+      initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' }), step({ name: 'C', file: '03-c.py' })]}
+      onCommit={onCommit}
+    />)
+    openRow('A')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("moved")' } })
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Move step down'))
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onCommit.mock.calls[0][1]).toMatchObject({ kind: 'move' })
+    expect(editor().value).toBe('log("moved")')
+    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 3: A')
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(2))
+    const [next, effect] = onCommit.mock.calls[1]
+    expect(effect).toMatchObject({ kind: 'save' })
+    expect(next[1]).toMatchObject({ name: 'A', file: '02-a.py', code: 'log("moved")', authoredBy: 'user' })
+  })
+
+  it('a lock during an edit keeps the edit open and Cancel never reverts the lock (2026-10-29)', async () => {
+    const onCommit = vi.fn()
+    render(<Harness initial={[step()]} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("typed")' } })
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Lock step'))
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'lock', name: 'Fetch page', locked: true })
+    expect(editor().value).toBe('log("typed")')
+    expect(within(screen.getByTestId('step-controls')).getByLabelText('Unlock step')).toBeTruthy()
+    fireEvent.click(within(dialog()).getByText('Cancel'))
+    const ask = screen.getByRole('alertdialog')
+    expect(ask.getAttribute('aria-label')).toBe('Discard your script edits?')
+    fireEvent.click(within(ask).getByText('Discard edits'))
+    await waitFor(() => expect(screen.queryByTestId('step-editor')).toBeNull())
+    // back in view mode, the step is still locked
+    expect(screen.queryByTestId('step-controls')).toBeNull()
+    expect(within(dialog()).getByText('Locked')).toBeTruthy()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('Remove during a dirty edit says the edits go with the step (2026-10-29)', async () => {
+    const onCommit = vi.fn()
+    render(<Harness
+      initial={[step({ name: 'A', file: '01-a.py' }), step({ name: 'B', file: '02-b.py' })]}
+      onCommit={onCommit}
+    />)
+    openRow('A')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(editor(), { target: { value: 'log("typed")' } })
+    fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Remove step'))
+    const ask = screen.getByRole('alertdialog')
+    expect(ask.textContent).toContain('Your unsaved edits are dropped with it.')
+    fireEvent.click(within(ask).getByText('Remove step'))
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
+    expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'remove' })
+    expect(screen.queryByTestId('step-editor')).toBeNull()
   })
 
   it('Escape over an unsaved edit raises the discard confirm; cancelling keeps the text, confirming closes', async () => {
@@ -466,6 +556,52 @@ describe('step editing in the step-script modal (§11)', () => {
     // view mode keeps the break as typed
     const shown = within(dialog()).getByText((_, el) => el?.textContent === 'reads it\nthen parses the table' && el.tagName === 'DIV')
     expect(shown.style.whiteSpace).toBe('pre-wrap')
+  })
+
+  it('the timeout field saves the parsed pair: a duration, no limit, or blank for the default (2026-10-28)', async () => {
+    const onCommit = vi.fn()
+    render(<Harness initial={[step({ timeout: 900 })]} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    const field = screen.getByLabelText('Step timeout') as HTMLInputElement
+    expect(field.value).toBe('15m')
+    expect(field.placeholder).toBe('15m')
+    // retyping the same value another way is nothing to save
+    fireEvent.change(field, { target: { value: '900' } })
+    expect(saveButton().disabled).toBe(true)
+    fireEvent.change(field, { target: { value: '2h' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
+    expect(onCommit.mock.calls[0][0][0].timeout).toBe(7200)
+    expect('noTimeout' in onCommit.mock.calls[0][0][0]).toBe(false)
+    // no limit drops timeout and sets the flag
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    fireEvent.change(screen.getByLabelText('Step timeout'), { target: { value: 'no limit' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(2))
+    expect(onCommit.mock.calls[1][0][0].noTimeout).toBe(true)
+    expect('timeout' in onCommit.mock.calls[1][0][0]).toBe(false)
+    // blank removes both keys
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    expect((screen.getByLabelText('Step timeout') as HTMLInputElement).value).toBe('no limit')
+    fireEvent.change(screen.getByLabelText('Step timeout'), { target: { value: '' } })
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(3))
+    expect('timeout' in onCommit.mock.calls[2][0][0]).toBe(false)
+    expect('noTimeout' in onCommit.mock.calls[2][0][0]).toBe(false)
+  })
+
+  it('a timeout the grammar rejects disables Save with the inline hint (2026-10-28)', () => {
+    render(<Harness initial={[step()]} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    expect((screen.getByLabelText('Step timeout') as HTMLInputElement).value).toBe('')
+    fireEvent.change(screen.getByLabelText('Step timeout'), { target: { value: '1h30m' } })
+    expect(saveButton().disabled).toBe(true)
+    expect(within(dialog()).getByText('Use seconds, or 90s / 15m / 2h, or no limit')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Step timeout'), { target: { value: '90s' } })
+    expect(within(dialog()).queryByText('Use seconds, or 90s / 15m / 2h, or no limit')).toBeNull()
+    expect(saveButton().disabled).toBe(false)
   })
 
   it('a whitespace-only name or description change is nothing to save (2026-10-28)', () => {

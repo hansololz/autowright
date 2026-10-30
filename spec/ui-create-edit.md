@@ -1008,19 +1008,30 @@ editors enter with
   agent-written and unlocked; once any step is locked or user-written it reads plain
   "STEPS" — the steps are no longer purely generated. The editor variant of the §9.2 step-script modal is where every hand edit
   happens:
-  - Its toolbar cluster (top right of the code pane) gains one `.ad-btn-icon` button
-    before the find button: **Edit** (`fa-pen`, "Edit script"; tip "Edit this script, its
-    name and description by hand"). Every button the editor adds — here, in the navigator's
-    action row below, and the edit-mode Cancel / Save — is a §14 `TipButton`: the tip is a
-    plain line saying what happens, with the shortcut in the platform's key names (§14),
-    never the native `title`. The toolbar stays about
-    the script alone (Edit, Find, the ‹ › step chevrons, Close) — the step-position
-    controls never sit there, where an up/down arrow pair next to the left/right
-    flipping chevrons reads as a second way to navigate.
-    The **step controls** live in the navigator instead, on the viewed row, as a
-    `.ad-btn-icon` action row (`data-testid="step-controls"`) beneath the tag row,
-    left-aligned with the row's text (buttons flush, no gap, the cluster inset 7 px so
-    the glyphs align optically with the name): in order **Move up** (`fa-arrow-up`,
+  - The code pane's toolbar gains nothing: it stays the §9.2 reader strip (line count,
+    Find, the ‹ › step chevrons, Close) in both modes — the step-position controls never
+    sit there, where an up/down arrow pair next to the left/right flipping chevrons
+    reads as a second way to navigate, and the mode switch never sits there either. Every
+    button the editor adds is a §14 `TipButton`: the tip is a plain line saying what
+    happens, with the shortcut in the platform's key names (§14), never the native
+    `title`.
+    Everything that changes a step lives in the navigator, on the viewed row. In view
+    mode the row carries one control: **Edit** (`fa-pen`, `.ad-btn-icon`, aria-label
+    "Edit script", tip "Edit this step: its script, name, description and timeout"),
+    right-aligned on the title line beside the step name (the name keeps `flex: 1` and
+    wraps under a long title; the pen is 26 px and top-aligned to the first line). View
+    mode is otherwise a reader: no move, lock or remove control shows until an edit
+    starts.
+    In edit mode the pen goes (the name is an input) and the row gains an **edit
+    footer** between the fields and the tag row — under the Timeout row (and its hint),
+    above the chips, so the row reads fields, then what to do with them, then the
+    step's tags and facts: left, the `.ad-btn-icon` **step controls**
+    (`data-testid="step-controls"`, buttons flush, no gap, the cluster inset 7 px so the
+    glyphs align optically with the name); right, **Cancel** (`.ad-btn-text.dim.small`,
+    tip "Drop your edits and go back to the saved script") and **Save** (`.ad-btn-link.small`
+    accent link, disabled while nothing changed, "Saving…" while validating; tip "Save
+    your edits (⌘S)"), 10 px apart, flush with the row's right edge. The step controls,
+    in order: **Move up** (`fa-arrow-up`,
     aria-label "Move step up", tip "Run this step one position earlier (⌥↑)") and **Move
     down** (`fa-arrow-down`, "Move step down", tip "Run this step one position later
     (⌥↓)") — the row itself is what moves, so the arrows sit on the thing they
@@ -1028,44 +1039,66 @@ editors enter with
     `aria-pressed` = locked, aria-label "Unlock step" / "Lock step"; the tip names the
     action the click takes: unlocked, "Lock this step: every sync keeps it byte for byte
     and builds the other steps around it"; locked, "Unlock this step: the next sync may
-    rewrite it"), beside its own Locked chip in the tag row above, and **Remove step**
+    rewrite it"), above its own Locked chip in the tag row below, and **Remove step**
     (`fa-trash`, the `.danger` icon variant — muted at rest, red on hover; aria-label
     "Remove step", tip "Remove this step from the automation (you will be asked to
-    confirm)"). Unviewed rows carry no controls. The detail page's modal
-    (no editor) shows no action row. All five buttons are disabled while a §8 job is in
-    flight or an old version is viewed; Move up is also disabled on the first step and
-    Move down on the last.
+    confirm)"). Unviewed rows carry no controls. The detail page's modal (no editor)
+    shows neither the pen nor a footer. All of them are disabled while a §8 job is in
+    flight or an old version is viewed, and while Save's validation is in flight; Move
+    up is also disabled on the first step and Move down on the last.
+    The three step controls **work during the edit** — they are instant, visible
+    changes, and Save covers only the fields: **Move** reorders at once and the edit
+    rides along to the new position (the working copy is untouched; Save then applies
+    onto the moved step, whose `NN-` prefix already changed); the **lock toggle** flips
+    `locked` at once (the chip appears or goes while the fields keep their text; Cancel
+    never reverts a lock); **Remove** confirms as below, the body gaining the sentence
+    "Your unsaved edits are dropped with it." while the edit is dirty, and confirming
+    drops the edit with the step.
   - **Edit mode**: the code pane's body becomes the document-editor modal's textarea
     (same rhythm, padding, inset, focus-on-open with the caret at the end); the find bar
     closes and ⌘F is inert; flipping steps (chevrons, arrow keys, navigator rows) is
-    disabled; the toolbar's right side shows the live line count and **Cancel** / **Save**
-    (accent link, disabled while nothing changed; tips "Drop your edits and go back to
-    the saved script" / "Save your edits (⌘S)"), ⌘S / Ctrl+S saves; ✕, Escape and the
+    disabled; the toolbar keeps the live line count; **Cancel** / **Save** sit in the
+    navigator row's edit footer (above), ⌘S / Ctrl+S saves; ✕, Escape and the
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
     changes you typed into the script editor will be lost.", confirm "Discard edits"),
     while Cancel returns to view mode through the same guard. In edit mode the find and
-    chevron buttons stay visible but disabled, Edit is hidden, and the navigator's
-    action row (the move buttons, the lock toggle and Remove step) stays visible but
-    disabled (their commit would end the edit and drop the typed text).
+    chevron buttons stay visible but disabled and the pen is hidden.
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
     **description** as two `.ad-input.compact` fields in edit mode: the name a one-line
     input (required — a blank name disables Save with the inline hint "Give the step a
     name"), the description a multi-line textarea (3 rows, vertical resize only, Enter
     inserts a line break — a description may span several lines, and the viewed row and
-    the step row render its line breaks as typed, `pre-wrap`). Beneath the
+    the step row render its line breaks as typed, `pre-wrap`). Under the description a
+    **Timeout** row — the word "Timeout" in the muted 11.5 px sans, then a 92 px
+    `.ad-input.compact` field (aria-label "Step timeout") — edits the step's §4.1
+    `timeout` / `noTimeout` pair in the clock tag's own shorthand. The field opens holding
+    the stored value rendered by the clock-tag rule (`2h`, `5m`, `90s`, `no limit`), or
+    empty when the step sets neither, with the engine default's label (`15m`) as its
+    placeholder. Accepted (case-insensitive, trimmed): a positive whole number of seconds
+    (`900`); one with a unit suffix `s` / `sec` / `secs`, `m` / `min` / `mins`, `h` / `hr`
+    / `hrs` (`90s`, `15m`, `2h`); `no limit`, `none` or `unlimited` for `noTimeout: true`;
+    and blank, which removes both keys so the step falls back to the §6 default. Anything
+    else (`0`, `1.5m`, `1h30m`, `30 minutes`) disables Save with the inline red hint "Use
+    seconds, or 90s / 15m / 2h, or no limit" under the field. Dirtiness compares the parsed
+    value, so retyping `900` as `15m` is nothing to save; typing the default `15m` on a step
+    that set nothing pins `timeout: 900` (a value, not an absence). The §8 sync treats the
+    pair like the rest of a user step's manifest: locked, byte for byte; unlocked, kept
+    unless the spec requires a change. Beneath the
     textarea a 36 px footer (the doc modal's hint style) carries a checkbox **Remember
     this edit as a build rule** and, enabled by it, a text field (placeholder "What every
     future sync must keep — one line"; checked with a blank field, Save disables with the
     inline hint "Write the rule to remember"); unchecked, the footer reads "Saving keeps the
     workflow in sync — a hand edit changes the steps, not the spec."
   - **Save** first asks the backend (`POST /validate-steps`, §19) with the draft's steps as
-    they would be after the edit — while that answer is in flight the textarea, the name and
-    description fields, the remember controls, Cancel, ✕, Escape, the backdrop and ⌘S are
+    they would be after the edit — while that answer is in flight the textarea, the name,
+    description and timeout fields, the remember controls, Cancel, ✕, Escape, the backdrop and ⌘S are
     inert and Save shows its busy state, so nothing typed or decided meanwhile can be lost
     or saved against the user's intent, and a Save whose modal has started closing is
     dropped; validation errors render as a red `Notice` strip between
     the toolbar and the textarea, one line each, with the text intact and the modal open.
-    On a clean pass it applies `code`, `name` and `description` to the draft step (the
+    On a clean pass it applies `code`, `name`, `description` and the timeout pair
+    (`timeout: <seconds>` with `noTimeout` dropped, or `noTimeout: true` with `timeout`
+    dropped, or neither) to the draft step (the
     `file` keeps its suffix — a rename never renames the script), sets `authoredBy: user`
     (`locked` unchanged), marks the draft touched, clears the Draft-undo snapshot (a manual
     save, like the documents'), and returns the pane to view mode on the same step. A
@@ -1082,15 +1115,17 @@ editors enter with
     `NN-` prefix from the new positions (the suffixes are kept, so a move never renames
     a script beyond its prefix), keep the moved step viewed at its new position, and
     land the chip "Step '<name>' moved to position N." (`fa-arrows-up-down`, N the
-    1-based new position). **⌥↑ / ⌥↓** (Alt+↑ / Alt+↓) do the same while the editor's
-    modal is open in view mode (inert in edit mode, on the detail page, and at the
-    ends); the plain arrows keep flipping. A locked step moves like any other — §4.1
+    1-based new position). **⌥↑ / ⌥↓** (Alt+↑ / Alt+↓) do the same in edit mode while
+    focus is outside a text field (the textarea and the name, description, timeout and
+    rule fields keep every key for themselves); inert in view mode, where no move
+    control shows, on the detail page, and at the ends. In view mode the plain arrows
+    keep flipping. A locked step moves like any other — §4.1
     freezes its content, not its position. A move is a manual edit: draft touched,
     undo snapshot cleared, never out of sync. Because the next sync lays the unlocked
     steps out as the spec implies, an order that matters belongs in the spec: while
     the move chip is the thread's last entry, the turn action row offers **Remember
     this order** (below), which writes the current order as one build rule.
-  - **Lock toggle** flips the draft step's `locked` (the toolbar glyph swaps and the
+  - **Lock toggle** flips the draft step's `locked` (the footer glyph swaps and the
     navigator's "Locked" chip appears or goes) and lands the chip "Step '<name>'
     locked." / "… unlocked." (`fa-lock` / `fa-lock-open`). **Remove step** confirms
     ("Remove step N, '<name>'?", body "The script is deleted from the draft." plus, for an
