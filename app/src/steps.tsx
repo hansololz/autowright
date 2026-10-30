@@ -580,8 +580,8 @@ export function StepKeys({ i, count, closing, paused, flipsOff, onNav, onFind, o
       const flip = back ? (i > 0 ? i - 1 : null) : forward ? (i < count - 1 ? i + 1 : null) : null
       if (flip === null) return
       e.preventDefault()
-      // §9.2: a key flip drops focus from whatever holds it — a chevron, or
-      // the page's step row that opened the modal and still holds focus
+      // §9.2: a key flip drops focus from whatever holds it — a toolbar
+      // button, or the page's step row that opened the modal and still holds focus
       // behind it (wider than the card, its ring would peek past the edge) —
       // so keyboard mode never draws a ring; the accent bar alone marks the
       // step.
@@ -987,12 +987,6 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
               <div style={{ display: 'flex', alignItems: 'center', gap: 2, flex: 'none', marginLeft: 4 }}>
                 <TipButton className="ad-btn-icon" aria-label="Find in script" tip={`Find in this script (${keys.mod}F)`} aria-pressed={find.open} disabled={editActive} onClick={find.show}>
                   <i className="fa-solid fa-magnifying-glass" />
-                </TipButton>
-                <TipButton className="ad-btn-icon" aria-label="Previous step" tip="Previous step (←)" disabled={editActive || i === 0} onClick={() => onNav(i - 1)}>
-                  <i className="fa-solid fa-chevron-left" />
-                </TipButton>
-                <TipButton className="ad-btn-icon" aria-label="Next step" tip="Next step (→)" disabled={editActive || i === steps.length - 1} onClick={() => onNav(i + 1)}>
-                  <i className="fa-solid fa-chevron-right" />
                 </TipButton>
                 <TipButton className="ad-btn-icon" aria-label="Close" tip="Close (Esc)" disabled={saving} onClick={() => { if (savingRef.current) return; if (dirtyRef.current) setDiscardAsk('close'); else close() }}>
                   <i className="fa-solid fa-xmark" />

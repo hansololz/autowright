@@ -929,7 +929,7 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   host or a file name in the fact list is for. Flipping steps never draws a focus ring:
   the viewed block cannot take focus, a clicked row unmounts as it becomes the viewed
   block (so no ring lingers on a step no longer viewed), and an arrow-key flip drops
-  focus from whatever holds it — a chevron, or the page's step row that opened the modal
+  focus from whatever holds it — a toolbar button, or the page's step row that opened the modal
   and still holds focus behind it (wider than the card, its ring would peek past the
   card's edge) — so the accent bar alone marks the step: no box around a row, a chevron,
   or anything behind the backdrop. The viewed row carries a 2 px accent
@@ -995,12 +995,15 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   place that filename appears in the UI) and, right, a "`<n>` lines" count ("1 line" in
   the singular; a script's single trailing final newline is neither rendered nor counted)
   and the control cluster — a find button (`fa-magnifying-glass`, "Find in script",
-  `aria-pressed` while the find bar is open; tip "Find in this script (⌘F)"), previous /
-  next step chevrons as `.ad-btn-icon` buttons (disabled at the ends; tips "Previous step
-  (←)" / "Next step (→)"; the ↑ / ↓ and ← / → arrow keys navigate
-  too - ↑ / ↓ because the navigator is a vertical list, ← / → the chevrons' own axis) and a
+  `aria-pressed` while the find bar is open; tip "Find in this script (⌘F)") and a
   close ✕ (tip "Close (Esc)"; Escape and backdrop click also close, standard `Modal`
-  behavior). Every one is a `TipButton` (§14 bubble, never native `title`). The toolbar
+  behavior). Both are `TipButton`s (§14 bubble, never native `title`). The toolbar
+  carries no previous / next step chevrons: the navigator is always on screen and is the
+  one click target for flipping steps (a second control for the same move reads as a
+  second way to navigate), while the ↑ / ↓ and ← / → arrow keys flip steps from the
+  keyboard (↑ / ↓ because the navigator is a vertical list, ← / → as the natural
+  previous / next axis; the keys are a shortcut, not a control, so nothing in the UI
+  advertises them). The toolbar
   never scrolls, so the filename and the controls stay put through a long script and
   never overlap code.
   **Find in script.** (The bar, its hook and its match/marking helpers are one shared

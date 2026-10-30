@@ -1009,9 +1009,9 @@ editors enter with
   "STEPS" — the steps are no longer purely generated. The editor variant of the §9.2 step-script modal is where every hand edit
   happens:
   - The code pane's toolbar gains nothing: it stays the §9.2 reader strip (line count,
-    Find, the ‹ › step chevrons, Close) in both modes — the step-position controls never
-    sit there, where an up/down arrow pair next to the left/right flipping chevrons
-    reads as a second way to navigate, and the mode switch never sits there either. Every
+    Find, Close) in both modes — the step-position controls never sit there, where an
+    up/down arrow pair reads as a second way to navigate (the same reason §9.2 keeps
+    previous / next chevrons out of it), and the mode switch never sits there either. Every
     button the editor adds is a §14 `TipButton`: the tip is a plain line saying what
     happens, with the shortcut in the platform's key names (§14), never the native
     `title`.
@@ -1074,7 +1074,7 @@ editors enter with
     keeps its 24 px bottom padding under the caret's line (`scroll-padding-bottom`), so a
     line typed at the end never sits flush on the footer divider. The gutter exists so a validation error's "line N" and the
     reader's numbers point at the same line; the numbers stay unselectable. The find bar
-    closes and ⌘F is inert; flipping steps (chevrons, arrow keys, navigator rows) is
+    closes and ⌘F is inert; flipping steps (arrow keys, navigator rows) is
     disabled; the toolbar keeps the live line count; **Cancel** / **Save** sit in the
     navigator row's edit footer (above), ⌘S / Ctrl+S saves; ✕, Escape and the
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
@@ -1407,8 +1407,7 @@ editors enter with
   detail page's rows the editor's carry **no** right-edge expand glyph — the row's hover
   fill is the only affordance, and the button's "View script" `title` tooltip is kept on
   the row itself; one step shows at a
-  time, with the modal's step navigator, previous / next, and the arrow keys flipping inside
-  it). The step number
+  time, with the modal's step navigator and the arrow keys flipping inside it). The step number
   prefixes the title ("1. Fetch page" — faint mono numeral, title styling unchanged) instead
   of occupying a left gutter column, keeping the row's left edge free on narrow windows.
   The editor's modal draws its §9.2 package facts from the draft's declared packages

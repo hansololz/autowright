@@ -115,7 +115,8 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(editor().value).toContain('from autowright import params, log, result')
     expect(saveButton().disabled).toBe(true)
     // edit mode: flipping and find are inert, the footer reads the in-sync hint
-    expect((screen.getByLabelText('Previous step') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 2: New step')
     expect((screen.getByLabelText('Find in script') as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText('Saving keeps the workflow in sync — a hand edit changes the steps, not the spec.')).toBeTruthy()
   })
@@ -301,7 +302,7 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(screen.queryByTestId('step-editor')).toBeNull()
     expect(screen.queryByTestId('step-controls')).toBeNull()
     // a user-written step's confirm drops the may-write-it-again sentence
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     fireEvent.click(screen.getByLabelText('Edit script'))
     fireEvent.click(within(screen.getByTestId('step-controls')).getByLabelText('Remove step'))
     expect(screen.getByRole('alertdialog').textContent).not.toContain('The next sync may write it again')

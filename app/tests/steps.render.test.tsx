@@ -281,8 +281,9 @@ describe('step-script modal', () => {
       expect(chip.closest('span')?.getAttribute('aria-label'))
         .toBe('This step uses the MAIL_PASSWORD secret from your Keychain')
     }
-    expect((screen.getByLabelText('Previous step') as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByLabelText('Next step') as HTMLButtonElement).disabled).toBe(false)
+    // §9.2: the toolbar carries no previous / next chevrons — the navigator flips steps
+    expect(screen.queryByLabelText('Previous step')).toBeNull()
+    expect(screen.queryByLabelText('Next step')).toBeNull()
   })
 
   it('a bare step\'s modal shows only the always-on time-limit chip', () => {
@@ -314,7 +315,7 @@ describe('step-script modal', () => {
     const gutter = () => Array.from(screen.getByRole('dialog').querySelectorAll('span'))
       .filter((el) => (el.style as CSSStyleDeclaration).userSelect === 'none').map((el) => el.textContent)
     expect(gutter()).toEqual(['1', '2', '3'])
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     expect(screen.getByText('1 line')).toBeTruthy()
     expect(gutter()).toEqual(['1'])
   })
@@ -345,12 +346,14 @@ describe('step-script modal', () => {
       .toBe('This step uses the bs4 Python package — parse pages')
   })
 
-  it('detail variant: next/prev buttons, the navigator rows and the arrow keys flip steps, guarded at both ends', () => {
+  it('detail variant: the navigator rows and the arrow keys flip steps, guarded at both ends', () => {
     renderDetail()
     openFirst()
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     expect(screen.getByText('STEP 2 OF 2')).toBeTruthy()
-    expect((screen.getByLabelText('Next step') as HTMLButtonElement).disabled).toBe(true)
+    // ArrowRight at the last step is a no-op, never an overflow
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    expect(screen.getByText('STEP 2 OF 2')).toBeTruthy()
     // only the viewed navigator row expands to show its description
     expect(navRow('Send mail').getAttribute('aria-current')).toBe('step')
     expect(screen.getByRole('dialog').textContent).toContain('mails it')
@@ -358,7 +361,7 @@ describe('step-script modal', () => {
     // clicking a navigator row views that step
     fireEvent.click(navRow('Fetch page'))
     expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     fireEvent.keyDown(document, { key: 'ArrowLeft' })
     expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
     // ArrowLeft at the first step is a no-op, never an underflow
@@ -406,10 +409,10 @@ describe('step-script modal', () => {
     navRow('Send mail').focus()
     fireEvent.click(navRow('Send mail'))
     expect(document.activeElement).toBe(document.body)
-    // an arrow flip drops focus from a focused chevron
-    const prev = screen.getByLabelText('Previous step') as HTMLButtonElement
-    prev.focus()
-    expect(document.activeElement).toBe(prev)
+    // an arrow flip drops focus from a focused toolbar button
+    const findButton = screen.getByLabelText('Find in script') as HTMLButtonElement
+    findButton.focus()
+    expect(document.activeElement).toBe(findButton)
     fireEvent.keyDown(document, { key: 'ArrowLeft' })
     expect(screen.getByText(/STEP 1 OF 2/)).toBeTruthy()
     expect(document.activeElement).toBe(document.body)
@@ -573,7 +576,7 @@ describe('find in script (§9.2)', () => {
     fireEvent.change(screen.getByPlaceholderText('Find in script'), { target: { value: 'send' } })
     fireEvent.click(screen.getByLabelText('Next match'))
     expect(counter()).toBe('2 of 3')
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     expect(screen.getByTestId('find-bar')).toBeTruthy()
     expect((screen.getByPlaceholderText('Find in script') as HTMLInputElement).value).toBe('send')
     expect(counter()).toBe('1 of 2')
@@ -596,7 +599,7 @@ describe('find in script (§9.2)', () => {
     fireEvent.keyDown(document, { key: 'f', metaKey: true })
     fireEvent.change(screen.getByPlaceholderText('Find in script'), { target: { value: 'send' } })
     fireEvent.click(screen.getByLabelText('Next match'))
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     expect(marks().length).toBeGreaterThan(0)
     expect(errors.filter((e) => e.includes('same key'))).toEqual([])
     spy.mockRestore()
@@ -738,7 +741,7 @@ describe('navigator facts (§9.2 literal scans)', () => {
     fireEvent.click(screen.getAllByText('Pull')[0])
     const sections = () => Array.from(screen.getByTestId('step-facts').children).map((el) => el.textContent)
     expect(sections()).toEqual(['WEBSITES•example.org', 'FILES•Hands out.json to step 2', 'VERSION•New in v1'])
-    fireEvent.click(screen.getByLabelText('Next step'))
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
     expect(sections()).toEqual(['FILES•Reads out.json from step 1', 'VERSION•New in v1'])
   })
 })
