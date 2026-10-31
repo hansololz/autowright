@@ -1,6 +1,6 @@
 // §9.2 MEMORY card: reveal/snapshot/clear actions, the snapshot rows with
 // their inline confirm swaps, and the §6.3 automatic-snapshot toggles.
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import { usePlatformCopy } from '../../platformCopy'
 import { useStore } from '../../store'
@@ -33,6 +33,12 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
   const [snapName, setSnapName] = useState('')
   const [snapRow, setSnapRow] = useState<{ snapshotId: string; kind: 'restore' | 'rename' | 'delete' } | null>(null)
   const [renameVal, setRenameVal] = useState('')
+  // §6.3 toggles, NotificationsCard's pattern: a key's committed value while
+  // its PATCH (and the store refresh) is in flight, so a second click reads
+  // the value the first one sent, never the stale record. Per key, request
+  // counted: only the newest click settles its key.
+  const [pendingSnap, setPendingSnap] = useState<Partial<SnapshotSettings>>({})
+  const snapSequence = useRef<Partial<Record<keyof SnapshotSettings, number>>>({})
 
   // Close any open inline confirm when the page switches automations.
   useEffect(() => { setConfirmClear(false); setSnapAsk(false); setSnapRow(null) }, [auto.id])
@@ -86,9 +92,20 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
     })
   }
   // §6.3 automatic-snapshot toggles — user-owned operational state, applies immediately (§19 PATCH)
+  const snapValue = (key: keyof SnapshotSettings) => pendingSnap[key] ?? auto.snapshotSettings[key]
   const setSnapSetting = (key: keyof SnapshotSettings, on: boolean) => {
-    runAction(auto.id, async () => {
+    const sequence = (snapSequence.current[key] ?? 0) + 1
+    snapSequence.current[key] = sequence
+    setPendingSnap((p) => ({ ...p, [key]: on }))
+    void runAction(auto.id, async () => {
       await api.patchAutomation(auto.id, { snapshotSettings: { [key]: on } })
+    }).finally(() => {
+      if (snapSequence.current[key] !== sequence) return
+      setPendingSnap((p) => {
+        const rest = { ...p }
+        delete rest[key]
+        return rest
+      })
     })
   }
 
@@ -267,9 +284,9 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
                 <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginTop: 2 }}>{help}</div>
               </div>
               <Toggle
-                on={auto.snapshotSettings[key]}
-                onChange={() => setSnapSetting(key, !auto.snapshotSettings[key])}
-                title={auto.snapshotSettings[key] ? 'Turn this automatic snapshot off' : 'Turn this automatic snapshot on'}
+                on={snapValue(key)}
+                onChange={() => setSnapSetting(key, !snapValue(key))}
+                title={snapValue(key) ? 'Turn this automatic snapshot off' : 'Turn this automatic snapshot on'}
               />
             </div>
           ))}

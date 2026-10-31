@@ -19,7 +19,7 @@ name: Hello
 description: Says hello
 note: Created
 params:
-  - { name: on_off, kind: toggle, label: On, help: h, default: true }
+  - { name: on_off, kind: toggle, label: "On", help: h, default: true }
 steps:
   - { file: 01-a.py, name: A, description: d }
   - { file: 02-b.py, name: B, description: d, agent: true, why: needs judgment }
@@ -2076,7 +2076,7 @@ def test_validate_steps_package_blocks_and_number_min():
 
     # number param: a missing `min` is injected as 0; the default stays required
     nomin = GOOD_STEPS.replace(
-        "  - { name: on_off, kind: toggle, label: On, help: h, default: true }\n",
+        '  - { name: on_off, kind: toggle, label: "On", help: h, default: true }\n',
         "  - { name: count, kind: number, label: N, help: h, default: 3 }\n")
     draft, errors = validate_steps(parse_envelope(nomin))
     assert errors == []
@@ -2085,7 +2085,7 @@ def test_validate_steps_package_blocks_and_number_min():
 
     # min alone never substitutes for the default at draft time
     withmin = GOOD_STEPS.replace(
-        "  - { name: on_off, kind: toggle, label: On, help: h, default: true }\n",
+        '  - { name: on_off, kind: toggle, label: "On", help: h, default: true }\n',
         "  - { name: count, kind: number, label: N, help: h, min: 2 }\n")
     _, errors = validate_steps(parse_envelope(withmin))
     assert any("missing default" in e for e in errors)
@@ -2108,7 +2108,7 @@ name: Hello
 description: Says hello
 note: Created
 params:
-  - { name: on_off, kind: toggle, label: On, help: h, default: true }
+  - { name: on_off, kind: toggle, label: "On", help: h, default: true }
 steps:
   - { file: 01-a.py, name: A, description: d }
   - { file: 02-b.py, name: B, description: d, agent: true, why: needs judgment }

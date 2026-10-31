@@ -4274,11 +4274,16 @@ def test_ws_unsubscribes_even_when_the_sender_task_raises(client, monkeypatch):
     try:
         with TestClient(api.app) as c:
             before = len(api.hub._subs)
+            # 2026-10-30 second sweep: payloads serialize with a str() fallback,
+            # so the send itself is made to fail to exercise the sender's error
+            # path (it closes the socket with 1011 and returns).
+            async def failing_send_text(self, text):
+                raise RuntimeError("send failed")
+
+            monkeypatch.setattr(api.WebSocket, "send_text", failing_send_text)
             with c.websocket_connect(f"/ws?token={api.AUTH_TOKEN}"):
                 assert len(api.hub._subs) == before + 1
-                # a payload send_json can't serialize kills the sender task —
-                # its exception surfaces from the `await sender` below
-                api.hub.publish("test.unserializable", value={1, 2})
+                api.hub.publish("test.send-failure", value=1)
                 # the sender task raises on its own loop — poll for the release
                 # rather than sleeping a fixed stretch a slow machine outruns
                 for _ in range(100):

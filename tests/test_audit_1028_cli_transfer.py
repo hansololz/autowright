@@ -93,10 +93,10 @@ def test_a_malformed_redirect_on_marketplace_add_answers_422(client, monkeypatch
 
 
 def test_a_malformed_redirect_on_the_github_api_is_a_transfer_error(monkeypatch):
-    def urlopen(request, timeout=None):
+    def opener(request, *, timeout=None, refuse=None):
         raise ValueError("Invalid IPv6 URL")
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(transfer, "open_https_only", opener)
     with pytest.raises(transfer.TransferError, match="couldn't reach GitHub"):
         transfer._github_api("/repos/o/r/releases/latest")
 

@@ -1646,10 +1646,21 @@ async function fetchUpdateState() {
 // version Squirrel staged from it (null until update-install staged one).
 let downloadedVersion = null
 let stagedVersion = null
+// §3: the listener a given-up staging leaves behind, so a staging that lands
+// after the give-up is still recorded (a staged bundle installs on any quit).
+let lateStagingListener = null
+
+function stopWatchingLateStaging() {
+  if (!lateStagingListener) return
+  autoUpdater.removeListener('update-downloaded', lateStagingListener)
+  lateStagingListener = null
+}
 
 function stageWithSquirrel(updater) {
   return new Promise((resolve) => {
     if (updater.squirrelDownloadedUpdate) return resolve(null)
+    stopWatchingLateStaging()
+    const version = downloadedVersion
     let settled = false
     const settle = (error) => {
       if (settled) return
@@ -1659,7 +1670,15 @@ function stageWithSquirrel(updater) {
       autoUpdater.removeListener('error', onErr)
       resolve(error)
     }
-    const giveUp = setTimeout(() => settle('the updater stopped responding'), 10 * 60_000)
+    const giveUp = setTimeout(() => {
+      settle('the updater stopped responding')
+      lateStagingListener = () => {
+        stopWatchingLateStaging()
+        appLog('update: staging completed after the give-up; the bundle installs on the next quit')
+        stagedVersion = version
+      }
+      autoUpdater.on('update-downloaded', lateStagingListener)
+    }, 10 * 60_000)
     const onDone = () => settle(null)
     const onErr = (err) => settle(String(err?.message || err))
     autoUpdater.on('update-downloaded', onDone)
@@ -1687,24 +1706,28 @@ function downloadUpdate() {
   return downloadInFlight
 }
 
+const RESTART_TO_FINISH_ERROR = 'Restart to finish the update you already downloaded.'
+
 async function runDownloadUpdate() {
+  // §3: a download while an install is in flight is refused; on macOS
+  // re-entering MacUpdater closes the proxy Squirrel is reading from.
+  if (installInFlight) return { error: RESTART_TO_FINISH_ERROR }
   try {
     const updater = genericUpdater()
     const result = await updater.checkForUpdates()
     const version = String(result?.updateInfo?.version ?? '')
     if (!isNewerVersion(version, app.getVersion())) return { error: 'no update available' }
-    // §3 (macOS): a different version was already downloaded (or Squirrel
-    // already staged one) this run, and electron-updater's
-    // squirrelDownloadedUpdate flag never resets, so a later staging would
-    // "succeed" on that flag and install the older bundle. A flag already set
-    // with no version recorded is a staged bundle of a version we don't know —
-    // refused the same way.
-    const heldVersion = stagedVersion ?? downloadedVersion
-    const heldOther = heldVersion !== null
-      ? heldVersion !== version
+    // §3 (macOS): Squirrel already staged a different version this run, and
+    // electron-updater's squirrelDownloadedUpdate flag never resets, so a
+    // later staging would "succeed" on that flag and install the older
+    // bundle. A flag already set with no staged version recorded is a staged
+    // bundle of a version we don't know, refused the same way. A download
+    // alone stages nothing and is replaceable, so it never refuses.
+    const heldOther = stagedVersion !== null
+      ? stagedVersion !== version
       : Boolean(updater.squirrelDownloadedUpdate)
     if (plat.UPDATER === 'mac' && heldOther) {
-      return { error: 'Restart to finish the update you already downloaded.' }
+      return { error: RESTART_TO_FINISH_ERROR }
     }
     await updater.downloadUpdate(result?.cancellationToken)
     win?.webContents.send('update-progress', 100)
@@ -1790,6 +1813,10 @@ let installInFlight = null
 
 function installUpdate() {
   if (!installInFlight) {
+    // §3 step 0, the other direction: one stop-and-quit at a time.
+    if (resetInFlight || quitFlight || nativeQuitPending) {
+      return Promise.resolve({ error: STOP_AND_QUIT_IN_PROGRESS_ERROR })
+    }
     installInFlight = runInstallUpdate().finally(() => { installInFlight = null })
   }
   return installInFlight
@@ -1810,8 +1837,11 @@ async function runInstallUpdate() {
   if (await executionsLive()) return { busy: true }
   // §3 (macOS): Squirrel stages only here, behind the live-execution gate —
   // an error (or the 10-minute give-up) answers { error } with nothing staged
-  // and nothing quit.
-  if (plat.UPDATER === 'mac') {
+  // and nothing quit. A bundle already staged is never staged again. Staging
+  // takes minutes, so the gate runs again once it is staged: an execution
+  // that started meanwhile answers busy and nothing quits (the staged bundle
+  // finishes at the next quit).
+  if (plat.UPDATER === 'mac' && stagedVersion === null) {
     const updater = genericUpdater()
     const error = await stageWithSquirrel(updater)
     if (error) {
@@ -1819,6 +1849,7 @@ async function runInstallUpdate() {
       return { error }
     }
     stagedVersion = downloadedVersion
+    if (await executionsLive()) return { busy: true, staged: true }
   }
   appLog('update: quitting to install')
   const stopsBackend = Boolean(plat.stopBackendBeforeInstall) && installerStaged()
@@ -1940,6 +1971,9 @@ let nativeQuitPending = false
 // itself with app.exit(0), and a second `service stop` racing its
 // deleteAllData would let the app exit half-erased, so an OS quit is ignored.
 let resetInFlight = false
+// §3 step 0: the refusal both reset-all and update-install answer while
+// another stop-and-quit is in progress.
+const STOP_AND_QUIT_IN_PROGRESS_ERROR = 'another operation is in progress'
 
 function stopAndQuit(force, label) {
   if (quitFlight) return quitFlight
@@ -2189,7 +2223,7 @@ ipcMain.handle('reset-all', async () => {
   // reset, a quit flight, a native quit or an update install already in
   // progress refuses this one before anything is touched.
   if (resetInFlight || quitFlight || nativeQuitPending || installInFlight) {
-    return { error: 'another operation is in progress' }
+    return { error: STOP_AND_QUIT_IN_PROGRESS_ERROR }
   }
   resetInFlight = true
   if (await executionsLive()) {

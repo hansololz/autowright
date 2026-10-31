@@ -77,7 +77,9 @@ def _exit_http(e: urllib.error.HTTPError, base: str | None = None) -> None:
         message = f"{loc}: {msg}" if loc else msg
     else:
         message = body
-    sys.exit(f"{e.code}: {message[:300]}")
+    # §20 untrusted text on the console: a detail can embed archive or
+    # catalog text (an imported step's name), so it is escaped like any.
+    sys.exit(f"{e.code}: {_console_safe(message[:300])}")
 
 
 class Client:
@@ -178,12 +180,15 @@ def _resolve(items: list[dict], ref: str, noun: str) -> dict:
         matches = [it for it in items if ref.lower() in it["name"].lower()]
     if len(matches) == 1:
         return matches[0]
+    # §20 untrusted text on the console: marketplace names come from
+    # catalogs, so the candidate lists are escaped.
     if matches:
         sys.exit(f"{ref!r} is ambiguous - matches: "
-                 + ", ".join(f"{it['name']} ({it['id'][:8]})" for it in matches)
+                 + ", ".join(f"{_console_safe(it['name'])} ({it['id'][:8]})"
+                             for it in matches)
                  + " - use the id instead")
     sys.exit(f"no {noun} matches {ref!r} - "
-             f"have: {', '.join(it['name'] for it in items) or '(none)'}")
+             f"have: {', '.join(_console_safe(it['name']) for it in items) or '(none)'}")
 
 
 def _exit_if_ambiguous(ref: str, matches: list[dict], name_of) -> None:
@@ -1046,21 +1051,28 @@ def cmd_automation_push(c: Client, args) -> None:
     # disk, which is what the pulled_from rewrite after the save starts from.
     manifest_on_disk = files.get("manifest.yaml")
     baseline = _pulled_baseline(files)
+    # §20: the baseline and the stale check apply only when `pulled_id` names
+    # the automation being pushed; a workdir pulled from another automation
+    # is judged as a manifest without the `pulled_*` keys.
+    foreign = "pulled_id" in baseline and baseline["pulled_id"] != a["id"]
+    if foreign:
+        baseline = {}
     # §20: a stale workdir does not push silently - versions saved in the app
     # since the pull would be overwritten unseen. A manifest without the key
     # is never refused on this ground.
-    pulled = _pulled_from(files)
+    pulled = None if foreign else _pulled_from(files)
     current = full.get("version")
     if (pulled is not None and isinstance(current, int) and pulled < current
             and not getattr(args, "force", False)):
         sys.exit(f"{full['name']!r} is at v{current}; this workdir was pulled from "
                  f"v{pulled} — pull again, or pass --force to save over "
                  f"v{pulled + 1}..v{current}")
-    _apply_lock_flags(files, getattr(args, "lock", None) or [],
-                      getattr(args, "unlock", None) or [])
+    lock_flags = (getattr(args, "lock", None) or [], getattr(args, "unlock", None) or [])
+    _apply_lock_flags(files, *lock_flags)
     draft = validate_workdir(d, agents, secrets, files=files,
                              unresolved=full.get("unresolvedReferences"))
-    _apply_step_authorship(draft, files, _pulled_steps(full, files))
+    _apply_step_authorship(draft, files, (full.get("steps") or []) if foreign
+                           else _pulled_steps(full, files))
     if args.note:
         draft["note"] = args.note
     # §20: a manifest schedule that was among the pulled lines but is no
@@ -1076,12 +1088,12 @@ def cmd_automation_push(c: Client, args) -> None:
     # applies become the workdir's new `pulled_*` values.
     baseline_updates: dict = {}
     if "pulled_triggers" in baseline:
+        # Every schedule line the manifest holds, the ones skipped above as
+        # deleted in the app included, so the next push skips them again
+        # instead of reading them as new lines.
         manifest_lines = _manifest_trigger_lines(manifest_on_disk)
-        applied_lines = [t for t in manifest_lines
-                         if (key := _manifest_schedule_key(t)) not in pulled_keys
-                         or key in stored_keys]
-        if {_manifest_schedule_key(t) for t in applied_lines} != pulled_keys:
-            baseline_updates["pulled_triggers"] = applied_lines
+        if {_manifest_schedule_key(t) for t in manifest_lines} != pulled_keys:
+            baseline_updates["pulled_triggers"] = manifest_lines
     # §20 grant model: stored grants plus explicit --grant-* flags, never
     # widened by what the pushed steps happen to reference.
     step_agents, allowed_secrets = _grants(args, draft, agents, secrets,
@@ -1111,7 +1123,7 @@ def cmd_automation_push(c: Client, args) -> None:
     else:
         print(f"saved {name!r} as v{r['version']}")
         # §20: the workdir now matches the version this push minted.
-        if isinstance(r.get("version"), int):
+        if isinstance(r.get("version"), int) and not foreign:
             baseline_updates["pulled_from"] = r["version"]
     description = draft.get("description")
     if ("pulled_description" in baseline
@@ -1120,7 +1132,21 @@ def cmd_automation_push(c: Client, args) -> None:
     patch_description = bool(description) and description != (full.get("description") or "")
     if description and "pulled_description" in baseline and not patch_description:
         baseline_updates["pulled_description"] = description
-    _rewrite_pulled_baseline(d, manifest_on_disk, baseline_updates)
+    manifest_text = manifest_on_disk
+    if any(lock_flags) and files.get("manifest.yaml") != manifest_on_disk:
+        # §20: once the save lands, the --lock/--unlock edits reach the
+        # workdir manifest too, so the next plain push does not undo them;
+        # the pulled_* rewrite below then runs over that text.
+        manifest_text = files["manifest.yaml"]
+        try:
+            (d / "manifest.yaml").write_text(manifest_text, encoding="utf-8")
+        except OSError as e:
+            # The version has already landed - say the workdir is behind
+            # rather than fail a save that succeeded.
+            print(f"warning: couldn't write the --lock/--unlock edits to "
+                  f"{d / 'manifest.yaml'}: {e.strerror or e}", file=sys.stderr)
+            manifest_text = manifest_on_disk
+    _rewrite_pulled_baseline(d, manifest_text, baseline_updates)
     if patch_description:
         c.req("PATCH", f"/automations/{a['id']}", {"description": description})
         # Only once the PATCH landed - a refused one leaves the baseline as it was.
@@ -1233,7 +1259,10 @@ def cmd_automation_validate(c: Client, args) -> None:
     pulled_id = _pulled_baseline(files).get("pulled_id")
     body: dict = {}
     unresolved = None
-    if isinstance(pulled_id, str) and pulled_id:
+    # An id this backend doesn't know (a deleted automation, a workdir from
+    # another machine) is ignored: the workdir validates on its own.
+    if (isinstance(pulled_id, str) and pulled_id
+            and any(x.get("id") == pulled_id for x in c.req("GET", "/automations"))):
         unresolved = c.req("GET", f"/automations/{pulled_id}").get("unresolvedReferences")
         body["automationId"] = pulled_id
     draft = validate_workdir(d, agents, secrets, files=files, unresolved=unresolved)
@@ -1514,7 +1543,7 @@ def cmd_automation_import(c: Client, args) -> None:
         pr = c.req("POST", "/automations/import/url", {"url": args.path}, timeout=660)
         resolved = pr.get("preview", {}).get("resolvedUrl")
         if resolved and resolved != args.path.strip():
-            print(f"resolved to {resolved}")
+            print(f"resolved to {_console_safe(resolved)}")
         # §20 HTTP timeouts: the confirm lands the archive - a large one on a
         # slow volume must never report "backend isn't reachable" while it works.
         r = c.req("POST", "/automations/import/confirm", {"token": pr.get("token")},

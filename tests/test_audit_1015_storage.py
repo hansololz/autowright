@@ -26,9 +26,11 @@ def test_a_save_skips_a_version_folder_the_load_skipped(store):
     store.save_new_version(a, make_version(note="Second"))
     stray = _stray_version_dir(store, a, 3)
 
-    assert store.save_new_version(a, make_version(note="Third")) == 4
-    assert stray.exists()
-    assert (stray / "manifest.yaml").read_text(encoding="utf-8") == "{{{ not yaml"
+    # 2026-10-30 second sweep: a folder above current_version is a crash
+    # orphan, set aside as `v3.orphan` (never overwritten) before numbering.
+    assert store.save_new_version(a, make_version(note="Third")) == 3
+    aside = stray.with_name("v3.orphan")
+    assert (aside / "manifest.yaml").read_text(encoding="utf-8") == "{{{ not yaml"
 
 
 @pytest.mark.parametrize("how", ["save", "restore"])
@@ -45,11 +47,15 @@ def test_a_failed_save_never_removes_a_stray_version_folder(store, monkeypatch, 
             store.save_new_version(a, make_version(note="Second"))
         else:
             store.restore_version(a, 1)
-    assert stray.exists()
+    # 2026-10-30 second sweep: the orphan was set aside, and the failed
+    # attempt's rollback never removes it.
+    aside = stray.with_name("v2.orphan")
+    assert (aside / "manifest.yaml").read_text(encoding="utf-8") == "{{{ not yaml"
+    assert not stray.exists()
     assert not (store.auto_dir(a) / "versions" / "v3").exists()
     assert sorted(a["versions"]) == [1]
-    assert store.save_new_version(a, make_version(note="Retry")) == 3
-    assert stray.exists()
+    assert store.save_new_version(a, make_version(note="Retry")) == 2
+    assert (aside / "manifest.yaml").read_text(encoding="utf-8") == "{{{ not yaml"
 
 
 def _referencing_version(secret_id):

@@ -322,6 +322,13 @@ version that writes the new shape, and the oldest shape still read.
   above `current_version` is ignored at load (§5 crash orphan). (d) Agent and secret rows
   skipped at load are written back raw by the next save (§4.7/§4.8). None changes a
   written shape; nothing to migrate.
+- **2026-10-30 (second sweep) - audit batch.** (a) A crash-orphan version folder (§5,
+  above `current_version`) is renamed aside to `vN.orphan` by the next save that numbers
+  past it; older releases' loaders never match that name (their `v<digits>` match), nothing
+  is renamed at load, and no written shape changes — nothing to migrate. (b) The stored
+  `timeout`/`retries` pair is read by one lenient reader everywhere (§4.1); the written
+  shape is unchanged. (c) `DELETE /secrets` also sweeps the §4.8 rows the load skipped
+  (§19); a `secrets.yaml` from any release still loads as before.
 - **2026-08-23 - policy adopted.** Baseline v0.6.0; scope on-disk user data (§21.1);
   strategy migrate-on-load (§21.2); transfer archives, API/CLI skew, and forward
   compatibility out of scope (§21.3). No migrations exist yet - the formats v0.6.0 writes

@@ -33,7 +33,7 @@ declare global {
       // which the §9.4 page renders instead of the generic network copy.
       updateCheck(): Promise<{ state: 'uptodate' } | { state: 'error'; error?: string } | { state: 'available'; version: string }>
       updateDownload(): Promise<{ ok: true } | { error: string }>
-      updateInstall(): Promise<{ ok: true } | { busy: true } | { error: string }>
+      updateInstall(): Promise<{ ok: true } | { busy: true; staged?: boolean } | { error: string }>
       updateBrewManaged(): Promise<boolean>
       // §4.9 QUIT card (§3 explicit-quit exception)
       quitAll(force?: boolean): Promise<{ ok: true } | { busy: true } | { error: string }>

@@ -2693,7 +2693,7 @@ describe('CreateFlow send/sync edit guard + settle flush + poll retry (§11)', (
     render(<CreateFlow />)
     send('hello')
     await waitFor(() => expect(screen.getByText('Something went wrong')).toBeTruthy(), { timeout: 8000 })
-    expect(screen.getByText('backend gone')).toBeTruthy()
+    expect(screen.getByText('The job was lost: backend gone')).toBeTruthy()
   })
 })
 

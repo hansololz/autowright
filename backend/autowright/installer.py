@@ -143,13 +143,19 @@ def start(provider_id: str, publish) -> bool:
         worker.start()
         worker.join(INSTALL_TIMEOUT_S)
         error: BaseException | None = raised[0] if raised else None
-        if worker.is_alive():
+        abandoned = worker.is_alive()
+        if abandoned:
             error = RuntimeError(f"install timed out after {INSTALL_TIMEOUT_S // 60} minutes")
         if error is not None:
             msg = (str(error).strip().splitlines() or ["install failed"])[0][:300]
             with _lock:
+                # §19: on the give-up the snapshot's token is replaced, so the
+                # still-running phase's late emits fail the generation check:
+                # no progress keys on the failed snapshot, no event after the
+                # terminal one. `_phases` keeps `gen` so `start` still refuses
+                # until the phase actually returns.
                 _jobs[provider_id] = {"state": "failed", "error": msg,
-                                      "_gen": gen}
+                                      "_gen": None if abandoned else gen}
             publish(done=True, ok=False, error=msg)
             return
         with _lock:

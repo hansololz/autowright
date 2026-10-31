@@ -1742,7 +1742,7 @@ def test_github_api_error_mapping(monkeypatch):
     import urllib.error
 
     def urlopen_for(result):
-        def fake(req, timeout):
+        def fake(req, *, timeout, refuse):
             assert req.full_url.startswith("https://api.github.com/")
             if isinstance(result, Exception):
                 raise result
@@ -1752,23 +1752,23 @@ def test_github_api_error_mapping(monkeypatch):
     def http_error(code):
         return urllib.error.HTTPError("https://api.github.com/x", code, "err", {}, None)
 
-    monkeypatch.setattr(transfer.urllib.request, "urlopen",
+    monkeypatch.setattr(transfer, "open_https_only",
                         urlopen_for({"assets": []}))
     assert transfer._github_api("/repos/a/b/releases/latest") == {"assets": []}
 
-    monkeypatch.setattr(transfer.urllib.request, "urlopen", urlopen_for(http_error(404)))
+    monkeypatch.setattr(transfer, "open_https_only", urlopen_for(http_error(404)))
     assert transfer._github_api("/repos/a/b/releases/latest") is None
 
     for code in (403, 429):
-        monkeypatch.setattr(transfer.urllib.request, "urlopen", urlopen_for(http_error(code)))
+        monkeypatch.setattr(transfer, "open_https_only", urlopen_for(http_error(code)))
         with pytest.raises(transfer.TransferError, match="rate-limited"):
             transfer._github_api("/repos/a/b/releases/latest")
 
-    monkeypatch.setattr(transfer.urllib.request, "urlopen", urlopen_for(http_error(500)))
+    monkeypatch.setattr(transfer, "open_https_only", urlopen_for(http_error(500)))
     with pytest.raises(transfer.TransferError, match="GitHub answered 500"):
         transfer._github_api("/repos/a/b/releases/latest")
 
-    monkeypatch.setattr(transfer.urllib.request, "urlopen",
+    monkeypatch.setattr(transfer, "open_https_only",
                         urlopen_for(urllib.error.URLError("no route to host")))
     with pytest.raises(transfer.TransferError, match="couldn't reach GitHub"):
         transfer._github_api("/repos/a/b/releases/latest")
@@ -1778,8 +1778,8 @@ def test_github_unreadable_answer_and_release_without_an_asset(monkeypatch):
     """§5.2: the two GitHub answers that are neither an error code nor a usable
     archive - a captive portal serving HTML where the API's JSON belongs, and a
     real release carrying no .autowright asset."""
-    monkeypatch.setattr(transfer.urllib.request, "urlopen",
-                        lambda req, timeout: _FakeResp(b"<html>sign in</html>"))
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, *, timeout, refuse: _FakeResp(b"<html>sign in</html>"))
     with pytest.raises(transfer.TransferError, match="GitHub's answer wasn't readable"):
         transfer._github_api("/repos/alice/watcher/releases/latest")
 

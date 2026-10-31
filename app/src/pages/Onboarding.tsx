@@ -302,8 +302,16 @@ export default function Onboarding() {
   const startSignin = (p: Det) => {
     void api.loginHarness(p.id)
       .then((r) => { setCard(p.id, { phase: 'signin', method: r.method }); pollSignin(p) })
-      .catch((e: Error) => {
+      .catch((e: Error & { status?: number }) => {
         if (e.message.includes('already signed in')) startCheck(p)
+        else if (e.status === 409 && /isn['’]t installed/.test(e.message)) {
+          // §10: the harness was uninstalled since detection: back to idle,
+          // detection re-run, never the manual sign-in line for a gone binary.
+          setCard(p.id, { phase: 'idle', method: null })
+          ob.detStarted = false
+          startDetect()
+          showToast(e.message)
+        }
         else showToast(e.message)
       })
   }
@@ -359,6 +367,41 @@ export default function Onboarding() {
       })
       .catch(() => startCheck(p))
   }
+
+  // §9 manual sign-in line: a found signed-out card with no sign-in help, or a
+  // suggestion card that finished installing signed out with none (the Linux
+  // TUI providers), shows the line instead of a button. The line promises
+  // "Autowright detects it automatically", so while any card shows it one
+  // 2 s poll asks §19 GET /agents/signin/{id} for each; a flip to signed in
+  // drops the line and runs the connection check.
+  const showsManualSignin = (p: Det) => {
+    const c = card(p.id)
+    if (c.phase !== 'idle' || signinHelpOn(p.id)) return false
+    if (p.installed) return p.signedIn === false
+    return agentInstallOn && !!c.notReady && !!c.installedSignedOut
+  }
+  const manualSigninKey = ob.phase === 'connect' && ob.det === 'cards'
+    ? ob.provs.filter(showsManualSignin).map((p) => p.id).join(',')
+    : ''
+  useEffect(() => {
+    if (!manualSigninKey) return
+    const ids = manualSigninKey.split(',')
+    const timer = window.setInterval(() => {
+      for (const id of ids) {
+        void api.signinStatus(id).then((s) => {
+          if (s.signedIn !== true) return
+          const p = ob.provs.find((x) => x.id === id)
+          if (!p || !showsManualSignin(p)) return
+          const signedIn = { ...p, signedIn: true }
+          up((o) => { o.provs = o.provs.map((x) => (x.id === id ? signedIn : x)) })
+          setCard(id, { installedSignedOut: false })
+          startCheck(signedIn)
+        }).catch(() => { /* backend hiccup, keep polling */ })
+      }
+    }, 2000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manualSigninKey])
 
   // ----- Free local AI card machine (§10): install the missing pieces in
   // order — OpenCode, Ollama, the model — then the connection check.

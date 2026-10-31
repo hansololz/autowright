@@ -1315,6 +1315,8 @@ export default function CreateFlow() {
                   value={nameEdit}
                   onChange={(e) => { setNameEdit(e.target.value); setNameErr(null) }}
                   onKeyDown={(e) => {
+                    // An IME composition owns Enter and Escape until it ends.
+                    if (e.nativeEvent.isComposing) return
                     if (e.key === 'Enter') commitTitleRename()
                     if (e.key === 'Escape') { setNameEdit(null); setNameErr(null) }
                   }}
@@ -1426,6 +1428,7 @@ export default function CreateFlow() {
                   value={descEdit}
                   onChange={(e) => setDescEdit(e.target.value)}
                   onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing) return
                     if (e.key === 'Enter') commitDescEdit()
                     if (e.key === 'Escape') setDescEdit(null)
                   }}

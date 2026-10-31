@@ -142,13 +142,17 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   message or cron firing, an app-start firing, a manual start, a retry — counts the
   automation as at capacity and joins the tail (or is refused as a manual start would be),
   and a scheduler tick drains before it fires, so a slot freed between a finish and its
-  drain is never taken by a newer arrival ahead of the head. **Staleness is checked on
+  drain is never taken by a newer arrival ahead of the head (the tick's drain is guarded:
+  an error finishing one stale entry is logged and never silences the automation's
+  triggers for that tick, 2026-10-30 second sweep). **Staleness is checked on
   every tick, not only at the head with a free slot**: a message entry past the TTL
   finishes `skipped` and its sender is told then, even while every slot stays busy for
   hours — the 120 s cap is a cap on the wait, not on the wait once a slot frees. A head
   whose promotion fails for a reason that will not clear (anything but an `OSError`,
   which the next finish or tick retries, or the engine's own refusals — slot taken,
-  shutting down, being deleted — which keep the head waiting) finishes `skipped` with the note "couldn't be
+  shutting down, being deleted, data path unreachable — raised as the engine's
+  `AdmissionRefused` (a `RuntimeError` subclass; any other `RuntimeError` is a failure that
+  will not clear, 2026-10-30 second sweep) and keeping the head waiting) finishes `skipped` with the note "couldn't be
   started" rather than wedging the queue behind it. Promotion reuses the queued record:
   the same record's steps are filled in and its status flips `queued` → `executing`, so a
   firing produces exactly one execution record from admission to finish. Cancelling a queued
@@ -652,7 +656,14 @@ every **other declared** distribution (across all automations) to its installed 
 dependencies too); an undeclared transitive dependency may still move on an explicit
 Update — that is the one moment the user asked for change — no manifest is touched, because
 manifests carry no version; every automation declaring the distribution picks up the new
-version at its next execution automatically.
+version at its next execution automatically. After any successful pip run (ensure or Update)
+the directory is tidied: pip's `--target` upgrade leaves the previous `<name>-<old>.dist-info`
+beside the new one and `importlib.metadata` then reports whichever it lists first, so every
+duplicate `.dist-info` of a distribution but the newest-written one is removed, and the
+installed-check itself prefers the newest-written when duplicates remain (2026-10-30 second
+sweep: the outdated badge never cleared and the pins could pin the stale version). Update
+re-runs the installed-check after taking the pip lock, as ensure does, so a package a
+concurrent ensure installed during the wait is never reported "not installed".
 
 **Native tools (deliberately deferred).** System binaries (ffmpeg, tesseract, …) are not
 installable — pip is the only channel. That never justifies a contorted workaround: the

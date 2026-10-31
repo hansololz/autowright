@@ -37,7 +37,7 @@ from . import harness, packages as pkglib, paths, reqlog, triggers as triggerlib
 from .events import hub
 from .imports_check import ALLOWED_IMPORTS, disallowed_imports
 from .specmd import blocks_to_md, md_to_blocks
-from .storage import SECRET_REF_RE, step_json
+from .storage import SECRET_REF_RE, _kind_ok, step_json
 from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.drafting")
@@ -835,49 +835,25 @@ def parse_envelope(text: str) -> dict[str, str]:
 _blocked_mark_outside_fences = harness.blocked_mark_outside_fences
 
 
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
-
-
 def build_rules_bullets(spec_md: str | None) -> list[str]:
-    """§8: the bullets under the SPEC's first h2 titled "Build rules" (case
-    ignored, a trailing colon ignored), up to the next heading of the same or
-    a higher level — the texts a constraint blocker's `rule` must quote. An
-    indented non-bullet line continues the bullet above it; fenced code is
-    never a heading or a bullet."""
+    """§8: the `li` blocks (specmd.md_to_blocks) under the SPEC's first h2
+    titled "Build rules" (case ignored, a trailing colon ignored), up to the
+    next h1 or h2: the texts a constraint blocker's `rule` must quote. The
+    same blocks §11 "Remove the rule" searches, so a `*`, `+` or numbered
+    line, or an indented continuation, is never a rule."""
+    blocks = md_to_blocks(spec_md or "")
+    heading = next((i for i, b in enumerate(blocks)
+                    if b["kind"] == "h2"
+                    and b["text"].strip().rstrip(":").strip().lower() == "build rules"), None)
+    if heading is None:
+        return []
     bullets: list[str] = []
-    inside = False
-    fenced = False
-    current: str | None = None
-    for line in (spec_md or "").split("\n"):
-        if line.strip().startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced:
-            continue
-        heading = _HEADING_RE.match(line)
-        if heading:
-            level, title = len(heading.group(1)), heading.group(2).strip()
-            if inside and level <= 2:
-                break
-            if not inside and level == 2 and title.rstrip(":").strip().lower() == "build rules":
-                inside = True
-            continue
-        if not inside:
-            continue
-        bullet = _BULLET_RE.match(line)
-        if bullet:
-            if current is not None:
-                bullets.append(current)
-            current = bullet.group(1).strip()
-        elif current is not None and line.strip() and line[:1].isspace():
-            current += " " + line.strip()
-        elif current is not None:
-            bullets.append(current)
-            current = None
-    if current is not None:
-        bullets.append(current)
-    return [b for b in bullets if b]
+    for block in blocks[heading + 1:]:
+        if block["kind"] in ("h1", "h2"):
+            break
+        if block["kind"] == "li" and block["text"]:
+            bullets.append(block["text"])
+    return bullets
 
 
 def parse_blockers(text: str, locked_names: set[str] | None = None,
@@ -1048,13 +1024,22 @@ def parse_dialect_entry(t, allow_time: bool = False, *,
             return None, f"triggers: {err}"
         return entry, None
     if "imessage" in keys and keys <= {"imessage", "pattern"}:
+        handle = t["imessage"]
+        # §8: an unquoted +15551234567 reads as a YAML integer and loses its
+        # `+`, so an integer handle is read back as `+<digits>`.
+        if isinstance(handle, int) and not isinstance(handle, bool) and handle >= 0:
+            handle = f"+{handle}"
         entry = {"kind": "imessage",
-                 "from": triggerlib.normalize_handle(str(t["imessage"])), "enabled": True,
+                 "from": triggerlib.normalize_handle(str(handle)), "enabled": True,
                  **({"pattern": str(t["pattern"]).strip()} if t.get("pattern") else {})}
         if err := triggerlib.validate_trigger(entry):
             return None, f"triggers: {err}"
         return entry, None
     if "discord" in keys and keys <= {"discord", "secret", "pattern", "mention", "author"}:
+        # §8 rule 9: a non-boolean `mention` (a quoted "true") is an error,
+        # never dropped: dropping it would fire on every message.
+        if "mention" in t and not isinstance(t["mention"], bool):
+            return None, "triggers: `mention` must be true or false"
         # author: scalar accepted as shorthand for a one-element list (§8)
         au = t.get("author")
         au = au if isinstance(au, list) else [au] if au else []
@@ -1468,6 +1453,16 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             errors.append(f"param {p['name']}: unknown kind {p['kind']}")
         if "default" not in p:
             errors.append(f"param {p['name']}: missing default")
+        elif (p["kind"] in PARAM_KINDS and p["default"] is not None
+              and not _kind_ok(p["kind"], p["default"])):
+            # §8 rule 3: the Review card and the runtime would otherwise
+            # disagree about the default (storage.param_default drops it).
+            errors.append(f"param {p['name']}: the default isn't a {p['kind']} value")
+        for field in ("label", "help"):
+            if field in p and not isinstance(p[field], str):
+                hint = (" (quote it: YAML reads yes/no/on/off as booleans)"
+                        if isinstance(p[field], bool) else "")
+                errors.append(f"param {p['name']}: `{field}` must be text{hint}")
         if p["kind"] == "number" and "min" not in p:
             p["min"] = 0
         # §8: unknown param keys drop silently (unlike unknown manifest and
@@ -1550,6 +1545,10 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             errors.append(f"step {i}: `authored_by` must be agent or user")
         if "locked" in s and not isinstance(s["locked"], bool):
             errors.append(f"step {i}: `locked` must be true or false")
+        # §8 rule 7: `agent` is never read by truthiness, a quoted "false"
+        # must not become an agent step.
+        if "agent" in s and not isinstance(s["agent"], bool):
+            errors.append(f"step {i}: `agent` must be true or false")
     # §4.1 / §8 rule 3: step names are non-blank and unique (compared after
     # trimming) — every by-name match (the lock splice below, the §11 chips,
     # the §19 diff) rests on it, so this runs before the lock checks.
@@ -1613,12 +1612,12 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             # Everything below reads these as text — the repair round fixes
             # the shape first.
             continue
-        if s.get("agent") and not (s.get("why") or "").strip():
+        if s.get("agent") is True and not (s.get("why") or "").strip():
             errors.append(f"step {s.get('name')}: agent: true requires a why")
         ags = s.get("agents")
         declared_agents: set[str] = set()
         if ags is not None:
-            if not s.get("agent"):
+            if s.get("agent") is not True:
                 errors.append(f"step {s.get('name')}: agents is only valid on agent: true steps")
             elif (not isinstance(ags, list)
                   or not all(isinstance(x, dict) and isinstance(x.get("id"), str)
@@ -1706,6 +1705,10 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                 errors.append(f"{s.get('file')}: import {mod} isn't allowed")
         except SyntaxError as e:
             errors.append(f"{s.get('file')}: syntax error — {e.msg} (line {e.lineno})")
+        except (ValueError, MemoryError, RecursionError):
+            # §8 rule 4: CPython raises these, not SyntaxError, on code
+            # nested too deeply for its parser.
+            errors.append(f"{s.get('file')}: couldn't be parsed (too deeply nested)")
         t = s.get("timeout")
         r = s.get("retries")
         # §8 rule 3: a scalar `secrets` / `packages` / `agents` is already an
@@ -1717,12 +1720,12 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
             # so they are stored trimmed.
             "file": s.get("file"), "name": str(s.get("name") or "").strip(),
             "description": s.get("description", ""),
-            "agent": bool(s.get("agent")), "why": s.get("why", ""),
+            "agent": s.get("agent") is True, "why": s.get("why", ""),
             "agents": [{"id": x["id"],
                         **({"why": str(x["why"]).strip()} if str(x.get("why") or "").strip() else {})}
                        for x in ags
                        if isinstance(x, dict) and isinstance(x.get("id"), str)]
-                      if s.get("agent") and isinstance(ags, list) else [],
+                      if s.get("agent") is True and isinstance(ags, list) else [],
             "secrets": [{"id": x["id"], "why": str(x.get("why") or "").strip()}
                         for x in (secs if isinstance(secs, list) else [])
                         if isinstance(x, dict) and isinstance(x.get("id"), str)],

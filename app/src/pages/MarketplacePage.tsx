@@ -313,7 +313,7 @@ function AddMarketplaceModal({ onClose, onAdded }: {
               className="ad-input mono"
               value={value}
               onChange={(e) => { setValue(e.target.value); setError(null) }}
-              onKeyDown={(e) => { if (e.key === 'Enter') submitField() }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) submitField() }}
               autoFocus
               spellCheck={false}
               placeholder="https://… or /path/to/marketplace-catalog.yaml"

@@ -105,12 +105,12 @@ def manifest_step_entry(s: dict, fname: str) -> dict[str, Any]:
     # §4.1 per-step time limit + §7 retry pair. The internal shape is
     # snake_case only — the API boundary normalizes the camelCase client
     # spelling before anything reaches storage.
-    if lenient_int(s.get("timeout")):
-        entry["timeout"] = lenient_int(s.get("timeout"))
+    if (timeout := step_timeout_value(s)) is not None:
+        entry["timeout"] = timeout
     if s.get("no_timeout"):
         entry["no_timeout"] = True
-    if lenient_int(s.get("retries")):
-        entry["retries"] = lenient_int(s.get("retries"))
+    if retries := step_retries_value(s):
+        entry["retries"] = retries
     if s.get("infinite_retries"):
         entry["infinite_retries"] = True
     # §4.1 authorship and lock — written only when set (absent = agent /
@@ -168,6 +168,39 @@ def lenient_int(v: Any) -> int:
         return 0
 
 
+STEP_TIMEOUT_MAX_S = 365 * 86400  # §4.1: a stored timeout above a year reads as absent
+
+
+def step_timeout_value(s: dict) -> int | None:
+    """§4.1 the ONE reader of a stored step `timeout` (2026-10-30 second
+    sweep), shared by the §19 serialization, the §5 manifest writer and the
+    §6 engine: a positive integer of at most one year (a lenient text form
+    like "30" included), else None (absent: the default applies). The cap
+    keeps a hand-edited `1e300` out of the engine's watchdog timer, which
+    overflows on it and would leave the step with no limit at all."""
+    # lenient_int maps .inf / .nan (OverflowError, ValueError) to 0; a YAML
+    # bool is not an integer.
+    value = s.get("timeout")
+    if isinstance(value, bool):
+        return None
+    timeout = lenient_int(value)
+    return timeout if 0 < timeout <= STEP_TIMEOUT_MAX_S else None
+
+
+def step_retries_value(s: dict) -> int:
+    """§4.1 the ONE reader of a stored step `retries` (2026-10-30 second
+    sweep): an integer 1-10 (a lenient text form like "3" included), else 0,
+    so a hand-edited `retries: 500` never makes the engine do what the UI
+    does not show."""
+    # lenient_int maps .inf / .nan (OverflowError, ValueError) to 0; a YAML
+    # bool is not an integer.
+    value = s.get("retries")
+    if isinstance(value, bool):
+        return 0
+    retries = lenient_int(value)
+    return retries if 1 <= retries <= 10 else 0
+
+
 def step_json(s: dict) -> dict:
     """The ONE §4.1 API serialization of an internal (snake_case) step — used
     by versions, drafts, the pending slot, and the §19 draft-job result, so a
@@ -183,12 +216,13 @@ def step_json(s: dict) -> dict:
         out["why"] = s.get("why", "")
     # §19/§21.4 (2026-10-30): served only when it reads as a positive integer
     # (retries 1-10) — a hand-edited `timeout: abc` degrades to the default
-    # (absent), never a `0` every later save would refuse.
-    if s.get("timeout") and (timeout := lenient_int(s["timeout"])) > 0:
+    # (absent), never a `0` every later save would refuse. The shared §4.1
+    # readers keep this in step with the engine.
+    if (timeout := step_timeout_value(s)) is not None:
         out["timeout"] = timeout
     if s.get("no_timeout"):
         out["noTimeout"] = True
-    if s.get("retries") and 1 <= (retries := lenient_int(s["retries"])) <= 10:
+    if retries := step_retries_value(s):
         out["retries"] = retries
     if s.get("infinite_retries"):
         out["infiniteRetries"] = True
@@ -960,10 +994,17 @@ class Store:
             name = str(name)
         elif not isinstance(name, str) or not name:
             name = d.name
+        # §5 (2026-10-30 second sweep): a description that is not text loads
+        # as its text form for a plain scalar (a YAML date `2026-10-30` →
+        # "2026-10-30"), "" otherwise (missing, a list, a mapping).
+        description = top.get("description")
+        if not isinstance(description, str):
+            description = "" if description is None or isinstance(description, (list, dict)) \
+                else str(description)
         a: dict = {
             "id": top["id"],
             "name": name,
-            "description": top.get("description", ""),
+            "description": description,
             "current_version": int(top.get("current_version", 1)),
             "triggers": self._load_triggers(top.get("triggers", []) or []),
             "agent_id": top.get("agent_id"),
@@ -1000,7 +1041,7 @@ class Store:
                     # §5 crash orphan: the writer landed this folder's manifest
                     # but the pointer flip never happened — the save failed as
                     # a whole, so it is never adopted (left on disk; the next
-                    # save numbers past it).
+                    # save or restore sets it aside as `vN.orphan`).
                     log.warning("version folder %s is above current version v%s — "
                                 "ignoring it (a save that never completed)",
                                 vd, a["current_version"])
@@ -1866,10 +1907,40 @@ class Store:
         else:
             a.pop("unresolved_references", None)
 
+    def _set_aside_orphan_versions(self, a: dict) -> None:
+        """§5 crash orphans (2026-10-30 second sweep): before a save or restore
+        numbers a new version, every `vN` folder above `current_version` that
+        the history does not hold is renamed aside to `vN.orphan` (then
+        `vN.orphan-2`, ...), so once the pointer moves past it the startup walk
+        can never adopt it as a real version. Caller holds the lock."""
+        vdir = self.auto_dir(a) / "versions"
+        if not vdir.is_dir():
+            return
+        for vd in sorted(vdir.iterdir()):
+            m = re.fullmatch(r"v(\d+)", vd.name)
+            if not m:
+                continue
+            number = int(m.group(1))
+            if number <= a["current_version"] or number in a["versions"]:
+                continue
+            target = vdir / f"{vd.name}.orphan"
+            suffix = 2
+            while target.exists():
+                target = vdir / f"{vd.name}.orphan-{suffix}"
+                suffix += 1
+            try:
+                vd.rename(target)
+                log.warning("version folder %s is a crash orphan above v%s, set aside as %s",
+                            vd, a["current_version"], target.name)
+            except OSError as exc:
+                # The numbering below still skips a folder it cannot move.
+                log.warning("couldn't set aside crash-orphan version folder %s: %s", vd, exc)
+
     def save_new_version(self, a: dict, ver: dict) -> int:
         """§4.4/§5: write vN+1 folder, then flip the pointer atomically."""
         with self.lock:
             self._still_registered(a)
+            self._set_aside_orphan_versions(a)
             n = a["current_version"] + 1
             # §5: free both in memory and on disk — a vN folder the startup
             # walk skipped (unreadable manifest, a half-repaired folder) is
@@ -1910,6 +1981,7 @@ class Store:
     def restore_version(self, a: dict, v: int) -> int:
         with self.lock:
             self._still_registered(a)
+            self._set_aside_orphan_versions(a)
             n = a["current_version"] + 1
             # §5: free both in memory and on disk — a vN folder the startup
             # walk skipped (unreadable manifest, a half-repaired folder) is

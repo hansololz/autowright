@@ -39,7 +39,7 @@ type UpdateCheck =
   | { state: 'error'; error?: string }
   | { state: 'available'; version: string }
   | { state: 'downloading'; version: string; percent: number | null }
-  | { state: 'downloaded'; version: string; busy?: boolean }
+  | { state: 'downloaded'; version: string; busy?: boolean; staged?: boolean }
   | { state: 'failed'; error: string }
 
 // One doc modal for both document rows (§9.4). Dynamic `?raw` imports keep the
@@ -149,7 +149,9 @@ export default function AboutPage() {
       { error: 'updater unavailable' } as const
     ))
     setInstalling(false)
-    if (r && 'busy' in r) setUpd({ state: 'downloaded', version: v, busy: true })
+    // §9.4: `staged` (macOS) means the bundle was staged before the re-check
+    // found an execution live, so it finishes at the next quit.
+    if (r && 'busy' in r) setUpd({ state: 'downloaded', version: v, busy: true, staged: r.staged === true })
     // §9.4: the updater refused to quit (nothing staged, a stale download, a
     // failed installer spawn) or the call itself rejected — the same "Update
     // failed" sub-line and button revert as a download error, never a card
@@ -186,6 +188,7 @@ export default function AboutPage() {
     downloading: 'version' in upd ? `Version ${upd.version} is available.` : '',
     downloaded: upd.state === 'downloaded' && upd.busy
       ? 'An automation is executing. The update installs when you restart after it finishes.'
+        + (upd.staged ? ' The update is already staged and finishes when the app next quits.' : '')
       : 'Update downloaded. Only the app restarts, not your automations.',
     failed: upd.state === 'failed' ? `Update failed: ${upd.error}` : '',
     // §3: a carried detail wins — the no-feed line must never read as a

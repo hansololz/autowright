@@ -87,10 +87,14 @@ the update bullets below).
   result line — `service install` reports its reason on **stdout** and exits 1, so the
   detail is `stdout || stderr || the exec error`, never the bare "Command failed: <cmd>"
   (2026-10-30; a failed version-sync reinstall records `failed` the same way instead of
-  leaving the status `ok` with the old backend booted out). The health check that ends the
-  wait also requires `/health`'s `pid` to equal the `backend.json` pid — a 200 from
-  another Autowright backend squatting the recorded port (another user's, an isolated
-  dev home's) is not ours (2026-10-30). The renderer reads that status over
+  leaving the status `ok` with the old backend booted out). The health check also compares
+  `/health`'s `pid` with the `backend.json` pid **when both carry one**: equal is ours,
+  different is another Autowright backend squatting the recorded port (another user's, an
+  isolated dev home's) and not ours; a `/health` body without a `pid` (every backend
+  released before 2026-10-30) is judged by `app` and `version` alone, so the first launch
+  after an update never mistakes the previous release's backend for a foreign one and
+  boots it out mid-execution (2026-10-30 second sweep: it did, skipping the live-execution
+  drain of the version sync). The renderer reads that status over
   the preload bridge (`backend-status` IPC: `{ state: 'idle'|'installing'|'ok'|'failed', detail }`)
   and the §9 boot splash shows the failure detail instead of waiting silently. The renderer keeps
   retrying regardless — a late backend still connects. An install the shell drops because a
@@ -606,7 +610,9 @@ the update bullets below).
   fires a `reset-all` IPC; the Electron main process orchestrates, in order:
   0. A reset already in flight, or a quit flight, native quit or update install in
      progress, refuses the call (`{ error }`) — one stop-and-quit at a time, in either
-     direction (2026-10-30: a second `reset-all` ran a second delete concurrently).
+     direction (2026-10-30: a second `reset-all` ran a second delete concurrently);
+     symmetrically `update-install` refuses `{ error }` while a reset, a quit flight or a
+     native quit is in progress (2026-10-30 second sweep: only the reset side checked).
   1. The same live-execution gate as quit-all/update-install (busy → `{ busy: true }`,
      nothing touched; an unreachable backend counts as idle — but a reachable backend that
      answers the probe with anything but 200 (a stale token, a 500 mid-execution) is
@@ -825,15 +831,25 @@ the update bullets below).
     resolves `{ ok: true }` with the verified zip in electron-updater's cache (the
     handler remembers the downloaded version; a later `update-download` for a different
     version answers `{ error: "Restart to finish the update you already downloaded." }`
-    rather than resolving on electron-updater's never-reset `squirrelDownloadedUpdate`
-    flag and installing the older bundle). The Squirrel hand-off moves to `update-install`:
+    only once a bundle is **staged** — a staged bundle is what ShipIt installs, while a
+    download alone is replaceable — or when electron-updater's never-reset
+    `squirrelDownloadedUpdate` flag is set with no version recorded; a download while an
+    `update-install` is in flight is refused with the same line, since re-entering
+    `MacUpdater` closes the proxy Squirrel is reading from, 2026-10-30 second sweep). The Squirrel hand-off moves to `update-install`:
     behind the gate, the darwin handler subscribes to Electron's `autoUpdater`
     `update-downloaded`/`error` events, calls its `checkForUpdates()` (Squirrel fetches
     the zip from the proxy, verifies the code signature, stages the bundle) and only then
     `quitAndInstall()`; the About row reads "Installing…" meanwhile (§9.4), an `error`
     event settles `{ error }` with the bundle untouched, and if Squirrel emits neither
     within 10 minutes the handler settles with a plain-word error instead of hanging
-    the flow forever. Unverified on a real host (ports.md). There is no dev fork: `forceDevUpdateConfig` is set unconditionally (a
+    the flow forever (a staging that completes after that give-up is logged when it
+    lands — the bundle is then staged and installs on the next quit). Staging takes
+    minutes, so the live-execution gate runs **again** once the bundle is staged: an
+    execution that started meanwhile answers `{ busy: true, staged: true }` and nothing
+    quits (the §9.4 card says the staged update finishes at the next quit); a repeated
+    `update-install` with a bundle already staged skips straight to the gate and
+    `quitAndInstall()` — Squirrel is never re-engaged over a staged bundle (2026-10-30
+    second sweep). Unverified on a real host (ports.md). There is no dev fork: `forceDevUpdateConfig` is set unconditionally (a
     packaged app ignores it) so an unpackaged dev launch runs the same real path — the
     provider config always comes from the constructor options, never from a yml — and an
     unsigned dev build surfaces Squirrel's real signature error in the UI.

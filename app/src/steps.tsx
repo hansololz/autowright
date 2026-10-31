@@ -529,7 +529,7 @@ function StepRow({ step, i, last, editor, tags, onOpen }: {
 }
 
 // The arrow keys flip the viewed step (↑ / ↓ along the navigator's own axis,
-// ← / → along the chevrons'); ⌘F / Ctrl+F opens the find bar. Rendered inside the Modal so it can see `closing`: the children stay
+// ← / → as their horizontal twins); ⌘F / Ctrl+F opens the find bar. Rendered inside the Modal so it can see `closing`: the children stay
 // mounted through the ~200 ms exit animation, and a key press then would act
 // on the fading card — same guard shape as the Modal's own Escape handler.
 // The flip keys ignore editable targets, so typing in the find field never
@@ -601,7 +601,7 @@ export function StepKeys({ i, count, closing, paused, flipsOff, onNav, onFind, o
 // holding the detail, plus the detail variant's modal-only package chips).
 // Right, the code pane at full height on the code ground: a fixed toolbar
 // (STEP N OF M eyebrow, the §4.1 version-folder filename — its one appearance
-// in the UI — the line count, prev / next / close) over the line-numbered
+// in the UI — the line count, find / close) over the line-numbered
 // script in its own scroll pane. Only the code pane remounts through the §14
 // keyed fade (resetting its scroll) when the step switches; the navigator and
 // the toolbar stay put, so nothing under the pointer flashes.
@@ -614,8 +614,8 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
   setEdit?: (fn: (e: StepEdit | null) => StepEdit | null) => void
   // §11 edit footer (move / lock / remove, Cancel / Save) — rendered on the
   // viewed row of the editor variant in edit mode, beneath the tag row: the
-  // row is what moves, so the arrows sit on the thing they move, away from
-  // the toolbar's ‹ › chevrons
+  // row is what moves, so the arrows sit on the thing they move, not in the
+  // toolbar
   controls?: React.ReactNode
   // §11 the Edit pen, right-aligned on the viewed row's title line (view mode)
   editButton?: React.ReactNode
@@ -1122,7 +1122,8 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
 }
 
 // Holds the viewed-step index locally so opening the modal re-renders only
-// this list. One step shows at a time; prev / next flips inside the modal.
+// this list. One step shows at a time; the navigator rows and the arrow keys
+// flip it inside the modal.
 // `history` / `viewing` feed the §9.2 change badge: the stored revisions
 // (current version + `versions`) and which revision these steps belong to.
 export type StepListProps = {
@@ -1172,7 +1173,7 @@ export function StepList(props: StepListProps) {
     // click, so it only consumes the marker here, never re-applies it.
     if (ownChange.current) { ownChange.current = null; return }
     const e = editRef.current
-    if (e && stepEditDirty(e)) { setSwapAsk(true); return }
+    if (e && stepEditUnsaved(e)) { setSwapAsk(true); return }
     if (e) dropEdit()
     setViewing(null)
   }, [steps]) // eslint-disable-line react-hooks/exhaustive-deps

@@ -293,9 +293,15 @@ whatever the user is drafting in the app. Files:
   (a manifest-side edit), so an in-app rename or description edit made since the pull —
   neither mints a version — is never reverted by a later push; and a manifest schedule
   that was among the pulled lines but is no longer stored (deleted in the app since)
-  is not re-added. A push that applied a manifest-side `name`, `description` or schedule
-  edit rewrites the matching `pulled_*` baseline to what it applied (beside `pulled_from`),
-  so a later in-app edit is judged against the workdir's last push, not its last pull. A
+  is not re-added. A push that applied a manifest-side `name` or `description` edit rewrites the
+  matching `pulled_*` baseline to what it applied (beside `pulled_from`), and
+  `pulled_triggers` becomes every schedule line the manifest holds as pushed — the lines
+  skipped as deleted-in-app included, so the next push skips them again instead of reading
+  them as new lines (2026-10-30 second sweep: a schedule deleted in the app came back on
+  the second push) — so a later in-app edit is judged against the workdir's last push, not
+  its last pull. The baseline and the stale check below apply only when `pulled_id` names
+  the automation being pushed; a workdir pulled from one automation and pushed into another
+  is judged as a manifest without the keys (2026-10-30 second sweep). A
   manifest without those keys (an older pull) keeps the earlier behaviour. `pulled_id` is what `validate` and `push` send as the §19 `automationId`,
   and the §5.1 unresolved-reference map rides the local pre-pass too, so their lines
   match a refused save word for word. **A stale workdir does not push silently** (2026-10-28): when
@@ -335,14 +341,19 @@ exact name as the manifest spells it; an unknown name exits 1 listing the workdi
 names; the same name in both exits 1): each sets or clears that step's §4.1 `locked` key on
 the manifest in memory before validation, so the flag and a hand edit of `locked:` in the
 manifest are one path. A locked step's lock rides the version like any step field; the
-next §8 sync (from the app) keeps it byte for byte. `pull` writes `locked: true` on locked
+next §8 sync (from the app) keeps it byte for byte. Once the save lands, the flags' edits
+are written to the workdir manifest too (the manifest is re-dumped through the yaml writer,
+so comments and hand formatting are not kept, exactly as a list-valued `pulled_*` rewrite
+behaves), so the next plain push does not undo them (2026-10-30 second sweep). `pull` writes `locked: true` on locked
 steps so the lock is visible in the workdir and survives a round trip.
 
 **`automation validate <dir>`** runs the same validators push runs (below) over a workdir
 and writes nothing: prints `ok` and exits 0 when clean, otherwise one error per line and
 exit 1 — the developer loop's check before a push. It needs the backend only for the
 existence context (agents and secrets), through `POST /validate-steps` (§19, with the
-workdir's `automationId` when it has one), so its
+workdir's `pulled_id` as `automationId` when that automation exists here — an id this
+backend doesn't know, a deleted automation or a workdir from another machine, is ignored
+and the workdir validates on its own, 2026-10-30 second sweep), so its
 errors match the server's word for word; the grant checks (`--grant-*`, "an agent step
 needs at least one granted agent") belong to the target automation and run only on push
 and create — validate's help says so.

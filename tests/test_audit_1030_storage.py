@@ -174,8 +174,10 @@ def test_a_version_folder_above_current_is_ignored_and_numbered_past(store, home
     assert b["current_version"] == 1
     assert set(b["versions"]) == {1}
     assert (versions / "v2" / "automation.yaml").exists()  # left on disk
-    assert s2.save_new_version(b, make_version(note="Next")) == 3
-    assert (versions / "v2" / "automation.yaml").exists()
+    # 2026-10-30 second sweep: the next save sets the orphan aside first,
+    # then numbers the new version into the freed slot.
+    assert s2.save_new_version(b, make_version(note="Next")) == 2
+    assert (versions / "v2.orphan" / "automation.yaml").exists()
 
 
 # ---------- S7 §21.4 the legacy draft instructions.md survives a draft save ----------

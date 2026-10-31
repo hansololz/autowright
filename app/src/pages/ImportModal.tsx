@@ -131,7 +131,7 @@ export default function ImportModal({ onDone, onClose, initial }: {
               className="ad-input"
               value={url}
               onChange={(e) => { setUrl(e.target.value); setError(null) }}
-              onKeyDown={(e) => { if (e.key === 'Enter') void fetchUrl() }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) void fetchUrl() }}
               autoFocus
               spellCheck={false}
               placeholder="https://github.com/… or a direct .autowright link"

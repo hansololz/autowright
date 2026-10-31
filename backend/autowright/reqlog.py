@@ -111,6 +111,20 @@ def _write(d, stem: str, text: str, cap: int) -> None:
         pass
 
 
+def _drop_partial_utf8_tail(body: bytes) -> bytes:
+    """`body` without an incomplete UTF-8 sequence at its end (at most the
+    last three bytes, a lead byte whose continuation bytes were cut off)."""
+    for back in range(1, min(4, len(body)) + 1):
+        byte = body[-back]
+        if byte & 0xC0 == 0x80:  # continuation byte: keep looking for the lead
+            continue
+        if byte & 0x80 == 0:  # ASCII: nothing incomplete
+            return body
+        needed = 2 if byte & 0xE0 == 0xC0 else 3 if byte & 0xF0 == 0xE0 else 4 if byte & 0xF8 == 0xF0 else 0
+        return body[:-back] if needed > back else body
+    return body
+
+
 def _body_text(body: bytes, total: int, redact: bool) -> str:
     """`body` is the captured prefix (≤ BODY_CAP), `total` the true byte count."""
     if redact:
@@ -118,6 +132,10 @@ def _body_text(body: bytes, total: int, redact: bool) -> str:
     if total == 0:
         return "(empty)"
     note = f"\n… truncated ({total} bytes total, first {len(body)} kept)" if total > len(body) else ""
+    if note:
+        # A cut can land inside a multibyte character: drop the incomplete
+        # trailing UTF-8 sequence so a text body never renders as binary.
+        body = _drop_partial_utf8_tail(body)
     try:
         return body.decode("utf-8") + note
     except UnicodeDecodeError:

@@ -808,7 +808,7 @@ def test_trigger_off_cancels_unmatched_imessage_entries(store, monkeypatch):
 
 
 def test_drain_queue_slot_race_leaves_entry_queued(store, monkeypatch):
-    """§6 drain race: at_capacity said free but start answers RuntimeError (a
+    """§6 drain race: at_capacity said free but start answers CapacityError (a
     concurrent starter took the slot) — drain returns and the entry stays
     queued for the next finish; an entry with no queued_at counts as fresh,
     never stale."""
@@ -824,8 +824,10 @@ def test_drain_queue_slot_race_leaves_entry_queued(store, monkeypatch):
     head["queued_at"] = None  # §6: no timestamp reads as freshly queued
 
     a["_live"] = set()  # capacity looks free…
+    from autowright.engine import CapacityError
+
     monkeypatch.setattr(engine, "start",
-                        lambda *args, **kw: (_ for _ in ()).throw(RuntimeError("already executing")))
+                        lambda *args, **kw: (_ for _ in ()).throw(CapacityError("already executing")))
     drain_queue(store, engine, a["id"])  # …but the slot is taken under us
     assert store.execs[head["id"]]["status"] == "queued"  # still waiting
 

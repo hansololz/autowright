@@ -143,7 +143,13 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   the user cancels/skips (never combined with retries — §8 validation; the persistent-
   automation shape, usually together with noTimeout). Both absent → 0: first failed attempt
   fails the step, and there is no automatic execution-level retry (§6). Like the timeout
-  pair, both are written by the authoring agent per the §8 retry rule. On disk and in the §8
+  pair, both are written by the authoring agent per the §8 retry rule. One reader serves
+  every consumer of the stored pair — the §19 serialization, the §5 manifest writer and the
+  §6 engine (2026-10-30 second sweep): `timeout` counts when it reads as a positive integer of
+  at most one year (31,536,000 s; a lenient text form like `"30"` included — a `1e300`
+  would overflow the §6 watchdog timer and leave the step with no limit), `retries` when it reads as an integer
+  1–10; anything else is the absent value, so a hand-edited `retries: 500` or `timeout: .inf`
+  never makes the engine do what the UI does not show. On disk and in the §8
   manifest the keys are spelled `no_timeout`, `infinite_retries` (§5 yaml is snake_case); the
   API serialization is `noTimeout`, `infiniteRetries` in every payload that carries steps,
   the §19 draft-job result included. On **input** the §19 step model accepts either

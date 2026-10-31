@@ -38,7 +38,9 @@ def md_to_blocks(md: str) -> list[dict]:
             blocks.append({"kind": "p", "text": " ".join(para)})
             para.clear()
 
-    for raw in (md or "").splitlines():
+    # Split on "\n" alone after normalising \r\n and \r: splitlines() also
+    # breaks on U+2028, U+2029, U+0085 and \x0c, splitting a heading apart.
+    for raw in (md or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         ln = raw.rstrip()
         if not ln.strip():
             flush()

@@ -27,7 +27,7 @@ from . import __version__, harness, packages as pkglib, paths, timefmt, triggers
 from .drafting import STEP_FILE_RE, validate_step_refs
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import (AGENT_REF_RE, SECRET_REF_RE, MissingStepScriptError, Store, new_id,
-                      _kind_ok, step_script_sha, strip_param_values)
+                      _kind_ok, param_default, step_script_sha, strip_param_values)
 from .untrusted_yaml import excerpt, load_untrusted
 
 FORMAT_VERSION = 2
@@ -303,9 +303,13 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
                 if any(p.get("name") == k for p in ver.get("params", []))}
         # §5.1: definitions only — a version written before the §4.2 save-side
         # strip may still hold resolved values; they must never leave the
-        # machine outside the include-values gate.
+        # machine outside the include-values gate. Each `default` is written
+        # as param_default resolves it: a stored default that doesn't match its
+        # kind (a save checks presence only) exports as the kind default, so
+        # the import-side kind check below never refuses this archive.
         meta: dict = {"description": a.get("description", ""),
-                      "params": strip_param_values(ver.get("params"))}
+                      "params": [{**p, "default": param_default(p)}
+                                 for p in strip_param_values(ver.get("params"))]}
         pkgs = [{"pip": p.get("pip"), "import": p.get("import"),
                  **({"why": p["why"]} if p.get("why") else {})}
                 for p in ver.get("packages", []) or []]
@@ -1521,7 +1525,10 @@ def _github_api(path: str):
     # other outbound read - an API listing is small, so 1 MB is plenty.
     deadline = time.monotonic() + FETCH_DEADLINE_S
     try:
-        with urllib.request.urlopen(req, timeout=open_timeout(deadline)) as r:
+        # §5.2: https only, redirects refused before they are followed, like
+        # every other outbound read.
+        with open_https_only(req, timeout=open_timeout(deadline),
+                             refuse=lambda: TransferError(REDIRECTED_OFF_HTTPS)) as r:
             expected = content_length(r)
             chunks, total = [], 0
             while chunk := r.read1(_FETCH_CHUNK):
@@ -1577,6 +1584,16 @@ def _release_asset(release) -> str | None:
     return None
 
 
+def _https_asset(url) -> str:
+    """§5.2: an archive link a GitHub listing returned (a release asset's
+    `browser_download_url`, a file's `download_url`) is fetched only over
+    https - anything else is refused before any request is sent."""
+    if not isinstance(url, str) or urlsplit(url).scheme != "https":
+        raise TransferError("the archive's download link isn't https - only "
+                            "https:// downloads can be imported")
+    return url
+
+
 def resolve_url(url: str) -> str:
     """§5.2: turn a pasted URL into a direct archive URL, or reject with 422."""
     url = url.strip()
@@ -1599,20 +1616,20 @@ def resolve_url(url: str) -> str:
         if not asset:
             raise TransferError(f"release {tag!r} of {owner}/{repo} has no "
                                 ".autowright asset")
-        return asset
+        return _https_asset(asset)
     if not (m := _GH_REPO_RE.match(path)):
         raise TransferError("unrecognized github.com URL — paste the repository page, a "
                             "release, or a direct .autowright link")
     owner, repo = m.groups()
     if asset := _release_asset(_github_api(f"/repos/{owner}/{repo}/releases/latest")):
-        return asset
+        return _https_asset(asset)
     listing = _github_api(f"/repos/{owner}/{repo}/contents/")
     files = sorted((f["name"], f.get("download_url"))
                    for f in (listing if isinstance(listing, list) else [])
                    if isinstance(f, dict) and f.get("type") == "file"
                    and str(f.get("name", "")).endswith(".autowright"))
     if files and files[0][1]:
-        return files[0][1]
+        return _https_asset(files[0][1])
     raise TransferError(f"{owner}/{repo} has no .autowright archive — checked the latest "
                         "release's assets and the repository root")
 

@@ -1082,8 +1082,8 @@ editors enter with
     while Cancel returns to view mode through the same guard. The guard counts a typed
     remember rule as unsaved work too (a rule with no field change asks before it is
     dropped, though it never enables Save on its own, 2026-10-30). ⌘S yields to the §9.3
-    developer-log overlay like every other shortcut. In edit mode the find and
-    chevron buttons stay visible but disabled and the pen is hidden.
+    developer-log overlay like every other shortcut. In edit mode the find
+    button stays visible but disabled and the pen is hidden.
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
     **description** as two `.ad-input.compact` fields in edit mode: the name a one-line
     input (required — a blank name disables Save with the inline hint "Give the step a

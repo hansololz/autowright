@@ -127,6 +127,9 @@ export function useDraftJob(d: DraftJobDeps) {
     // a stage's end is the next stage's stamp, or the settle stamp for the last.
     let lastStageTimes: { stage: string; time: number }[] = []
     let lastEndedTime: number | null = null
+    // The newest payload's feed, so a poll that gives up can still settle the
+    // stages it showed with their own slices.
+    let lastEvents: { text: string; stage?: string; time?: number }[] = []
     // Builds (and marks settled) one activity entry per given stage, each
     // carrying its own stage-stamped slice of the feed; only the last stage of
     // a terminal batch takes the job's outcome — earlier stages finished fine.
@@ -212,6 +215,7 @@ export function useDraftJob(d: DraftJobDeps) {
           noteStage(j.stage)
           lastStageTimes = j.stageTimes ?? []
           lastEndedTime = j.endedTime ?? null
+          lastEvents = evs
           const evKey = evs.length ? `${evs.length}:${evs[evs.length - 1].text}` : ''
           if (j.status === 'building' && (j.stage !== lastStage || (j.detail ?? null) !== lastDetail || evKey !== lastEvKey)) {
             lastStage = j.stage
@@ -296,6 +300,16 @@ export function useDraftJob(d: DraftJobDeps) {
           if (++pollFails < 3) return // transient - the next tick retries
           jobIdRef.current = null
           stopPoll()
+          // §11: a shown block is never removed. Every stage still live
+          // settles as failed before the failure entry lands; a poll that
+          // never observed a stage settles the pre-poll default block.
+          const pending = seenStages.filter((s) => !settledStages.has(s))
+          const rest = settleStages(lastEvents, pending, 'failed')
+          setRev((r) => {
+            if (!r) return r
+            const entries = seenStages.length ? rest : [failedLiveEntry(r)]
+            return entries.length ? { ...r, chat: [...r.chat, ...entries] } : r
+          })
           onFail((e as Error).message, undefined, true)
         } finally {
           pollInFlightRef.current = false
@@ -312,6 +326,15 @@ export function useDraftJob(d: DraftJobDeps) {
     // (the thread itself no longer rides the draft)
     ? { patch: { notes, touched: true }, chip: [newEntry({ kind: 'system' as const, icon: 'fa-note-sticky', text: 'Notes updated.' })] }
     : { patch: {}, chip: [] })
+
+  // §11: a shown block is never removed. The live progress entry a job
+  // failure ends before any stage was observed (a POST error, a poll that
+  // never answered) settles under its pre-poll default title with outcome
+  // failed and its canned bullet.
+  const failedLiveEntry = (r: Rev): ChatEntry => {
+    const title = jobStageTitle(r)
+    return newEntry({ kind: 'activity', title, text: stageDoingBullet(title), outcome: 'failed' })
+  }
 
   // The {start} half of the core: POST the job, then arm the poll — unless a
   // cancel landed while the POST was in flight (gen moved), in which case the
@@ -570,9 +593,13 @@ export function useDraftJob(d: DraftJobDeps) {
       }
       if (actions.undo && ctx.hadSnap) showToast('Last change undone.', 3200)
     },
-    onFail: (msg) => setRev((r) => r && ({
+    // §11 Failures: a poll that gave up after three failures says the job
+    // was lost, like the sync's failure entry.
+    onFail: (msg, _detail, lost) => setRev((r) => r && ({
       ...r, chatBusy: false,
-      chat: [...r.chat, newEntry({ kind: 'error', text: msg || 'The request failed — try again or rephrase.' })],
+      chat: [...r.chat, newEntry({ kind: 'error', text: lost
+        ? `The job was lost: ${msg || 'no answer from the backend'}`
+        : msg || 'The request failed — try again or rephrase.' })],
     })),
     onCancelled: () => setRev((r) => r && ({ ...r, chatBusy: false })),
     // §11: the flip's plan lands mid-job as "The plan" (rewrites follow by
@@ -640,9 +667,11 @@ export function useDraftJob(d: DraftJobDeps) {
         enabledAgents: rev.enabledAgents, allowedSecrets: rev.allowedSecrets,
       }, makeChatHandlers({ request, hadSnap, planEntryId: null }))
     } catch (e) {
+      // §11: the live block shown since send settles as failed above the
+      // error entry, never vanishing.
       setRev((r) => r && ({
         ...r, chatBusy: false,
-        chat: [...r.chat, newEntry({ kind: 'error', text: (e as Error).message })],
+        chat: [...r.chat, failedLiveEntry(r), newEntry({ kind: 'error', text: (e as Error).message })],
       }))
     }
   }
@@ -775,8 +804,9 @@ export function useDraftJob(d: DraftJobDeps) {
     } catch (e) {
       // §11 hold-and-flush: a POST that never became a job is an outcome too —
       // the held chips land like on any other failure.
+      // §11: the live sync block settles as failed first, never vanishing.
       const held = takeHeldChips()
-      setRev((r) => r && ({ ...r, syncBusy: false, ...(held.length ? { chat: [...r.chat, ...held] } : {}) }))
+      setRev((r) => r && ({ ...r, syncBusy: false, chat: [...r.chat, failedLiveEntry(r), ...held] }))
       showToast((e as Error).message)
     }
   }

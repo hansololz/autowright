@@ -788,7 +788,11 @@ def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = 
             # misses: a sleeping Mac is the one way a live scheduler misses a
             # moment, and the §6 drop record already shows each one.
             continue
-        since = enabled_since(t)  # None for a trigger stored without the stamp
+        # None for a trigger stored without the stamp, or one stamped more
+        # than FUTURE_STAMP_HOLD ahead (§6: a far-future stamp is ignored, as
+        # the scheduler ignores it). Naive wall time, as `enabled_since` reads it.
+        credible = credible_enabled_instant(t, now.astimezone())
+        since = credible.replace(tzinfo=None) if credible is not None else None
         anchor_baseline = interval_baseline if t["kind"] == "interval" else baseline
         first = trigger_next(t, after=max(baseline, since) if since else baseline,
                              run_baseline=anchor_baseline)

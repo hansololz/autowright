@@ -4,7 +4,7 @@
 // §7 filter modal — statuses, automations, a started-time range — and the
 // pager bring deeper history in via GET /executions. Every filter is one
 // predicate applied server-side and to the window's rows alike.
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { memo, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { byCanonicalOrder, useStore } from '../store'
 import { Badge, BtnGhost, EmptyNotice, Eyebrow, HeaderActions, MetaChip, PageLoading, PageTitle, PULSE, waitedLabel } from '../ui'
@@ -128,34 +128,44 @@ export default function ExecutionsList() {
   const [modalOpen, setModalOpen] = useState(false)
   const filtered = filtersActive(filters)
   const filterKey = JSON.stringify(filters)
-  // §7: one predicate, the same on the server and over the window's rows —
+  // §7 presets are relative: a 60 s clock tick re-renders the page while a
+  // preset is applied, so a row that ages out of "Last hour" leaves the page
+  // left open. Custom ranges and Any time never move, so they need no tick.
+  const [, setClockTick] = useState(0)
+  const presetActive = filters.time.preset !== 'any' && filters.time.preset !== 'custom'
+  useEffect(() => {
+    if (!presetActive) return
+    const timer = setInterval(() => setClockTick((n) => n + 1), 60_000)
+    return () => clearInterval(timer)
+  }, [presetActive])
+  // §7: one predicate, the same on the server and over the window's rows:
   // status ∈ selection (when any), automation id ∈ selection (when any),
   // startedMs within the inclusive bounds. A preset resolves against the clock
-  // once per filter change, never per use: the query and the predicate must
-  // read the same bounds, or a row fetched under one window fails the other
-  // and vanishes from the page a moment after it landed.
-  const range = useMemo(() => resolveRange(filters.time, Date.now()), [filterKey]) // eslint-disable-line react-hooks/exhaustive-deps
-  const matches = useMemo(() => {
-    const selectedStatuses = new Set<string>(filters.statuses)
-    const selectedIds = new Set(filters.automations)
-    return (e: Execution) =>
-      (selectedStatuses.size === 0 || selectedStatuses.has(e.status)) &&
-      (selectedIds.size === 0 || (e.automationId !== null && selectedIds.has(e.automationId))) &&
-      (range.from === undefined || e.startedMs >= range.from) &&
-      (range.to === undefined || e.startedMs <= range.to)
-  }, [filterKey, range]) // eslint-disable-line react-hooks/exhaustive-deps
+  // at every use: here at every render, and again at every fetch (queryFor).
+  const range = resolveRange(filters.time, Date.now())
+  const selectedStatuses = new Set<string>(filters.statuses)
+  const selectedIds = new Set(filters.automations)
+  const matches = (e: Execution) =>
+    (selectedStatuses.size === 0 || selectedStatuses.has(e.status)) &&
+    (selectedIds.size === 0 || (e.automationId !== null && selectedIds.has(e.automationId))) &&
+    (range.from === undefined || e.startedMs >= range.from) &&
+    (range.to === undefined || e.startedMs <= range.to)
   // §7: the Finished section exists only while the status selection is empty
   // or names a terminal status — live statuses alone render no table and
   // fetch nothing.
   const terminalSelected = filters.statuses.filter((s) => !LIVE_STATUSES.includes(s))
   const hasFinished = filters.statuses.length === 0 || terminalSelected.length > 0
   // §19 query for every fetch: each selected terminal status (`finished` =
-  // every terminal status when none is selected) plus the other dimensions.
-  const query = {
-    status: terminalSelected.length > 0 ? terminalSelected : 'finished',
-    ...(filters.automations.length > 0 ? { automation: filters.automations } : {}),
-    ...(range.from !== undefined ? { startedFromMs: range.from } : {}),
-    ...(range.to !== undefined ? { startedToMs: range.to } : {}),
+  // every terminal status when none is selected) plus the other dimensions,
+  // the time range resolved against the clock at the moment of the fetch.
+  const queryFor = (now: number) => {
+    const bounds = resolveRange(filters.time, now)
+    return {
+      status: terminalSelected.length > 0 ? terminalSelected : 'finished',
+      ...(filters.automations.length > 0 ? { automation: filters.automations } : {}),
+      ...(bounds.from !== undefined ? { startedFromMs: bounds.from } : {}),
+      ...(bounds.to !== undefined ? { startedToMs: bounds.to } : {}),
+    }
   }
   // §7 fetched pages and the page number: view state only — reset on unmount
   // and on every filter change. `serverTotal` is the current filter's match
@@ -177,9 +187,8 @@ export default function ExecutionsList() {
     .filter((e) => e.status === 'queued' && matches(e))
     .sort((a, b) => (a.queuedMs || a.startedMs) - (b.queuedMs || b.startedMs))
 
-  const matchesFinished = useCallback((e: Execution) =>
-    e.status !== 'queued' && e.status !== 'executing' && hasFinished && matches(e),
-  [matches, hasFinished])
+  const matchesFinished = (e: Execution) =>
+    e.status !== 'queued' && e.status !== 'executing' && hasFinished && matches(e)
   // §7 merge: fetched pages join the live window, window wins on an id both
   // hold (it is fresher — events land there), in the canonical order.
   const windowFinished = executions.filter(matchesFinished)
@@ -193,18 +202,29 @@ export default function ExecutionsList() {
   // empty", not "the answer hasn't arrived"). Unfiltered, the window is the
   // first page and nothing fetches; a live-only status selection has no
   // Finished section to fetch for.
+  // §7 reset rule: only a filter-dimension change resets fetched pages and the
+  // page number. A §19 reconnect alone keeps both: unfiltered, the absorption
+  // and the execution.deleted ring below keep the set honest; under a filter
+  // it refetches every row up to the current page (an execution.deleted
+  // missed while the socket was down is never replayed).
   const [firstFetchDone, setFirstFetchDone] = useState(true)
+  const fetchedFilterKey = useRef<string | null>(null)
   useEffect(() => {
+    const filterChanged = fetchedFilterKey.current !== filterKey
+    fetchedFilterKey.current = filterKey
     const n = ++fetchSeq.current
-    setFetched([])
-    setServerTotal(null)
-    setPage(0)
+    if (filterChanged) {
+      setFetched([])
+      setServerTotal(null)
+      setPage(0)
+    }
     if (!filtered || !hasFinished) {
       setFirstFetchDone(true)
       return
     }
-    setFirstFetchDone(false)
-    void api.listExecutions({ ...query, limit: PAGE }).then((r) => {
+    if (filterChanged) setFirstFetchDone(false)
+    const limit = filterChanged ? PAGE : (page + 1) * PAGE
+    void api.listExecutions({ ...queryFor(Date.now()), limit }).then((r) => {
       if (n !== fetchSeq.current) return
       setFetched(r.executions)
       setServerTotal(r.total)
@@ -307,7 +327,7 @@ export default function ExecutionsList() {
     const n = fetchSeq.current
     setBusy(true)
     void api.listExecutions({
-      ...query,
+      ...queryFor(Date.now()),
       limit: PAGE,
       before: { startedMs: last.startedMs, id: last.id },
     }).then((r) => {

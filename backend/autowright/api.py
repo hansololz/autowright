@@ -347,6 +347,15 @@ def _auto_json_locked(a: dict) -> dict:
         return store.auto_json(a)
 
 
+def _modified_flags(a: dict, version: int | None = None) -> list[bool]:
+    """The §4.1 `modifiedOnDisk` flag of each step of `a`'s version `version`
+    (default: current), in step order; compared around a
+    `store.disk_modified_steps` call to tell whether it flipped one."""
+    number = a["current_version"] if version is None else version
+    steps = (a["versions"].get(number) or {}).get("steps") or []
+    return [bool(s.get("modifiedOnDisk")) for s in steps if isinstance(s, dict)]
+
+
 def _publish_auto_changed(a: dict) -> None:
     """§19: a single-automation change event carries the changed row (list
     shape) so clients patch in place instead of re-fetching /state. Bare
@@ -1027,6 +1036,11 @@ def validate_steps(raw: dict = Body(...)) -> dict:
     (`_step_model_error`); only a body-level error (no `draft`, a `steps`
     that is not a list, a wrong-typed `automationId`) stays the §19 422.
     Writes nothing, touches no draft."""
+    # §19: a stale automationId answers 404 even when a step field is
+    # mistyped, so the id resolves before the request model's checks.
+    automation_id = raw.get("automationId")
+    if isinstance(automation_id, str) and automation_id:
+        _auto_or_404(automation_id)
     try:
         body = models.StepsValidate.model_validate(raw)
     except ValidationError as e:
@@ -1067,8 +1081,13 @@ def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict
         # as validated — refused before anything is created. Decided from
         # the files on disk against their seals (two-way: a reverted edit
         # clears), never only the loaded flag.
+        flags_before = _modified_flags(source)
         modified = next(iter(store.disk_modified_steps(source)), None)
         if modified is not None:
+            if _modified_flags(source) != flags_before:
+                # §4.1: the gate's disk read flipped a step flag, published
+                # so the problem shows at once (like the export gate).
+                _publish_auto_changed(source)
             raise HTTPException(409, f"Step `{modified.get('name')}` was edited on disk — "
                                      "pull and push it, or save it from the editor, "
                                      "before duplicating")
@@ -1153,9 +1172,10 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
             store.require_name_free(sent["name"], exclude_id=a["id"])
         # §4.4: a step modified on disk always mints — the save seals the
         # editor's content as a fresh, validated version.
+        # Decided from the files on disk (store.disk_modified_steps), never
+        # only the loaded flag: a hand edit made after load mints too.
         minted = (_version_content(ver) != _version_content(cur)
-                  or any(isinstance(s, dict) and s.get("modifiedOnDisk")
-                         for s in cur.get("steps") or []))
+                  or bool(store.disk_modified_steps(a)))
         n = store.save_new_version(a, ver) if minted else a["current_version"]
         patch = {k: sent[k] for k in ("agentId", "stepAgents", "allowedSecrets", "name") if k in sent}
         if triggers is not None:
@@ -1568,9 +1588,12 @@ def restore(automation_id: str, body: models.VersionRestore) -> dict:
         # A missing script is the restore's own §5 409 ("step script … is
         # missing on disk", raised by restore_version) — not this gate's.
         version_dir = store.auto_dir(a) / "versions" / f"v{v}"
+        flags_before = _modified_flags(a, v)
         modified = next((s for s in store.disk_modified_steps(a, v)
                          if (version_dir / s["file"]).is_file()), None)
         if modified is not None:
+            if _modified_flags(a, v) != flags_before:
+                _publish_auto_changed(a)  # §4.1: a flipped step flag, as the duplicate gate
             raise HTTPException(422, f"v{v}'s step `{modified.get('name')}` was edited "
                                      "on disk — pull and push it instead")
     n = store.restore_version(a, v)
@@ -2279,6 +2302,12 @@ def retry_exec(execution_id: str) -> dict:
         # §19: only the version lookup maps — any other LookupError inside
         # the retry propagates as an internal error.
         raise HTTPException(409, f"version {exec_version_label(h)} no longer exists") from e
+    except LookupError as e:
+        # §19: a record body that can't be read (execution.yaml gone or
+        # unreadable) is a 404; any other LookupError stays an internal error.
+        if str(e).strip("'\"") == "execution not found":
+            raise HTTPException(404, "execution not found") from e
+        raise
     except RuntimeError as e:
         # §7: retry answers 409 while live or when a re-saved draft's steps
         # drifted from the record.
@@ -2939,9 +2968,20 @@ def delete_all_secrets() -> dict:
         # path drops the row before the value, so a crash between the two leaves
         # orphan Keychain items, never rows claiming values that are gone.
         secrets = [s for s in store.secrets if s["id"] not in set(swept)]
-        store.save_secrets(secrets)  # §5 disk-first: write, then assign
+        # §19: the §4.8 rows the load skipped as malformed go too: each one
+        # carrying a string id gets the same Keychain delete, and the skipped
+        # set is cleared so the write leaves no raw rows behind.
+        skipped = store._skipped_secrets
+        skipped_ids = [s.get("id") for s in skipped
+                       if isinstance(s, dict) and isinstance(s.get("id"), str) and s.get("id")]
+        store._skipped_secrets = []
+        try:
+            store.save_secrets(secrets)  # §5 disk-first: write, then assign
+        except BaseException:
+            store._skipped_secrets = skipped
+            raise
         store.secrets = secrets
-    for secret_id in swept:  # Keychain IPC — outside the lock (see create_secret)
+    for secret_id in [*swept, *skipped_ids]:  # Keychain IPC — outside the lock (see create_secret)
         keychain.delete_secret(secret_id)
     hub.publish("secrets.changed")  # one event covers the whole sweep
     return {"deleted": len(swept)}
@@ -3344,7 +3384,21 @@ async def ws(sock: WebSocket, token: str = Query(""), role: str = Query("")) -> 
                 # and re-syncs (1013: try again later).
                 await sock.close(code=1013)
                 return
-            await sock.send_json(msg)
+            # §19: a str() fallback for any value the encoder doesn't know (a
+            # hand-edited YAML date), and a send that still fails closes the
+            # socket (1011) so the client reconnects and refetches, never a
+            # sender that dies quietly while the socket stays open.
+            try:
+                await sock.send_text(json.dumps(msg, default=str))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("websocket send failed; closing the socket")
+                try:
+                    await sock.close(code=1011)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
 
     # Stream in a side task and block on receive(): a quiet client publishes
     # nothing, so without the receive-watch a disconnect goes unseen and the

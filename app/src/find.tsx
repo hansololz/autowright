@@ -158,6 +158,8 @@ export function FindBar({ find, label }: { find: Find; label: string }) {
         autoFocus
         onChange={(e) => find.setQuery(e.target.value)}
         onKeyDown={(e) => {
+          // An IME composition owns Enter and Escape until it ends.
+          if (e.nativeEvent.isComposing) return
           if (e.key === 'Enter') { e.preventDefault(); find.step(e.shiftKey ? -1 : 1) }
           else if (e.key === 'Escape') { e.stopPropagation(); find.close() }
           else if (e.key.startsWith('Arrow')) e.stopPropagation()

@@ -36,6 +36,15 @@ class VersionNotFound(LookupError):
     "no longer exists" record for this one, and logs a bug inside `start`."""
 
 
+class AdmissionRefused(RuntimeError):
+    """§6: the engine's own admission refusals (the backend shutting down, the
+    data path unreachable, the automation being deleted, the execution already
+    executing). A RuntimeError subclass, so every caller's 409 mapping still
+    catches it, but a class of its own, because §6 queue promotion keeps the
+    head waiting only for a refusal that may clear: any other RuntimeError is a
+    failure that will not, and ends the head "couldn't be started"."""
+
+
 class CapacityError(RuntimeError):
     """§6: every `maxParallel` slot is taken. A RuntimeError subclass, so every
     caller's 409 mapping still catches it — but a class of its own, because the
@@ -58,9 +67,12 @@ def step_timeout_for(s: dict) -> float | None:
     the watchdog entirely (None); absent falls back to the default above."""
     if s.get("no_timeout"):
         return None
-    t = s.get("timeout")
-    if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0:
-        return float(t)
+    # §4.1 shared reader (2026-10-30 second sweep): a finite positive integer
+    # or the default, the same value the UI shows.
+    from .storage import step_timeout_value
+    timeout = step_timeout_value(s)
+    if timeout is not None:
+        return float(timeout)
     return _step_timeout()
 
 
@@ -118,11 +130,10 @@ REPLY_BUDGET = 100  # §6.1: replies one step attempt may send; the rest are dro
 
 def step_retries_for(s: dict) -> int:
     """§4.1/§7: the step's automatic retry budget per execution pass — 0 when
-    absent (§8 validation caps the manifest field at 10)."""
-    r = s.get("retries")
-    if isinstance(r, (int, float)) and not isinstance(r, bool) and r > 0:
-        return int(r)
-    return 0
+    absent or outside 1-10 (§4.1 shared reader, 2026-10-30 second sweep: the
+    same value the UI shows)."""
+    from .storage import step_retries_value
+    return step_retries_value(s)
 
 
 def step_retries_forever(s: dict) -> bool:
@@ -743,19 +754,19 @@ class Engine:
             # drain would otherwise spawn a step group after the sweep, with
             # nothing left to kill it.
             if self._stopping:
-                raise RuntimeError("the backend is shutting down")
+                raise AdmissionRefused("the backend is shutting down")
             # §4.9 degraded session: the relocated data path's executions/ dir
             # was missing at load — no record may be created, or it would start
             # a second, hidden history on the boot disk. Refused BEFORE any
             # record exists (the API answers 409 with this text).
             if self.store.exec_dir_unreachable:
-                raise RuntimeError(DATA_PATH_UNREACHABLE)
+                raise AdmissionRefused(DATA_PATH_UNREACHABLE)
             # §19 delete: an admission racing the DELETE window (the automation
             # is still registered while its live executions are cancelled and
             # awaited) must not start — it would escape the delete's wait set
             # and re-create the tree after the rmtree.
             if auto.get("_deleting"):
-                raise RuntimeError("this automation is being deleted")
+                raise AdmissionRefused("this automation is being deleted")
             # §4.5: the record stores (kind, version) — the §19 label is parsed
             # here at the boundary and never kept. Resolution runs BEFORE the
             # capacity check: §19 says an unresolvable label answers 404
@@ -823,6 +834,12 @@ class Engine:
             # it if its copy is skipped or fails.
             owed.discard(version)
             return True
+        # §6.3: an existing snapshot answers first, whatever the records say:
+        # the record scan below reads every zero-attempt record's body under
+        # store.lock, and a version that keeps failing before step 1 would
+        # pay that full read on every firing.
+        if self.store.pre_version_snapshot_exists(auto, f"v{version}"):
+            return False
         # §6.3: only a record that started at least one step attempt counts
         # as the version's recorded execution — one cancelled or interrupted
         # before step 1 (zero attempts, whatever its status) never does, so the
@@ -833,14 +850,11 @@ class Engine:
         # admitted behind one that did, and a cancel before its step 1 re-owes
         # the snapshot through the mark — so two parallel first-executions
         # still take exactly one.
-        if any(x["automation_id"] == auto["id"] and x.get("kind") == "version"
-               and x.get("version") == version
-               and not self.store.never_ran(x)
-               and (x["status"] == "executing" or self._started_an_attempt(x))
-               for x in self.store.execs.values()):
-            return False
-        # Belt and braces after a retention sweep removed the version's records.
-        return not self.store.pre_version_snapshot_exists(auto, f"v{version}")
+        return not any(x["automation_id"] == auto["id"] and x.get("kind") == "version"
+                       and x.get("version") == version
+                       and not self.store.never_ran(x)
+                       and (x["status"] == "executing" or self._started_an_attempt(x))
+                       for x in self.store.execs.values())
 
     def _started_an_attempt(self, h: dict) -> bool:
         """§6.3: True when some step of the record has a non-empty `attempts`
@@ -933,22 +947,22 @@ class Engine:
             # §3 shutdown: past the kill sweep nothing new may start — same
             # rule as `start`, and a retry launches its own engine thread.
             if self._stopping:
-                raise RuntimeError("the backend is shutting down")
+                raise AdmissionRefused("the backend is shutting down")
             # §4.9 degraded session: the same refusal as `start`.
             if self.store.exec_dir_unreachable:
-                raise RuntimeError(DATA_PATH_UNREACHABLE)
+                raise AdmissionRefused(DATA_PATH_UNREACHABLE)
             # §19 delete: the same DELETE-window refusal as `start` — a retry
             # admitted while the automation's live executions are cancelled
             # and awaited would escape the delete's wait set.
             if auto.get("_deleting"):
-                raise RuntimeError("this automation is being deleted")
+                raise AdmissionRefused("this automation is being deleted")
             # Re-read under the lock: the caller's header may be the stale
             # object a first retry already replaced in store.execs — checking
             # its status would let two concurrent retries both pass and launch
             # two engine threads on the same record.
             h = self.store.execs.get(h["id"]) or h
             if self.is_live(h["id"]):
-                raise RuntimeError("already executing")
+                raise AdmissionRefused("already executing")
             # §6: a retry is a new admission — it never jumps waiting entries.
             if admission_blocked(self.store, self, auto):
                 raise CapacityError("already executing")
@@ -956,7 +970,7 @@ class Engine:
                 raise RuntimeError("only failed executions can be retried")
             ver = self._resolve_version(auto, h["kind"], h.get("version"))
             if ver is None:
-                raise LookupError(f"version {exec_version_label(h)} not found")
+                raise VersionNotFound(f"version {exec_version_label(h)} not found")
             full = self.store.exec_full(h["id"])
             if full is None:
                 raise LookupError("execution not found")

@@ -26,10 +26,12 @@ def disallowed_imports(code: str, extra: Iterable[str] = ()) -> list[str]:
     (absolute, any nesting) is checked by its top-level package name.
     `extra` is the version's declared package imports (§6.2), accepted on top.
     Unparseable code returns [] — the syntax error surfaces at exec time.
+    Code nested too deeply to parse (CPython raises MemoryError or
+    RecursionError there, not SyntaxError) is unparseable the same way.
     """
     try:
         tree = ast.parse(code)
-    except SyntaxError:
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
         return []
     allowed = ALLOWED_IMPORTS | set(extra)
     bad: list[str] = []

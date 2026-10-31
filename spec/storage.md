@@ -394,7 +394,11 @@ never overwritten or, on a failed save, removed. A folder numbered **above**
 before the pointer flip (2026-10-30) — and the startup walk ignores it (logged, left on
 disk, never adopted into the history: the save it belonged to failed as a whole, and
 adopting the version without the top-level changes that rode the same save would be a
-half-save); the next save numbers past it like any skipped folder. A save whose pointer flip fails rolls
+half-save). The next save (or restore) that numbers a new version first renames every
+such folder aside to `vN.orphan` (`vN.orphan-2`, … when taken): once a later save has
+numbered past it, nothing would distinguish it from a real version at the next load, so it
+must never stay under a `vN` name below the pointer (2026-10-30 second sweep); the startup
+walk's `v<digits>` match ignores the renamed folder, and deleting the automation removes it. A save whose pointer flip fails rolls
 back everything the attempt touched: the version leaves memory and disk, and the
 automation's cached reference ids (memoized per version number) are dropped too, so the
 next save — which reuses the same number — is judged on its own content, never on the
@@ -524,8 +528,11 @@ bytes of aliases can describe a billion-element structure that PyYAML's safe loa
 expands happily, hanging the request thread at preview or Audit time, 2026-10-30), error
 text never embeds an untrusted value's full repr (a capped, escaped excerpt at most), and
 a parameter `default` arriving by import is type-checked against its kind with the §19
-param-values check (null allowed) — stricter than a save, which checks presence only, since
-an imported default is the one place an untrusted value lands verbatim in a version. Step file names and the §5 archive/export file names also reject the Windows
+param-values check (null allowed); the §8 validator applies the same check to a drafted
+default (2026-10-30 second sweep), and export writes each param's `default` as
+`param_default` resolves it — the stored default when it matches its kind, the kind default
+otherwise — so an automation saved before that rule still exports instead of being refused
+with "repair the automation first". Step file names and the §5 archive/export file names also reject the Windows
 device stems (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any case, with
 any extension) — on Windows a write to `nul.py` goes to the device and seals over empty
 bytes. Imported step code is normalized to LF line endings (an archive member with CRLF
@@ -534,7 +541,9 @@ reload with every blank line doubled). The same
 leniency covers a hand-edited top-level field of the wrong type: an automation `name` that
 is not text loads as its text form when it is a plain scalar (`name: 2024` → "2024") and
 as the directory name otherwise (missing, empty, a list or mapping), so a name-collision
-check or rename never raises on it.
+check or rename never raises on it; a `description` that is not text loads the same way — its
+text form for a plain scalar, `""` otherwise (2026-10-30 second sweep: `description:
+2026-10-30` is a YAML date, which the §19 event stream could not serialize).
 **Relocated data path, unreachable (decided):** only the default data path is ever created
 on first run. A relocated `dataPath` whose `executions/` directory isn't there at load (an
 unmounted volume, a typo) opens an **in-memory index for the session** and never re-creates

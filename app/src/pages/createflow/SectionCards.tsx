@@ -6,6 +6,7 @@
 import React, { useRef, useState } from 'react'
 import { usePlatformCopy } from '../../platformCopy'
 import { SecretModal } from '../../SecretModal'
+import { useStore } from '../../store'
 import { useTriggerPreview } from '../../triggers'
 import { StepList, type StepEditing, type StepHistory } from '../../steps'
 import type { Agent, SecretMeta, UnresolvedRefs } from '../../types'
@@ -405,7 +406,10 @@ export function LeftColumn({
           onClose={() => setSecretModal(false)}
           onSaved={(saved) => {
             // §11: a secret saved from this card is an explicit grant — the
-            // §19 PUT entity response carries the minted id.
+            // §19 PUT entity response carries the minted id. The store list
+            // takes the record first, so the row and the allowed count are
+            // right before the next /state refresh.
+            useStore.getState().upsertSecret(saved)
             up({ allowedSecrets: [...rev.allowedSecrets, saved.id], ...(isEdit ? { touched: true } : {}) })
           }}
         />

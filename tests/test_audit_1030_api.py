@@ -437,12 +437,24 @@ def test_an_import_error_never_embeds_a_whole_untrusted_value(client):
 def test_export_refuses_what_the_importer_would_reject(client):
     from autowright.storage import store
 
+    # 2026-10-30 second sweep: a missing param default no longer refuses (export
+    # writes `param_default`, §5.1), so the refused shape here is a package
+    # declared without a why.
+    a = store.create_automation(make_version(packages=[{"pip": "requests", "import": "requests"}]),
+                                "Whyless", "mock")
+    r = client.get(f"/automations/{a['id']}/export")
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"] == ("packages: requests needs a why — one line on what the "
+                                  "steps use it for — repair the automation first")
+
+
+def test_export_writes_the_kind_default_for_a_param_without_one(client):
+    from autowright.storage import store
+
     a = store.create_automation(make_version(), "Undefaulted", "mock")
     a["versions"][a["current_version"]]["params"][0].pop("default")
     r = client.get(f"/automations/{a['id']}/export")
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"] == ("param 'greeting': missing default — repair the "
-                                  "automation first")
+    assert r.status_code == 200, r.text
 
 
 # ---------- M4: /health carries the backend pid ----------

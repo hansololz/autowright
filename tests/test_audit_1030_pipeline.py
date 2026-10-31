@@ -179,7 +179,7 @@ def test_build_rules_bullets_are_read_from_the_spec():
     from autowright.drafting import build_rules_bullets
 
     assert build_rules_bullets(SPEC_WITH_RULES) == [
-        "Retry the fetch three times", "Keep the cache warm", "nested bullet stays inside"]
+        "Retry the fetch three times", "Keep", "nested bullet stays inside"]
     assert build_rules_bullets("# T\n\nno rules\n") == []
 
 

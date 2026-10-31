@@ -206,6 +206,21 @@ def _finish_before_run(engine: Engine, h: dict, reason: str) -> None:
         hub.publish("execution.deleted", executionId=h["id"])
 
 
+class _CopyAborted(Exception):
+    """Raised from the memory copy's `ignore` hook when the test was stopped
+    (a cancel or the shutdown sweep) while the copy ran."""
+
+
+def _copy_stop_check(state: dict):
+    """A `shutil.copytree` ignore callback that aborts the copy once
+    `state` carries a cancel or shutdown; otherwise it ignores nothing."""
+    def check(directory: str, names: list[str]) -> list[str]:
+        if state.get("cancel") or state.get("shutdown"):
+            raise _CopyAborted()
+        return []
+    return check
+
+
 def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, h: dict,
                     state: dict, dbase: Path, steps_fingerprint: str | None) -> None:
     """The test thread: re-check at registration, write the sent draft's
@@ -228,6 +243,14 @@ def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, 
             # engine would then execute.
             atomic_write_text(steps_dir / s["file"], s.get("code", ""))
 
+        # §19: a cancel, settle or shutdown that landed while the step files
+        # were written ends the test here, before the memory copy starts.
+        with store.lock:
+            reason = _stopped_before_run(engine, auto, h, state)
+        if reason is not None:
+            _finish_before_run(engine, h, reason)
+            return
+
         # §11 scratch memory: draft container's memory/ when present (edit mode
         # falls back to the automation's), create mode the pending slot's — copied
         # to a temp dir and discarded when the test ends.
@@ -240,7 +263,9 @@ def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, 
         if auto is not None and not src.exists():
             src = store.auto_dir(auto) / "memory"
         if src.exists():
-            shutil.copytree(src, mem_dir)
+            # §19: the copy re-checks for a stop at each directory it enters,
+            # so a cancel during a large memory copy stops it promptly.
+            shutil.copytree(src, mem_dir, ignore=_copy_stop_check(state))
         mem_dir.mkdir(parents=True, exist_ok=True)
         (dbase / "test.yaml").unlink(missing_ok=True)  # wiped at each test start (§5)
 
@@ -253,6 +278,15 @@ def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, 
         with store.lock:
             if engine._stopping:
                 state["shutdown"] = True
+    except _CopyAborted:
+        # §19: stopped mid-copy, finished like a stop before the run: the
+        # partial scratch copy is discarded.
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+        with store.lock:
+            reason = _stopped_before_run(engine, auto, h, state)
+        _finish_before_run(engine, h, reason or "cancelled")
+        return
     except BaseException:
         # Any setup failure takes the record with it: a permanent "executing"
         # test record trips the §19 409 forever (and delete_test_execs skips

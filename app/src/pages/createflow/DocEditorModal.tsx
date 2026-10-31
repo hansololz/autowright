@@ -67,8 +67,16 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
   // what the exit animation settles into — Save applies, everything else discards
   const pending = useRef<'save' | 'discard'>('discard')
   const closeRef = useRef<() => void>(() => {})
-  const save = () => { if (dirtyRef.current) { pending.current = 'save'; closeRef.current() } }
+  // Mirrors the Modal's `closing` flag: through the exit animation the card is
+  // already dismissed, so a ⌘S or Save after "Discard edits" never saves the
+  // discarded text, and Escape never raises the confirm over the fading card.
+  const closingRef = useRef(false)
+  const save = () => {
+    if (closingRef.current) return
+    if (dirtyRef.current) { pending.current = 'save'; closeRef.current() }
+  }
   const cancel = () => {
+    if (closingRef.current) return
     if (dirtyRef.current) setConfirm(true)
     else { pending.current = 'discard'; closeRef.current() }
   }
@@ -98,6 +106,7 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
   // Escape / backdrop: unchanged text closes; changed text raises the confirm
   // and keeps the card open (the confirm stacks above it).
   const guardClose = () => {
+    if (closingRef.current) return false
     if (!dirtyRef.current) return true
     setConfirm(true)
     return false
@@ -108,8 +117,9 @@ export function DocEditorModal({ kind, text, original, onChange, onSave, onDisca
       width={860} ariaLabel={`Edit ${meta.file}`} guardClose={guardClose}
       cardStyle={{ padding: 0, width: 'min(860px, 92vw)', overflow: 'hidden' }}
     >
-      {(close) => {
+      {(close, closing) => {
         closeRef.current = close
+        closingRef.current = closing
         return (
           <div className="ad-docmodal" data-testid="doc-editor" style={{
             height: frame, display: 'flex', flexDirection: 'column', minWidth: 0, background: 'var(--bg-code)',

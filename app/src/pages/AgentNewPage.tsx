@@ -203,8 +203,13 @@ export default function AgentNewPage() {
         // "already signed in" (or no account needed) — setup is done. Any
         // other 409 is a sign-in the backend can't help with (the Linux
         // terminal instruction, Terminal not responding): its text is the
-        // instruction, and the card shows the manual sign-in line.
+        // instruction, and the card shows the manual sign-in line. A 409
+        // saying the harness isn't installed (uninstalled since detection)
+        // never shows that line: back to idle with detection re-run (§12).
         if (e.message.includes('already signed in')) setupDone(h)
+        else if (e.status === 409 && /isn['’]t installed/.test(e.message)) {
+          setHInst('idle'); void refreshDet(); showToast(e.message)
+        }
         else if (e.status === 409) { setHInst('manual'); showToast(e.message) }
         else { setHInst('idle'); void refreshDet(); showToast(e.message) }
       })
@@ -778,7 +783,7 @@ export default function AgentNewPage() {
                     className="ad-input row mono"
                     value={pullText}
                     onChange={(e) => setPullText(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') startPull(pullText) }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) startPull(pullText) }}
                     placeholder="e.g. qwen3-coder:30b"
                     style={{ flex: 1 }}
                   />

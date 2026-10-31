@@ -98,7 +98,12 @@ can override it.
   `actions.yaml` already treats unknown keys that way), while a **param** entry is still
   normalized to the §4.2 definition fields (`name`, `kind`, `label`, `help`, `default`,
   `min`, `placeholder`, `validate` — a param entry describes a form field, and an unknown
-  key there drops silently so it never reaches a version file or a §5.1 archive). The
+  key there drops silently so it never reaches a version file or a §5.1 archive — while a
+  `default` that is present and not null must be a value of the param's `kind` (the §19
+  param-values check) and `label` / `help`, when present, must be text (an unquoted `Yes`,
+  `No`, `On` or `Off` is a YAML boolean, so the error tells the agent to quote it), each a
+  validation error for the repair round, since the Review card and the runtime would otherwise
+  disagree about the default, 2026-10-30 second sweep). The
   known manifest keys include everything the §20 workdir `pull` writes (`name`,
   `description`, `note`, `triggers`, `params`, `packages`, `steps`). The validator never
   raises on a wrongly typed value: a `steps` or `params` that isn't a list, a `kind` or
@@ -834,8 +839,11 @@ notes rewrite (§11).
    legitimately change). The stored suffix the splice keeps is what follows a leading
    `NN-` (digits and one dash) only — a stored file without that prefix keeps its whole
    name behind the agent's prefix, never a mangled tail.
-4. Every step file passes `ast.parse`; imports ⊆ stdlib + curated packages + `autowright` + the
-   manifest's declared package imports (§6.2).
+4. Every step file passes `ast.parse` (a parse that raises `MemoryError` or `RecursionError`
+   instead of `SyntaxError` — code nested too deeply for the interpreter — is the validation
+   error "couldn't be parsed (too deeply nested)", never an uncaught failure of the job or a
+   500 from the save gate, 2026-10-30 second sweep); imports ⊆ stdlib + curated packages +
+   `autowright` + the manifest's declared package imports (§6.2).
 5. `packages` is optional: a list of `{ pip, import, why }` entries — `pip` a bare distribution
    name (PEP 503 name only, no version specifier, ranges, or extras), `import` a valid module
    name that is not already stdlib or curated (declaring one that is, is a validation error —
@@ -871,7 +879,9 @@ notes rewrite (§11).
    secrets['API_TOKEN'], which isn't among the allowed secrets", never a version that fails
    at runtime with a misleading not-allowed message; the mandatory trailing `# NAME`
    comment at each use is prompt-side convention only, never parsed.
-7. `agent: true` is the query-only marker (§6); `why` is required with it, and the optional
+7. `agent: true` is the query-only marker (§6; a non-boolean value is a validation error,
+   never read by truthiness — `agent: "false"` must not become an agent step, 2026-10-30
+   second sweep); `why` is required with it, and the optional
    `agents` list (agent steps only) holds `{ id, why? }` entries whose ids must be
    enabled-agent §4.7 uuids from the grants yaml (an unknown id, a `name` key in an entry,
    or the same id twice in one list is a validation error; the unknown-id error lists the
@@ -923,14 +933,17 @@ notes rewrite (§11).
      no cron can express (90 seconds, 45 minutes, 6 hours since the last run) is always an
      interval. No `timezone` on an interval.
    - `{ imessage: handle }` (+ optional `pattern`) — `handle` a §4.3-valid sender (E.164
-     phone or email), mapped to the stored `from` field.
+     phone or email), mapped to the stored `from` field; an unquoted number reads as a YAML
+     integer and loses its `+`, so an integer handle is read as `+<digits>` (2026-10-30
+     second sweep: the repair round kept asking for the form the agent had written).
    - `{ discord: channel-id, secret: <id> }` (+ optional `pattern`, `mention`, `author`) —
      channel a numeric id, `secret` a granted secret's §4.8 id copied exactly from the
      grants yaml (a validation error when it is neither a granted secret's id — same rule
      as a step's `secrets:` entry — nor an existing CURRENT trigger's token-secret id:
      re-emitting a stored trigger through the §4.3 merge must never fail on a bot token
-     that was, correctly, never step-granted), `mention` a bool, `author` a
-     numeric Discord user id or a list of them (§4.3 sender filter; a scalar is accepted as
+     that was, correctly, never step-granted), `mention` a bool (a non-boolean such as the quoted `"true"` is a validation error,
+     never dropped — dropping it would fire on every message, 2026-10-30 second sweep),
+     `author` a numeric Discord user id or a list of them (§4.3 sender filter; a scalar is accepted as
      shorthand and stored as a one-element list).
    - `app_start: true`.
 
@@ -972,9 +985,12 @@ blockers:
     step: Fetch page    # the locked step's name — exactly one of step / rule
     rule: retry the fetch three times   # the build rule's text, quoted from the SPEC
                         # (validated: it must be a case-insensitive substring of one
-                        # bullet under the SPEC's `## Build rules`, else the blocker is
-                        # a validation error and feeds a repair round — a paraphrase
-                        # would leave §11 "Remove the rule" unable to find it, 2026-10-30)
+                        # `- ` bullet under the SPEC's `## Build rules` — the same
+                        # list-item blocks §11 "Remove the rule" searches, so `*` or
+                        # numbered lines and indented continuations are no rule —
+                        # else the blocker is a validation error and feeds a repair
+                        # round — a paraphrase would leave "Remove the rule" unable
+                        # to find it, 2026-10-30)
     workaround: Optional — the best build that keeps the constraint (markdown);
                 # omit when none exists
 ===END===

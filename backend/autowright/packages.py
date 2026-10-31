@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -85,6 +86,9 @@ def _scan_installed() -> dict[str, str]:
     import importlib.metadata as md
 
     out: dict[str, str] = {}
+    # §6.2 (2026-10-30 second sweep): when a distribution has more than one
+    # dist-info left, the newest-written one wins, never directory order.
+    written: dict[str, int] = {}
     d = site_packages_dir()
     if not d.exists():
         return out
@@ -93,10 +97,45 @@ def _scan_installed() -> dict[str, str]:
             name = dist.metadata.get("Name")
             if not name:
                 continue
-            out[_norm(name)] = dist.version
+            key = _norm(name)
+            mtime = _dist_info_mtime(getattr(dist, "_path", None))
+            if key in out and mtime < written.get(key, -1):
+                continue
+            out[key] = dist.version
+            written[key] = mtime
         except Exception:  # noqa: BLE001 — a broken dist-info never blocks the check
             continue
     return out
+
+
+def _dist_info_mtime(path) -> int:
+    try:
+        return os.stat(path).st_mtime_ns if path is not None else -1
+    except OSError:
+        return -1
+
+
+def _tidy_dist_info() -> None:
+    """§6.2 (2026-10-30 second sweep): pip's `--target` upgrade leaves the
+    previous `<name>-<old>.dist-info` beside the new one. After a successful
+    pip run, every duplicate dist-info of a distribution but the
+    newest-written one is removed. Caller holds `_pip_lock`."""
+    d = site_packages_dir()
+    groups: dict[str, list[Path]] = {}
+    try:
+        candidates = [p for p in d.iterdir() if p.is_dir() and p.name.endswith(".dist-info")]
+    except OSError:
+        return
+    for p in candidates:
+        name = p.name[: -len(".dist-info")].split("-", 1)[0]
+        if name:
+            groups.setdefault(_norm(name), []).append(p)
+    for paths_for_name in groups.values():
+        if len(paths_for_name) < 2:
+            continue
+        paths_for_name.sort(key=_dist_info_mtime, reverse=True)
+        for stale in paths_for_name[1:]:
+            shutil.rmtree(stale, ignore_errors=True)
 
 
 def _installed_versions() -> dict[str, str]:
@@ -467,6 +506,8 @@ def ensure(entries: list[dict], on_progress=None, should_stop=None,
                 on_progress(r["pip"])
             err = _pip_install(r["pip"], pin_installed=True, should_stop=should_stop,
                                upgrade=False)
+            if not err:
+                _tidy_dist_info()
             invalidate_scan()  # pip may have written even on failure
             if err:
                 r["status"] = "failed"
@@ -506,6 +547,9 @@ def upgrade(entries: list[dict], should_stop=None, wait: bool = True,
             r["error"] = "cancelled"
         return results
     try:
+        # §6.2 re-check, as ensure does: a package a concurrent ensure
+        # installed while this update waited is never reported "not installed".
+        results = check(entries)
         for r in results:
             if not PIP_NAME_RE.match(r["pip"]):
                 r["status"] = "failed"
@@ -523,6 +567,8 @@ def upgrade(entries: list[dict], should_stop=None, wait: bool = True,
                 continue
             err = _pip_install(r["pip"], pin_installed=True, upgrade=True,
                                pin_only=declared_names - {_norm(r["pip"])})
+            if not err:
+                _tidy_dist_info()
             invalidate_scan()
             if err:
                 r["status"] = "failed"

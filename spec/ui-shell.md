@@ -335,7 +335,7 @@ animation animates `transform` and would knock the toast off-center while it pla
   saying what the button does, with the shortcut in parentheses in the platform's key
   names (`⌘` / `⌥` on macOS, `Ctrl+` / `Alt+` on Windows and Linux, by the §9 `platformOs`
   token), never a repeat of the aria-label. The hover sits on a same-size wrapper, so a
-  disabled button keeps its tip (Save before an edit, a chevron at the end of the list).
+  disabled button keeps its tip (Save before an edit, Move up on the first step).
   Legacy `title` tooltips on buttons migrate to the bubble as those buttons are touched. `Toggle` renders `role="switch"` + `aria-checked`; radio groups (`RadioRing`
   rows) render `role="radio"`/`aria-checked` inside a `role="radiogroup"`; checkboxes are
   either real `<input type="checkbox">` elements inside a `<label>` or, where the whole row
@@ -1281,7 +1281,10 @@ also open itself after an update (below) with the About page nowhere in sight.
   the button reverts to "Check for updates" (an unsigned dev build always lands
   here — same code path, real Squirrel error). "Restart to update" calls
   `update-install`; a `{ busy }` answer renders "An automation is executing. The
-  update installs when you restart after it finishes." and keeps the button; an
+  update installs when you restart after it finishes." and keeps the button (with
+  `staged: true` — macOS, the bundle was staged before the re-check found an execution
+  live, §3 — the line continues "The update is already staged and finishes when the app
+  next quits.", 2026-10-30 second sweep); an
   `{ error }` answer (the updater refused to quit — nothing staged, a stale download, a
   failed installer spawn) renders the same "Update failed: `<error>`" sub-line as a
   download error and reverts the button, never a card stuck on "Restart to update";
@@ -1494,7 +1497,14 @@ real sign-in checks; no simulation in any mode:
   back. We'll notice on our own."; Terminal for the others — "We opened Terminal — finish
   signing in there and come back. We'll notice on our own."), with "Cancel" returning to idle.
   The UI polls §19 `GET /agents/signin/{id}` every 2 s; once signed in the card runs the
-  connection check automatically and lands on Connected + Use as default.
+  connection check automatically and lands on Connected + Use as default. A card showing
+  the §9 manual sign-in line (`agentInstall` false, or a Linux TUI provider) polls the same
+  endpoint the same way while the line is up — the line promises "Autowright detects it
+  automatically", so a sign-in made from a terminal lands without a reload (2026-10-30
+  second sweep; the §12 add-agent page already did). A `POST /agents/login` 409 whose
+  message says the harness isn't installed (uninstalled since detection) returns the card
+  to idle, re-runs detection and toasts the message — never the manual sign-in line for a
+  binary that is gone (2026-10-30 second sweep).
 - **Setup status line** — once every found card's auto-check has settled (none still
   checking), a line under the found section says whether the user can move on: "You're
   ready — pick a connected AI as your default, or set up another below." when at least one

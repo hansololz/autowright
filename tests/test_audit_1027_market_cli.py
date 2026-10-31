@@ -215,18 +215,18 @@ class _Body(io.BytesIO):
 def test_the_github_api_listing_is_capped(monkeypatch):
     big = json.dumps(["x" * 1024] * 2048).encode()  # about 2 MB
     assert len(big) > 2 * 1024 * 1024 - 1
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _Body(big))
+    monkeypatch.setattr(transfer, "open_https_only", lambda req, *, timeout=None, refuse=None: _Body(big))
     with pytest.raises(transfer.TransferError, match="1 MB"):
         transfer._github_api("/repos/o/r/contents/")
 
 
 def test_a_short_github_api_answer_fails(monkeypatch):
-    monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _Body(b"[]", length=100))
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, *, timeout=None, refuse=None: _Body(b"[]", length=100))
     with pytest.raises(transfer.TransferError, match="closed before"):
         transfer._github_api("/repos/o/r/contents/")
-    monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _Body(b'[{"name": "a"}]'))
+    monkeypatch.setattr(transfer, "open_https_only",
+                        lambda req, *, timeout=None, refuse=None: _Body(b'[{"name": "a"}]'))
     assert transfer._github_api("/repos/o/r/contents/") == [{"name": "a"}]
 
 

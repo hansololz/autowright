@@ -301,7 +301,11 @@ remain plain dicts (§2).
   the same wording from `POST /drafts` (sync without a `current`) and duplicate — never
   a 500 (2026-10-30). Execute and retry answer 404 only for a version label that doesn't
   resolve (the §7 label grammar, the same `vN` parser the diff route uses — bare `3`
-  or `vv3` is not a label); any other lookup failure inside a start is an internal error.
+  or `vv3` is not a label); a retry whose version vanishes between the route's pre-check
+  and the engine's own lookup answers the pre-check's 409 (the engine raises
+  `VersionNotFound`), and one whose record body can't be read (`execution.yaml` gone or
+  unreadable) answers 404 (2026-10-30 second sweep: both were a 500); any other lookup
+  failure inside a start is an internal error.
 - **Server-side step validation** — `POST /automations` and `POST /automations/{id}/versions`
   run the §8 step validators (`ast.parse`, the §6.2 import allowlist, manifest schema and
   step-file ordering, §4.1 step-name uniqueness, the timeout/retry rules, the §8 rule-6/7 id checks — step `agents:` /
@@ -917,7 +921,10 @@ already neutralize. The provider config and
   snapshotted at entry — `secrets.yaml` ends empty in the normal case, but a secret created
   while the Keychain deletes run keeps its row rather than becoming an orphaned value with
   no metadata — one `secrets.changed` event covers the sweep, and the answer is
-  `{ deleted: <count> }` (0 with no secrets — never an error). Automations' `allowed_secrets` grants and step references
+  `{ deleted: <count> }` (0 with no secrets — never an error). The §4.8 rows the load
+  skipped as malformed are swept too: each skipped row that carries a string id gets the
+  same best-effort Keychain delete, and the skipped set is cleared so the write leaves
+  `secrets.yaml` empty rather than writing the raw rows back (2026-10-30 second sweep). Automations' `allowed_secrets` grants and step references
   are left as written, exactly like the per-id delete (dangling ids surface as §4.1
   `secret-missing` blockers). The unreadable-store guard below still answers 409 — the §3
   reset flow treats that as non-fatal and proceeds —
@@ -1074,4 +1081,9 @@ already neutralize. The provider config and
   steps/spec/versions, and an `automation.changed` missed while the socket was down would
   otherwise leave the page showing a new version number over old bodies until navigation), and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
   the client's disconnect, so a dropped client ends the handler immediately — an idle open
-  socket never leaves uvicorn's graceful shutdown waiting.
+  socket never leaves uvicorn's graceful shutdown waiting. Events are serialized with a
+  `str()` fallback for any value the JSON encoder doesn't know (`json.dumps(default=str)`),
+  and a send that still fails is logged and **closes the socket (1011)** so the client's
+  reconnect-and-refetch runs — never a sender that dies quietly while the socket stays open
+  and every later event is lost (2026-10-30 second sweep: a hand-edited `description:
+  2026-10-30` loads as a YAML date and did exactly that to every client).

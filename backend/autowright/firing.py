@@ -301,7 +301,7 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
     Called whenever a slot frees (an execution finishing or being cancelled)
     and on every scheduler tick, so a raised `maxParallel` or a missed wake-up
     still gets picked up."""
-    from .engine import VersionNotFound  # deferred: engine imports firing
+    from .engine import AdmissionRefused, CapacityError, VersionNotFound  # deferred: engine imports firing
 
     expire_stale(store, automation_id)
     while True:
@@ -332,16 +332,18 @@ def drain_queue(store: Store, engine: Engine, automation_id: str) -> None:
                     # the entry was already promoted (a §7 launch failure, a
                     # disk error writing the promoted record), the record must
                     # not stay `executing` with no thread.
-                    if not isinstance(e, RuntimeError):
+                    refused = isinstance(e, (AdmissionRefused, CapacityError))
+                    if not refused:
                         log.warning("queue promotion failed: %s", e)
                     if head["status"] == "executing" and not engine.is_live(head["id"]):
                         finish_never_ran(store, head, "the execution couldn't be started",
                                          finished_at=timefmt.now_iso(),
                                          with_automation=True)
-                    if isinstance(e, (RuntimeError, OSError)):
-                        # A refusal (slot taken, shutdown, deletion, data path
-                        # gone) or a write error that may clear: the head stays
-                        # and the next finish or tick drains again.
+                    if refused or isinstance(e, OSError):
+                        # The engine's own refusal (slot taken, shutdown,
+                        # deletion, data path gone) or a write error that may
+                        # clear: the head stays and the next finish or tick
+                        # drains again. Any other RuntimeError will not clear.
                         return
                     if head["status"] != "queued":
                         continue  # ended above — move on to the next entry

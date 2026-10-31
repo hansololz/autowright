@@ -13,13 +13,16 @@ function serviceFailureDetail(err, stdout, stderr) {
 
 // §3: a 200 on the recorded port proves nothing on its own. Only a /health
 // body that names this app (`app === 'Autowright'`), carries a non-empty
-// version and — when backend.json records a pid — answers with that same pid
-// is ours; another Autowright backend squatting the recorded port (another
-// user's, an isolated AUTOWRIGHT_HOME's) is not. Returns the version, or null
-// when the answer is not ours.
+// version and, when both it and backend.json carry a pid, answers with that
+// same pid is ours; another Autowright backend squatting the recorded port
+// (another user's, an isolated AUTOWRIGHT_HOME's) is not. A body with no pid
+// (every backend released before 2026-10-30) is judged by app and version
+// alone, or the first launch after an update would take the previous
+// release's backend for a foreign one. Returns the version, or null when the
+// answer is not ours.
 function healthVersion(body, info) {
   if (body?.app !== 'Autowright') return null
-  if (info?.pid != null && body?.pid !== info.pid) return null
+  if (info?.pid != null && body?.pid != null && body.pid !== info.pid) return null
   return String(body.version ?? '') || null
 }
 

@@ -186,7 +186,12 @@ class Scheduler:
         # any firing: nothing jumps the queue, so a slot freed since the last
         # tick goes to the head, never to this tick's occurrence.
         if drain:
-            drain_queue(self.store, self.engine, a["id"])
+            # Guarded: an error finishing one stale entry (a write failing on
+            # its record) must never silence this automation's triggers.
+            try:
+                drain_queue(self.store, self.engine, a["id"])
+            except Exception:  # noqa: BLE001
+                log.exception("draining the queue of %r failed", a.get("name"))
         due: list[tuple[datetime, dict]] = []
         dropped: list[dict] = []  # §6 runIfMissed-off triggers whose span was slept through
         # Baselines of due triggers before this tick advanced them — restored
