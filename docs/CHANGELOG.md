@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.14.0 - 2026-10-31
+
+- You can now edit, add, remove, reorder, and lock the steps of an automation's script directly in the step viewer.
+- Step editing gains Timeout and Retries fields per step, line numbers as you type, and tooltips on every button.
+- Version diffs now mark a step that was only moved, instead of showing it as unchanged.
+- The step controls now sit in a single row above the step name, and the duplicate next/previous arrows are gone.
+- Scheduled automations now fire at the right time after a timezone or daylight-saving change.
+- An update no longer installs while a run is still going, and secrets stay hidden in run output.
+
 ## v0.13.2 - 2026-10-18
 
 - You can now click a notification to jump straight to the run or automation it came from.
