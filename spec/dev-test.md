@@ -167,7 +167,10 @@ real-Electron coverage is deliberately outside the unit report.
 and `app/tsconfig.test.json` extends it to cover everything else that is TypeScript but
 never shipped: `tests/`, `e2e/`, the Vite/Vitest config files, and `ds-entry.ts`, adding
 only the `node` types those need. Neither the renderer's settings nor its file set change;
-the second config exists so untypechecked TypeScript cannot accumulate outside `src`.
+the second config exists so untypechecked TypeScript cannot accumulate outside `src`. Both
+configs set `noUnusedLocals`, so an import or local that nothing reads fails the typecheck
+rather than lingering as dead code (unused *parameters* stay allowed — React props are
+often destructured for documentation).
 
 **Drift guards.** `tests/test_drift_guards.py` holds the cheap textual guards over facts
 that live in more than one hand-maintained file: the app version agrees across `release/VERSION`,

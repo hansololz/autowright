@@ -459,7 +459,7 @@ failed one, the frame sits at the floor.
   previous / next file chevrons (`.ad-btn-icon`, disabled at the ends) and a close ✕
   (Escape and backdrop click also close). Below it, one overlay-scrollbar pane of
   line-numbered rows exactly as the step-script modal draws them: faint mono right-aligned
-  unselectable gutter, `--code-text` at 12px/1.65 mono, §11 `PyCode` highlighting on `.py`
+  unselectable gutter, `--code-text` at 12px/1.65 mono, §11 `highlightPythonLines` highlighting on `.py`
   files and plain text on every other, a single trailing final newline neither rendered
   nor counted, and switching files remounting the rows with the §14 keyed fade. A file the
   route serves with `text` null (not UTF-8, or over the 1 MB member cap) shows the §14

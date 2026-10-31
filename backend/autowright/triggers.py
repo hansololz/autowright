@@ -724,23 +724,15 @@ def time_elapsed(t: dict, now: datetime | None = None) -> bool:
     return at <= (now or datetime.now())
 
 
-def next_at(triggers: list[dict], after: datetime | None = None,
-            run_baseline: datetime | None = None) -> datetime | None:
-    """§4.3 nextAtMs: minimum over enabled triggers, None when nothing is coming.
-    `run_baseline` anchors interval triggers (trigger_next)."""
-    nxts = [n for t in triggers if t["enabled"] if (n := trigger_next(t, after, run_baseline))]
-    return min(nxts) if nxts else None
-
-
 def next_at_ms(triggers: list[dict], after: datetime | None = None,
                run_baseline: datetime | None = None, *,
                interval_baseline: datetime | None = None) -> int | None:
     """§4.3 `nextAtMs`: the next occurrence's epoch milliseconds, None when
-    nothing is coming. Taken from each occurrence's instant rather than from
-    `next_at`'s local naive minimum: an interval's occurrence is an instant
-    (§4.3), and a naive reading inside the fall-back fold resolves to the
-    earlier hour, which is not the moment the scheduler fires. The interval
-    anchor is an instant too: `interval_baseline` (aware UTC, the store's
+    nothing is coming. Taken from each occurrence's instant rather than from a
+    local naive minimum: an interval's occurrence is an instant (§4.3), and a
+    naive reading inside the fall-back fold resolves to the earlier hour,
+    which is not the moment the scheduler fires. The interval anchor is an
+    instant too: `interval_baseline` (aware UTC, the store's
     `run_baseline_instant` — the exact instant the run started, the reading
     the scheduler uses) when the caller has it; otherwise a naive
     `run_baseline` is converted once with `local_instant` (latest reading not

@@ -1,6 +1,6 @@
 // Unit tests for the pure helpers in src/ui.tsx. No component rendering:
-// highlightPython is exercised directly — it returns the token nodes PyCode
-// memoizes into its <pre>.
+// highlightPython is exercised directly — it returns the token nodes
+// highlightPythonLines splits into rows.
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {

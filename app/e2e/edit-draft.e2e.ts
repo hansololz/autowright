@@ -1,5 +1,5 @@
 // §15 e2e: edit-mode draft Test on an existing automation. Step code is
-// view-only in the editor (StepRow renders read-only PyCode), so the editable
+// view-only in the editor (StepRow renders read-only highlightPythonLines rows), so the editable
 // surface exercised here is the SPEC text (its Edit → textarea → Save path).
 // The §11 test executes the draft's real steps on a scratch memory copy —
 // live memory bytes and the automation's derived display must not change.

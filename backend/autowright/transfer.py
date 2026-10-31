@@ -39,11 +39,8 @@ SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # `agents["<id>"]` code subscripts, and a discord trigger's `secret` - to
 # refs; import resolves each ref through the §5.1 match ladders and rewrites
 # it to the matched local record's id, or to a freshly minted unresolved id.
-# These regexes match the archive's ref-form code subscripts; the _ANY_
-# variants match every subscript key, so validation catches uuid-form and
-# name-form leftovers in one scan.
-ARCHIVE_SECRET_REF_RE = re.compile(r"\bsecrets\[\s*[\"']([0-9]+)[\"']\s*\]")
-ARCHIVE_AGENT_REF_RE = re.compile(r"\bagents\[\s*[\"']([0-9]+)[\"']\s*\]")
+# These regexes match every `secrets[...]` / `agents[...]` subscript key, so
+# validation catches ref-form, uuid-form and name-form subscripts in one scan.
 _ANY_SECRET_SUBSCRIPT_RE = re.compile(r"\bsecrets\[\s*[\"']([^\"'\n]*)[\"']\s*\]")
 _ANY_AGENT_SUBSCRIPT_RE = re.compile(r"\bagents\[\s*[\"']([^\"'\n]*)[\"']\s*\]")
 # §5.1 ref rule: decimal strings assigned per kind in listing order; a

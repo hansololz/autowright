@@ -13,7 +13,7 @@ import {
 } from '../ui'
 import ArchiveViewer from './ArchiveViewer'
 import CatalogEditorModal, {
-  CATALOG_FILE, STORED_LABEL, caption, errLine, inputStyle, lastSegment, locationLabel,
+  CATALOG_FILE, STORED_LABEL, caption, errLine, inputStyle, locationLabel,
 } from './CatalogEditor'
 import ImportModal from './ImportModal'
 import { ImportSummaryModal } from './AutomationsList'
@@ -293,7 +293,7 @@ function AddMarketplaceModal({ onClose, onAdded }: {
               style={{
                 marginTop: 18, minHeight: 96, display: 'flex', flexDirection: 'column', alignItems: 'center',
                 justifyContent: 'center', gap: 8, cursor: busy ? 'default' : 'pointer',
-                border: `1px dashed ${over ? 'var(--accent)' : 'var(--hairline-strong, var(--hairline))'}`,
+                border: `1px dashed ${over ? 'var(--accent)' : 'var(--hairline)'}`,
                 background: over ? 'var(--bg-inset)' : undefined,
               }}
             >
@@ -431,8 +431,6 @@ export default function MarketplacePage() {
   // §19 reconnect rule: a marketplace.changed missed while the socket was
   // down is never replayed - the table refetches on every reconnect too.
   const reconnects = useStore((s) => s.reconnects)
-  // §9 per-OS copy rule: the machine noun this page names.
-  const copy = usePlatformCopy()
   // null until the first §19 answer lands - the page shows PageLoading.
   const [sources, setSources] = useState<MarketplaceSource[] | null>(null)
   const [addOpen, setAddOpen] = useState(false)

@@ -1248,7 +1248,7 @@ event naming a rewrite document (`spec.md`, `notes.md`): the stdout
 prose accumulated at that moment is the accompanying answer, the same rule as the
 streamed-marker form. Line-count updates throttle to one update per
 second; marker and document changes update immediately. `detail` rides the job (§19
-`GET /drafts`, beside
+`GET /drafts/{jobId}`, beside
 `stage`) and resets at each stage boundary. A harness
 that reports no events simply yields no `detail` - the coarse stage labels remain.
 

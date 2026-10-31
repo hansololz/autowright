@@ -1,5 +1,4 @@
 // §9.2 RECENT EXECUTIONS card — row per execution, linking into Executions.
-import React from 'react'
 import { useStore } from '../../store'
 import type { Execution } from '../../types'
 import { Badge, Eyebrow } from '../../ui'

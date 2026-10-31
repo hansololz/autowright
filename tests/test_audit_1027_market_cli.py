@@ -474,7 +474,7 @@ def test_validate_help_says_grant_checks_run_on_push_and_create(capsys):
     from autowright import cli
 
     with pytest.raises(SystemExit):
-        cli.build_parser(full=True).parse_args(["automation", "validate", "--help"])
+        cli.build_parser().parse_args(["automation", "validate", "--help"])
     help_text = " ".join(capsys.readouterr().out.split())
     assert "only by `automation push` and `automation create`" in help_text
 

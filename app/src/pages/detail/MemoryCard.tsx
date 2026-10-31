@@ -1,6 +1,6 @@
 // §9.2 MEMORY card: reveal/snapshot/clear actions, the snapshot rows with
 // their inline confirm swaps, and the §6.3 automatic-snapshot toggles.
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import { usePlatformCopy } from '../../platformCopy'
 import { useStore } from '../../store'

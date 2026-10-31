@@ -60,7 +60,7 @@ def test_duplicate_json_carries_the_warning_field(capsys):
 def test_automation_set_help_keeps_the_key_lines():
     from autowright import cli
 
-    parser = cli.build_parser(full=True)
+    parser = cli.build_parser()
     for word in ("automation", "set"):
         parser = next(a for a in parser._actions
                       if isinstance(a, argparse._SubParsersAction)).choices[word]

@@ -3400,9 +3400,10 @@ class Store:
 
     def snapshot_memory(self, a: dict, reason: str, name: str | None = None,
                         version: str | None = None, keep: str | None = None) -> dict | None:
-        """§6.3 create, stage-then-commit in one call - the shape every caller
-        that isn't racing for a §6 slot uses. Callers holding store.lock get the
-        copy under it; the §7 admission path stages and commits separately."""
+        """§6.3 create, stage-then-commit in one call. Production stages and commits
+        separately (the §7 admission path races for a slot; the API create route holds
+        the lock between the halves) - this one-call form is the test suite's seeding
+        seam and has no production caller."""
         staged = self.stage_snapshot(a, reason)
         if staged is None:
             return None

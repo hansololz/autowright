@@ -145,7 +145,7 @@ def test_no_listing_parser_carries_an_epilog():
             for name, sub in a.choices.items():
                 walk(sub, f"{path} {name}")
 
-    walk(cli.build_parser(full=True), "autowright")
+    walk(cli.build_parser(), "autowright")
     assert not offenders, f"parsers holding subcommands must carry no epilog: {offenders}"
 
 

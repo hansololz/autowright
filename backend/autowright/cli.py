@@ -2796,15 +2796,6 @@ def _exec_ref(p) -> None:
     p.add_argument("execution", nargs="?", help=_EXEC_REF)
 
 
-# §20: the full surface is on. False registers only `service` (the group the
-# packaged app shells out to at launch, §3 ensure-backend) — kept as a switch
-# because the test suite exercises both parser shapes.
-CLI_ENABLED = True
-
-_DISABLED_NOTE = ("Automation commands are disabled in this release — "
-                  "create, edit, and execute automations in the Autowright app.")
-
-
 def _grant_flags(p) -> None:
     """§20 grant model: the explicit, repeatable grant flags on create/push."""
     p.add_argument("--grant-agent", action="append", default=[], metavar="NAME",
@@ -2843,7 +2834,7 @@ def _add_service(top) -> None:
                    help="what to do with the service")
 
 
-def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     ap = Parser(
         prog="autowright", formatter_class=Help,
         description=(
@@ -2859,24 +2850,14 @@ def build_parser(full: bool = CLI_ENABLED) -> argparse.ArgumentParser:
             "everything down."
             "\n\n"
             "Read verbs take --json, which prints the backend's own JSON instead of the human "
-            "columns, so scripts and agents never have to parse prose."
-            if full else
-            # The disabled shape registers only `service`, so it must not promise
-            # a surface that isn't there.
-            "Autowright from the command line. This release registers only the service "
-            "group — the background service that keeps your automations firing when the app "
-            "isn't open."),
+            "columns, so scripts and agents never have to parse prose."),
         # §20: a parser holding subcommands ends at its listing — no epilog above
         # a listing the reader hasn't reached yet.
-        epilog=None if full else _DISABLED_NOTE)
+        epilog=None)
     top = ap.add_subparsers(dest="cmd", required=False, metavar="COMMAND")
     # §20 bare invocation: `autowright` alone prints this help and exits 0,
     # rather than answering the question "what is this?" with a usage stub.
     ap.set_defaults(fn=_help_fn(ap), client=False)
-
-    if not full:
-        _add_service(top)
-        return ap
 
     _sub(top, "status", cmd_status, "check the backend is up, with entity counts",
          json_flag=True,

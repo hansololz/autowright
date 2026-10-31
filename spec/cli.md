@@ -4,7 +4,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
 
 ## 20. CLI (decided)
 
-> **Status: enabled.** The full surface is registered (`cli.CLI_ENABLED = True`). The condition
+> **Status: enabled.** The full surface is registered unconditionally — the disabled-era
+> service-only parser shape no longer exists in `cli.py`. The condition
 > for enabling was settling the grant model, and it is settled — see **Grant model** below: no
 > all-on secret seed on `create`, no silent grant widening on `push`; every grant is an explicit
 > repeatable flag on the command line. This is the enforcement the disabled era lacked: an agent

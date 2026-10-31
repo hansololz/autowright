@@ -129,7 +129,6 @@ export interface LeftColumnProps {
   lockStyle?: React.CSSProperties
   agents: Agent[]
   secrets: SecretMeta[]
-  unresolvedReferences?: UnresolvedRefs
   availAgents: Agent[]
   agentStepIdx: number[]
   agWarn: boolean
@@ -151,7 +150,7 @@ export interface LeftColumnProps {
 
 export function LeftColumn({
   rev, up, fw, bld, isEdit, isCreateEmpty, busyRewrite, viewingOld, testLive, lockStyle,
-  agents, secrets, unresolvedReferences, availAgents, agentStepIdx,
+  agents, secrets, availAgents, agentStepIdx,
   agWarn, agNone, agNotEnabled, agMissing, agFallbackIdx,
   secWarn, secNotAllowed, secMissing, secRefs,
   specOpenEff, agSecOpenEff, secSecOpenEff, instrOpenEff, notesOpenEff,

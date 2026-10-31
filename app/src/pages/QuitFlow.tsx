@@ -3,7 +3,7 @@
 // the store (`quitStage`, `quitAll`) so the Settings QUIT card and an OS quit
 // — Cmd+Q, the application menu's Quit, the dock's Quit, pushed by main as
 // `quit-requested` — run the very same flow.
-import React, { useEffect } from 'react'
+import { useEffect } from 'react'
 import { useStore } from '../store'
 import { BlockingOverlay, ConfirmModal, Spinner } from '../ui'
 

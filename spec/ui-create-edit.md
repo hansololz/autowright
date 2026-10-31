@@ -1428,10 +1428,10 @@ editors enter with
   generated. A sync or undo that swaps the
   steps closes an open step-script modal (same reason the old open set reset: the index
   no longer names the same step). The modal renders the step's
-  `code` with Python syntax highlighting — a self-contained tokenizer (`PyCode` in `ui.tsx`, no
+  `code` with Python syntax highlighting — a self-contained tokenizer (`highlightPythonLines` in `ui.tsx`, no
   dependency) coloring keywords, constants, strings, numbers, comments, decorators, builtins,
   `def`/`class` names, and call names over the base mono `pre`. Language is always
-  Python (§15); the same `PyCode` renders the detail page and the draft/create step editor. Agent steps listing no agent
+  Python (§15); the same `highlightPythonLines` renders the detail page and the draft/create step editor. Agent steps listing no agent
   and no enabled agent show a red warning ("Step N needs an agent, but none is enabled — the
   execution would fail there. Enable one below."). A step whose entry id resolves to an
   agent that isn't

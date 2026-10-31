@@ -1,7 +1,7 @@
 // Shared UI primitives — one source of truth for badges, toggles, radios,
 // popovers, toasts (prototype Component helpers, §14 tokens). The result
 // section and its views live in result.tsx.
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ParamDef, Status, Step } from './types'
 import { applyHeldTarget, useStore } from './store'
@@ -1357,17 +1357,6 @@ export function highlightPythonLines(code: string): React.ReactNode[][] {
     }
   }
   return lines
-}
-
-// Highlighted Python <pre>. Pass the same style/className the plain <pre> used;
-// per-token colors override the base text color for recognized tokens. The
-// tokenizer walks the whole script, so it only reruns when the code changes —
-// an unrelated re-render (a poll tick under an open modal) reuses the nodes.
-export function PyCode({ code, className, style }: {
-  code: string; className?: string; style?: React.CSSProperties
-}) {
-  const nodes = useMemo(() => highlightPython(code), [code])
-  return <pre className={className} style={style}>{nodes}</pre>
 }
 
 // §11 document-editor textarea — shared by the document-editor modal and the

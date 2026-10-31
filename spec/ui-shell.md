@@ -1029,7 +1029,7 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   flipping steps (the flip keys ignore every editable target). Typing a new query or
   flipping steps returns to the first match.
   Below it the script sits in its own overlay-scrollbar pane with a line-number gutter
-  (faint mono, right-aligned, unselectable) beside every line and §11 `PyCode`
+  (faint mono, right-aligned, unselectable) beside every line and §11 `highlightPythonLines`
   highlighting; a long line wraps under its own number rather than scrolling sideways, and
   the code keeps a 28 px right inset so no line ever runs under the overlay thumb. The
   gutter numbers are unselectable and an empty line still carries its newline, so a
@@ -1132,7 +1132,7 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   (left gutter, left text, right gutter, right text), so the two sides scroll as one and a
   wrapped line never drifts from its counterpart; the two text columns share a
   `--hairline-dim` divider, gutters follow the step-script modal (faint mono,
-  right-aligned, unselectable), text is `--code-text` at 12px/1.65 mono with §11 `PyCode`
+  right-aligned, unselectable), text is `--code-text` at 12px/1.65 mono with §11 `highlightPythonLines`
   highlighting on step scripts and plain text on the three documents, wrapped under its own
   number, 28 px right inset. Row kinds and grounds: `same` (both sides, no tint), `add`
   (right side only; its two cells on `--diff-add-bg`), `del` (left side only; its two

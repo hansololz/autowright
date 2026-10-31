@@ -1493,7 +1493,6 @@ export default function CreateFlow() {
                 lockStyle={lockStyle}
                 agents={agents}
                 secrets={secrets}
-                unresolvedReferences={unresolvedRefs}
                 availAgents={availAgents}
                 agentStepIdx={agentStepIdx}
                 agWarn={agWarn}

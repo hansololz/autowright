@@ -7,7 +7,7 @@
 // does. Cancel, Escape and a backdrop click close silently when the text is
 // unchanged and raise the discard confirm otherwise (the Modal's guardClose);
 // every path plays the §14 exit before the caller's state changes.
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { devlogOverlayOpen } from '../../devlog'
 import { ConfirmModal, DOC_FOOTER_STYLE, DOC_TEXTAREA_STYLE, Eyebrow, Modal, docLineCount, isTopModal, useOverlayThumb } from '../../ui'
 

@@ -1263,14 +1263,14 @@ def test_usage_errors_exit_1_not_2():
                  ["automation", "list", "--nope"],     # unknown flag
                  ["service", "frobnicate"]):           # bad choice
         with pytest.raises(SystemExit) as ei, contextlib.redirect_stderr(io.StringIO()):
-            cli.build_parser(full=True).parse_args(argv)
+            cli.build_parser().parse_args(argv)
         # a str code exits 1 and prints itself on stderr; 2 must never appear
         assert isinstance(ei.value.code, str), f"{argv} exited {ei.value.code!r}"
         assert "autowright" in ei.value.code
 
     # --help still exits 0 through argparse's own path
     with pytest.raises(SystemExit) as ei, contextlib.redirect_stdout(io.StringIO()):
-        cli.build_parser(full=True).parse_args(["--help"])
+        cli.build_parser().parse_args(["--help"])
     assert ei.value.code == 0
 
 
@@ -1490,7 +1490,7 @@ def _run(client, *argv):
     wiring and the command in one go."""
     from autowright import cli
 
-    args = cli.build_parser(full=True).parse_args(list(argv))
+    args = cli.build_parser().parse_args(list(argv))
     args.fn(client, args)
     return args
 
@@ -1498,24 +1498,22 @@ def _run(client, *argv):
 def test_parser_marks_service_as_clientless():
     from autowright import cli
 
-    assert cli.build_parser(full=True).parse_args(["service", "status"]).client is False
-    assert cli.build_parser(full=True).parse_args(["status"]).client is True
+    assert cli.build_parser().parse_args(["service", "status"]).client is False
+    assert cli.build_parser().parse_args(["status"]).client is True
 
 
-def test_parser_accepts_service_stop_in_both_shapes():
+def test_parser_accepts_service_stop():
     # §20/§3: `service stop` (the quit-entirely backend half) is part of the
-    # verb set in the full parser and the service-only parser alike.
+    # parser's verb set.
     from autowright import cli
 
-    assert cli.build_parser(full=True).parse_args(["service", "stop"]).action == "stop"
-    assert cli.build_parser(full=False).parse_args(["service", "stop"]).action == "stop"
+    assert cli.build_parser().parse_args(["service", "stop"]).action == "stop"
 
 
 def test_shipped_cli_exposes_the_full_surface():
     """§20: the CLI is enabled — the parser main() ships is the full one."""
     from autowright import cli
 
-    assert cli.CLI_ENABLED is True
     ap = cli.build_parser()  # the parser main() actually ships
     assert ap.parse_args(["service", "status"]).client is False
     assert ap.parse_args(["automation", "list"]).client is True
@@ -1543,7 +1541,7 @@ def test_every_command_documents_itself():
             elif not isinstance(a, argparse._HelpAction) and not a.help:
                 no_help.append(f"{path} <{a.dest}>")
 
-    walk(cli.build_parser(full=True), "autowright")
+    walk(cli.build_parser(), "autowright")
     assert not no_description, f"commands with no description: {no_description}"
     assert not no_help, f"arguments with no help: {no_help}"
 
@@ -1555,7 +1553,7 @@ def _help_for(*argv) -> str:
 
     out = io.StringIO()
     with pytest.raises(SystemExit), contextlib.redirect_stdout(out):
-        cli.build_parser(full=True).parse_args([*argv, "--help"])
+        cli.build_parser().parse_args([*argv, "--help"])
     # 3.14's argparse colorizes help; assert on the plain text
     return re.sub(r"\x1b\[[0-9;]*m", "", out.getvalue())
 
@@ -1572,7 +1570,7 @@ def test_bare_invocation_prints_help_and_succeeds(monkeypatch, capsys):
     plain = re.compile(r"\x1b\[[0-9;]*m")
 
     for argv in ([], ["automation"], ["automation", "trigger"], ["secret"]):
-        args = cli.build_parser(full=True).parse_args(argv)
+        args = cli.build_parser().parse_args(argv)
         # never builds a Client: `autowright` must answer with the backend down
         assert args.client is False, argv
         args.fn(None, args)
@@ -1581,7 +1579,7 @@ def test_bare_invocation_prints_help_and_succeeds(monkeypatch, capsys):
         assert ("COMMANDS:" in out or "VERBS:" in out), argv
 
     # the top-level bare help is the same text --help prints
-    bare = cli.build_parser(full=True)
+    bare = cli.build_parser()
     bare.parse_args([]).fn(None, None)
     assert plain.sub("", capsys.readouterr().out) == plain.sub("", bare.format_help())
 
@@ -1659,28 +1657,11 @@ def test_example_epilogs_keep_their_line_breaks(monkeypatch):
     monkeypatch.setenv("COLUMNS", "100")
     out = io.StringIO()
     with pytest.raises(SystemExit), contextlib.redirect_stdout(out):
-        cli.build_parser(full=True).parse_args(["automation", "trigger", "add", "--help"])
+        cli.build_parser().parse_args(["automation", "trigger", "add", "--help"])
     text = out.getvalue()
     assert '  autowright automation trigger add report "0 8 * * *"\n' in text
     # the description above it is still wrapped, not left as one long line
     assert max(len(line) for line in text.splitlines()) < 200
-
-
-def test_disabled_parser_shape_exposes_only_service():
-    """The CLI_ENABLED=False shape stays testable: only `service` registers."""
-    import contextlib
-
-    from autowright import cli
-
-    ap = cli.build_parser(full=False)
-    assert ap.parse_args(["service", "status"]).client is False
-
-    for argv in (["status"], ["automation", "list"], ["secret", "list"],
-                 ["secret", "set", "TOKEN"], ["execution", "list"],
-                 ["automation", "execute", "x"], ["settings", "show"],
-                 ["agent", "list"], ["instructions"]):
-        with pytest.raises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            ap.parse_args(argv)
 
 
 def test_cmd_status_prints_counts_and_json(capsys):
@@ -4146,7 +4127,7 @@ def test_catalog_remove_help_numbers_by_the_catalog_file():
 
     import argparse
 
-    parser = cli.build_parser(full=True)
+    parser = cli.build_parser()
     for word in ("marketplace", "catalog", "remove"):
         parser = next(a for a in parser._actions
                       if isinstance(a, argparse._SubParsersAction)).choices[word]

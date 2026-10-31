@@ -1,6 +1,6 @@
 // Automation detail (§4.3/§4.4/§7, prototype "Automation detail" screen).
 // Thin page shell — the section cards live in ./detail/ (§17).
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, saveFile } from '../api'
 import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'

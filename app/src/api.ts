@@ -359,9 +359,6 @@ export const api = {
     if (!r.ok) throw await apiError(r)
     return r.arrayBuffer()
   },
-  importAutomation: (data: Uint8Array) =>
-    rawPost<{ automation: import('./types').Automation; summary: import('./types').ImportSummary }>(
-      '/automations/import', data),
   // §5.2 two-phase import — preview (URL or file bytes), then confirm by token
   importPreview: (data: Uint8Array) =>
     rawPost<{ token: string; preview: import('./types').ImportPreview }>(

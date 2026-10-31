@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from autowright.triggers import (
-    CronError, cron_display, cron_next, next_at, normalize_triggers,
+    CronError, cron_display, cron_next, next_at_ms, normalize_triggers,
     parse_cron, time_display, trigger_chip, trigger_next, validate_trigger,
 )
 
@@ -63,15 +63,15 @@ def test_labels():
     assert time_display("2026-07-20T15:00:00") == ("Once at Jul 20, 3:00 PM", "Once Jul 20 15:00")
 
 
-def test_trigger_chip_and_next_at():
+def test_trigger_chip_and_next_at_ms():
     t1 = {"id": "1", "kind": "cron", "enabled": True, "expression": "0 8 * * *"}
     t2 = {"id": "2", "kind": "cron", "enabled": True, "expression": "0 2 * * *"}
     assert trigger_chip([]) == "No triggers"
     assert trigger_chip([t1]) == "Daily 8:00"
     assert trigger_chip([t1, t2]) == "2 triggers"
     now = datetime(2026, 7, 10, 9, 0)
-    assert next_at([t1, t2], after=now) == datetime(2026, 7, 11, 2, 0)
-    assert next_at([{**t1, "enabled": False}, {**t2, "enabled": False}], after=now) is None
+    assert next_at_ms([t1, t2], after=now) == int(datetime(2026, 7, 11, 2, 0).timestamp() * 1000)
+    assert next_at_ms([{**t1, "enabled": False}, {**t2, "enabled": False}], after=now) is None
 
 
 def test_time_trigger_validation_and_next():
@@ -153,7 +153,7 @@ def test_app_start_trigger():
     assert "one app-start" in err
     t = {"id": "1", "kind": "app_start", "enabled": True}
     assert trigger_next(t) is None  # no computable next occurrence
-    assert next_at([t]) is None
+    assert next_at_ms([t]) is None
     assert trigger_display(t) == ("On app start", "App start")
     assert trigger_chip([t]) == "App start"
 
@@ -243,7 +243,7 @@ def test_discord_trigger_normalize_and_display():
     assert trigger_display({"kind": "imessage"}) == ("iMessage · missing", "iMessage")
     # no computable next occurrence (§4.3) — nextAtMs ignores discord
     assert trigger_next(plain[0]) is None
-    assert next_at([{**plain[0], "enabled": True}]) is None
+    assert next_at_ms([{**plain[0], "enabled": True}]) is None
 
 
 def test_specmd_roundtrip():
@@ -646,12 +646,13 @@ def test_next_at_passes_the_run_baseline_to_intervals():
               "source": "user"}]
     now = datetime(2026, 7, 10, 12, 0)
     baseline = datetime(2026, 7, 10, 3, 0)
-    assert next_at(trigs, after=now, run_baseline=baseline) == datetime(2026, 7, 10, 15, 0)
+    assert next_at_ms(trigs, after=now, run_baseline=baseline) == \
+        int(datetime(2026, 7, 10, 15, 0).timestamp() * 1000)
     # without a baseline the interval anchors at `after` itself (the §19 preview)
-    assert next_at(trigs, after=now) == datetime(2026, 7, 10, 18, 0)
+    assert next_at_ms(trigs, after=now) == int(datetime(2026, 7, 10, 18, 0).timestamp() * 1000)
     # a disabled interval contributes nothing
     off = [{**trigs[0], "enabled": False}]
-    assert next_at(off, after=now, run_baseline=baseline) is None
+    assert next_at_ms(off, after=now, run_baseline=baseline) is None
 
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="POSIX-only tzset")

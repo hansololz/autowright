@@ -8,7 +8,7 @@ type Surface = 'onboard' | 'app' | 'create' | 'menubar'
 export type Page =
   | 'automations' | 'automation' | 'executions' | 'execution'
   | 'agents' | 'agentNew' | 'secrets' | 'settings' | 'about'
-  // §22.3: rendered only while the §4.9 developerMode setting is on
+  // §22.3 marketplace page; parked only by the §22 MARKETPLACE_HIDDEN switch (config.ts)
   | 'marketplace'
 
 type CreateFrom = 'app' | 'edit' | null

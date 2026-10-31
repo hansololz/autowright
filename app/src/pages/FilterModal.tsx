@@ -2,7 +2,7 @@
 // (status, automations, started-time range) edited together as a draft and
 // committed by Apply — the page's only filter control. Any applied dimension
 // puts a filter line under the title and a count on the Filter button.
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { useStore } from '../store'
 import { BtnGhost, BtnPrimary, CheckBox, EmptyLine, Eyebrow, Modal, RadioRing, ScrollArea } from '../ui'
 
