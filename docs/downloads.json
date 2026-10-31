@@ -1,7 +1,7 @@
 {
   "darwin-arm64": {
-    "url": "https://github.com/hansololz/autowright/releases/download/v0.13.2/Autowright-0.13.2-darwin-arm64.dmg",
-    "version": "0.13.2"
+    "url": "https://github.com/hansololz/autowright/releases/download/v0.14.0/Autowright-0.14.0-darwin-arm64.dmg",
+    "version": "0.14.0"
   },
   "linux-x86_64": {
     "url": "https://github.com/hansololz/autowright/releases/download/v0.13.2/Autowright.AppImage",
