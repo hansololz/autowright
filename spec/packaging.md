@@ -98,9 +98,14 @@ the update bullets below).
   the preload bridge (`backend-status` IPC: `{ state: 'idle'|'installing'|'ok'|'failed', detail }`)
   and the §9 boot splash shows the failure detail instead of waiting silently. The renderer keeps
   retrying regardless — a late backend still connects. An install the shell drops because a
-  quit-all is already latched records that outcome too (`failed` with a "quitting" detail
-  plus an `app.log` line) — the status never latches on `installing` for a run that was
-  never made.
+  quit-all is already latched records that outcome too (`failed` with the plain-sentence
+  detail "Autowright is quitting." plus an `app.log` line — the splash prints the detail
+  verbatim, so it is a sentence, never the raw word "quitting", 2026-10-31) — the status
+  never latches on `installing` for a run that was never made. The version sync itself is
+  single-flight (a second call while its loop runs joins it — a refused Windows install's
+  resume used to start a second loop) and re-probes `/health` right before its
+  `service install`, skipping the install when the backend already reports the app's
+  version (2026-10-31).
 - **Bundled Python (decided):** the app ships its own relocatable CPython (python-build-standalone
   builds) inside the bundle (`Contents/Resources/python/`; on Windows the packaged layout is
   `resources\python\` and the interpreter sits flat at `python\python.exe` — the
@@ -108,7 +113,15 @@ the update bullets below).
   platform layer's `bundledPythonPath`). The backend, the engine, and every
   step script execute on this one interpreter. The system/user Python is never used, never required,
   and never installed — users install nothing, and every Mac gets the identical interpreter
-  version. The launchd plist points at the bundled interpreter by absolute path (`sys.executable`
+  version. The interpreter is **isolated from the user's Python environment** wherever the
+  app launches it (the backend service definitions on every OS, the §6 executor spawn, the
+  §6.2 pip spawn): `PYTHONNOUSERSITE=1` keeps `~/.local/lib/pythonX.Y/site-packages` off
+  `sys.path` (a `pip install --user requests` for the same minor version shadowed the
+  curated one and ran its `.pth` hooks at startup) and `PYTHONSAFEPATH=1` keeps the spawn
+  cwd off it (`-m` puts the cwd first, and a systemd user unit's default cwd is `$HOME`,
+  where a stray `email.py` shadowed the stdlib for every step, 2026-10-31). Developer mode
+  runs the same way: the repo's editable install lives in the venv's own site-packages,
+  which neither variable touches. The launchd plist points at the bundled interpreter by absolute path (`sys.executable`
   at install time; python-build-standalone resolves its own home relative to the binary, so no
   `PYTHONHOME` is needed). Moving the app bundle breaks that path — launchd then can't start the
   backend, and the next app launch's ensure-backend step re-registers with the new path.
@@ -242,7 +255,13 @@ the update bullets below).
   (every probe uses `lstat`). On Windows (§2 groundwork, defined by `win32.cjs`) the
   shim is a batch file `autowright.cmd`: `@echo off`, a `rem autowright CLI shim` marker line,
   then `"<python>" -m autowright.cli %*` (the interpreter path with every `%` doubled —
-  batch expands `%NAME%`, and a Windows user name may hold one), CRLF line endings, installed at
+  batch expands `%NAME%`, and a Windows user name may hold one; when the path lies under
+  `%LOCALAPPDATA%` — every per-user install, `…\Programs\Autowright\…` — it is written as
+  `%LOCALAPPDATA%\<rest>` with the variable left for cmd to expand at run time, because
+  cmd reads a batch file in the console's OEM code page and a literal UTF-8 path through a
+  profile folder like `C:\Users\José` was misread, failing every command with "the system
+  cannot find the path specified"; the two writers of this shim, `win32.cjs` and
+  `platform/windows.py`, stay byte-identical, 2026-10-31, unverified on a Windows host), CRLF line endings, installed at
   `%LOCALAPPDATA%\Autowright\bin\autowright.cmd` (user-owned, same no-privilege rule; the
   backend `service install` healing half below covers this `.cmd` shim too, through the
   Windows ServiceManager in `platform/windows.py`). The command name is `autowright` (no
@@ -596,6 +615,9 @@ the update bullets below).
   to write there.
   A stopped backend returns at next login (`RunAtLoad`) or next app launch (ensure-backend
   re-heals) — stopped, never uninstalled.
+  Every service definition (the launchd plist's `EnvironmentVariables`, the systemd unit's
+  `Environment=`, the Task Scheduler action) carries the §3 interpreter-isolation pair
+  `PYTHONNOUSERSITE=1` / `PYTHONSAFEPATH=1` (2026-10-31).
   On Linux the systemd user unit carries `Environment=` lines for `XDG_DATA_HOME`,
   `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and `AUTOWRIGHT_HOME` whenever the installing
   process has them set (2026-10-30): the GUI runs with the desktop session's environment
@@ -617,7 +639,12 @@ the update bullets below).
      `quit-all` refuses `{ error }` and an OS quit is ignored with a log line while an
      update install is in flight (2026-10-31: a quit during the install's backend stop ran
      a second `service stop` beside it, and a refused install's resume could re-register
-     the backend in the middle of the quit).
+     the backend in the middle of the quit) — "in flight" meaning the span from the
+     backend stop to the `quitAndInstall` hand-off only, not the macOS staging wait that
+     precedes it (up to 10 min, during which Cmd+Q was silently ignored; a quit during
+     staging is an ordinary quit, and the staging listener is dropped with the 10-minute
+     give-up, so a staging that never reports stops refusing later downloads with
+     "Restart to finish the update you already downloaded.", 2026-10-31 second sweep).
   1. The same live-execution gate as quit-all/update-install (busy → `{ busy: true }`,
      nothing touched; an unreachable backend counts as idle — but a reachable backend that
      answers the probe with anything but 200 (a stale token, a 500 mid-execution) is
@@ -841,17 +868,21 @@ the update bullets below).
     `squirrelDownloadedUpdate` flag is set with no version recorded; a download while an
     `update-install` is in flight is refused with the same line, since re-entering
     `MacUpdater` closes the proxy Squirrel is reading from, 2026-10-30 second sweep; and so
-    is one while a given-up staging's late listener is still armed, since a staging that
-    completes after the give-up would otherwise be the bundle installed under the About
-    row's newer version number, 2026-10-31). The Squirrel hand-off moves to `update-install`:
+    is one while electron-updater's never-reset `squirrelDownloadedUpdate` flag says a
+    bundle is staged with no version recorded — the one guard against a staging that
+    completed after the give-up being the bundle installed under the About row's newer
+    version number; the separate late-staging listener is gone, since it stayed armed for
+    good when Squirrel never reported and refused every later download, 2026-10-31). The Squirrel hand-off moves to `update-install`:
     behind the gate, the darwin handler subscribes to Electron's `autoUpdater`
     `update-downloaded`/`error` events, calls its `checkForUpdates()` (Squirrel fetches
     the zip from the proxy, verifies the code signature, stages the bundle) and only then
     `quitAndInstall()`; the About row reads "Installing…" meanwhile (§9.4), an `error`
     event settles `{ error }` with the bundle untouched, and if Squirrel emits neither
     within 10 minutes the handler settles with a plain-word error instead of hanging
-    the flow forever (a staging that completes after that give-up is logged when it
-    lands — the bundle is then staged and installs on the next quit). Staging takes
+    the flow forever (a staging that completes after that give-up is not listened for; the
+    bundle is then staged, Squirrel installs it on the next quit, and until then a
+    download of any version — the same one included — is refused with the restart line
+    above). Staging takes
     minutes, so the live-execution gate runs **again** once the bundle is staged: an
     execution that started meanwhile answers `{ busy: true, staged: true }` and nothing
     quits (the §9.4 card says the staged update finishes at the next quit); a repeated
@@ -1095,7 +1126,13 @@ and dropped (dormant project; the name-sharing Squirrel.Mac stays on macOS uncha
   threw, refused on its error stream, or the 10 s no-quit timer fired) kicks off the
   backend's restore — the launch ensure-backend again, started before the answer goes back
   but never awaited, since its health probes can take seconds — so a refused install never
-  leaves the scheduler stopped until the next logon. `update-install` is
+  leaves the scheduler stopped until the next logon. Before the backend stop, the handler
+  checks that the staged installer file exists and is readable and refuses `{ error }`
+  otherwise (an antivirus quarantine of the unsigned installer; NSIS's `doInstall` reports
+  a launch failure on the error stream only **after** it has scheduled the quit, so a
+  refusal found that late cannot be caught — the one residual: a UAC prompt declined after
+  the hand-off quits the app with nothing installed and the backend stopped until the next
+  logon's `RunAtLoad` twin, the Task Scheduler logon trigger, 2026-10-31). `update-install` is
   single-flight on every OS: a second call while one is pending shares its answer (a second
   `service stop` child could otherwise still be alive when NSIS starts). (2026-10-28;
   unverified on a real Windows host.)

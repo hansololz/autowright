@@ -272,7 +272,8 @@ export const api = {
   // with copyMemory; the server dedupes the name (§4.1), the landed one is in the answer
   duplicateAutomation: (automationId: string, body: { name?: string; copyMemory?: boolean }) =>
     req<import('./types').DuplicateResponse>('POST', `/automations/${automationId}/duplicate`, body),
-  saveVersion: (automationId: string, body: Record<string, unknown>) =>
+  // body.baseVersion (§19): the editor's seed version, 409 when it moved on
+  saveVersion: (automationId: string, body: Record<string, unknown> & { baseVersion?: number }) =>
     req<{ version: number }>('POST', `/automations/${automationId}/versions`, body),
   // §19 version diff: the backend diffs, the §9.2 modal only renders
   versionDiff: (automationId: string, from: number, to: number) =>
@@ -284,8 +285,14 @@ export const api = {
     req<{ draft: import('./types').DraftPayload | null; agentId: string | null
       // §19 background continuation: the owner's building job or held outcome
       job?: import('./types').DraftJobRef }>('GET', `/draft/${owner}`),
-  putDraft: (owner: string, draft: unknown, agentId?: string | null) =>
-    req('PUT', `/draft/${owner}`, { draft, ...(agentId !== undefined ? { agentId } : {}) }),
+  // §4.4 one editor per version: baseVersion is the version an edit-mode
+  // editor seeded from — a 409 answers when another version landed since.
+  putDraft: (owner: string, draft: unknown, agentId?: string | null, baseVersion?: number) =>
+    req('PUT', `/draft/${owner}`, {
+      draft,
+      ...(agentId !== undefined ? { agentId } : {}),
+      ...(baseVersion !== undefined ? { baseVersion } : {}),
+    }),
   openDraft: (owner: string) => req('POST', `/draft/${owner}/open`),
   deleteDraft: (owner: string) => req('DELETE', `/draft/${owner}`),
   // §19/§4.4 the chat-thread surface — the thread lives at the container root

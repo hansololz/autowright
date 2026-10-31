@@ -190,6 +190,10 @@ def test_retention_sweeps_a_deleted_automations_latest(store):
                      (gone_latest, (datetime.now() - timedelta(days=45)).isoformat(timespec="seconds"))):
         h["started_at"] = stamp
         store.update_execution(h)
+    # §5 (2026-10-31): the age is measured from the newest record — one
+    # started now keeps the anchor at the wall clock.
+    store.create_execution(store.create_automation(make_version(), "Fresh", None),
+                           "version", 1, "manual", [], status="succeeded")
     store._refresh_exec_derived()
     store.autos.pop(gone["id"])  # its executions outlive it
     store.retention_cleanup()

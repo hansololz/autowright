@@ -2,6 +2,7 @@
 streams status/logs, enforces policies, persists everything file-first."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -885,7 +886,7 @@ class Engine:
                 return False
             staging = dmem.parent / f"{DRAFT_MEM_STAGE_PREFIX}{new_id()}"
         try:
-            shutil.copytree(live_mem, staging)
+            shutil.copytree(live_mem, staging, symlinks=True)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -986,7 +987,14 @@ class Engine:
                     [(s["name"], s.get("file"), s.get("sha")) for s in h["steps"]] != \
                     [(s["name"], s.get("file"), _step_sha(s)) for s in ver["steps"]]:
                 raise RuntimeError("the draft's steps changed since this execution — execute it fresh instead")
-            self.store.execs[h["id"]] = h  # the live in-memory record is the full one
+            # §7 disk-first (2026-10-31): the re-opened record is a copy,
+            # written (log line + execution.yaml) BEFORE it replaces the
+            # failed one in the live table — `exec_full` may hand back the
+            # very object store.execs holds. A write that raises (ENOSPC,
+            # EIO) leaves the stored record `failed` with no live entry, and
+            # the OS error propagates (500 with its message); mutating in
+            # place first used to strand an `executing` record with no thread.
+            h = copy.deepcopy(h)
             for s in h["steps"]:
                 if s["status"] == "failed":
                     s["status"] = "queued"
@@ -1001,6 +1009,7 @@ class Engine:
                 n = _next_attempt_n(h["steps"][idx])
                 self._log(h, "sys", f"retrying from step {idx + 1} — attempt {n}", {})
             self.store.update_execution(h)
+            self.store.execs[h["id"]] = h  # the live in-memory record is the full one
             return self._launch(auto, ver, h)
 
     def _launch(self, auto: dict, ver: dict, h: dict) -> dict:
@@ -1542,6 +1551,26 @@ class Engine:
                     else:
                         secret_values[sid] = v
                         secret_names[sid] = sec["name"]
+            # §6.1 (2026-10-31): the prompt/reply scan and the redaction map
+            # cover ALL of the automation's allowed secret values, not only
+            # the ones this version's steps reference — v1 may have saved a
+            # value into memory that v2 no longer names. Scan/redaction only:
+            # a step still receives just its own secrets (§6 scoping). An
+            # allowed secret that is gone, unset, or unreadable fails nothing
+            # here — it has no value to leak through this execution.
+            for sid in sorted(set(auto["allowed_secrets"]) - needed):
+                sec = by_id.get(sid)
+                if sec is None:
+                    continue
+                try:
+                    v = keychain.get_secret(sid)
+                except Exception as e:  # noqa: BLE001 — locked, access denied, …
+                    log.warning("couldn't read secret %s from the OS secret store: %s",
+                                sid[:8], e)
+                    continue
+                if v:
+                    secret_values[sid] = v
+                    secret_names[sid] = sec["name"]
             # Redaction labels are names (§4.5 redactedSecrets), never ids.
             redactions = build_redactions(secret_values, secret_names)
 
@@ -1712,6 +1741,16 @@ class Engine:
                             message = message[:ERROR_MESSAGE_CAP] + CLIP_MARKER
                         reason = (err or {}).get("reason") or failure_reason(rc, err)
                         attempt["error"] = {"message": message, "reason": reason}
+                        # §7 policy verdicts (2026-10-31): a DisallowedImport
+                        # (exit 4) or runtime MissingSecret (exit 3) — as the
+                        # executor's own structured event says, the
+                        # failure_reason test — is the same answer on every
+                        # attempt, so the step fails once instead of
+                        # respawning under infiniteRetries forever.
+                        err_type = (err or {}).get("type")
+                        if (rc == 4 and err_type == "DisallowedImport") or \
+                                (rc == 3 and err_type == "MissingSecret"):
+                            notify_holder["non_retryable"] = True
                         if (forever or pass_tries < budget) and \
                                 not notify_holder.get("non_retryable"):
                             # §7 step retry: budget left — only the attempt keeps
@@ -1951,6 +1990,9 @@ class Engine:
             else str(self._memory_dir(auto, h["kind"])),
             "workspace": str(self.store.exec_dir(h["id"]) / "workspace"),
             "result_dir": str(self.store.exec_dir(h["id"]) / "result"),
+            # §6 (2026-10-31): per-site fetch spacing shared across the
+            # execution's steps, each its own executor process.
+            "sites_file": str(self.store.exec_dir(h["id"]) / ".sites.json"),
             "agents": agent_cfgs,
             "is_agent_step": bool(s.get("agent")),
             "agent_timeout": 120,
@@ -2007,12 +2049,20 @@ class Engine:
 
             def deliver() -> None:
                 err = listeners.send_reply(payload, text)
-                if err:
-                    self._log(h, "err", f"reply failed — {err}", redactions, cur)
-                else:
-                    where = (f"iMessage ({payload.get('chat')})" if payload.get("kind") == "imessage"
-                             else f"Discord ({payload.get('channel')})")
-                    self._log(h, "sys", f"reply sent to {where}", redactions, cur)
+                # §5 (2026-10-31): a late delivery whose record was deleted
+                # meanwhile (a §11 test record replaced by keep-latest) logs
+                # nothing — appending would re-create executions/<id>/logs/.
+                # Checked and logged in one store.lock hold, so a delete can't
+                # land between the two (store.lock → the leaf _log_lock).
+                with self.store.lock:
+                    if h["id"] not in self.store.execs:
+                        return
+                    if err:
+                        self._log(h, "err", f"reply failed — {err}", redactions, cur)
+                    else:
+                        where = (f"iMessage ({payload.get('chat')})" if payload.get("kind") == "imessage"
+                                 else f"Discord ({payload.get('channel')})")
+                        self._log(h, "sys", f"reply sent to {where}", redactions, cur)
 
             listeners.submit_send(deliver)
 

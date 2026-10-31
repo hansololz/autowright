@@ -540,11 +540,15 @@ export function LoadingRow({ label, style }: { label: React.ReactNode; style?: R
 }
 
 /** §9 page back link — chevron + label, above the page title. */
-export function BackLink({ label, onClick, style }: {
+export function BackLink({ label, onClick, style, disabled }: {
   label: React.ReactNode; onClick: () => void; style?: React.CSSProperties
+  /** §9 busy rule: a back link whose leave path writes (the §11 editor's
+   * draft keep) disables with the commit buttons beside it (2026-10-31). */
+  disabled?: boolean
 }) {
   return (
-    <button className="ad-btn-text" onClick={onClick} style={{ display: 'block', marginBottom: 10, ...style }}>
+    <button className="ad-btn-text" onClick={onClick} disabled={disabled}
+            style={{ display: 'block', marginBottom: 10, ...style }}>
       <i className="fa-solid fa-chevron-left" style={{ fontSize: 10 }} /> {label}
     </button>
   )

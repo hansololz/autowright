@@ -193,7 +193,13 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (§4.3 `enabledAt`) that lies more than 15 min ahead of the clock is a stamp from the
   same glitch and is **ignored as if absent** (dropped from the first-seen clamp and from
   the interval anchor candidates, 2026-10-30) — never clamped to `now`, which would move
-  the baseline forward on every tick and silence the trigger for good. In the repeated fall-back hour
+  the baseline forward on every tick and silence the trigger for good; the automation's
+  **run baseline** (§4.3: the newest `started_at`) gets the same 15-minute credibility
+  rule in the interval anchor and the §4.1 overdue audit — a record started under a
+  clock set ahead would otherwise anchor every interval and silence the overdue check
+  until the wall clock reaches it, since the newest `started_at` never gets replaced by a
+  later real run (2026-10-31). The §5 retention sweep anchors its cutoff on the same
+  newest-record instant for the mirror-image reason. In the repeated fall-back hour
   a zone-less cron chooses, of the two readings of an ambiguous wall time, the one whose
   instant is strictly after the baseline's instant (`fold` honoured, as the zoned path
   already did), so a baseline that itself sits in the second pass (a boot, enable, or wake
@@ -224,8 +230,17 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   the execution covers it, and the one-per-wake rule holds. Dropped moments never make the
   automation §4.1 `overdue` - the user chose them. The field covers sleep only: the
   backend-not-running case above is unchanged whatever its value.
-- **Reading web pages** — 10 s timeout; ≥ 2 s between requests to the same site; retry twice;
-  respect robots.txt; user agent "Autowright/1.0".
+- **Reading web pages** — 10 s timeout per read and a 60 s deadline for the whole fetch
+  (a trickling server used to hold the step until its §4.1 watchdog); the body is capped
+  at 8 MB (a larger page is a step error, never read into memory whole) and decoded with
+  the charset the `Content-Type` header declares, UTF-8 when it declares none (a
+  windows-1252 page came back garbled, 2026-10-31); ≥ 2 s between requests to the same
+  site, counted **across the execution's steps** — each step is its own executor process,
+  so the per-site last-hit times live in the execution record's `.sites.json`, which the
+  engine names in the executor context (`sites_file`) and every `fetch_page` reads before
+  and writes after a hit; retry twice; respect robots.txt (the parsed robots.txt is cached
+  per process, so the second step of an execution re-reads it — accepted); user agent
+  "Autowright/1.0".
 - **Workspace per execution** — every step executes with its cwd set to the execution's `workspace/`
   directory; scripts are executed in place from their version folder (or `draft/automation/`), never
   copied. All steps of an execution share the one workspace; it is disposable scratch space,
@@ -595,7 +610,12 @@ silently depend on a package another automation happened to install.
 user-writable directory, `<app-support>/site-packages` (§5), via the bundled interpreter's
 `python -m pip install --target` (on Windows the console interpreter with a hidden
 console — §2 spawn policy `paths.console_python()` + `CREATE_NO_WINDOW` — so pip and its
-helper children never show a terminal window under the §3 `pythonw.exe` service), wheels
+helper children never show a terminal window under the §3 `pythonw.exe` service; pip runs
+with `PIP_USER=0` and `PIP_REQUIRE_VIRTUALENV=0` in its environment, since a user's
+`pip.conf` with `user = true` or `require-virtualenv = true` made every `--target` install
+fail outright — never `--isolated`, which would also discard the §15 `PIP_NO_INDEX` /
+`PIP_FIND_LINKS` the test suites rely on — plus the §3 interpreter-isolation variables
+`PYTHONNOUSERSITE=1` / `PYTHONSAFEPATH=1`, 2026-10-31), wheels
 only (`--only-binary :all:` — a source-only
 distribution fails fast with pip's "no matching distribution" rather than hitting a compiler
 users don't have). After pip exits 0 the ensure re-runs the import check: a declared
@@ -710,7 +730,12 @@ destructive moments recoverable.
   recursive copy. Each snapshot is self-describing; there is deliberately no index file. The
   list is read from disk on demand, newest `created_at` first — nothing cached, per the §5
   rebuild-from-disk model; a dir whose `snapshot.yaml` names a different `id` is skipped as
-  damaged (§5), so no mutation ever resolves a path from a hand-edited id.
+  damaged (§5), so no mutation ever resolves a path from a hand-edited id. Every memory copy
+  (snapshot, restore, §9.2 duplicate's copy, the §11 draft-memory seed, a test's copy) copies
+  a **symlink as a link** and never follows it: `copytree`'s default follows links, so a
+  dangling one (a venv in `memory/` whose interpreter was upgraded away) made every copy
+  raise after copying everything else — and with it every first execution of a new
+  version, forever — and a link to a directory copied the target's whole tree (2026-10-31).
 - **Reasons** — `manual` (MEMORY-card button, optional name); `pre-clear` (automatic, taken
   before §9.2 "Clear memory" empties the dir); `pre-version` (automatic, taken by the engine
   right before the first execution of a version with no recorded execution yet — real "vN"
@@ -744,7 +769,14 @@ destructive moments recoverable.
   and, via `pre-restore`, undoable.
 - **Manual snapshot** — 409 while any execution is live (a mid-execution copy could catch a
   half-written file). Automatic reasons never race an execution: `pre-clear` rides the clear
-  request, which is itself 409-gated the same way. `pre-version` runs before step 1 — and
+  request, which is itself 409-gated the same way. **Raced-copy rule:** every gated copy
+  (manual, pre-clear, restore's stage and pre-restore, duplicate's copy) reads the
+  automation's **execution-start counter** (bumped under the store lock whenever a record is
+  created or promoted into a run) at its first gate and abandons the copy at commit if the
+  counter moved or anything is live — a one-minute cron that started and finished inside a
+  multi-GB copy used to pass both "nothing live" checks and commit a torn image (and, for
+  restore, swap the run's writes away with only a torn `pre-restore` to undo it,
+  2026-10-31). `pre-version` runs before step 1 — and
   because two parallel first-executions of a new version would otherwise both see "no recorded
   execution yet", the *decision* is taken **in the lock span that admits the execution**, so exactly one is
   ever taken, and the copy itself runs on the admitted execution's worker thread before its

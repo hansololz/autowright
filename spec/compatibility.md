@@ -329,9 +329,28 @@ version that writes the new shape, and the oldest shape still read.
   normalized form is written by the next save, and every release's loader reads both forms;
   without it a version saved before the 2026-10-30 validator rule answered 422 on every
   save. Fixture: a v0.13.2-shape version with a mismatched default and a boolean label.
+  Extended the same day (second sweep): a number param's `min` that is not a finite number
+  is dropped at load (the 2026-10-31 validator rule "`min` must be a number" had shipped
+  without this twin, so a stored `min: 1e3` — YAML text — or `min: null` answered 422 on
+  every save again), a `kv` default's rows are coerced to text key / text value with
+  null-key rows dropped, and a non-finite number default resolves through
+  `param_default` like any other mismatch. Fixture cases added: `min: "1e3"`, `min: null`,
+  a `kv` row with an integer key, `default: .inf`.
   (b) Wrong-type top-level `enabled_agents` / `allowed_secrets` / `param_values`, a param
   entry without a name, and a date-typed snapshot `created_at` are coerced at load (§5);
-  no written shape changes.
+  no written shape changes. Extended (second sweep): a `param_values` entry that is not a
+  value of its definition's kind (non-finite number, non-text `kv` key) is ignored at load
+  and the default applies — one `.inf` made every `GET /state` a 500. Fixture: a top-level
+  `param_values` with `.inf` and a `kv` row keyed by an integer.
+  (c) Cron step on a bare number (second sweep): the §4.3 dialect now rejects `5/15` at
+  every entry door, but released versions stored and fired it with Vixie's meaning
+  (`5-59/15`), so a stored expression is **rewritten at load** to that range form —
+  `a/n` → `a-<field max>/n` per field — and the load-time trigger check skips the new
+  "never fires" rule (an expression that never fires stays stored and keeps not firing, as
+  it always did; only the API and import refuse it). Read-side migration: the rewritten
+  form is written by the next save. Fixture: a v0.13.x automation.yaml with
+  `expression: "5/15 * * * *"` and one with `0 0 30 2 *`, both still enabled after load,
+  the first firing at :05, :20, :35, :50.
 - **2026-10-30 (second sweep) - audit batch.** (a) A crash-orphan version folder (§5,
   above `current_version`) is renamed aside to `vN.orphan` by the next save that numbers
   past it; older releases' loaders never match that name (their `v<digits>` match), nothing

@@ -277,7 +277,8 @@ def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, 
             # §19: the copy re-checks for a stop at each directory it enters
             # and before each file it copies (2026-10-31), so a cancel during
             # a large memory copy stops it promptly.
-            shutil.copytree(src, mem_dir, ignore=_copy_stop_check(state),
+            shutil.copytree(src, mem_dir, symlinks=True,
+                            ignore=_copy_stop_check(state),
                             copy_function=_copy_file_stop_check(state))
         mem_dir.mkdir(parents=True, exist_ok=True)
         (dbase / "test.yaml").unlink(missing_ok=True)  # wiped at each test start (§5)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 APP_NAME = "Autowright"
@@ -28,11 +29,23 @@ def is_windows_device_name(name: str) -> bool:
     return str(name).split(".", 1)[0].strip().lower() in _WINDOWS_DEVICE_STEMS
 
 
+FILENAME_STEM_MAX_BYTES = 200
+
+
 def safe_filename(name: str) -> str:
     """§19: the automation name sanitized for a filesystem filename. Lives here
     rather than in `transfer` so the §20 CLI can reach it without importing the
     store (§15 leaf rule); `transfer.safe_filename` re-exports it."""
-    cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", name).strip().strip(".")
+    cleaned = unicodedata.normalize("NFC", name)
+    cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", cleaned).strip().strip(".")
+    # §5 (2026-10-31): the stem is capped at FILENAME_STEM_MAX_BYTES of UTF-8,
+    # cut on a character boundary — NAME_MAX is 255 bytes, and a CJK name
+    # reaches it at about 80 characters, leaving room for a " n" suffix and
+    # the `.autowright` extension.
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > FILENAME_STEM_MAX_BYTES:
+        cleaned = re.sub(r"[\s.]+$", "", encoded[:FILENAME_STEM_MAX_BYTES]
+                         .decode("utf-8", errors="ignore"))
     if is_windows_device_name(cleaned):
         return "automation"
     return cleaned or "automation"

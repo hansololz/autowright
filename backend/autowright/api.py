@@ -31,7 +31,7 @@ from .events import OVERFLOW, hub
 from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, finish_queued,
                      fire_trigger, queue_manual)
 from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
-                      NameTakenError, StepModifiedError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms,
+                      NameTakenError, OrphanSetAsideError, StepModifiedError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms,
                       exec_version_label, iter_file_stats, new_id,
                       size_label, store, strip_param_values)
 from . import testexec, versions_diff
@@ -331,6 +331,16 @@ async def _missing_step_script_handler(request: Request, exc: MissingStepScriptE
     from fastapi.responses import JSONResponse
 
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# §5/§19 crash-orphan set-aside that failed: the save or restore was refused,
+# and the 500 names the folder and the OS reason (the error's message), never
+# the bare "Internal Server Error" a raw OSError produced (2026-10-31 second sweep).
+@app.exception_handler(OrphanSetAsideError)
+async def _orphan_set_aside_handler(request: Request, exc: OrphanSetAsideError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 def _auto_or_404(automation_id: str) -> dict:
@@ -1124,6 +1134,16 @@ def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict
     return out
 
 
+def _reject_stale_base(a: dict, base_version: int | None) -> None:
+    """§4.4 one editor per version: content seeded from another version than
+    the current one (a §20 push minted one meanwhile) answers 409 before
+    anything is settled or written (2026-10-31 second sweep). Caller holds
+    store.lock; None (the push, older clients) skips the check."""
+    if base_version is not None and base_version != a["current_version"]:
+        raise HTTPException(409, f"version v{a['current_version']} was saved outside this editor"
+                                 " — close and reopen Edit to continue from it")
+
+
 @app.post("/automations/{automation_id}/versions", dependencies=[Depends(auth)])
 def save_version(automation_id: str, body: models.VersionSave) -> dict:
     a = _auto_or_404(automation_id)
@@ -1155,6 +1175,7 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
     # A refused settle must be side-effect free: check the 409 condition
     # before the cancels (the in-lock check below stays authoritative).
     with store.lock:
+        _reject_stale_base(a, body.baseVersion)
         _reject_live_draft_exec(a)
         if sent.get("name") and sent["name"] != a["name"]:
             # §4.1/§19: a name taken since the up-front check answers 422
@@ -1166,6 +1187,9 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
         # Same guard as PUT/DELETE draft: saving deletes the draft container,
         # and a live Draft execution reads its step scripts lazily mid-run.
         _reject_live_draft_exec(a)
+        # §4.4: re-checked under the lock that mints — nothing lands over a
+        # version minted after the pre-settle check.
+        _reject_stale_base(a, body.baseVersion)
         # §4.4 operational-only save: unchanged versioned content mints no
         # version — the triggers/values/grants patch below still applies.
         cur = a["versions"].get(a["current_version"]) or {}
@@ -1317,6 +1341,9 @@ def put_draft_container(owner: str, body: models.DraftPut) -> dict:
             store.save_draft(None, ver, name=d.get("name"), agent_id=body.agentId,
                              triggers=d.get("triggers") or [])
         else:
+            # §4.4: an editor seeded from an older version never re-creates
+            # a draft over the one it has not seen.
+            _reject_stale_base(a, body.baseVersion)
             _reject_live_draft_exec(a)
             ver["triggers"] = d.get("triggers")
             store.save_draft(a, ver)
@@ -1494,15 +1521,17 @@ def _clear_import_spool() -> None:
 def _sweep_parked() -> None:
     """§5.2: drop every expired parked archive and its spool file. Run on every
     preview *and* every confirm — an expired file must never sit on disk until
-    the next preview happens to come along."""
-    now = time.time()
+    the next preview happens to come along. Stamps are time.monotonic(),
+    held only in memory (§6: in-memory durations never read the wall clock,
+    2026-10-31 second sweep)."""
+    now = time.monotonic()
     with _import_lock:
         for k in [k for k, (t, _) in _import_parked.items() if now - t > _IMPORT_TTL]:
             _drop_parked(k)
 
 
 def _park_archive(data: bytes) -> str:
-    now = time.time()
+    now = time.monotonic()
     token = pysecrets.token_hex(16)
     d = paths.import_spool_dir()
     p = d / f"{token}.autowright"
@@ -1560,7 +1589,7 @@ def import_confirm(body: models.ImportConfirm) -> dict:
         raise HTTPException(404, _IMPORT_GONE)
     parked_at, path = slot
     try:
-        if time.time() - parked_at > _IMPORT_TTL:
+        if time.monotonic() - parked_at > _IMPORT_TTL:
             raise HTTPException(404, _IMPORT_GONE)
         try:
             data = path.read_bytes()
@@ -1865,13 +1894,16 @@ def clear_memory(automation_id: str) -> dict:
     # re-checks `_live` so a copy that raced an execution never lands.
     with store.memory_ops:
         with store.lock:
-            if a.get("_live"):
+            # §6.3 raced-copy rule: the start counter read at the first gate.
+            token = store.start_token(a)
+            if token is None:
                 raise HTTPException(409, "an execution is in progress")
         staged = store.stage_snapshot(a, "pre-clear")  # §6.3 — None when memory is empty or the toggle is off
         with store.lock:
             # §6: no rmtree under the lock — a raced copy is discarded after
-            # the hold ends.
-            raced = bool(a.get("_live"))
+            # the hold ends. §6.3: a run that started (and maybe finished)
+            # inside the copy moved the counter (2026-10-31 second sweep).
+            raced = store.start_token(a) != token
             if not raced:
                 if staged is not None:
                     store.commit_snapshot(a, staged, "pre-clear")
@@ -1899,7 +1931,9 @@ def create_snapshot(automation_id: str, body: models.SnapshotCreate | None = Non
     a = _auto_or_404(automation_id)
     with store.memory_ops:
         with store.lock:
-            if a.get("_live"):
+            # §6.3 raced-copy rule: the start counter read at the first gate.
+            token = store.start_token(a)
+            if token is None:
                 raise HTTPException(409, "an execution is in progress")
         staged = store.stage_snapshot(a, "manual")
         if staged is None:
@@ -1907,8 +1941,10 @@ def create_snapshot(automation_id: str, body: models.SnapshotCreate | None = Non
         try:
             with store.lock:
                 # §6: no rmtree under the lock — a raced copy is discarded
-                # after the hold ends.
-                raced = bool(a.get("_live"))
+                # after the hold ends. §6.3: a run that started (and maybe
+                # finished) inside the copy moved the counter (2026-10-31
+                # second sweep).
+                raced = store.start_token(a) != token
                 if not raced:
                     meta = store.commit_snapshot(a, staged, "manual",
                                                  name=((body.name if body else None) or "").strip() or None)
@@ -2081,11 +2117,18 @@ def post_draft(body: models.DraftJobStart) -> dict:
             return "discarded"
         return None
 
+    # §8 locked-bytes guard: the owner's on-disk step-script folders — its
+    # current version folder (none for `pending`) and its draft working copy.
+    locked_folders = [store.draft_dir(auto) / "automation"]
+    if auto is not None:
+        locked_folders.insert(0, store.auto_dir(auto) / "versions"
+                              / f"v{auto['current_version']}")
     try:
         job_id = draft_jobs.start(mode, agent, body.text, current, grants,
                                   chat_history=body.chat, executions=executions,
                                   pkg_state=pkg_state,
-                                  owner_id=owner_id, admit=admit)
+                                  owner_id=owner_id, admit=admit,
+                                  locked_folders=locked_folders)
     except drafting.DraftRefused as e:
         if e.reason == "deleting":
             raise HTTPException(404, "automation not found") from None

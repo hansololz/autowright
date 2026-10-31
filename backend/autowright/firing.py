@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -107,6 +108,20 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
         # the capacity branch below never reaches it.)
         if a.get("_deleting"):
             return False
+        # §6 (2026-10-31): the caller collected `a` in an earlier hold — a
+        # data-path reload since may have replaced the automation dict, and a
+        # start against the stale one would bypass maxParallel. Refused
+        # quietly, with no record — the scheduler's own stale-snapshot rule.
+        if store.autos.get(a["id"]) is not a:
+            return False
+        # §6 (2026-10-31): likewise a PATCH landing since the hit was
+        # collected may have turned the trigger off or removed it — an
+        # occurrence the API already confirmed off must not fire (or queue,
+        # where cancel_unmatched_queue would never see it).
+        if t.get("id"):
+            cur = next((x for x in a["triggers"] if x.get("id") == t["id"]), None)
+            if cur is None or not cur.get("enabled"):
+                return False
         # §4.9 degraded session: nothing creates an execution record — not a
         # start, not a queued entry, not a skipped one. Refused like the DELETE
         # window above: no record, nothing started.
@@ -121,6 +136,12 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
                 h = store.create_execution(a, "version", a["current_version"], kind,
                                            steps=[], status="queued",
                                            trigger_payload=payload)
+                # §6 TTL clock (2026-10-31): a monotonic stamp beside the
+                # queued_at it was taken with (in-memory only, `_`-prefixed
+                # like exec_started_ms's cache), so a backward wall-clock step
+                # can't keep a stale firing from expiring.
+                h["_queued_mono"] = time.monotonic()
+                h["_queued_mono_key"] = h.get("queued_at")
                 # §6: admission is visible immediately — the §7 Waiting section
                 # and the §9.2 "N waiting" line update off this, and promotion
                 # publishes the ordinary execution.started for the same record.
@@ -273,11 +294,17 @@ def cancel_unmatched_queue(store: Store, engine: Engine, automation_id: str) -> 
         # §6: only payload-carrying (message-admitted) entries are matched —
         # a manual entry was not admitted by any trigger, so trigger edits
         # never cancel it.
-        doomed = [h["id"] for h in store.queued_execs(automation_id)
+        doomed = [h for h in store.queued_execs(automation_id)
                   if h.get("trigger_payload")
                   and _key(h["trigger_payload"]) not in live]
-    for eid in doomed:
-        engine.cancel(eid)  # queued → finish_queued: skipped, sender told
+    for h in doomed:
+        # §6 (2026-10-31): finish the entry directly, never through
+        # engine.cancel — that falls through to a LIVE cancel when the entry
+        # was promoted in the gap since the snapshot, and a trigger edit must
+        # never kill a running execution (the §19 queue clear's rule). A
+        # promoted entry is no longer queued, so finish_queued answers False.
+        # Outside store.lock: finish_queued replies to the sender.
+        finish_queued(store, h, "cancelled before it ran")
 
 
 def _is_stale(h: dict) -> bool:
@@ -362,6 +389,11 @@ def _waited_s(h: dict) -> float:
     q = h.get("queued_at")
     if not q:
         return 0.0
+    # §6: the monotonic admission stamp wins while the stored queued_at is
+    # still the one it was taken with; a reloaded (after a restart) or
+    # hand-edited entry falls back to the wall-clock difference.
+    if "_queued_mono" in h and h.get("_queued_mono_key") == q:
+        return time.monotonic() - h["_queued_mono"]
     try:
         queued = datetime.fromisoformat(q)
     except (TypeError, ValueError):

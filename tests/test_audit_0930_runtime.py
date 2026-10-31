@@ -194,6 +194,10 @@ def test_retention_keeps_the_latest_real_execution_whatever_its_age(store):
     older = record(60, "succeeded")
     latest = record(45, "succeeded")
     dropped = record(40, "skipped")
+    # §5 (2026-10-31): the age is measured from the newest record — one
+    # started now keeps the anchor at the wall clock.
+    store.create_execution(store.create_automation(make_version(), "Fresh", None),
+                           "version", 1, "manual", [], status="succeeded")
     store.settings["days"] = 30
     store.retention_cleanup()
     assert latest["id"] in store.execs

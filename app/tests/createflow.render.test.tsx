@@ -2842,7 +2842,7 @@ describe('CreateFlow sync re-attach, backend cancel, identity PATCH (§11/§19)'
       .toBe('Steps synced with the spec — review them, then save.')
   })
 
-  it('a backend-side cancel clears the composer with no error entry and no chip', async () => {
+  it('a backend-side cancel settles no outcome, leaves the stopped chip and returns the request', async () => {
     // a stored thread that does not end on a user entry: the re-attach
     // reconciliation then adds nothing, so the assertions below read the
     // cancel alone (§11)
@@ -2859,11 +2859,13 @@ describe('CreateFlow sync re-attach, backend cancel, identity PATCH (§11/§19)'
     // sending swapped Send for the running job's Cancel (§11 in-flight rules)
     expect(screen.getByText('Cancel')).toBeTruthy()
     await waitFor(() => expect(screen.getByText('Send')).toBeTruthy(), { timeout: 5000 })
-    // §11: a cancelled job settles nothing: no outcome entry, no glyph, and
-    // no stopped chip (that one belongs to the composer's own Cancel)
+    // §11: a cancelled job settles nothing: no outcome entry, no glyph; a
+    // cancel this editor did not send still ends the turn visibly — the
+    // stopped chip lands and the request returns to the composer (2026-10-31)
     expect(screen.queryByText('Something went wrong')).toBeNull()
-    expect(screen.queryByText('Edit stopped — the spec is unchanged.')).toBeNull()
     const thread = screen.getByTestId('chat-thread')
+    expect(within(thread).getByText('Edit stopped — the spec is unchanged.')).toBeTruthy()
+    expect((screen.getByPlaceholderText('Change something, or ask a question…') as HTMLTextAreaElement).value).toBe('Also weekends')
     expect(thread.querySelector('.fa-check')).toBeNull()
     expect(thread.querySelector('.fa-xmark')).toBeNull()
     expect(storeMod.useStore.getState().toast).toBeNull()

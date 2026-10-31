@@ -181,6 +181,7 @@ def test_fire_trigger_mid_execution_writes_skipped_record(store):
     a = store.create_automation(make_version(), "Busy", None)
     a["_live"] = {"some-live-exec"}
     t = {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *"}
+    a["triggers"].append(t)  # §6: a firing's trigger must be on the automation
     assert fire_trigger(store, engine, a, t) is False
     recs = [h for h in store.execs.values() if h["automation_id"] == a["id"]]
     assert len(recs) == 1
@@ -213,6 +214,7 @@ def test_fire_trigger_answers_a_refused_message_firing(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Busy", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["_live"] = {"some-live-exec"}
     a["max_queued"] = 0  # queue disabled → straight to skip-on-busy
     payload = _payload()
@@ -225,6 +227,7 @@ def test_fire_trigger_answers_a_refused_message_firing(store, monkeypatch):
     assert [h["note"] for h in store.execs.values()] == ["previous execution still in progress"]
 
     cron = {"id": "t2", "kind": "cron", "enabled": True, "expression": "0 8 * * *"}
+    a["triggers"].append(cron)  # §6: a firing's trigger must be on the automation
     assert fire_trigger(store, engine, a, cron) is False
     assert notified == [payload]  # unchanged — no sender to answer
     assert {h["note"] for h in store.execs.values()} == {"previous execution still in progress"}
@@ -238,6 +241,7 @@ def test_message_firing_queues_instead_of_being_dropped(store):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"some-live-exec"}
 
@@ -264,6 +268,7 @@ def test_admission_publishes_exec_queued(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"some-live-exec"}
 
@@ -287,6 +292,7 @@ def test_queue_admits_every_firing_and_caps_at_max_queued(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["_live"] = {"some-live-exec"}
     a["max_queued"] = 2
 
@@ -322,6 +328,7 @@ def test_queue_drains_into_a_freed_slot_and_promotes_in_place(store):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"blocking"}
 
@@ -362,6 +369,7 @@ def test_stale_queue_entry_is_answered_not_executed(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trig(), payload=_payload("Dave"))
@@ -389,6 +397,7 @@ def test_cancelling_a_queued_entry_answers_its_sender(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trig(), payload=_payload("Dave"))
@@ -414,6 +423,7 @@ def test_max_parallel_admits_several_and_then_queues(store):
     ver = make_version()
     ver["steps"][0]["code"] = "import time\ntime.sleep(1.5)\n"
     a = store.create_automation(ver, "Parallel", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_parallel"] = 2
     a["max_queued"] = 10  # §4.1: queueing is opt-in — default 0 would skip Kim
 
@@ -510,6 +520,7 @@ def test_each_admission_publishes_its_own_exec_queued(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trig(), payload=_payload("Dave", "one"))
@@ -622,6 +633,7 @@ def test_deleted_version_queue_entry_finishes_with_note(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Chat", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trig(), payload=_payload("Dave"))
@@ -763,6 +775,7 @@ def test_fire_trigger_version_gone_reports_not_started(store):
     a["versions"].clear()  # the version the firing would resolve is gone
     before = len(store.execs)
     t = {"id": "t1", "kind": "cron", "enabled": True, "expression": "0 8 * * *"}
+    a["triggers"].append(t)  # §6: a firing's trigger must be on the automation
     assert fire_trigger(store, engine, a, t) is False
     # §7: nothing started, but the occurrence leaves its skipped record — a
     # silent swallow would fire and vanish every occurrence forever.
@@ -817,6 +830,7 @@ def test_drain_queue_slot_race_leaves_entry_queued(store, monkeypatch):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Race", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 10  # §4.1: queueing is opt-in — the default 0 would skip
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trig(), payload=_payload("Dave"))
@@ -914,6 +928,7 @@ def test_queue_manual_full_queue_and_draft_refuse_with_no_record(store):
 
     engine, sched = _mk(store)
     a = store.create_automation(make_version(), "Manual Q", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 1
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trig(), payload=_payload())  # fills the queue
@@ -987,6 +1002,8 @@ def test_fire_trigger_finishes_a_record_left_behind_by_a_failed_start(store):
             raise OSError("disk on fire")
 
     a = store.create_automation(make_version(), "Half Started", None)
+    a["triggers"].append({"id": "t1", "kind": "cron", "enabled": True,
+                          "expression": "0 8 * * *"})  # §6: a firing's trigger must be on the automation
     assert fire_trigger(store, Boom(), a, {"id": "t1", "kind": "cron"}) is False
     assert a["_live"] == set()
     h = next(iter(store.execs.values()))
@@ -998,9 +1015,11 @@ def test_fire_trigger_finishes_a_record_left_behind_by_a_failed_start(store):
 
 
 def test_scheduler_warns_once_on_timezone_rewind(store, monkeypatch, caplog):
-    """§4.3: a wall rewind too large for DST (system-timezone change) is
-    handled like fall-back but logs one diagnosable warning — and does not
-    double-fire the rewound span."""
+    """§4.3: the baseline is an instant, re-read each tick as a wall time in
+    the current zone, so a wall rewind too large for DST (a system-timezone
+    change) neither re-fires nor skips anything relative to that instant —
+    the 13:00 in the rewound span stays unfired. The one warning per change
+    is diagnostic only; it changes no firing."""
     import logging
     from datetime import datetime, timedelta, timezone
 
@@ -1433,6 +1452,8 @@ def test_fire_trigger_logs_a_start_bug_instead_of_a_missing_version(store, caplo
             raise KeyError("steps")
 
     a = store.create_automation(make_version(), "StartBug", None)
+    a["triggers"].append({"id": "t1", "kind": "cron", "enabled": True,
+                          "expression": "0 8 * * *"})  # §6: a firing's trigger must be on the automation
     with caplog.at_level(logging.ERROR):
         assert fire_trigger(store, Boom(), a, {"id": "t1", "kind": "cron"}) is False
     assert store.execs == {}  # no phantom "no longer exists" record

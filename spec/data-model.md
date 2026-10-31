@@ -169,7 +169,9 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   `agents`, `secrets`, `packages`, the timeout pair, the retry pair) are frozen for every §8
   sync — the backend splices the stored step back into the agent's output byte for byte and
   the §8 validator rejects a sync that drops, duplicates, or alters it; only the step's
-  position (and so its `NN-` filename prefix) may move. Lock state is versioned content
+  position (and so its `NN-` filename prefix) may move. The lock also holds against a
+  harness that writes to disk directly: the §8 locked-bytes guard snapshots every locked
+  script before a drafting call and restores it after, failing the job (2026-10-31). Lock state is versioned content
   (part of the step, so a version records which steps were locked when it was saved); it
   changes only through the §11 step editor's lock control, the §20 `push --lock` /
   `--unlock` flags, or a workdir manifest edit — no §8 action can lock or unlock, and a
@@ -350,7 +352,7 @@ problems: [{ kind, label }] — derived at serialization, never stored: the "wou
 |---|---|---|---|
 | `toggle` | label, help, on | "On"/"Off" | switch |
 | `list` | label, help, validate, lines[] | validate → "N links" (valid-URL count), else "N entries" | one input per line, add/remove; per-line URL validation (red border plus a red "NOT A VALID LINK" tag on an invalid non-empty line when validate — detail page and editor alike); info line "N lines · G valid links[ · B needs attention]" |
-| `kv` | label, help, rows[{key,value}] | "N entries" | key/value pairs, add/remove |
+| `kv` | label, help, rows[{key,value}] — each row a text key and a text value (a `kv` value is a value of its kind only when every row has both as text; a numeric or null key from an archive or a draft is rejected where values enter and coerced at load, §5 — the editor calls `trim()` on the key, so one `key: 8080` row showed the detail page's error card, 2026-10-31) | "N entries" | key/value pairs, add/remove |
 | `number` | label, help, value, min | value | digits-only; empty/below-min clamps to min |
 | `text` | label, help, value, placeholder? | value or "Not set" | plain input |
 
@@ -363,7 +365,10 @@ values-as-used block).
 URL validity: `/^https?:\/\/\S+\.\S+/`.
 
 Every definition carries a default: `toggle` → off, `number` → its `min`, `text`/`list`/`kv` →
-empty. Definitions are versioned with the automation; values live in the top-level
+empty. A `number` value is a **finite** number — `.nan` and `.inf` are never values of the
+kind at any door (validator, import, `PATCH paramValues` with a JSON `1e999`, the §5
+loader), since every automation payload carries the merged values and the §19 JSON encoder
+refuses NaN (2026-10-31). Definitions are versioned with the automation; values live in the top-level
 `automation.yaml` and are matched by name and kind at execution/restore time (§5). The
 §11 editor's chat can **stage** stored-value changes (§8 `param_values` action): the staged
 name → value map rides the draft as the draft-only `param_values` key (§4.4) and is applied
@@ -437,7 +442,7 @@ strings `label` and `short`. The backend assigns `id` to entries that arrive wit
 |---|---|---|---|
 | `cron` | `expression`: 5-field cron expression · optional `timezone` · optional `runIfMissed`: bool, default true (below) · `source`: `"spec"` \| `"user"` (provenance, above; required) | at every match | humanized when simple (below), else the raw expression in mono |
 | `interval` | `every`: ISO-8601 duration (the interval dialect below; stored canonical, e.g. `PT6H`, `PT90S`, `P1D`) · optional `runIfMissed`: bool, default true (below) · `source`: `"spec"` \| `"user"` (provenance, above; required) · no `timezone` | every `every` **since the last run** (interval semantics below) | "Every 6 hours" / "Every 6h" (interval labels below) |
-| `time` | `at`: wall-clock ISO timestamp ("2026-07-20T15:00"), seconds allowed ("2026-07-20T15:00:15") · optional `timezone` · optional `runIfMissed`: bool, default true (below) | once, then the trigger is consumed | "Once at Jul 20, 3:00 PM" / "Once Jul 20 15:00"; non-zero seconds append to the time in both strings: "Once at Jul 20, 3:00:15 PM" / "Once Jul 20 15:00:15" |
+| `time` | `at`: wall-clock ISO timestamp ("2026-07-20T15:00"), seconds allowed ("2026-07-20T15:00:15"); **stored canonical** in exactly that form (`YYYY-MM-DDTHH:MM`, `:SS` only when non-zero) whatever ISO spelling arrived — `fromisoformat` accepts `20261120T0900` and `2026-W47-5T15:00`, which the §9.2 editor reads by fixed positions and would show garbled (2026-10-31) · optional `timezone` · optional `runIfMissed`: bool, default true (below) | once, then the trigger is consumed | "Once at Jul 20, 3:00 PM" / "Once Jul 20 15:00"; non-zero seconds append to the time in both strings: "Once at Jul 20, 3:00:15 PM" / "Once Jul 20 15:00:15" |
 | `app_start` | — | at every desktop-app launch (§6 firing path) | "On app start" / "App start" |
 | `discord` | `channel`: Discord channel id (ASCII digits) · `secret`: id of the §4.8 secret holding the bot token (a secret uuid) · optional `pattern`: text filter · optional `mention`: bool · optional `author`: sender filter, a list of Discord user ids (ASCII digits) | at every matching Discord message (rules below) | "Discord · `<channel>`" (+ " · “`<pattern>`”" when set) / "Discord" |
 | `imessage` | `from`: sender handle (E.164 phone or email) · optional `pattern`: text filter | at every matching iMessage on this Mac (rules below) | "iMessage · `<from>`" (+ " · “`<pattern>`”" when set) / "iMessage" |
@@ -644,17 +649,32 @@ Privacy & Security → Full Disk Access").
 dependency; the renderer has none and previews via §19 `POST /triggers/preview`): five
 whitespace-separated
 fields — minute, hour, day-of-month, month, day-of-week (0–6, Sun = 0) — each `*` or a comma
-list of numbers, ranges (`a-b`), and steps (`*/n`, `a-b/n`). Numbers only: no month/day names,
+list of numbers, ranges (`a-b`), and steps (`*/n`, `a-b/n`; a step on a bare number, `5/15`,
+is rejected — Vixie reads it as `5-max/15` and the spec dialect has no such form, 2026-10-31;
+a stored one from an earlier release is rewritten to that range form at load, §21). Numbers only: no month/day names,
 no `@daily` macros, no seconds field. Standard Vixie rule: when day-of-month and day-of-week are
-both restricted, a date matching either one fires. Times are wall clock in the trigger's zone
-(`timezone`, default local); an occurrence erased by DST (spring forward) still fires, shifted
+both restricted, a date matching either one fires — a field is "restricted" when it does not
+**start with `*`**, so `*/2` in day-of-month leaves day-of-week the only restriction
+(`0 9 */2 * 1` is Mondays that are odd days, as Vixie and cronie read it, not every odd day
+or Monday, 2026-10-31). Times are wall clock in the trigger's zone
+(`timezone`, default local; stored as the canonical IANA key, matched case-insensitively
+against the zone database — `europe/berlin` resolves on a case-insensitive filesystem and
+nowhere else, so it stores as `Europe/Berlin`, 2026-10-31); an occurrence erased by DST (spring forward) still fires, shifted
 forward by the gap width (a "2:30" on the day the clock jumps 2:00→3:00 fires at 3:30 — the
 erased wall time read with the pre-transition offset), and one repeated by
-fall-back fires once. Invalid expressions are rejected at the API (422), never stored.
-(A system-timezone change that rewinds the wall clock is indistinguishable from fall-back
-and is handled the same conservative way — occurrences in the rewound span do not re-fire;
-a rewind larger than any DST shift logs a scheduler warning so a reported miss is
-diagnosable.)
+fall-back fires once. Invalid expressions are rejected at the API (422), never stored; so is
+an expression with no occurrence at all inside the scheduler's search window (`0 0 30 2 *`
+validates field by field and would sit enabled forever without firing — the error says
+"never fires", 2026-10-31; the §5 load-time check does not apply this rule, so a stored
+one keeps loading, §21).
+(The scheduler's per-trigger baseline is an **instant**; each tick reads it as a wall time
+in the current local zone, so a system-timezone change neither re-fires occurrences whose
+instant lies before the baseline (an eastward change used to fire the evening cron at 3 AM
+and write a false "missed while asleep" drop) nor skips the ones after it (a westward
+change used to skip the day's remaining occurrences); a DST fall-back reads the same
+instant to the same first-pass wall time, so the fold rule is unchanged. A wall reading
+that moved by more than a fold hour between ticks logs a scheduler warning naming the
+timezone change, once per trigger, so a reported oddity is diagnosable, 2026-10-31.)
 
 **Humanized cron labels** — exactly two shapes get words; everything else displays the raw
 expression:
@@ -744,7 +764,19 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
   (toast: "Draft kept — resume it from this automation anytime."). Every exit path
   persists it — the header back button, system back/forward navigation, anything that closes
   the editor — never just the header button. Discard draft and Save as vN+1 settle the draft:
-  leaving after either writes nothing (a discarded or saved draft is never resurrected).
+  leaving after either writes nothing (a discarded or saved draft is never resurrected — the
+  header back link is therefore disabled while a Save, Create, Start over or Discard is in
+  flight, and the leave path refuses to write while one is, since a back-link click landing
+  after the save's `delete_draft` re-created the draft just saved, 2026-10-31).
+  **One editor per version:** the editor remembers the version it seeded from and sends it
+  as `baseVersion` on every draft PUT and on the save (§19); a version minted meanwhile by
+  anything else (a §20 `automation push` is allowed while an untouched editor is open) makes
+  the backend answer 409 "version vN was saved outside this editor — close and reopen Edit
+  to continue from it", and the editor, on seeing the automation's version move past its
+  seed, stops persisting its draft and disables Save with that sentence as the hint — a
+  save from stale content would otherwise mint vN+1 from vN−1's steps and silently revert
+  the push, and the draft persist would resurrect a draft `--discard-draft` just removed
+  (2026-10-31).
   The Draft view is the only editable view (§11: every listed vN row is read-only history —
   the current version is not a selectable view, below); touched Draft edits persist on every
   draft-keep path (leaving the editor, switching views in the Version menu), never silently

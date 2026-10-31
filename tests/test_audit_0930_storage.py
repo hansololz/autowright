@@ -659,13 +659,15 @@ def test_invalidate_voids_an_in_flight_walk_and_the_new_walk_lands(store, monkey
         assert entered.wait(5)
         (store.auto_dir(a) / "memory" / "more.yaml").write_text("v: 12\n", newline="")
         store.invalidate_memory_stats(a)
-        # The new-generation walk lands while the old one is still blocked.
-        assert _wait_published(published, 1) == 1
-        assert a["_memory_stats"][2]["size"] == "11 B"
-        release.set()
+        # 2026-10-31 second sweep (single-flight): no second walk starts while
+        # the old one is blocked; once released, the voided walk lands nothing
+        # and re-walks once under the new generation, which lands.
         time.sleep(0.1)
-        # The voided walk landed nothing and published nothing.
-        assert len(published) == 1
+        assert len(calls) == 1 and published == []
+        release.set()
+        assert _wait_published(published, 1) == 1
+        time.sleep(0.1)
+        assert len(published) == 1 and len(calls) == 2
         assert a["_memory_stats"][2]["size"] == "11 B"
         assert a["_memory_stats_walking"] is False
     finally:

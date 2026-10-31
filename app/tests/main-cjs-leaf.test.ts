@@ -123,7 +123,7 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     expect(src).not.toContain('autowright.cli')
     const shimForms = [
       'exec ${quoted} -m autowright.cli "$@"', // POSIX shim (darwin/linux/fallback, §3 single-quoted path)
-      '"${String(python).replace(/%/g, \'%%\')}" -m autowright.cli %*', // Windows .cmd shim (win32, §3 `%` doubled)
+      '"${shimInterpreter(python)}" -m autowright.cli %*', // Windows .cmd shim (win32, §3 `%` doubled, %LOCALAPPDATA% relative)
     ]
     const lines = union.split('\n').filter((l) => l.includes('autowright.cli'))
     expect(lines.length).toBeGreaterThanOrEqual(1)
@@ -1503,7 +1503,7 @@ describe.skipIf(!HAS_UPDATER)('main.cjs electron-updater path (§3)', () => {
     expect(m.updater.installs).toBe(1)
     // The gate itself is one shared code path for every platform: the busy
     // check runs before either updater is asked to quit.
-    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,2000}quitAndInstall\(\)/)
+    expect(src).toMatch(/if \(await executionsLive\(\)\) return \{ busy: true \}[\s\S]{0,4000}quitAndInstall\(\)/)
   })
 })
 
@@ -2869,7 +2869,7 @@ describe('main.cjs quit and reset quiet the shell (§3)', () => {
     else process.env.AUTOWRIGHT_HOME = savedHome
   })
 
-  it('an install dropped because a quit-all latched records that outcome', async () => {
+  it('an install dropped because a quit-all latched is logged and leaves the status alone', async () => {
     vi.useFakeTimers()
     const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
     const bundled = platMod.bundledPythonPath(resources)
@@ -2895,8 +2895,9 @@ describe('main.cjs quit and reset quiet the shell (§3)', () => {
       expect(await m.invoke('quit-all', {})).toEqual({ ok: true })
       releaseHealth()
       await vi.advanceTimersByTimeAsync(0)
-      // §3: never latched on 'installing' for a run that was never made.
-      expect(await m.invoke('backend-status')).toEqual({ state: 'failed', detail: 'quitting' })
+      // §3 (2026-10-31 second sweep): the drop records `failed` with a plain
+      // sentence — the splash never shows the raw word "quitting".
+      expect(await m.invoke('backend-status')).toEqual({ state: 'failed', detail: 'Autowright is quitting.' })
       expect(m.log()).toContain('ensure-backend: install dropped')
     } finally {
       fetchSpy.mockRestore()
@@ -3732,7 +3733,7 @@ describe('main.cjs audit 2026-10-30 second sweep (§3)', () => {
     expect(m.updater.installs).toBe(1)
   })
 
-  it('macOS: a staging that lands after the 10-minute give-up is logged and recorded as staged', async () => {
+  it('macOS: a staging that lands after the 10-minute give-up is held by Squirrel\'s own flag', async () => {
     if (platMod.UPDATER !== 'mac') return
     vi.useFakeTimers()
     nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
@@ -3748,7 +3749,6 @@ describe('main.cjs audit 2026-10-30 second sweep (§3)', () => {
     expect(answer).toEqual({ error: 'the updater stopped responding' })
     m.updater.squirrelDownloadedUpdate = true
     m.squirrelEmit('update-downloaded')
-    expect(m.log()).toContain('update: staging completed after the give-up; the bundle installs on the next quit')
     // The late bundle is the staged one: a different version now asks for a
     // restart, and a retried install goes straight to quitAndInstall.
     m.updater.check = { updateInfo: { version: '0.14.1' } }

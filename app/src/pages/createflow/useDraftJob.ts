@@ -601,7 +601,24 @@ export function useDraftJob(d: DraftJobDeps) {
         ? `The job was lost: ${msg || 'no answer from the backend'}`
         : msg || 'The request failed — try again or rephrase.' })],
     })),
-    onCancelled: () => setRev((r) => r && ({ ...r, chatBusy: false })),
+    // §11 (2026-10-31): a cancel this editor did not send (a §20 push
+    // --discard-draft, any server-side settle) still ends the turn visibly —
+    // the in-flight stage leaves no entry like any cancel, the "Edit stopped"
+    // chip follows the pending user entry, and the request returns to the
+    // composer, so the thread never ends on a request that looks unanswered.
+    // A composer cancel in flight owns its own chip (cancelChat's stopped()).
+    onCancelled: () => {
+      if (cancellingRef.current) {
+        setRev((r) => r && ({ ...r, chatBusy: false }))
+        return
+      }
+      const req = chatReqRef.current
+      chatReqRef.current = null
+      const chip = newEntry({ kind: 'system', icon: 'fa-ban', text: 'Edit stopped — the spec is unchanged.' })
+      setRev((r) => r && ({ ...r, chatBusy: false, chat: [...r.chat, chip] }))
+      const text = req?.text ?? ctx.request
+      if (text) composer.set((cur) => cur || text)
+    },
     // §11: the flip's plan lands mid-job as "The plan" (rewrites follow by
     // definition), beneath the just-settled deciding block — unless one
     // already landed (a re-attached job whose flip was observed live).

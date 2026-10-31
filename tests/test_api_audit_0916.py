@@ -283,6 +283,7 @@ def test_a_version_not_found_firing_never_tells_the_sender_it_is_busy(store, mon
     a["current_version"] = 9  # §7: the version this firing targets doesn't resolve
     trigger = {"id": "t1", "kind": "discord", "enabled": True, "channel": "42",
                "secret": "TOKEN"}
+    a["triggers"].append(trigger)  # §6: a firing's trigger must be on the automation
     payload = {"kind": "discord", "channel": "42", "secret": "TOKEN",
                "sender": "Dave", "text": "go"}
 

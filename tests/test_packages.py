@@ -113,11 +113,11 @@ def test_latest_compatible_picks_newest_valid_wheel(monkeypatch):
 
     urls = []
 
-    def fake_urlopen(req, timeout=None):
+    def fake_urlopen(req, timeout=None, refuse=None):
         urls.append(req.full_url)
         return io.BytesIO(json.dumps(_pypi_payload()).encode("utf-8"))
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("autowright.transfer.open_https_only", fake_urlopen)
     assert _latest_compatible("Pkg") == "1.2"
     # lookup goes to the PEP 503-normalized project URL
     assert urls == ["https://pypi.org/pypi/pkg/json"]
@@ -128,8 +128,8 @@ def test_latest_compatible_none_when_nothing_ships_a_usable_wheel(monkeypatch):
 
     payload = {"releases": {"1.0": [{"filename": "pkg-1.0.tar.gz"}]}}
     monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda req, timeout=None: io.BytesIO(json.dumps(payload).encode("utf-8")))
+        "autowright.transfer.open_https_only",
+        lambda req, timeout=None, refuse=None: io.BytesIO(json.dumps(payload).encode("utf-8")))
     assert _latest_compatible("pkg") is None
 
 
@@ -141,10 +141,10 @@ def test_fetch_failure_means_no_update_badge(monkeypatch):
 
     from autowright import packages
 
-    def boom(req, timeout=None):
+    def boom(req, timeout=None, refuse=None):
         raise urllib.error.URLError("offline")
 
-    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr("autowright.transfer.open_https_only", boom)
     with pytest.raises(urllib.error.URLError):
         packages._latest_compatible("pkg")
 
@@ -173,8 +173,8 @@ def test_outdated_empty_entries_and_skip_paths(home, monkeypatch):
         "1.2": [{"filename": "pkg-1.2-py3-none-any.whl"}],
     }}
     monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda req, timeout=None: io.BytesIO(json.dumps(payload).encode("utf-8")))
+        "autowright.transfer.open_https_only",
+        lambda req, timeout=None, refuse=None: io.BytesIO(json.dumps(payload).encode("utf-8")))
     assert packages._latest_compatible("pkg") == "1.2"
 
 

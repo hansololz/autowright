@@ -794,7 +794,17 @@ land with the version; Create, Save, Start over, and Discard draft each disable 
 §9 busy feedback) from the click until their request settles — a double-click on "Create
 automation" must never send two `POST /automations` (the backend dedupes names rather than
 422ing, so it would create two automations), and a second Save must never race the first
-one's thread flush against the "Draft saved as vN." marker; a save whose versioned content is unchanged (only staged
+one's thread flush against the "Draft saved as vN." marker; the header back link disables
+with them and the leave path writes no draft while one of them is in flight (and, the
+other way round, Create / Save / Start over / Discard disable while the leave path's own
+draft write is in flight), since a back-link click during a save re-created the draft the
+save had just settled (§4.4, 2026-10-31). Save and Create navigate to the detail page only
+while the editor is still the shown page (§9 landing rule): a save that lands after the
+user moved to Secrets must not pull them back. Save sends the editor's seed version as
+`baseVersion` (§19); once the automation's version has moved past it (a §20 push while the
+editor was open) the editor stops persisting its draft, Save disables, and the hint under
+the header reads "Version vN was saved outside this editor — close and reopen Edit to
+continue from it." (the 409's sentence); a 409 that still arrives shows as the save error. a save whose versioned content is unchanged (only staged
 values/triggers/concurrency/grants moved) still goes through the same button and endpoint — the
 backend applies the operational state without minting a version (§4.4), announced by
 the toast "Changes saved — triggers and values updated, no new version needed."

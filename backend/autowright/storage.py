@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -150,7 +151,13 @@ def normalize_param_definitions(params: list[dict]) -> list[dict]:
     and not a value of its `kind` becomes the kind's empty default (what
     `param_default` already resolved it to at runtime), and a non-text
     `label` / `help` is removed. `kind` is kept as is. Nothing is written
-    here: the normalized form lands on disk with the next save."""
+    here: the normalized form lands on disk with the next save.
+
+    Second sweep (2026-10-31): a number param's `min` that is not a finite
+    number is removed (the validator's "`min` must be a number" had no
+    load-side twin), and a `kv` default's rows are coerced to the §4.2 text
+    key / text value form through `scalar_text`, a non-mapping row or one
+    whose key has no text form dropped, a null value read as empty text."""
     out = []
     for p in params:
         name = p.get("name")
@@ -158,6 +165,17 @@ def normalize_param_definitions(params: list[dict]) -> list[dict]:
             continue
         entry = {k: v for k, v in p.items()
                  if not (k in ("label", "help") and not isinstance(v, str))}
+        if entry.get("kind") == "number" and "min" in entry \
+                and not _kind_ok("number", entry["min"]):
+            del entry["min"]
+        if entry.get("kind") == "kv" and isinstance(entry.get("default"), list):
+            # A null value is an empty one (`value:` left blank by hand), not
+            # a reason to reset the whole default; a null key drops the row.
+            entry["default"] = [{"key": scalar_text(row.get("key")),
+                                 "value": "" if row.get("value") is None
+                                 else scalar_text(row.get("value"))}
+                                for row in entry["default"]
+                                if isinstance(row, dict) and scalar_text(row.get("key")) is not None]
         default = entry.get("default")
         if default is not None and not _kind_ok(entry.get("kind"), default):
             entry["default"] = param_default({k: v for k, v in entry.items() if k != "default"})
@@ -176,6 +194,23 @@ def scalar_text(v: Any) -> str | None:
     if isinstance(v, (int, float, str)):
         return v if isinstance(v, str) else str(v)
     return None
+
+
+def _absent(path: Path) -> bool:
+    """§5 "absence is only not found" (2026-10-31): True only when `stat`
+    answers not-found / not-a-directory. Any other OSError (EACCES on a
+    directory without the search bit, EIO or a timeout on a network volume)
+    is logged and reads as present, so a load-time scan skips the entry
+    instead of reaping it — Python 3.14's `Path.exists()` answers False to
+    every OSError."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError as e:
+        log.warning("can't stat %s (%s) — treating it as present", path, e.strerror or e)
+        return False
+    return False
 
 
 def exec_version_label(h: dict) -> str:
@@ -412,11 +447,17 @@ def size_label(n: int) -> str:
 
 
 def _kind_ok(kind: str | None, v: Any) -> bool:
+    # §4.2 (2026-10-31 second sweep): a `number` value is finite (`.nan` /
+    # `.inf` never are — starlette's JSON encoder refuses them), and a `kv`
+    # value is rows of a text key and a text value (the editor trims the key).
     return (
         (kind == "toggle" and isinstance(v, bool))
-        or (kind == "number" and isinstance(v, (int, float)) and not isinstance(v, bool))
+        or (kind == "number" and isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
         or (kind == "list" and isinstance(v, list) and all(isinstance(x, str) for x in v))
-        or (kind == "kv" and isinstance(v, list) and all(isinstance(x, dict) for x in v))
+        or (kind == "kv" and isinstance(v, list)
+            and all(isinstance(x, dict) and isinstance(x.get("key"), str)
+                    and isinstance(x.get("value"), str) for x in v))
         or (kind == "text" and isinstance(v, str))
     )
 
@@ -518,6 +559,18 @@ class AutomationGoneError(KeyError):
 class LiveExecutionError(RuntimeError):
     """§6.3: an execution started while a memory operation was staging its
     copy outside store.lock — the operation is abandoned, nothing landed."""
+
+
+class OrphanSetAsideError(RuntimeError):
+    """§5 crash-orphan set-aside failed (an OSError: a Windows sharing
+    violation, permissions). The save or restore is refused with this error
+    instead of numbering past the orphan; the §19 layer answers 500 with the
+    folder and the OS reason, never a bare Internal Server Error (2026-10-31)."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"couldn't set aside {path}: {reason} — the save was refused")
+        self.path = path
+        self.reason = reason
 
 
 class NameTakenError(ValueError):
@@ -751,8 +804,11 @@ class Store:
                     continue
                 if d.name.startswith(".ad-"):
                     continue  # a staging dir — the sweeps above own those
-                if not (d / "automation.yaml").exists():
+                if _absent(d / "automation.yaml"):
                     # §5: a create that failed after its version folder landed.
+                    # Only a not-found stat counts (absence is only "not
+                    # found"): an unreadable dir falls to the load below,
+                    # which skips it, never reaps it.
                     log.warning("automation directory %s has no automation.yaml", d)
                     if startup and re.fullmatch(_UUID, d.name):
                         # Only at startup, and only a directory the app itself
@@ -957,7 +1013,16 @@ class Store:
         if not d.exists():
             return
         # list(): the sweeps below rename directories aside inside the loop.
-        for ed in list(d.iterdir()):
+        try:
+            entries = list(d.iterdir())
+        except OSError as e:
+            # §5: an executions dir that exists but can't be listed never
+            # bricks startup (load_all runs unguarded at boot) — the index
+            # check is skipped for the session, the ghost-row repair with it
+            # (every row would read as having no directory).
+            log.warning("can't list %s (%s) — skipping the execution index check", d, e)
+            return
+        for ed in entries:
             if ed.name.startswith(".") and not ed.name.startswith(self.DELETED_PREFIX):
                 # §5: dot-prefixed entries (`.git`, `.Trashes`, `.fseventsd`)
                 # are never adopted and never removed — the §4.9 adopt check
@@ -974,7 +1039,7 @@ class Store:
             if ed.name in self.execs:
                 self._refresh_stale_row(ed, index_mtime)
                 continue
-            if not (ed / "execution.yaml").exists():
+            if _absent(ed / "execution.yaml"):
                 # §5: the directory is made before the record is written, so
                 # one without an execution.yaml is a crash leftover — nothing
                 # can ever adopt it, and it would sit there forever.
@@ -1005,7 +1070,14 @@ class Store:
         # away via "Show in Finder") leaves a ghost index row that would list
         # forever — the yaml is authoritative, so the row goes.
         for eid in [e for e in self.execs if not (d / e).is_dir()]:
-            self.execdb.delete(eid)
+            try:
+                self.execdb.delete(eid)
+            except Exception as e:  # noqa: BLE001
+                # §5: the twin of the upsert guard above — a full disk or a
+                # read-only index never bricks startup; the row stays.
+                log.warning("execution %s has no directory on disk, but dropping its index row "
+                            "failed (%s) — keeping it", eid, e)
+                continue
             del self.execs[eid]
             log.warning("execution %s has no directory on disk — dropping its index row", eid)
 
@@ -1128,6 +1200,18 @@ class Store:
             log.warning("automation %r at %s can't resolve its current version v%s — "
                         "skipping it at load", a["name"], d, a["current_version"])
             return None
+        # §5 (2026-10-31 second sweep): a stored value that is not a value of
+        # its current definition's kind (a `.nan` / `.inf` number, a non-text
+        # `kv` key) is ignored and the default applies — merged_params puts
+        # every value into every automation payload, and one `.inf` made every
+        # GET /state a 500. A value with no matching definition stays as is.
+        definitions = {p["name"]: p for p in a["versions"][a["current_version"]].get("params") or []
+                       if isinstance(p, dict) and isinstance(p.get("name"), str)}
+        for key in [k for k, v in a["param_values"].items()
+                    if k in definitions and not _kind_ok(definitions[k].get("kind"), v)]:
+            log.warning("automation %r: stored value of param %r isn't a %s value — "
+                        "using the default", a["name"], key, definitions[key].get("kind"))
+            del a["param_values"][key]
         return a
 
     @staticmethod
@@ -1162,7 +1246,7 @@ class Store:
             # Hand-edited disk must never brick startup (§5) — a validator
             # crash on weird trigger data counts as invalid, not fatal.
             try:
-                return triggerlib.validate_trigger(t) is None
+                return triggerlib.validate_trigger(t, at_load=True) is None
             except Exception:  # noqa: BLE001
                 return False
 
@@ -1186,6 +1270,12 @@ class Store:
             return trigger_id
 
         for t in raw:
+            if (isinstance(t, dict) and t.get("kind") == "cron"
+                    and isinstance(t.get("expression"), str)):
+                # §21 (c): a released build's `5/15` is rewritten to the
+                # `5-59/15` it always fired as. Nothing is written here; the
+                # next save writes the rewritten form (2026-10-31).
+                t = {**t, "expression": triggerlib.rewrite_legacy_cron(t["expression"])}
             if (isinstance(t, dict) and t.get("kind") == "app_start"
                     and any(x["kind"] == "app_start" for x in out)):
                 log.warning("dropping duplicate app-start trigger %r", t)  # §4.3: at most one
@@ -1436,6 +1526,9 @@ class Store:
             a["_last_exec_at"] = latest["started_at"] if latest else None
             a["_live"] = live.get(a["id"], set())
             a["_exec_ids"] = exec_ids.get(a["id"], set())
+            # §6.3 execution-start counter: in memory only, so it starts at 0
+            # per load (a re-derive after load never resets a running count).
+            a.setdefault("_starts", 0)
 
     @staticmethod
     def never_ran(h: dict) -> bool:
@@ -1676,7 +1769,7 @@ class Store:
                 "versions": {}, "draft": None,
                 # §4.1 `live` is a set: maxParallel may allow several at once.
                 "_last_status": "none", "_last_exec_at": None, "_live": set(),
-                "_exec_ids": set(),
+                "_exec_ids": set(), "_starts": 0,  # §6.3 execution-start counter
             }
             ver = {**ver, "when": now, "note": ver.get("note") or "Created"}
             vd = self.auto_dir(a) / "versions" / "v1"
@@ -1812,7 +1905,7 @@ class Store:
                    if source.get("unresolved_references") else {}),
                 "versions": {}, "draft": None,
                 "_last_status": "none", "_last_exec_at": None, "_live": set(),
-                "_exec_ids": set(),
+                "_exec_ids": set(), "_starts": 0,  # §6.3 execution-start counter
             }
             vd = self.auto_dir(a) / "versions" / "v1"
             # Every file but the manifest first, the manifest last — it is the
@@ -1862,6 +1955,11 @@ class Store:
             source = self.autos.get(source_id)
             if source is None:
                 raise AutomationGoneError(source_id)
+            # §6.3 raced-copy rule: the source's execution-start counter at
+            # the first gate; the commit abandons the copy if it moved.
+            token = self.start_token(source)
+            if token is None:
+                raise LiveExecutionError("an execution is in progress")
             src = self.auto_dir(source) / "memory"
             mem = self.auto_dir(target) / "memory"
             tmp = mem.parent / MEMORY_SWAP_TMP
@@ -1870,7 +1968,7 @@ class Store:
         if not src.exists():
             return
         try:
-            shutil.copytree(src, tmp)
+            shutil.copytree(src, tmp, symlinks=True)  # §6.3: links as links
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
@@ -1882,9 +1980,10 @@ class Store:
                 abandoned = e
             if abandoned is None and target.get("_live"):
                 abandoned = LiveExecutionError("an execution is in progress")
-            if abandoned is None and source.get("_live"):
+            if abandoned is None and self.start_token(source) != token:
                 # §5: an execution of the SOURCE started while the copy staged
-                # — the copy may hold its memory mid-write, so it never lands.
+                # (live now, or started and finished inside the copy) — the
+                # copy may hold its memory mid-write, so it never lands.
                 abandoned = LiveExecutionError("an execution is in progress")
             if abandoned is None:
                 if mem.exists():
@@ -1975,9 +2074,11 @@ class Store:
             except OSError as exc:
                 # §5 (2026-10-31): never number past an orphan that stays under
                 # its `vN` name, which the next load would adopt as a real
-                # version; the save or restore is refused with this error.
+                # version; the save or restore is refused with this error —
+                # typed, so the §19 layer names the folder and the OS reason
+                # (2026-10-31 second sweep).
                 log.warning("couldn't set aside crash-orphan version folder %s: %s", vd, exc)
-                raise
+                raise OrphanSetAsideError(vd, exc.strerror or str(exc)) from exc
 
     def save_new_version(self, a: dict, ver: dict) -> int:
         """§4.4/§5: write vN+1 folder, then flip the pointer atomically."""
@@ -1992,7 +2093,6 @@ class Store:
                 n += 1
             ver = {**ver, "when": timefmt.now_iso()}
             vd = self.auto_dir(a) / "versions" / f"v{n}"
-            self._write_version_folder(vd, ver)
 
             def mutate() -> int:
                 a["versions"][n] = self._reload_version(vd, ver)
@@ -2007,6 +2107,9 @@ class Store:
                 return n
 
             try:
+                # §5 (2026-10-31): the write sits inside the rollback too — an
+                # ENOSPC mid-write must not leave a partial vN behind.
+                self._write_version_folder(vd, ver)
                 return self._commit_toplevel(a, mutate)
             except Exception:
                 # §5: the pointer rolled back, so the new version must leave
@@ -2047,7 +2150,6 @@ class Store:
             # folder, just an incomplete directory the next save skips.
             restored = {**a["versions"][v], "when": timefmt.now_iso(),
                         "note": f"Restored from v{v}"}
-            self._write_version_folder(dst, restored)
 
             def mutate() -> int:
                 a["versions"][n] = self._reload_version(dst, restored)
@@ -2056,6 +2158,8 @@ class Store:
                 return n
 
             try:
+                # As in save_new_version: a failed write leaves no partial vN.
+                self._write_version_folder(dst, restored)
                 return self._commit_toplevel(a, mutate)
             except Exception:
                 # §5, as in save_new_version: the pointer rolled back, so the
@@ -2462,6 +2566,18 @@ class Store:
         self.delete_test_execs(a["id"])  # §11 — real records stay (automationDeleted)
 
     # ---------- executions ----------
+    def start_token(self, a: dict) -> int | None:
+        """§6.3 raced-copy rule: the automation's execution-start counter
+        (`_starts`, bumped under store.lock whenever a record of it is created
+        as a run or promoted into one), or None while anything is live. A
+        memory operation reads it at its first gate and abandons its copy at
+        commit when the value moved or became None — a run that started AND
+        finished inside the copy is caught that way, where a live-set check
+        alone saw nothing (2026-10-31). Call under store.lock."""
+        if a.get("_live"):
+            return None
+        return int(a.get("_starts", 0))
+
     # §5 header projection — the fields the DB index carries per execution and
     # the whole in-memory shape of any record that isn't live (startup-loaded
     # rows, records demoted on their terminal transition).
@@ -2529,6 +2645,9 @@ class Store:
             # lastStatus (§4.1); it counts only against maxQueued.
             if status == "executing" and kind != "test":
                 auto["_live"].add(h["id"])
+                # §6.3 raced-copy rule: a record created as a run moves the
+                # counter; a queued one moves it when promote_execution runs it.
+                auto["_starts"] = auto.get("_starts", 0) + 1
                 auto["_latest"] = h
                 auto["_last_status"] = "executing"
                 auto["_last_exec_at"] = h["started_at"]
@@ -2550,6 +2669,10 @@ class Store:
                            "status": s.get("status", "queued"),
                            "duration_ms": s.get("duration_ms"),
                            "attempts": s.get("attempts", [])} for s in steps]
+            # §6.3 raced-copy rule: the promoted record is now a run (bumped
+            # first: a failed write below still errs toward abandoning a copy).
+            if not is_test(h) and (owner := self.autos.get(h["automation_id"])) is not None:
+                owner["_starts"] = owner.get("_starts", 0) + 1
             self.update_execution(h)  # writes yaml + db and re-derives live/latest
             return h
 
@@ -2579,6 +2702,15 @@ class Store:
                 # in-place retry flips a terminal record back to executing (§7),
                 # as does a §6 queue promotion
                 if a:
+                    if h["id"] not in a["_live"]:
+                        # §6.3 raced-copy rule: a record entering `executing`
+                        # (an in-place retry of a terminal record) is a start.
+                        # Membership in `_live`, not the record's prior status:
+                        # a caller may have flipped the stored dict in place.
+                        # Create and promote bump too, so one start can count
+                        # twice — harmless, the token is only ever compared
+                        # for equality (2026-10-31).
+                        a["_starts"] = a.get("_starts", 0) + 1
                     a["_live"].add(h["id"])
                     # §4.3 run baseline: the latest by `started_at` — a retry
                     # of an older record keeps its original stamp, so it never
@@ -3047,7 +3179,22 @@ class Store:
             except (TypeError, ValueError):
                 n = None
             days = max(1, n) if n is not None else 90
-            cutoff = datetime.now().timestamp() - days * 86400
+            # §5 (2026-10-31): the age is measured from the earlier of the wall
+            # clock and the newest parsable started_at — a clock set a year
+            # ahead must never read every record as ancient.
+            anchor = datetime.now().timestamp()
+            newest: float | None = None
+            for h in self.execs.values():
+                try:
+                    started = datetime.fromisoformat(h["started_at"]).timestamp() \
+                        if h.get("started_at") else None
+                except (TypeError, ValueError):
+                    started = None
+                if started is not None and (newest is None or started > newest):
+                    newest = started
+            if newest is not None:
+                anchor = min(anchor, newest)
+            cutoff = anchor - days * 86400
             # §5: each automation's latest real execution (the §4.1 lastStatus
             # population — the `_latest_exec` rule) is exempt whatever its
             # age: it is the §4.1 overdue baseline and the §4.3 interval
@@ -3181,42 +3328,61 @@ class Store:
     def _memory_stats_walk(self, a: dict, d: Path, generation: int) -> None:
         """The memory-tree walk, on its own thread — nothing waits on it. A
         walk that started before an invalidation lands nothing: its answer may
-        predate the replacement the invalidation stands for."""
-        stats = None
-        try:
-            size = 0
-            newest: float | None = None
-            for st in iter_file_stats(d):
-                size += st.st_size
-                newest = max(newest or 0, st.st_mtime)
-            label = size_label(size) if size else "empty"
-            updated = (timefmt.date_label(datetime.fromtimestamp(newest))
-                       if newest else "never written")
-            stats = {"size": label, "updated": updated, "path": str(d)}
-        except OSError as e:
-            # An unreadable memory dir is a §5 degradation: the label stays at
-            # what it was until the next call tries again.
-            log.warning("can't size %s (%s)", d, e)
-        finally:
+        predate the replacement the invalidation stands for. Single-flight
+        per automation (2026-10-31): `_memory_stats_walking` is held for the
+        thread's whole life, an invalidation meanwhile only sets
+        `_memory_stats_rewalk`, and this thread then walks once more under
+        the new generation — every finish used to start another full walk."""
+        while True:
+            stats = None
+            try:
+                size = 0
+                newest: float | None = None
+                for st in iter_file_stats(d):
+                    size += st.st_size
+                    newest = max(newest or 0, st.st_mtime)
+                label = size_label(size) if size else "empty"
+                updated = (timefmt.date_label(datetime.fromtimestamp(newest))
+                           if newest else "never written")
+                stats = {"size": label, "updated": updated, "path": str(d)}
+            except OSError as e:
+                # An unreadable memory dir is a §5 degradation: the label stays at
+                # what it was until the next call tries again.
+                log.warning("can't size %s (%s)", d, e)
+            except BaseException:
+                # Anything unexpected ends the thread: release single-flight
+                # so the next call can walk again.
+                with self._memory_stats_lock:
+                    a["_memory_stats_walking"] = False
+                    a["_memory_stats_rewalk"] = False
+                raise
             changed = False
+            again = False
             with self._memory_stats_lock:
                 current = a.get("_memory_stats_generation", 0) == generation
                 if stats is not None and current:
                     a["_memory_stats"] = (time.monotonic(), str(d), stats)
                     changed = a.get("_memory_stats_served") != stats
-                # A voided walk leaves the flag alone: it belongs to the walk
-                # the invalidation started under the new generation.
-                if current:
+                if a.get("_memory_stats_rewalk"):
+                    # An invalidation landed during this walk: walk once
+                    # more under the generation it started.
+                    a["_memory_stats_rewalk"] = False
+                    generation = a.get("_memory_stats_generation", 0)
+                    d = self.auto_dir(a) / "memory"
+                    again = True
+                else:
                     a["_memory_stats_walking"] = False
-        # §19: a landing that differs from what was last served announces the
-        # automation's row, so an open detail page refetches. Outside the memo
-        # guard — the publisher takes store.lock itself (memory_stats is called
-        # under store.lock and then takes the guard, so never the reverse).
-        if changed and self.on_memory_stats_changed is not None:
-            try:
-                self.on_memory_stats_changed(a)
-            except Exception:  # noqa: BLE001 — a display nudge never kills the walk thread
-                log.exception("publishing the memory stats change failed")
+            # §19: a landing that differs from what was last served announces the
+            # automation's row, so an open detail page refetches. Outside the memo
+            # guard — the publisher takes store.lock itself (memory_stats is called
+            # under store.lock and then takes the guard, so never the reverse).
+            if changed and self.on_memory_stats_changed is not None:
+                try:
+                    self.on_memory_stats_changed(a)
+                except Exception:  # noqa: BLE001 — a display nudge never kills the walk thread
+                    log.exception("publishing the memory stats change failed")
+            if not again:
+                return
 
     def invalidate_memory_stats(self, a: dict) -> None:
         """Expire the memory_stats memo (in-memory `_` key, never persisted) —
@@ -3240,8 +3406,12 @@ class Store:
                 a["_memory_stats"] = (float("-inf"), memo[1], memo[2])
             generation = a.get("_memory_stats_generation", 0) + 1
             a["_memory_stats_generation"] = generation
-            a["_memory_stats_walking"] = watched
-            if watched:
+            if watched and a.get("_memory_stats_walking"):
+                # Single-flight: the walk in flight re-walks once under the
+                # new generation instead of a second thread starting.
+                a["_memory_stats_rewalk"] = True
+            elif watched:
+                a["_memory_stats_walking"] = True
                 threading.Thread(target=self._memory_stats_walk,
                                  args=(a, d, generation),
                                  name="memorystats", daemon=True).start()
@@ -3366,7 +3536,10 @@ class Store:
                 elif self._snapshot_meta_ok(meta):
                     # §5 (2026-10-31): an unquoted `created_at` loads as a YAML
                     # date; coerced to text so the sort never mixes types.
-                    out.append({**meta, "created_at": str(meta["created_at"])})
+                    # The ISO form (`scalar_text`), never str(): a space-form
+                    # stamp sorts before same-day T stamps and the prune
+                    # would delete the newest snapshot first.
+                    out.append({**meta, "created_at": scalar_text(meta["created_at"])})
                 elif meta:
                     log.warning("snapshot %s has unusable snapshot.yaml — skipping it", name)
         out.sort(key=lambda m: m.get("created_at") or "", reverse=True)
@@ -3402,7 +3575,9 @@ class Store:
             return None
         staging = base / f"{self.SNAPSHOT_STAGE_PREFIX}{new_id()}"
         try:
-            shutil.copytree(mem, staging / "memory")
+            # §6.3: a link is copied as a link, never followed (a dangling
+            # venv interpreter failed every copy; a link to ~ copied home).
+            shutil.copytree(mem, staging / "memory", symlinks=True)
         except BaseException:
             self.discard_snapshot(staging)
             raise
@@ -3428,7 +3603,7 @@ class Store:
             # listing can't be a live generator over the directory.
             for d in list(root.iterdir()):
                 if (d.is_dir() and not d.name.startswith(self.DELETED_PREFIX)
-                        and not (d / "snapshot.yaml").exists()):
+                        and _absent(d / "snapshot.yaml")):
                     self._remove_tree(d)
             sid = new_id()
             staging.rename(root / sid)
@@ -3495,6 +3670,11 @@ class Store:
             src = self.snapshots_dir(a) / sid / "memory"
             if not meta or not src.exists():
                 return None
+            # §6.3 raced-copy rule: the execution-start counter at the first
+            # gate; the commit abandons the swap if it moved.
+            token = self.start_token(a)
+            if token is None:
+                raise LiveExecutionError("an execution is in progress")
             mem = self.auto_dir(a) / "memory"
             tmp = mem.parent / MEMORY_SWAP_TMP
             old = mem.parent / MEMORY_SWAP_OLD
@@ -3518,7 +3698,7 @@ class Store:
             # sequence leaves zero surviving copies — with the pre-restore
             # toggle off there is no snapshot to recover from, so rmtree'ing
             # memory/ before the staged copy lands would be a data-loss window.
-            shutil.copytree(src, tmp)
+            shutil.copytree(src, tmp, symlinks=True)  # §6.3: links as links
         except BaseException:
             if pre is not None:
                 self.discard_snapshot(pre[0])
@@ -3536,7 +3716,9 @@ class Store:
                 self._still_registered(a)
             except AutomationGoneError as e:
                 abandoned = e
-            if abandoned is None and a.get("_live"):
+            # §6.3: live now, or a run started (and maybe finished) during
+            # the copy — either way the staged image may be torn.
+            if abandoned is None and self.start_token(a) != token:
                 abandoned = LiveExecutionError("an execution is in progress")
             if abandoned is None:
                 return self._restore_swap(a, meta, sid, pre, mem, tmp, old)
@@ -3703,24 +3885,37 @@ class Store:
         a["_latest_result"] = (key, result)
         return result
 
-    def run_baseline(self, a: dict) -> datetime | None:
+    @staticmethod
+    def _baseline_source(a: dict, now: datetime | None) -> datetime | None:
+        """The aware run baseline behind `run_baseline` and
+        `run_baseline_instant`: the latest real execution's start, else
+        created_at. With `now`, a start more than FUTURE_STAMP_HOLD ahead of
+        it (a record started under a clock set ahead) is ignored as if absent,
+        so the baseline falls back to created_at (§6, 2026-10-31); without
+        `now` the start is read as stored — the §6 scheduler screens it
+        against its own clock in `interval_anchor`."""
+        last = lenient_local(a.get("_last_exec_at")) if a.get("_last_exec_at") else None
+        if now is not None:
+            last = triggerlib.credible_run_baseline(last, now)
+        return last or lenient_local(a.get("created_at"))
+
+    def run_baseline(self, a: dict, now: datetime | None = None) -> datetime | None:
         """§4.1 run baseline as local naive trigger-math time: the latest real
         execution's start (the lastStatus population — skipped/queued/test
         excluded, a run in progress included), else created_at. It anchors
         §4.3 interval triggers and seeds the §4.1 overdue audit; None only
-        when even created_at is unreadable (§5 lenient)."""
-        base = (lenient_local(a.get("_last_exec_at")) if a.get("_last_exec_at") else None) \
-            or lenient_local(a.get("created_at"))
+        when even created_at is unreadable (§5 lenient). `now`: see
+        `_baseline_source`."""
+        base = self._baseline_source(a, now)
         return base.astimezone().replace(tzinfo=None) if base else None
 
-    def run_baseline_instant(self, a: dict) -> datetime | None:
+    def run_baseline_instant(self, a: dict, now: datetime | None = None) -> datetime | None:
         """§4.3 the same run baseline as `run_baseline`, as the aware UTC
         instant the run really started — the interval anchor reaches the
         scheduler this way, never as a naive local wall-clock time round-tripped
         back (which would resolve a run inside a fall-back hour's repeated
         readings to the later one and push the next occurrence out by an hour)."""
-        base = (lenient_local(a.get("_last_exec_at")) if a.get("_last_exec_at") else None) \
-            or lenient_local(a.get("created_at"))
+        base = self._baseline_source(a, now)
         return base.astimezone(UTC) if base else None
 
     def overdue(self, a: dict, now: datetime | None = None) -> bool:
@@ -3731,11 +3926,14 @@ class Store:
         stamp, whichever is later, so a re-enable never false-fires on moments
         that passed while it was off. Derived from the execution index, the
         stored stamp, and the clock — the verdict itself is never stored."""
-        base = self.run_baseline(a)
+        # §6 (2026-10-31): a newest start far ahead of now falls back to
+        # created_at here, so the audit still counts from somewhere.
+        now = now or datetime.now()
+        base = self.run_baseline(a, now)
         if base is None:  # §5 lenient: a damaged created_at drops the audit, never 500s
             return False
         return triggerlib.is_overdue(a["triggers"], base, now,
-                                     interval_baseline=self.run_baseline_instant(a))
+                                     interval_baseline=self.run_baseline_instant(a, now))
 
     def problems_json(self, a: dict, cur: dict) -> list[dict]:
         """§4.1 `problems` — the would-this-fire-successfully audit, derived at
@@ -3879,8 +4077,11 @@ class Store:
         # §4.3: the epoch comes from the occurrence's instant — an interval's
         # occurrence is one, and a local naive reading in the fall-back fold
         # would hand the UI the earlier hour.
-        run_baseline = self.run_baseline(a)
-        interval_baseline = self.run_baseline_instant(a)
+        # §6 (2026-10-31): a newest start far ahead of now falls back to
+        # created_at, so the interval countdown never reads months out.
+        baseline_now = datetime.now()
+        run_baseline = self.run_baseline(a, baseline_now)
+        interval_baseline = self.run_baseline_instant(a, baseline_now)
         next_ms = triggerlib.next_at_ms(a["triggers"], run_baseline=run_baseline,
                                         interval_baseline=interval_baseline)
         # §4.3 `nextTriggerShort`: the trigger whose own occurrence, through

@@ -438,16 +438,25 @@ export default function AgentNewPage() {
       description: description.trim(),
     }
     setSaving(true)
+    // §9 landing rule (2026-10-31): Add agent / Save changes navigate only
+    // while the page that started them is still shown.
+    const clicked = useStore.getState()
+    const clickedPage = clicked.page
+    const clickedId = clicked.agentEditId
+    const stillShown = () => {
+      const now = useStore.getState()
+      return now.page === clickedPage && now.agentEditId === clickedId
+    }
     try {
       if (editAgent) {
         await api.patchAgent(editAgent.id, payload)
         // Saved config may change readiness — refresh the cached badge (§12).
         void runAgentCheck(editAgent.id, 'connecting')
-        go('agents')
+        if (stillShown()) go('agents')
         showToast(`Changes saved. ${payload.name} is ready.`)
       } else {
         await api.addAgent(payload)
-        go('agents')
+        if (stillShown()) go('agents')
         showToast(`${payload.name} added. Ready to write automations.`)
       }
     } catch (e) {

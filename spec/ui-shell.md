@@ -291,8 +291,9 @@ onboarding, and replaced by a newer link that arrives meanwhile. A modal whose r
 flight (the §5.2 import confirm, the §22.7 catalog save, the §9.2 Duplicate modal) keeps Escape and the backdrop inert
 until it lands, so a result the user waited for is never lost to an early close. A request
 that navigates when it lands (Duplicate, Execute again, Fix with AI, the import summary's
-Open automation, and the automation and agent Delete confirms — a DELETE can wait on a
-cancelled execution, §19) navigates only while the page that started it is still shown — a long
+Open automation, the automation and agent Delete confirms — a DELETE can wait on a
+cancelled execution, §19 — and the §11 Save / Create / Keep draft and the §12 Add agent /
+Save changes, 2026-10-31) navigates only while the page that started it is still shown — a long
 copy must never pull the user off a page they moved to meanwhile; a navigation that would
 land on a record the client failed to fetch (Duplicate's or Open automation's insert GET
 errored) stays put instead of bouncing through the dead-record redirect — Duplicate still
@@ -379,7 +380,10 @@ animation animates `transform` and would knock the toast off-center while it pla
   label swap) while their request is in flight, so a double-click never fires twice (two
   runs started blind past the §9.2 capacity popup, two automations created from one
   draft); sibling actions that would double-fire the commit disable
-  with them.
+  with them — the §11 editor's header back link among them (its leave path writes the
+  draft), and the §9.2 Delete confirm disables the actions menu, Execute now and Edit for
+  the record being deleted until the DELETE lands (a second Delete answered 409 beside the
+  first's success toast, 2026-10-31).
 
 Text selection: all text is selectable by default — any piece of information on screen
 (titles, badges, chips, labels, list rows, logs, paths, parameter values, scripts) can be
@@ -1232,7 +1236,11 @@ also open itself after an update (below) with the About page nowhere in sight.
   window's window-open handler denies the popup and routes the URL to
   `shell.openExternal`, so it lands in the default browser).
 
-  **External-URL policy** (both windows — main and the menu-bar panel carry the same handler):
+  **External-URL policy** (both windows — main and the menu-bar panel carry the same handler;
+  the same rule covers **frames**: a navigation inside the §4.5 result iframe — a link whose
+  own `target="_self"` overrides the frame's `<base target="_blank">` — is cancelled by the
+  frame-navigation handler and its URL routed through the policy below, so a result page can
+  never load a remote site inside the card, 2026-10-31):
   a window-open URL is opened only when its scheme is `https:`, `http:`, or `mailto:`, plus the
   one `x-apple.systempreferences:` deep link the §9 permission checklist uses; anything else is
   dropped silently. §7 result HTML is AI-authored and may echo attacker-controlled text from an

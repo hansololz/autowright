@@ -1,4 +1,5 @@
 """Step-SDK surface of the executor (§6.1) — pure parts, no real subprocess."""
+import email.message
 import io
 import json
 
@@ -466,9 +467,16 @@ def test_execution_metadata_read_only():
 class _FakeResp:
     def __init__(self, body: bytes):
         self._body = body
+        # §6: fetch_page decodes with the declared charset (none here → UTF-8).
+        self.headers = email.message.Message()
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, n: int = -1) -> bytes:
+        # Chunked like a real response: fetch_page reads under its 8 MB cap.
+        if n < 0:
+            out, self._body = self._body, b""
+        else:
+            out, self._body = self._body[:n], self._body[n:]
+        return out
 
     def __enter__(self):
         return self
@@ -492,6 +500,8 @@ def clean_fetch_state(monkeypatch):
         clock["t"] += s
 
     monkeypatch.setattr(executor.time, "time", lambda: clock["t"])
+    # §6: in-process spacing and the fetch deadline run on the monotonic clock.
+    monkeypatch.setattr(executor.time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(executor.time, "sleep", fake_sleep)
     return clock, sleeps
 

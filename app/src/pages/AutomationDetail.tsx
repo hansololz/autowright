@@ -72,6 +72,12 @@ export default function AutomationDetail() {
   // their request is in flight — a double-click never fires twice.
   const [starting, setStarting] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // §9 busy rule (2026-10-31): from the Delete confirm until the DELETE lands
+  // the actions menu, Execute now and Edit disable — a DELETE can wait on a
+  // cancelled execution, and a second Delete answered 409 beside the first's
+  // success toast. The ref gates the handler synchronously.
+  const [deleting, setDeleting] = useState(false)
+  const deletingRef = useRef(false)
   // §7/§9.2 Fix with AI: the failed run may sit outside the §19 /state
   // window, so its record is loaded before the editor opens; a second click
   // while that load is in flight does nothing.
@@ -257,6 +263,9 @@ export default function AutomationDetail() {
 
   const confirmDelete = () => {
     setDelAsk(false)
+    if (deletingRef.current) return
+    deletingRef.current = true
+    setDeleting(true)
     const nm = auto.name
     // §9: the landing navigates only while the page that started it is still
     // shown — a DELETE can wait on a cancelled execution (§19), and the user
@@ -269,7 +278,10 @@ export default function AutomationDetail() {
       const now = useStore.getState()
       if (now.page === clickedPage && now.automationId === clickedId) go('automations')
       return `“${nm}” deleted — its past results stay in Executions.`
-    }, { reload: false })
+    }, { reload: false }).finally(() => {
+      deletingRef.current = false
+      setDeleting(false)
+    })
   }
 
   const discardDraft = () => {
@@ -308,10 +320,10 @@ export default function AutomationDetail() {
         style={{ marginBottom: 6 }}
         right={(
         <HeaderActions>
-          <button className="ad-btn-ghost" onClick={() => setSurface('create', 'edit')}>
+          <button className="ad-btn-ghost" disabled={deleting} onClick={() => setSurface('create', 'edit')}>
             Edit
           </button>
-          <BtnPrimary onClick={() => doExecute()} disabled={starting}>
+          <BtnPrimary onClick={() => doExecute()} disabled={starting || deleting}>
             {starting
               ? <Spinner size={9} color="currentColor" style={{ verticalAlign: '-1px' }} />
               : <i className={execIconCls} style={{ fontSize: 9 }} />} {execLabel}
@@ -319,6 +331,7 @@ export default function AutomationDetail() {
           <div ref={actRef} style={{ position: 'relative' }}>
             <button
               className="ad-btn-ghost icon"
+              disabled={deleting}
               onClick={() => setActOpen(!actOpen)}
               title="More actions"
               aria-label="Automation actions"

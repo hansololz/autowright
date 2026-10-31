@@ -12,6 +12,7 @@ import http.client
 import io
 import json
 import logging
+import math
 import re
 import time
 import urllib.error
@@ -19,15 +20,17 @@ import urllib.request
 import zipfile
 import zlib
 from datetime import datetime
+from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
 
 from . import __version__, harness, packages as pkglib, paths, timefmt, triggers as triggerlib
-from .drafting import STEP_FILE_RE, validate_step_refs
+from .drafting import PARAM_FIELDS, STEP_FILE_RE, validate_step_refs
 from .specmd import blocks_to_md, md_to_blocks
-from .storage import (AGENT_REF_RE, SECRET_REF_RE, MissingStepScriptError, Store, new_id,
-                      _kind_ok, param_default, step_script_sha, strip_param_values)
+from .storage import (AGENT_REF_RE, SECRET_REF_RE, STEP_TIMEOUT_MAX_S, MissingStepScriptError,
+                      Store, new_id, _kind_ok, param_default, step_script_sha,
+                      strip_param_values)
 from .untrusted_yaml import excerpt, load_untrusted
 
 FORMAT_VERSION = 2
@@ -522,6 +525,20 @@ def _entry_ref(g: dict) -> str | None:
     return None
 
 
+def _archive_value_ok(kind: str | None, v: Any) -> bool:
+    """§4.2/§5.1 (2026-10-31): `_kind_ok` plus the rules the archive door
+    keeps closed on its own — a number is finite, and a `kv` row carries a
+    text key and a text value."""
+    if not _kind_ok(kind, v):
+        return False
+    if kind == "number":
+        return math.isfinite(v)
+    if kind == "kv":
+        return all(isinstance(row.get("key"), str) and isinstance(row.get("value"), str)
+                   for row in v)
+    return True
+
+
 def _validate(z: zipfile.ZipFile) -> dict:
     """Parse + validate everything up front; returns the parsed archive."""
     _check_sizes(z)
@@ -649,9 +666,21 @@ def _validate(z: zipfile.ZipFile) -> dict:
         # §5 untrusted-YAML rule: the default is type-checked against its
         # kind with the §4.2 value check (`_kind_ok`), so a structure that is
         # no value of that kind never lands verbatim in the version.
-        if p["default"] is not None and not _kind_ok(p["kind"], p["default"]):
+        if p["default"] is not None and not _archive_value_ok(p["kind"], p["default"]):
             raise TransferError(f"param {excerpt(p['name'])}: the default isn't a "
                                 f"{p['kind']} value")
+        # §5.1/§8 rule 3 (2026-10-31): the validator's other definition
+        # checks — an archive was the one door past them, and the first
+        # edit of the imported version would 422.
+        for field in ("label", "help"):
+            if field in p and not isinstance(p[field], str):
+                raise TransferError(f"param {excerpt(p['name'])}: `{field}` must be text")
+        if p["kind"] == "number" and "min" in p and not _archive_value_ok("number", p["min"]):
+            raise TransferError(f"param {excerpt(p['name'])}: `min` must be a number")
+    # §5.1/§8: unknown definition keys are trimmed to the §4.2 field list
+    # exactly as the validator trims them, so a stray key never reaches a
+    # version file.
+    params = [{k: p[k] for k in PARAM_FIELDS if k in p} for p in params]
     # §5.1: definitions only — an archive exported before the §4.2 save-side
     # strip can carry resolved values inside its definitions; they never land.
     params = strip_param_values(params)
@@ -798,6 +827,12 @@ def _validate(z: zipfile.ZipFile) -> dict:
         if t is not None:
             if not isinstance(t, int) or isinstance(t, bool) or t <= 0:
                 raise TransferError(f"invalid step timeout: {excerpt(t)}")
+            # §5.1 (2026-10-31): the §4.1 one-year cap — a larger stored
+            # timeout reads as absent and the step would silently run under
+            # the default.
+            if t > STEP_TIMEOUT_MAX_S:
+                raise TransferError(f"invalid step timeout: {excerpt(t)} — the cap is one "
+                                    f"year ({STEP_TIMEOUT_MAX_S} seconds)")
             entry["timeout"] = t
         if s.get("no_timeout"):
             # §5.1: steps obey the §8 bounds — an archive can't land a step no
@@ -1409,8 +1444,11 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
                                 unresolved_references=unresolved or None)
     # §5.1: values naming no param of the imported version drop, never store
     # (the §19 PATCH rule) — matched by name, like every other values path.
-    names = {p["name"] for p in ver["params"] or []}
-    values = {k: v for k, v in arch["param_values"].items() if k in names}
+    # An entry that is not a value of its definition's kind drops too (the
+    # §5 load rule, 2026-10-31): values are user state, never a refusal.
+    kinds = {p["name"]: p.get("kind") for p in ver["params"] or []}
+    values = {k: v for k, v in arch["param_values"].items()
+              if k in kinds and _archive_value_ok(kinds[k], v)}
     if values:
         # Values are the one manifest field creation can't seed. The
         # automation already landed — a failing values write degrades to an
@@ -1519,14 +1557,19 @@ def open_https_only(request: urllib.request.Request, *, timeout: float, refuse):
     return opener.open(request, timeout=timeout)
 
 
-def _github_api(path: str):
-    """Unauthenticated GitHub API GET; None on 404, TransferError otherwise."""
+def _github_api(path: str, deadline: float | None = None):
+    """Unauthenticated GitHub API GET; None on 404, TransferError otherwise.
+    `deadline` is the import's one §5.2 whole-download deadline (a
+    `time.monotonic()` stamp) - every listing call of a URL import and the
+    download itself consume the same one (2026-10-31); a fresh one when
+    absent."""
     req = urllib.request.Request(
         f"https://api.github.com{path}",
         headers={**_headers(), "Accept": "application/vnd.github+json"})
     # §5.2: the deadline, per-read timeout, cap, and short-body rule of every
     # other outbound read - an API listing is small, so 1 MB is plenty.
-    deadline = time.monotonic() + FETCH_DEADLINE_S
+    if deadline is None:
+        deadline = time.monotonic() + FETCH_DEADLINE_S
     try:
         # §5.2: https only, redirects refused before they are followed, like
         # every other outbound read.
@@ -1597,8 +1640,10 @@ def _https_asset(url) -> str:
     return url
 
 
-def resolve_url(url: str) -> str:
-    """§5.2: turn a pasted URL into a direct archive URL, or reject with 422."""
+def resolve_url(url: str, deadline: float | None = None) -> str:
+    """§5.2: turn a pasted URL into a direct archive URL, or reject with 422.
+    `deadline` is the import's whole-download deadline, which the GitHub
+    listing calls consume (fresh when absent)."""
     url = url.strip()
     parts = _split_link(url)
     if parts.scheme != "https":
@@ -1613,9 +1658,12 @@ def resolve_url(url: str) -> str:
         raise TransferError("the URL doesn't point to an .autowright archive — paste a "
                             "direct link to one, or a github.com repository page")
     path = parts.path.rstrip("/")
+    if deadline is None:
+        deadline = time.monotonic() + FETCH_DEADLINE_S
     if m := _GH_TAG_RE.match(path):
         owner, repo, tag = m.groups()
-        asset = _release_asset(_github_api(f"/repos/{owner}/{repo}/releases/tags/{tag}"))
+        asset = _release_asset(_github_api(f"/repos/{owner}/{repo}/releases/tags/{tag}",
+                                            deadline))
         if not asset:
             raise TransferError(f"release {tag!r} of {owner}/{repo} has no "
                                 ".autowright asset")
@@ -1624,9 +1672,9 @@ def resolve_url(url: str) -> str:
         raise TransferError("unrecognized github.com URL — paste the repository page, a "
                             "release, or a direct .autowright link")
     owner, repo = m.groups()
-    if asset := _release_asset(_github_api(f"/repos/{owner}/{repo}/releases/latest")):
+    if asset := _release_asset(_github_api(f"/repos/{owner}/{repo}/releases/latest", deadline)):
         return _https_asset(asset)
-    listing = _github_api(f"/repos/{owner}/{repo}/contents/")
+    listing = _github_api(f"/repos/{owner}/{repo}/contents/", deadline)
     files = sorted((f["name"], f.get("download_url"))
                    for f in (listing if isinstance(listing, list) else [])
                    if isinstance(f, dict) and f.get("type") == "file"
@@ -1639,13 +1687,15 @@ def resolve_url(url: str) -> str:
 
 def fetch_archive(url: str) -> tuple[bytes, str]:
     """§5.2 download: returns (archive bytes, resolved URL)."""
-    resolved = resolve_url(url)
-    req = urllib.request.Request(resolved, headers=_headers())
     # §5.2: the per-read timeout can't catch a server trickling bytes forever —
     # only a whole-download deadline can, and this runs on a threadpool worker
     # the backend needs back. It is measured from before the connect, so a slow
-    # connect and header read count against it too.
+    # connect and header read count against it too — and it is created once
+    # here, before the GitHub listing calls resolve_url makes, which consume
+    # the same one (2026-10-31: each call started its own, ~30 min in all).
     deadline = time.monotonic() + FETCH_DEADLINE_S
+    resolved = resolve_url(url, deadline)
+    req = urllib.request.Request(resolved, headers=_headers())
     try:
         with open_https_only(req, timeout=open_timeout(deadline),
                              refuse=lambda: TransferError(REDIRECTED_OFF_HTTPS)) as r:

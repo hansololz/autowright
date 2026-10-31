@@ -125,7 +125,7 @@ describe('U1: an IME composition owns Escape (§14)', () => {
 
   it('a composing Escape does not close a plain Modal', async () => {
     const onClose = vi.fn()
-    render(<Modal onClose={onClose} ariaLabel="Plain">{() => <div>body</div>}</Modal>)
+    render(<Modal onClose={onClose} width={520} ariaLabel="Plain">{() => <div>body</div>}</Modal>)
     fireEvent.keyDown(document, { key: 'Escape', isComposing: true })
     await settle()
     expect(onClose).not.toHaveBeenCalled()

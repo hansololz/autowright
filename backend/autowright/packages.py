@@ -242,7 +242,15 @@ def _latest_compatible(name: str) -> str | None:
     url = f"https://pypi.org/pypi/{_norm(name)}/json"
     req = urllib.request.Request(url, headers={"User-Agent": "Autowright/1.0"})
     deadline = time.monotonic() + PYPI_DEADLINE_S
-    with urllib.request.urlopen(req, timeout=PYPI_TIMEOUT) as resp:
+    # Imported here: transfer imports this module at load.
+    from . import transfer
+
+    # §5.2 (2026-10-31): https only, a redirect off https refused before it
+    # is followed, like every other outbound read — keeping this lookup's
+    # own per-read timeout, deadline, and cap.
+    with transfer.open_https_only(
+            req, timeout=PYPI_TIMEOUT,
+            refuse=lambda: ConnectionError("the PyPI lookup redirected off https")) as resp:
         try:
             expected = int(resp.headers.get("Content-Length"))
         except (TypeError, ValueError, AttributeError):
@@ -316,6 +324,21 @@ def outdated(entries: list[dict]) -> list[dict]:
         return list(pool.map(probe, items))
 
 
+def _pip_env() -> dict:
+    """os.environ for the pip spawn (§6.2, 2026-10-31). `PIP_USER=0` and
+    `PIP_REQUIRE_VIRTUALENV=0` override a user's pip.conf `user = true` /
+    `require-virtualenv = true`, either of which made every `--target`
+    install fail; never `--isolated`, which would also drop the §15
+    `PIP_NO_INDEX` / `PIP_FIND_LINKS` the suites rely on. Plus the §3
+    interpreter-isolation pair."""
+    env = dict(os.environ)
+    env["PIP_USER"] = "0"
+    env["PIP_REQUIRE_VIRTUALENV"] = "0"
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
+    return env
+
+
 def _pip_install(name: str, pin_installed: bool = False,
                  should_stop=None, upgrade: bool = False,
                  pin_only: set[str] | None = None) -> str | None:
@@ -366,6 +389,7 @@ def _pip_install(name: str, pin_installed: bool = False,
                                     # §2 pipe-encoding contract
                                     encoding="utf-8", errors="replace",
                                     stdin=subprocess.DEVNULL,
+                                    env=_pip_env(),
                                     **platform.current().processes.session_kwargs())
         except OSError as e:
             return str(e)

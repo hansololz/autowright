@@ -253,8 +253,12 @@ remain plain dicts (§2).
   slot's `chat.jsonl` into the new automation's container and appending the §4.4
   "Created as v1." boundary marker there (thread-lifetime rules, §4.4) — all of it only
   with `settlePending` true
-- `POST /automations/{id}/versions` `{ draft, name?, agentId?, stepAgents?, allowedSecrets?, paramValues?, concurrency? }`
-  — save edit as vN+1; the optional identity/grant fields, when sent, are applied to the
+- `POST /automations/{id}/versions` `{ draft, name?, agentId?, stepAgents?, allowedSecrets?, paramValues?, concurrency?, baseVersion? }`
+  — save edit as vN+1 (`baseVersion`, when sent, is the version the caller's content was
+  seeded from: a value other than the automation's current version answers 409 "version vN
+  was saved outside this editor — close and reopen Edit to continue from it" before
+  anything is settled or written, the §4.4 one-editor-per-version rule; the §20 push sends
+  none and keeps its own workdir staleness check); the optional identity/grant fields, when sent, are applied to the
   automation as a patch after the version lands — a sent `name` validates like the PATCH's
   (§4.1 case-insensitive collision with another automation), checked up front with the other
   validations: 422 aborts the save and nothing is written — the §20 push grant model rides this
@@ -320,7 +324,10 @@ remain plain dicts (§2).
   literal **`pending`** (the create-mode slot `<root>/draft/`). One container shape and one
   shared draft serializer for both owners — only the on-disk location differs (§5,
   unchanged). An automation `owner` that doesn't resolve answers 404. `PUT`
-  `{ draft, agentId? }` stores the §4.4 snapshot: the payload's
+  `{ draft, agentId?, baseVersion? }` stores the §4.4 snapshot (`baseVersion` as on the
+  version save: for an automation owner, a value other than its current version answers
+  409 with the same sentence and stores nothing, so an editor seeded from vN never
+  re-creates a draft over a vN+1 it has not seen; ignored for `pending`): the payload's
   stepAgents/allowedSecrets/triggers/paramValues/concurrency/testValues/outOfSync are stored as
   draft-only keys
   (`paramValues` the §4.2 chat-staged value map, stored as the draft-only `param_values`

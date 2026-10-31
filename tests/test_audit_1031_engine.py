@@ -22,7 +22,9 @@ def _fire_with_start_raising(store, monkeypatch, exc):
         raise exc
 
     monkeypatch.setattr(engine, "start", broken_start)
-    return fire_trigger(store, engine, a, {"id": "t1", "kind": "cron", "enabled": True})
+    trigger = {"id": "t1", "kind": "cron", "enabled": True}
+    a["triggers"].append(trigger)  # §6: a firing's trigger must be on the automation
+    return fire_trigger(store, engine, a, trigger)
 
 
 def _firing_tracebacks(caplog):

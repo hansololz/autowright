@@ -56,8 +56,8 @@ class Scheduler:
         # fired — a backward clock step never moves the baseline below it, so
         # an occurrence already fired never re-fires (§6 missed executions).
         self._last_fired: dict[tuple[str, str], tuple[datetime, datetime]] = {}
-        # Keys already warned about a wall-clock rewind too large for DST (a
-        # system-timezone change) — one warning per rewind, not one per tick.
+        # Keys already warned about a baseline wall reading that moved by more
+        # than DST shifts (a system-timezone change) — one warning per change.
         self._warned_rewind: set[tuple[str, str]] = set()
         # §4.9 degraded session: the "nothing fires" warning is logged once
         # per degraded stretch, not once per tick.
@@ -224,7 +224,29 @@ class Scheduler:
                     self._set_baseline(key, since, since_utc)
                 else:
                     self._set_baseline(key, self._prev_tick, self._prev_tick_utc)
-            base = self._baseline[key]
+            # §4.3: the baseline is an instant — each tick reads it as a wall
+            # time in the current local zone (`fromtimestamp` keeps the
+            # fall-back fold), so a system-timezone change neither re-fires
+            # occurrences before the baseline instant (eastward) nor skips
+            # the ones after it (westward), 2026-10-31.
+            base = datetime.fromtimestamp(self._baseline_utc[key].timestamp())
+            if abs((base - self._baseline[key]).total_seconds()) > 3900:
+                # The wall reading moved by more than any DST fall-back shifts
+                # (> 65 min) with the instant unchanged — almost certainly a
+                # system-timezone change. Logged once per change so a
+                # reported oddity is diagnosable; the re-read value is stored,
+                # so the next tick sees no move.
+                if t["enabled"] and key not in self._warned_rewind:
+                    self._warned_rewind.add(key)
+                    log.warning(
+                        "trigger baseline moved %d min on the wall clock with UTC "
+                        "steady — looks like a system timezone change; trigger %s "
+                        "on %r now counts from the same instant in the new zone",
+                        int((base - self._baseline[key]).total_seconds() // 60),
+                        t["id"], a["name"])
+                self._set_baseline(key, base, self._baseline_utc[key])
+            else:
+                self._warned_rewind.discard(key)
             if base > now and now_utc < self._baseline_utc[key]:
                 # A backward clock step (NTP) must not silence every
                 # trigger until the wall clock re-reaches the old baseline.
@@ -244,22 +266,6 @@ class Scheduler:
                 else:
                     base = now
                     self._set_baseline(key, now, now_utc)
-            if t["enabled"] and base > now and (base - now).total_seconds() > 3900:
-                # §4.3: the wall clock rewound with UTC steady, by more
-                # than any DST fall-back shifts (> 65 min) — almost
-                # certainly a system-timezone change. Deliberately handled
-                # like fall-back (occurrences in the rewound span never
-                # re-fire; a pending one-shot there is consumed unfired) —
-                # this line exists so a reported miss is diagnosable.
-                if key not in self._warned_rewind:
-                    self._warned_rewind.add(key)
-                    log.warning(
-                        "wall clock rewound %d min with UTC steady — looks like a "
-                        "system timezone change; occurrences of trigger %s on %r "
-                        "before the old baseline will not fire",
-                        int((base - now).total_seconds() // 60), t["id"], a["name"])
-            else:
-                self._warned_rewind.discard(key)
             if not t["enabled"]:
                 # Occurrences passing while off never fire, even after a re-enable.
                 self._set_baseline(key, now, now_utc)

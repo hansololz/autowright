@@ -48,6 +48,7 @@ def test_queue_stress_no_races(store, monkeypatch):
     engine = Engine(store)
     sched = Scheduler(store, engine)  # wires the drain_queue hook
     a = store.create_automation(ver, "Stress", None)
+    a["triggers"].append(_discord_trig())  # §6: a firing's trigger must be on the automation
     a["max_parallel"] = MAX_PARALLEL
     a["max_queued"] = MAX_QUEUED
 

@@ -90,6 +90,7 @@ def test_firing_between_finish_and_drain_joins_the_tail(store, monkeypatch):
     a = store.create_automation(ver, "Fifo", None)
     a["max_queued"] = 3
     trigger = _discord_trigger()
+    a["triggers"].append(trigger)  # §6: a firing's trigger must be on the automation
 
     seen = {}
     real_drain = engine.drain_queue
@@ -134,6 +135,7 @@ def test_waiting_entries_count_as_capacity_for_every_admission(store, monkeypatc
     _record_busy(monkeypatch)
     engine = Engine(store)
     a = store.create_automation(make_version(), "Waiting", None)
+    a["triggers"].append(_discord_trigger())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 5
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trigger(), payload=_payload("A"))
@@ -143,6 +145,7 @@ def test_waiting_entries_count_as_capacity_for_every_admission(store, monkeypatc
     entry, queued = queue_manual(store, engine, a, "manual")
     assert queued is True and entry["status"] == "queued"
     cron = {"id": "c1", "kind": "cron", "enabled": True, "expression": "0 8 * * *"}
+    a["triggers"].append(cron)  # §6: a firing's trigger must be on the automation
     assert fire_trigger(store, engine, a, cron) is False
     skipped = [x for x in store.execs.values() if x["trigger"] == "cron"]
     assert [x["status"] for x in skipped] == ["skipped"]
@@ -176,6 +179,7 @@ def test_tick_drains_before_it_fires(store, monkeypatch):
     monkeypatch.setattr(sched_mod, "fire_trigger",
                         lambda store, engine, a, t, **_: order.append("fire") or True)
     sched._tick()  # baselines
+    a["triggers"].append(_discord_trigger())  # §6: a firing's trigger must be on the automation
     a["_live"] = {"blocking"}
     fire_trigger(store, engine, a, _discord_trigger(), payload=_payload())
     a["_live"] = set()
@@ -196,6 +200,7 @@ def test_stale_entries_expire_under_full_capacity_and_senders_are_told(store, mo
     engine = Engine(store)
     sched = Scheduler(store, engine)
     a = store.create_automation(make_version(), "Stale", None)
+    a["triggers"].append(_discord_trigger())  # §6: a firing's trigger must be on the automation
     a["max_queued"] = 5
     a["_live"] = {"blocking"}  # every slot stays busy throughout
     manual, _queued = queue_manual(store, engine, a, "manual")  # the head: no TTL

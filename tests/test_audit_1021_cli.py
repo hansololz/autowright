@@ -163,7 +163,7 @@ def test_fetch_archive_times_out_on_one_byte_per_read1(monkeypatch):
     response = _Trickle()
     clock = iter(range(0, 10_000, 100))  # each read1 is 100 s later
     monkeypatch.setattr(transfer.time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(transfer, "resolve_url", lambda url: url)
+    monkeypatch.setattr(transfer, "resolve_url", lambda url, deadline=None: url)
     monkeypatch.setattr(transfer, "open_https_only",
                         lambda req, timeout, refuse: response)
     with pytest.raises(transfer.TransferError, match="timed out"):

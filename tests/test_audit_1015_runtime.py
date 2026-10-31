@@ -232,7 +232,10 @@ def test_auto_json_passes_the_run_instant_to_next_at_ms(store, monkeypatch):
     from autowright import triggers as triggerlib
 
     a = store.create_automation(make_version(), "Anchored", None)
-    a["_last_exec_at"] = "2026-11-01T05:30:00+00:00"
+    # A past instant: auto_json screens the run baseline against the real
+    # clock (§6 15-minute credibility rule, 2026-10-31), so a fixture date
+    # ahead of today would be dropped as a forward glitch.
+    a["_last_exec_at"] = "2026-10-01T05:30:00+00:00"
     seen = {}
     real = triggerlib.next_at_ms
 
@@ -242,7 +245,7 @@ def test_auto_json_passes_the_run_instant_to_next_at_ms(store, monkeypatch):
 
     monkeypatch.setattr(triggerlib, "next_at_ms", spy)
     store.auto_json(a)
-    assert seen["interval_baseline"] == RUN_INSTANT
+    assert seen["interval_baseline"] == datetime(2026, 10, 1, 5, 30, tzinfo=timezone.utc)
     assert seen["interval_baseline"] == store.run_baseline_instant(a)
 
 

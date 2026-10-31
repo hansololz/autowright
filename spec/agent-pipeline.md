@@ -105,8 +105,18 @@ can override it.
   validation error for the repair round, since the Review card and the runtime would otherwise
   disagree about the default, 2026-10-30 second sweep; a number param's `min`, when present,
   must itself be a number, since `1e3` reads from YAML as text and would otherwise be served
-  as the default, 2026-10-31). These checks judge what an agent drafts; a version stored
-  before they existed is normalized at load (§5, §21 2026-10-31) so it keeps saving. The
+  as the default, 2026-10-31; "a number" means a finite one, and a `kv` default's rows
+  each carry a text key and a text value, §4.2). These checks judge what an agent drafts; a version stored
+  before they existed is normalized at load (§5, §21 2026-10-31) so it keeps saving.
+  Every YAML block the pipeline reads out of an agent's output (the manifest, `actions.yaml`,
+  a repair answer, the test-values block) is parsed with the §5.1 **untrusted loader**:
+  anchors and aliases are a validation error for the repair round, never stored (the same
+  validator checks a §20 `push` workdir, so a hand-written manifest with anchors is refused
+  there too with the loader's message — a self-referencing structure from a workdir would
+  break `/state` exactly like one from an agent, and the error names the cause) — a
+  self-referencing default passed `safe_load` and the kind check, was written back with
+  anchors, and then failed JSON serialization on every `/state` for good, and an agent
+  drafting from web content is prompt-injectable (2026-10-31). The
   known manifest keys include everything the §20 workdir `pull` writes (`name`,
   `description`, `note`, `triggers`, `params`, `packages`, `steps`). The validator never
   raises on a wrongly typed value: a `steps` or `params` that isn't a list, a `kind` or
@@ -767,7 +777,15 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    only one of them (2026-10-28). The preflight surfaces **every** validator line about a
    locked step — its file name failing the `NN-name.py` rule, a blank name, a missing
    file — not only the grant and import lines (2026-10-30: a line the preflight filtered
-   out still failed every repair round and ended in a diagnosis blocker).
+   out still failed every repair round and ended in a diagnosis blocker). A locked step
+   whose stored script is **empty or missing** (its file gone from the version folder —
+   the §4.1 `step-modified` state — or a `code` the draft never carried) blocks the same
+   way (`reason`: "its script is missing or empty — the lock would keep an empty step",
+   `fix`: "Restore the script, or unlock the step so the next sync can rewrite it"), and
+   the splice itself refuses to write an empty script over a locked entry (a validation
+   error, never a spliced empty file): without both, a missing script was spliced as an
+   empty step, passed every check, and the next save sealed the empty file as the user's
+   locked code (2026-10-31).
 9. **SPEC** — the provided spec, headed "implement this exactly" and as overriding the
    BUILD INSTRUCTIONS above wherever it says otherwise.
 10. **Closing envelope reminder** — one final line restating the response shape (return
@@ -1164,7 +1182,8 @@ applies to these flags as each CLI lands there):
   auto-approves every tool, shell included - broader than the file writes the OUTPUT
   delivery needs; accepted for drafting calls because §6 already documents the drafting
   agent as unsandboxed on this harness, and narrowing the flag waits on the signed-in
-  verification this mode still owes. Runtime calls stay bare.
+  verification this mode still owes; the §4.1 lock holds regardless, through the
+  locked-bytes guard below. Runtime calls stay bare.
 - **OpenCode** - `opencode run --format json` (JSONL events on stdout): `text` events'
   part text becomes a `text` event each (the **reply is every text part joined in
   order**, falling back to raw stdout when none arrived — except that when a later part
@@ -1198,6 +1217,18 @@ a wording that assumed a kept list on every round once made Codex, Gemini and Op
 sync repairs drop the manifest). Codex's sandbox escalates to
 `--sandbox workspace-write` for these calls only, confining writes to the scratch cwd
 (runtime stays `read-only`; Gemini and OpenCode have no sandbox flag to escalate - §6).
+**Locked-bytes guard** (2026-10-31): the rule-8 splice governs what the agent *returns*,
+but an unsandboxed harness could also write to disk directly, so every drafting call
+(sync and chat alike, every repair round included) is bracketed by a byte snapshot of each
+§4.1 locked step's script wherever it lives on disk for the job's owner — the current
+version folder and the owner's draft folder (`pending` has no version folder). When the
+call returns — settled, failed, or cancelled — the files are compared: one that changed,
+vanished, or appeared where the snapshot had none is restored from the snapshot byte for
+byte (a vanished file re-created, an appeared one left alone), the agent's response is
+discarded unparsed, and the job settles `failed` with "the agent changed the locked step
+'<name>' on disk — the file was restored; nothing from this response was applied". The
+guard runs before any block of the response is read, so a tampered call can never land a
+draft, and the version seal (§4.1 `step-modified`) is never left tripped by an agent.
 A poll-based **scratch watcher** (0.3 s) turns each response document that lands into a
 `file` event carrying the file name and its current content, re-fires as the file grows,
 and orders documents by first appearance; a final sweep after the child exits catches a

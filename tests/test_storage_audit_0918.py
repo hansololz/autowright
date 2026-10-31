@@ -203,6 +203,10 @@ def test_retention_drops_the_summary_of_the_test_it_deletes(store):
     h, container = _test_record(store, a)
     h["started_at"] = "2020-01-01T00:00:00.000000+00:00"
     store.settings["days"] = 1
+    # §5 (2026-10-31): the age is measured from the newest record — one
+    # started now keeps the anchor at the wall clock.
+    store.create_execution(store.create_automation(make_version(), "Fresh", None),
+                           "version", 1, "manual", [], status="succeeded")
 
     assert store.retention_cleanup() == 1
     store.drain_reaper()

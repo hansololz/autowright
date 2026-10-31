@@ -42,7 +42,11 @@ ensure-backend step runs via `python -m autowright.service` (§3). Dependency di
 one-way: the CLI calls the backend API and the service module; **the UI and the backend never
 invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
 
-- **References:** automations resolve by id, then **exact name (case-insensitive)**, then
+- **References:** automations resolve by id, then **exact name (case-insensitive)** — the
+  §4.1 comparison exactly: trimmed, NFC-normalized, case-folded, so `café` typed
+  precomposed finds a name stored with a combining accent and `STRASSE` finds `Straße`, the
+  "exact-name lookup from a terminal always finds it" promise (a plain `lower()` compare did
+  neither, 2026-10-31) — then
   unique id prefix, then unique name substring (2026-09-30 order: an exact name outranks a
   prefix match, so an automation named `feed` or `1` is never shadowed — or deleted in its
   place — by another automation whose id happens to start with those characters; names are

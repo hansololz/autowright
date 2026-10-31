@@ -147,9 +147,12 @@ def test_a_failing_orphan_rename_refuses_the_save_and_leaves_the_folder(store, m
         return real(self, target)
 
     monkeypatch.setattr(Path, "rename", rename)
-    with pytest.raises(OSError):
+    # 2026-10-31 second sweep: the refusal is typed (OrphanSetAsideError),
+    # carrying the folder, no longer the raw OSError.
+    from autowright.storage import OrphanSetAsideError
+    with pytest.raises(OrphanSetAsideError):
         s2.save_new_version(b, make_version(note="Next"))
-    with pytest.raises(OSError):
+    with pytest.raises(OrphanSetAsideError):
         s2.restore_version(b, 1)
     assert b["current_version"] == 2
     assert (versions / "v3" / "automation.yaml").exists()

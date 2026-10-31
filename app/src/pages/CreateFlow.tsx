@@ -14,10 +14,7 @@ import { usePlatformCopy } from '../platformCopy'
 import { useStore } from '../store'
 import type { Agent, Blocker, ChatEntry, Step } from '../types'
 import type { StepEditEffect, StepEditing } from '../steps'
-import {
-  BackLink, BtnPrimary, ConfirmModal, HeaderActions, MenuItemRow, Notice, PageLoading, PageTitle,
-  PopMenu, ScrollArea, Spinner, usePopover,
-} from '../ui'
+import { BackLink, BtnPrimary, ConfirmModal, HeaderActions, MenuItemRow, Notice, PageLoading, PageTitle, PopMenu, ScrollArea, Spinner, usePopover } from '../ui'
 import {
   type Rev, amendSpec, analyzeTestMessage, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
   jobStageTitle, loadVersionInto,
@@ -98,6 +95,18 @@ export default function CreateFlow() {
   const agentIdRef = useRef(agentId)
   agentIdRef.current = agentId
   const draftSettled = useRef(false)
+  // §4.4/§11 (2026-10-31): the leave path's own draft write is in flight —
+  // Create / Save / Start over / Discard refuse while it is, and the leave
+  // path refuses while one of them is, so neither resurrects the other's draft.
+  const closingRef = useRef(false)
+  const [closing, setClosing] = useState(false)
+  // §4.4 one editor per version: the version the edit-mode editor seeded
+  // from, sent as `baseVersion` on every draft PUT and on the save (§19).
+  // Once the automation's version moves past it (a §20 push while the editor
+  // was open) the editor writes no draft and Save disables (2026-10-31).
+  const seedVersionRef = useRef<number | null>(null)
+  const seedIsStale = () => isEdit && seedVersionRef.current != null
+    && !!autoRef.current && autoRef.current.version !== seedVersionRef.current
   // §4.4 "a discarded or saved draft is never resurrected": the last
   // continuous-persist PUT, awaited before any draft DELETE so an in-flight
   // write can't land after the discard on a slow backend.
@@ -151,8 +160,9 @@ export default function CreateFlow() {
     }
     if (isEdit) {
       if (!a) return
+      if (seedIsStale()) return // §4.4 one editor per version: write nothing
       if (r && holdsDraftEdits(r, a)) {
-        void api.putDraft(a.id, serializeDraft(r)).catch(() => { /* backend restarting */ })
+        void api.putDraft(a.id, serializeDraft(r), undefined, seedVersionRef.current ?? undefined).catch(() => { /* backend restarting */ })
       }
       return
     }
@@ -247,9 +257,11 @@ export default function CreateFlow() {
       const key = JSON.stringify([serializeDraft(r), agentIdRef.current])
       if (key === lastPersistKey.current) return // the same bytes are already written
       if (isEdit) {
+        if (seedIsStale()) return // §4.4 one editor per version: write nothing
         if (a && holdsDraftEdits(r, a)) {
           lastPersistKey.current = key
-          putInFlight.current = api.putDraft(a.id, serializeDraft(r)).catch(() => { lastPersistKey.current = null })
+          putInFlight.current = api.putDraft(a.id, serializeDraft(r), undefined, seedVersionRef.current ?? undefined)
+            .catch(() => { lastPersistKey.current = null })
         }
         return
       }
@@ -396,7 +408,11 @@ export default function CreateFlow() {
   // §5: permissions are never versioned — a grant gap never blocks restoring an
   // old version; it fails at execution time instead (the cards still warn).
   const outOfSync = !!rev && (rev.dirty || (!viewingOld && (agentGap || secretGap)))
-  const saveBlocked = !!rev && (outOfSync || rev.syncBusy || rev.chatBusy
+  // §4.4 one editor per version: the automation's version moved past the
+  // seed (a §20 push while the editor was open) — Save disables with the
+  // 409's sentence as the hint (2026-10-31).
+  const seedStale = isEdit && seedVersionRef.current != null && !!auto && auto.version !== seedVersionRef.current
+  const saveBlocked = !!rev && (outOfSync || rev.syncBusy || rev.chatBusy || seedStale
     || (!isEdit && rev.steps.length === 0))
   const busyRewrite = !!rev && (rev.syncBusy || rev.chatBusy)
   // §11: one agent job at a time — the chat input and every job starter gate on this.
@@ -534,6 +550,7 @@ export default function CreateFlow() {
   useEffect(() => {
     if (!isEdit || seededRef.current || !auto || !auto.spec) return
     seededRef.current = true
+    seedVersionRef.current = auto.version
     // §9.2 Needs-fixing `step-modified` → Edit opens here like any edit:
     // nothing is pre-touched, so a look without an edit keeps no phantom draft
     setRev(seedFromAuto(auto, agents, secrets.map((s) => s.id)))
@@ -563,6 +580,7 @@ export default function CreateFlow() {
   }
 
   const resetCreate = async () => {
+    if (closingRef.current) return // §4.4: the leave path's write is in flight
     // §11: the fresh draft's first request - the first user entry after the
     // newest boundary marker - returns to the input. Derived from the thread
     // so a question-reply turn or a resumed draft returns the right text.
@@ -1035,7 +1053,10 @@ export default function CreateFlow() {
     if (rev.viewing === key) return
     if (holdsDraftEdits(rev, auto)) {
       draftSnap.current = rev
-      void api.putDraft(auto.id, serializeDraft(rev)).catch(() => { /* keep local snapshot */ })
+      if (!seedIsStale()) {
+        void api.putDraft(auto.id, serializeDraft(rev), undefined, seedVersionRef.current ?? undefined)
+          .catch(() => { /* keep local snapshot */ })
+      }
     }
     if (key === 'draft') {
       // §11: the chat thread is one live surface across views - entries that
@@ -1064,35 +1085,69 @@ export default function CreateFlow() {
   const [diffFrom, setDiffFrom] = useState<number | null>(null)
 
   // ---- leave / start over / save ----
+  // §9 landing rule (2026-10-31): Save / Create / Keep draft navigate only
+  // while the page that started them is still shown — a save landing after
+  // the user moved to Secrets must not pull them back. Captured at the click.
+  const landingGuard = () => {
+    const clicked = useStore.getState()
+    return () => {
+      const now = useStore.getState()
+      return now.surface === clicked.surface && now.page === clicked.page
+        && now.automationId === clicked.automationId
+    }
+  }
   const close = async () => {
-    jobs.stopPoll()
-    // §4.4 thread lifetime: the thread flushes on every exit path — the keep
-    // branches below set draftSettled, which mutes the unmount flush.
-    await flushChat()
-    if (isEdit && auto) {
-      if (rev && holdsDraftEdits(rev, auto)) {
-        // Settled (and announced kept) only once the write landed - a failed
-        // PUT toasts its reason and leaves the unmount flush armed to retry.
+    // §4.4/§11 (2026-10-31): the leave path writes no draft while a Save,
+    // Create, Start over or Discard is in flight or has settled the draft —
+    // a back-link click during a save re-created the draft it had settled.
+    if (savingRef.current || closingRef.current || draftSettled.current) return
+    closingRef.current = true
+    setClosing(true)
+    // §9 landing rule: the leave navigates only while the editor is still the
+    // shown page — the user may have moved on while the writes were in flight.
+    const stillShown = landingGuard()
+    try {
+      jobs.stopPoll()
+      // §4.4 thread lifetime: the thread flushes on every exit path — the keep
+      // branches below set draftSettled, which mutes the unmount flush.
+      await flushChat()
+      if (isEdit && auto) {
+        // §4.4 one editor per version: a seed another version moved past keeps
+        // no draft — the leave writes nothing.
+        if (rev && holdsDraftEdits(rev, auto) && !seedIsStale()) {
+          // Settled (and announced kept) only once the write landed - a failed
+          // PUT toasts its reason and leaves the unmount flush armed to retry.
+          try {
+            await api.putDraft(auto.id, serializeDraft(rev), undefined, seedVersionRef.current ?? undefined)
+            draftSettled.current = true
+            showToast('Draft kept — resume it from this automation anytime.', 3400)
+          } catch (e) { showToast((e as Error).message) }
+        }
+        if (stillShown()) {
+          setSurface('app')
+          go('automation')
+        }
+        return
+      }
+      // §4.4: leaving create mode after a draft landed keeps the pending slot.
+      if (!isEdit && rev && (rev.spec.length || rev.steps.length)) {
         try {
-          await api.putDraft(auto.id, serializeDraft(rev))
+          await api.putDraft('pending', serializeDraft(rev), agentId)
           draftSettled.current = true
-          showToast('Draft kept — resume it from this automation anytime.', 3400)
+          showToast('Draft kept — Resume draft picks it up anytime.', 3400)
         } catch (e) { showToast((e as Error).message) }
       }
-      setSurface('app')
-      go('automation')
-      return
+      if (stillShown()) {
+        setSurface('app')
+        go('automations')
+      }
+    } finally {
+      // The leave normally unmounts the editor (a state set on an unmounted
+      // component is a no-op); when it does not — the user moved on meanwhile,
+      // or the flush threw — the editor must not stay locked on `closing`.
+      closingRef.current = false
+      setClosing(false)
     }
-    // §4.4: leaving create mode after a draft landed keeps the pending slot.
-    if (!isEdit && rev && (rev.spec.length || rev.steps.length)) {
-      try {
-        await api.putDraft('pending', serializeDraft(rev), agentId)
-        draftSettled.current = true
-        showToast('Draft kept — Resume draft picks it up anytime.', 3400)
-      } catch (e) { showToast((e as Error).message) }
-    }
-    setSurface('app')
-    go('automations')
   }
 
   // §11/§9 busy rule: Create, Save, Start over, and Discard draft each
@@ -1107,7 +1162,7 @@ export default function CreateFlow() {
   const endSaving = () => { savingRef.current = false; setSaving(null) }
 
   const startOver = async () => {
-    if (savingRef.current) return
+    if (savingRef.current || closingRef.current) return
     // an automation that vanished mid-edit has nothing to discard — and must
     // never fall through to the create branch's reset
     if (isEdit && !auto) return
@@ -1138,11 +1193,12 @@ export default function CreateFlow() {
   }
 
   const doSave = async () => {
-    if (!rev || saveBlocked || savingRef.current) return
+    if (!rev || saveBlocked || savingRef.current || closingRef.current) return
     // an automation that vanished mid-edit has nothing to save as a new
     // version — and must never fall through to the create branch
     if (isEdit && !auto) return
     beginSaving('save')
+    const stillShown = landingGuard()
     try {
       draftSettled.current = true
       // §4.4 thread lifetime: every entry lands before the boundary marker
@@ -1152,8 +1208,10 @@ export default function CreateFlow() {
       if (isEdit && auto) {
         if (typeof rev.viewing === 'number' && rev.viewing !== auto.version) {
           const { version } = await api.restore(auto.id, rev.viewing)
-          setSurface('app')
-          go('automation')
+          if (stillShown()) {
+            setSurface('app')
+            go('automation')
+          }
           showToast(`v${rev.viewing} restored as version ${version} — earlier versions stay in the Version menu.`, 3200)
         } else {
           const { version } = await api.saveVersion(auto.id, {
@@ -1164,9 +1222,14 @@ export default function CreateFlow() {
             ...(Object.keys(rev.paramValues).length ? { paramValues: rev.paramValues } : {}),
             // §8/§19: staged concurrency lands beside the draft, like the PATCH
             ...(rev.concurrency ? { concurrency: rev.concurrency } : {}),
+            // §4.4 one editor per version: a version minted since the seed
+            // answers 409, shown below as the save error
+            ...(seedVersionRef.current != null ? { baseVersion: seedVersionRef.current } : {}),
           })
-          setSurface('app')
-          go('automation')
+          if (stillShown()) {
+            setSurface('app')
+            go('automation')
+          }
           // §4.4 operational-only save: same version back means nothing was
           // minted — the staged schedule/value changes still landed.
           showToast(version === auto.version
@@ -1187,8 +1250,10 @@ export default function CreateFlow() {
         // The one inserting load: every other one is update-only, so a row the
         // list has never held is added here and nowhere else.
         await useStore.getState().loadAuto(created.id, { insert: true })
-        setSurface('app')
-        go('automation', { automationId: created.id })
+        if (stillShown()) {
+          setSurface('app')
+          go('automation', { automationId: created.id })
+        }
         showToast('Created — nothing has executed yet. Press Execute now when you’re ready.', 3600)
       }
     } catch (e) {
@@ -1261,7 +1326,9 @@ export default function CreateFlow() {
               maxWidth: 1800, margin: '0 auto', padding: '0 30px 0 18px',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             }}>
-              <BackLink label={backLabel} onClick={() => void close()} />
+              {/* §9 busy rule (2026-10-31): the back link disables with Save /
+                  Create / Start over / Discard — its leave path writes the draft. */}
+              <BackLink label={backLabel} disabled={saving !== null || closing} onClick={() => void close()} />
             </div>
           </div>
           {!rev && <PageLoading />}
@@ -1273,14 +1340,22 @@ export default function CreateFlow() {
               style={{ marginBottom: 6 }}
               right={(
                 <HeaderActions>
+                  {/* §11: the hint wraps inside a bounded width rather than
+                      squeezing the title to an ellipsis — the §4.4 stale-seed
+                      sentence is a full line (2026-10-31). */}
                   {saveBlocked && !(isCreateEmpty && !anyJobBusy) && (
-                    <span style={{ font: "400 12.5px var(--sans)", color: 'var(--amber)' }}>
-                      {rev.syncBusy || rev.chatBusy
-                        ? jobStageTitle(rev)
-                        : 'Sync and review the steps before saving'}
+                    <span style={{
+                      font: "400 12.5px var(--sans)", color: 'var(--amber)', lineHeight: '16px',
+                      maxWidth: 380, whiteSpace: 'normal', textAlign: 'right', flex: '0 1 auto',
+                    }}>
+                      {seedStale && auto
+                        ? `Version v${auto.version} was saved outside this editor — close and reopen Edit to continue from it.`
+                        : rev.syncBusy || rev.chatBusy
+                          ? jobStageTitle(rev)
+                          : 'Sync and review the steps before saving'}
                     </span>
                   )}
-                  <button className="ad-btn-text dim" disabled={busyRewrite || saving !== null} onClick={() => void startOver()}>
+                  <button className="ad-btn-text dim" disabled={busyRewrite || saving !== null || closing} onClick={() => void startOver()}>
                     {saving === 'discard' ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                         <Spinner size={13} /> {isEdit ? 'Discarding…' : 'Starting over…'}
@@ -1288,11 +1363,11 @@ export default function CreateFlow() {
                     ) : isEdit ? 'Discard draft' : 'Start over'}
                   </button>
                   {isEdit && (rev.touched || !!auto?.draft) && (
-                    <button className="ad-btn-ghost" disabled={saving !== null} onClick={() => void close()}>
+                    <button className="ad-btn-ghost" disabled={saving !== null || closing} onClick={() => void close()}>
                       Keep draft
                     </button>
                   )}
-                  <BtnPrimary onClick={() => void doSave()} disabled={saveBlocked || saving !== null}>
+                  <BtnPrimary onClick={() => void doSave()} disabled={saveBlocked || saving !== null || closing}>
                     {saving === 'save' ? (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                         <Spinner size={13} /> {isEdit && auto ? (viewingOld ? 'Restoring…' : 'Saving…') : 'Creating…'}

@@ -245,6 +245,9 @@ def install() -> str:
         "ProgramArguments": [sys.executable, "-m", "autowright.main"],
         "RunAtLoad": True,
         "KeepAlive": True,
+        # §3 interpreter isolation (2026-10-31): the user site dir and the
+        # launch cwd stay off the backend's sys.path.
+        "EnvironmentVariables": {"PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1"},
         "StandardOutPath": str(paths.logs_dir() / "backend.out.log"),
         "StandardErrorPath": str(paths.logs_dir() / "backend.err.log"),
     }

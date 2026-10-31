@@ -1663,7 +1663,7 @@ def test_github_file_pages_are_read_from_the_raw_link():
 
 
 def test_resolve_github_release_tag_and_root_fallback(monkeypatch):
-    def fake_api(path):
+    def fake_api(path, deadline=None):
         table = {
             "/repos/alice/watcher/releases/latest": {"assets": [
                 {"name": "notes.zip", "browser_download_url": "https://x/zip"},
@@ -1783,7 +1783,7 @@ def test_github_unreadable_answer_and_release_without_an_asset(monkeypatch):
     with pytest.raises(transfer.TransferError, match="GitHub's answer wasn't readable"):
         transfer._github_api("/repos/alice/watcher/releases/latest")
 
-    monkeypatch.setattr(transfer, "_github_api", lambda path: {"assets": [
+    monkeypatch.setattr(transfer, "_github_api", lambda path, deadline=None: {"assets": [
         {"name": "notes.zip", "browser_download_url": "https://x/zip"}]})
     with pytest.raises(transfer.TransferError,
                        match=r"release 'v2' of alice/watcher has no \.autowright asset"):

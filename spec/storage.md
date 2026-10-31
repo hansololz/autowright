@@ -362,7 +362,9 @@ before the user has changed anything. `memory/` starts empty unless the caller a
 it, in which case the source's memory tree is copied into the new automation **after** the
 automation exists (the request is refused with 409 while the source is executing — §19 — and
 the copy's commit re-checks the source: a source that started executing during the copy
-abandons it, the §6.3 raced-copy rule), under the `memory_ops` lock and never the store lock (the §5 lock-order
+abandons it, the §6.3 raced-copy rule — judged by the source's execution-start counter,
+not only by what is live at commit, so a run that started **and finished** inside a long
+copy still abandons it), under the `memory_ops` lock and never the store lock (the §5 lock-order
 rule: `memory_ops` is never taken while `store.lock` is held) — a failed memory copy leaves
 the automation in place with empty memory and surfaces the error. Never copied: `chat.jsonl`,
 `draft/`, `memory-snapshots/`, executions. The write order is the create path's: the version
@@ -401,7 +403,10 @@ must never stay under a `vN` name below the pointer (2026-10-30 second sweep); t
 walk's `v<digits>` match ignores the renamed folder, and deleting the automation removes it.
 A set-aside that fails (an `OSError`: a Windows sharing violation, permissions) refuses the
 save or restore with that error instead of numbering past the orphan, which the next load
-would otherwise adopt as a real version (2026-10-31). A save whose pointer flip fails rolls
+would otherwise adopt as a real version (2026-10-31) — a typed error the §19 layer answers
+as a 500 whose detail names the folder and the OS reason ("couldn't set aside
+`<path>`: <reason> — the save was refused"), never the bare "Internal Server Error" a raw
+`OSError` produced (2026-10-31 second sweep), so the user can see which folder to fix. A save whose pointer flip fails rolls
 back everything the attempt touched: the version leaves memory and disk, and the
 automation's cached reference ids (memoized per version number) are dropped too, so the
 next save — which reuses the same number — is judged on its own content, never on the
@@ -537,7 +542,11 @@ default (2026-10-30 second sweep), and export writes each param's `default` as
 otherwise, and for a number param a `min` fallback only when `min` is itself a number
 (2026-10-31: `min: 1e3` is YAML text, and export's own check then refused it) — so an
 automation saved before that rule still exports instead of being refused
-with "repair the automation first". Step file names and the §5 archive/export file names also reject the Windows
+with "repair the automation first". The §5 archive/export file name derived from an
+automation name is NFC-normalized and capped at 200 UTF-8 bytes of stem, cut on a character
+boundary (NAME_MAX is 255 bytes on every supported filesystem, and a CJK name reaches it at
+about 80 characters — an uncapped stem made the §22.7 catalog save and the §20 `pull` /
+`export` default paths fail with "File name too long", 2026-10-31). Step file names and the §5 archive/export file names also reject the Windows
 device stems (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any case, with
 any extension) — on Windows a write to `nul.py` goes to the device and seals over empty
 bytes. Imported step code is normalized to LF line endings (an archive member with CRLF
@@ -558,11 +567,27 @@ stored version's `params` entry without a text `name` is dropped, so none of the
 inside the §19 serialization and turn every `GET /state` into a 500 (2026-10-31). A stored
 version's param definitions are also normalized at load (migrate-on-load, §21 2026-10-31):
 a `default` that is present, not null and not a value of the param's `kind` becomes the
-kind's empty default (what `param_default` already resolved it to at runtime), and a
-`label` / `help` that is not text is dropped, so a version saved before the §8 validator
+kind's empty default (what `param_default` already resolved it to at runtime), a
+`label` / `help` that is not text is dropped, a number param's `min` that is not a finite
+number is dropped (the validator's 2026-10-31 rule had no load-side twin, so `min: 1e3`,
+YAML text, answered 422 on every save the day after the default rule was migrated), and a
+`kv` default's rows are coerced to the §4.2 text key / text value form (`scalar_text`; a
+row whose key is null is dropped), so a version saved before the §8 validator
 checked those (2026-10-30 second sweep) still saves from the §11 editor and pushes from a
 §20 workdir instead of answering 422 on every step edit, lock or move; the written shape
-only changes when that version is next saved.
+only changes when that version is next saved. A stored `param_values` entry that is not a
+value of its definition's kind (a `.nan` / `.inf` number — never finite, so never a value
+of `number` — a non-text `kv` key, a bare string for a `list`) is ignored at load and the
+default applies, since `merged_params` puts every value into every automation payload
+and starlette's JSON encoder refuses NaN: one hand-edited or imported `.inf` turned
+every `GET /state` into a 500 (2026-10-31).
+**Absence is only "not found":** every load-time scan that removes or sets aside an
+entry because a file is missing (the crash-leftover rules above, the §6.3 snapshot sweep)
+treats only a not-found / not-a-directory result as absence — a `stat` that fails for any
+other reason (EACCES on a directory without the search bit, EIO or a timeout on a network
+volume) skips the entry with a warning and never reaps it; Python 3.14's `Path.exists()`
+answers False to every `OSError`, which would otherwise read a permission error as an
+empty automation (2026-10-31).
 **Relocated data path, unreachable (decided):** only the default data path is ever created
 on first run. A relocated `dataPath` whose `executions/` directory isn't there at load (an
 unmounted volume, a typo) opens an **in-memory index for the session** and never re-creates
@@ -651,7 +676,14 @@ Rules:
 - Retention cleanup (§4.9 `days`) deletes execution directories and DB rows, then their
   in-memory records. `days` is read leniently like every other numeric setting — a
   non-numeric hand-edited value falls back to the 90-day default rather than silently
-  disabling the sweep for the session. Records still `executing` or waiting in the §6 queue (`queued`) are
+  disabling the sweep for the session. The age is measured from the **earlier** of the
+  wall clock and the newest `started_at` of any record (a `started_at` in the future is
+  the §6 forward-glitch class — a bad RTC, a date set ahead for a test — and the sweep
+  must never read it as "everything is ancient": with the clock a year ahead, the plain
+  `now - days` cutoff deleted every record but each automation's latest on the next tick,
+  2026-10-31; anchoring on the newest real record keeps a sweep under a correct clock
+  within one record age of the plain rule and makes a glitched one delete nothing it
+  would not have deleted anyway). Records still `executing` or waiting in the §6 queue (`queued`) are
   exempt — deleting a queued record would silently drop a firing that never ran. Each
   **existing** automation's **latest real execution** (the newest record in the §4.1
   `lastStatus` population — `skipped`, `queued`, and test records excluded; read off the
@@ -906,9 +938,15 @@ answers 422 and writes nothing):
   definition rules: a step `agent: true` carries a nonempty `why`, every step `secrets:`
   entry carries one, a step listing several `agents:` entries carries one per entry (§8
   rule 7 — a single entry's is optional, as the app's own exports write it), and a
-  package has a nonempty `why` and a bare pip name, and step names are non-blank and
-  unique once trimmed (§4.1, 2026-10-28) — import rejects exactly what
-  `POST /versions` would),
+  package has a nonempty `why` and a bare pip name, step names are non-blank and
+  unique once trimmed (§4.1, 2026-10-28), a number param's `min` is a finite number, a
+  `label` / `help` is text, a `kv` default's rows carry a text key and a text value, a
+  number `default` is finite, unknown definition keys are trimmed to the §8 field list
+  exactly as the validator trims them, and a step `timeout` is at most the §4.1 one-year
+  cap (2026-10-31: an archive was the one door past each of these) — import rejects exactly what
+  `POST /versions` would; the archive's `param_values` entries are user state rather
+  than drafted definitions, so an entry that is not a value of its definition's kind is
+  dropped at import, the §5 load rule, never a refusal),
   §4.7 agent configs
   (harness/mode/model rules), §4.8 secret names, trigger
   kinds with at most one `app_start`. Refs must be unique per kind. The manifest's optional `os` must be a non-empty

@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.request
 
-from . import harness, paths, platform
+from . import harness, paths, platform, transfer
 from .platform.base import run_bounded
 
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
@@ -37,6 +37,10 @@ PATH_MARKER = "# Added by Autowright — command-line tools it installs live her
 # download would otherwise keep the job "running" forever — and the running
 # guard in start() would block every retry until a backend restart.
 INSTALL_TIMEOUT_S = 15 * 60
+# §5.2/§19: the installer download's own per-read timeout and byte cap — the
+# Ollama binary runs to hundreds of MB, so the archive's 30 s / 64 MB don't fit.
+DOWNLOAD_READ_TIMEOUT_S = 120
+DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 CLAUDE_INSTALLER = "https://claude.ai/install.sh"
 OPENCODE_INSTALLER = "https://opencode.ai/install"
@@ -300,7 +304,14 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
 def _download(url: str, dest: str, emit, label: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "autowright"})
     deadline = time.monotonic() + INSTALL_TIMEOUT_S
-    with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
+    # §5.2 (2026-10-31): https only with redirects refused before a plaintext
+    # hop is made, and the open's socket timeout the per-read 120 s or what
+    # remains of the deadline when that is less.
+    timeout = max(0.1, min(DOWNLOAD_READ_TIMEOUT_S, deadline - time.monotonic()))
+    with transfer.open_https_only(
+            req, timeout=timeout,
+            refuse=lambda: RuntimeError(f"{label} failed - the download redirected off https")
+    ) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         got, last = 0, -1
         while True:
@@ -312,8 +323,12 @@ def _download(url: str, dest: str, emit, label: str) -> None:
             chunk = r.read1(1 << 16)
             if not chunk:
                 break
-            f.write(chunk)
             got += len(chunk)
+            if got > DOWNLOAD_MAX_BYTES:
+                # §5.2: the byte cap is enforced during the read, never after.
+                raise RuntimeError(f"{label} failed - the download is larger than the "
+                                   f"{DOWNLOAD_MAX_BYTES // (1024 ** 3)} GB limit")
+            f.write(chunk)
             if total:
                 percent = int(got * 100 / total)
                 if percent != last:

@@ -440,12 +440,99 @@ class Agents:
         return Agent(self._ctx, self._scan, cfg)
 
 
-_site_last: dict[str, float] = {}
+_site_last: dict[str, float] = {}  # host → time.monotonic() of this process's last hit
 _robots: dict[str, urllib.robotparser.RobotFileParser] = {}
+# §6: the execution's `.sites.json` (host → wall-clock time of the last hit),
+# shared by every step of the execution — set in `main()` from
+# ctx["sites_file"]; None (no persistence) when the context names none.
+_sites_file: str | None = None
+FETCH_TIMEOUT_S = 10      # §6: per read (and the open, capped by the deadline)
+FETCH_DEADLINE_S = 60     # §6: the whole fetch, measured from before the connect
+FETCH_MAX_BYTES = 8 * 1024 * 1024  # §6: a larger page is a step error
+_FETCH_CHUNK = 65_536
+SITE_SPACING_S = 2.0
+
+
+def _read_sites() -> dict:
+    """§6: the execution's per-site last-hit map; {} when there is none, or
+    it is missing or damaged — spacing then falls back to this process."""
+    if not _sites_file:
+        return {}
+    try:
+        with open(_sites_file, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_site_hit(host: str, at: float) -> None:
+    """§6: record `host`'s hit for the execution's later steps. Best-effort:
+    a write failure only loses cross-step spacing, never fails the fetch."""
+    if not _sites_file:
+        return
+    import os
+
+    data = _read_sites()
+    data[host] = at
+    tmp = f"{_sites_file}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, _sites_file)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _site_wait(host: str) -> float:
+    """§6: seconds still owed before the next hit on `host` — the larger of
+    this process's monotonic spacing and the execution's shared wall-clock
+    record (2026-10-31: each step is its own executor process, so step 2 used
+    to hit a site 0 s after step 1). The wall-clock part is clamped to the
+    spacing itself, so a backward clock step can never stretch the wait."""
+    wait = 0.0
+    last = _site_last.get(host)
+    if last is not None:
+        wait = last + SITE_SPACING_S - time.monotonic()
+    shared = _read_sites().get(host)
+    if isinstance(shared, (int, float)) and not isinstance(shared, bool):
+        wait = max(wait, min(SITE_SPACING_S, shared + SITE_SPACING_S - time.time()))
+    return wait
+
+
+class _PageTooLarge(RuntimeError):
+    """§6: a page over the cap is a step error — never retried, since the same
+    page is just as large on the next try."""
+
+
+def _read_page(r, deadline: float) -> str:
+    """§6: the body in chunks under the 8 MB cap and the whole-fetch
+    deadline, decoded with the charset the Content-Type declares (UTF-8 when
+    it declares none, or one Python doesn't know)."""
+    read = getattr(r, "read1", None) or r.read  # read1: a trickle can't fill a buffer past the deadline
+    chunks, total = [], 0
+    while chunk := read(_FETCH_CHUNK):
+        total += len(chunk)
+        if total > FETCH_MAX_BYTES:
+            raise _PageTooLarge("page larger than 8 MB")
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"the fetch took over {FETCH_DEADLINE_S} seconds")
+        chunks.append(chunk)
+    charset = r.headers.get_content_charset() or "utf-8"
+    body = b"".join(chunks)
+    try:
+        return body.decode(charset, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
 
 
 def fetch_page(url: str) -> str:
-    """§6 web policies: 10s timeout, ≥2s per-site spacing, retry twice, robots.txt, UA."""
+    """§6 web policies: 10 s per read and a 60 s whole-fetch deadline, an
+    8 MB body cap, the declared charset, ≥ 2 s per-site spacing across the
+    execution's steps, retry twice, robots.txt, UA."""
     from urllib.parse import urlparse
 
     host = urlparse(url).netloc
@@ -475,16 +562,23 @@ def fetch_page(url: str) -> str:
         allowed = True
     if not allowed:
         raise RuntimeError(f"robots.txt disallows fetching {url}")
-    wait = _site_last.get(host, 0) + 2.0 - time.time()
+    wait = _site_wait(host)
     if wait > 0:
         time.sleep(wait)
     last_err: Exception | None = None
     for attempt in range(3):  # first try + retry twice
-        _site_last[host] = time.time()
+        # §6 (2026-10-31): in-process spacing on the monotonic clock; the
+        # shared record is wall-clock, since it outlives this process.
+        _site_last[host] = time.monotonic()
+        _write_site_hit(host, time.time())
+        deadline = time.monotonic() + FETCH_DEADLINE_S  # before the connect
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.read().decode("utf-8", errors="replace")
+            timeout = max(0.1, min(FETCH_TIMEOUT_S, deadline - time.monotonic()))
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return _read_page(r, deadline)
+        except _PageTooLarge:
+            raise
         except Exception as e:  # noqa: BLE001
             last_err = e
             if attempt < 2:  # no pointless sleep after the final failure
@@ -691,13 +785,15 @@ def main() -> int:
     # a wiring mistake that drops it must fail loudly here, not silently
     # narrow the outbound scan to the step's own secrets (fail closed).
     scan_secrets = ctx.pop("scan_secrets")
-    global _cut_guards, _GUARD_TAIL
+    global _cut_guards, _GUARD_TAIL, _sites_file
     _cut_guards = _build_cut_guards(scan_secrets)
     _GUARD_TAIL = _guard_tail(_cut_guards)
     # §6.2: declared packages live in the user-writable site-packages dir — the
     # bundled interpreter never has them installed directly.
     if ctx.get("site_packages"):
         sys.path.insert(0, str(ctx["site_packages"]))
+    # §6: per-site fetch spacing is shared across the execution's steps.
+    _sites_file = ctx.get("sites_file")
     workspace = Path(ctx["workspace"])
     workspace.mkdir(parents=True, exist_ok=True)
     import os

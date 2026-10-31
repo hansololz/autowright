@@ -577,11 +577,19 @@ def _write_new_archive(path: Path, data: bytes) -> Path:
     taken: set[str] = set()
     while True:
         try:
-            with open(path, "xb") as f:
-                f.write(data)
-            return path
+            f = open(path, "xb")
         except FileExistsError:
             path = path.parent / _free_name(path.parent, base, taken)
+            continue
+        # §22.7 step 5 (2026-10-31): the file exists from here on, so a write
+        # that fails (ENOSPC) removes it - a truncated archive never stays.
+        try:
+            with f:
+                f.write(data)
+        except BaseException:
+            _unlink(path)
+            raise
+        return path
 
 
 # ---------- catalog table (§22.2) ----------
@@ -1724,9 +1732,15 @@ class MarketplaceStore:
             # §22.4: a link download takes one of the two archive slots, so
             # repeated Audit or Install clicks are bounded, and never a §22.1
             # catalog read slot - a ten-minute §5.2 download must not starve
-            # add, refresh, images, or the auto-refresh thread.
-            with _archive_slots:
+            # add, refresh, images, or the auto-refresh thread. The wait for
+            # a slot is bounded like the image route's (2026-10-31), so clicks
+            # past the second never hold a request worker for a whole download.
+            if not _archive_slots.acquire(timeout=IMAGE_SLOT_WAIT_S):
+                raise MarketplaceBusy(BUSY)
+            try:
                 data, _resolved = transfer.fetch_archive(reference)
+            finally:
+                _archive_slots.release()
             return data, reference
         return (_read_reference(reference, cap=transfer.MAX_ARCHIVE_BYTES, what="archive"),
                 reference)

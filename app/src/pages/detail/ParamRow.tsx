@@ -34,7 +34,11 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
   useEffect(() => {
     if (!timer.current && !foc) setRows((p.rows ?? []).map((r) => ({ ...r })))
   }, [serverRows, foc])
-  useEffect(() => { setTog(null) }, [p.on])
+  // §9.2 (2026-10-31): the toggle's request counter, as MemoryCard's
+  // snapshot toggles — only the newest click's settle (its PATCH plus the
+  // reload, or its failure) clears the optimistic value, so a stale reload
+  // landing first never flickers the newer click back or loses it.
+  const togSequence = useRef(0)
 
   const commit = (value: unknown) => {
     if (timer.current) { clearTimeout(timer.current); timer.current = null }
@@ -104,11 +108,13 @@ export function ParamRow({ automationId, p, last }: { automationId: string; p: P
           value={p.kind === 'number' ? (num ?? String(p.value ?? '')) : (text ?? String(p.value ?? ''))}
           setOn={() => {
             const v = !(tog ?? !!p.on)
+            const sequence = ++togSequence.current
             setTog(v)
-            runAction(automationId, async () => {
+            // the newest settle hands the row back to the server value — on a
+            // failure that rolls the optimistic value back
+            void runAction(automationId, async () => {
               await api.patchAutomation(automationId, { paramValues: { [p.name]: v } })
-            // roll the optimistic value back — the server still holds the old one
-            }, { onError: () => setTog(null) })
+            }).finally(() => { if (togSequence.current === sequence) setTog(null) })
           }}
           setLines={(next, now) => setLinesSaved(next, !!now)}
           setRows={(next, now) => setRowsSaved(next, !!now)}

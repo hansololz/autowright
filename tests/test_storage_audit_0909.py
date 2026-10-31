@@ -487,6 +487,10 @@ def test_retention_days_falls_back_to_the_default(store):
     recent = store.create_execution(a, "version", 1, "manual", [], status="succeeded")
     recent["started_at"] = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")
     store.update_execution(recent)
+    # §5 (2026-10-31): the age is measured from the newest record — one
+    # started now keeps the anchor at the wall clock.
+    store.create_execution(store.create_automation(make_version(), "Fresh", None),
+                           "version", 1, "manual", [], status="succeeded")
 
     store.settings["days"] = "ninety"
     assert store.retention_cleanup() == 1

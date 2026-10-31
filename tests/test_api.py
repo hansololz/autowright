@@ -2950,6 +2950,7 @@ def test_queue_clear_endpoint(client, monkeypatch):
 
     a["_live"] = {"blocking"}
     trig = {"id": "t1", "kind": "discord", "enabled": True, "secret": "TOKEN", "channel": "42"}
+    a["triggers"].append(trig)  # §6: a firing's trigger must be on the automation
     for sender in ("Dave", "Ana"):
         fire_trigger(store, api_mod.engine, a, trig,
                      payload={"kind": "discord", "channel": "42", "secret": "TOKEN",
@@ -4163,6 +4164,7 @@ def test_queue_clear_never_kills_a_promoted_entry(client, monkeypatch):
     a["max_queued"] = 10
     a["_live"] = {"blocking"}
     trig = {"id": "t1", "kind": "discord", "enabled": True, "secret": "TOKEN", "channel": "42"}
+    a["triggers"].append(trig)  # §6: a firing's trigger must be on the automation
     for sender in ("Dave", "Ana"):
         fire_trigger(store, api_mod.engine, a, trig,
                      payload={"kind": "discord", "channel": "42", "secret": "TOKEN",

@@ -1491,8 +1491,9 @@ def test_step_context_populates_only_referenced_secrets_and_agents(store, monkey
         # §6.1: the automation-wide value map is the documented scan-only
         # exception — main() pops it off ctx before building the SDK, so no
         # step object is ever built from it. SEC_C is granted but referenced by
-        # no step, so it is never even fetched.
-        assert set(ctx["scan_secrets"]) == {sec_a, sec_b}
+        # no step: it still joins the scan map (§6.1 ALL of the automation's
+        # secret values, 2026-10-31) but never any step's `secrets`.
+        assert set(ctx["scan_secrets"]) == {sec_a, sec_b, sec_c}
         others = {k: v for k, v in ctx.items() if k not in ("secrets", "scan_secrets")}
         blob = json.dumps(others, default=str)
         for value in ("value-a", "value-b", "value-c"):

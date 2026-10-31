@@ -329,6 +329,14 @@ def _query_state() -> tuple[str, str | None]:
     return "", _error_of(code, out, err)
 
 
+# §3 interpreter isolation (2026-10-31 second sweep): a Task Scheduler action
+# carries no environment of its own, so the PYTHONNOUSERSITE=1 /
+# PYTHONSAFEPATH=1 pair rides as the equivalent interpreter flags: `-s` keeps
+# the user site-packages off sys.path, `-P` keeps the action's working
+# directory off it.
+_BACKEND_ARGUMENTS = "-s -P -m autowright.main"
+
+
 def _register(program: str) -> str | None:
     """Register or update the task in place (`-Force`), scoped to this user.
 
@@ -340,7 +348,7 @@ def _register(program: str) -> str | None:
         "$ErrorActionPreference = 'Stop'; "
         "$user = $env:USERDOMAIN + '\\' + $env:USERNAME; "
         f"$action = New-ScheduledTaskAction -Execute {_ps_literal(program)} "
-        f"-Argument {_ps_literal('-m autowright.main')}; "
+        f"-Argument {_ps_literal(_BACKEND_ARGUMENTS)}; "
         "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user; "
         "$settings = New-ScheduledTaskSettingsSet -RestartCount 3 "
         "-RestartInterval (New-TimeSpan -Minutes 1) "
@@ -543,9 +551,25 @@ def shim_text() -> str:
     and both halves must agree on one exec line or install would heal every
     shim the shell wrote. Every `%` in the interpreter path is doubled: batch
     expands `%NAME%`, and a Windows user name may hold one."""
-    python = str(paths.console_python()).replace("%", "%%")
+    python = _shim_interpreter(str(paths.console_python()))
     return (f"@echo off\r\n{SHIM_MARKER}\r\n"
             f'"{python}" -m autowright.cli %*\r\n')
+
+
+def _shim_interpreter(python: str) -> str:
+    """§3 (2026-10-31 second sweep): cmd reads a batch file in the console's
+    OEM code page, so a literal UTF-8 path through a profile folder like
+    `C:\\Users\\José` was misread and every command failed. A path under
+    %LOCALAPPDATA% (case-insensitive, at a separator) is written relative to
+    the variable, which cmd expands at run time; anything else stays literal.
+    Only the path's own `%` are doubled, never the variable reference. Mirrors
+    `win32.cjs`'s `shimInterpreter` byte for byte."""
+    base = os.environ.get("LOCALAPPDATA", "").rstrip("\\/")
+    if (base and len(python) > len(base)
+            and python[:len(base)].lower() == base.lower()
+            and python[len(base)] in "\\/"):
+        return "%LOCALAPPDATA%" + python[len(base):].replace("%", "%%")
+    return python.replace("%", "%%")
 
 
 def _heal_one(p: Path) -> str | None:

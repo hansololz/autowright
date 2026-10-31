@@ -448,12 +448,16 @@ const SERVICE_CHILD_OPTIONS = {
   env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
 }
 
+const QUIT_DROPPED_INSTALL_DETAIL = 'Autowright is quitting.'
+
 function runServiceInstall(py, cb) {
   // §3: an install dropped because quit-all is already latched records that
-  // outcome — the status never latches on 'installing' for a run that was
-  // never made. Both callers (ensure-backend and the version sync) land here.
+  // outcome (`failed`, so the status never latches on `installing` for a run
+  // that was never made) with a plain sentence — the §9 boot splash prints the
+  // detail verbatim, and it used to read the raw word "quitting" (2026-10-31
+  // second sweep). Both callers (ensure-backend and the version sync) land here.
   if (quittingAll) {
-    ensureStatus = { state: 'failed', detail: 'quitting' }
+    ensureStatus = { state: 'failed', detail: QUIT_DROPPED_INSTALL_DETAIL }
     appLog('ensure-backend: install dropped — the app is quitting')
     return
   }
@@ -490,7 +494,18 @@ async function verifyBackendUp() {
 // §3 launch-time version compare: a healthy but outdated backend (the app
 // bundle was swapped by an update, or replaced by hand) restarts onto this
 // bundle's interpreter — never mid-execution; live executions drain first.
-async function syncBackendVersion(py, running) {
+// Single-flight (2026-10-31 second sweep): a refused install's resume runs
+// ensure-backend again, and a second drain loop stacked beside the first.
+let versionSyncInFlight = null
+
+function syncBackendVersion(py, running) {
+  if (!versionSyncInFlight) {
+    versionSyncInFlight = runVersionSync(py, running).finally(() => { versionSyncInFlight = null })
+  }
+  return versionSyncInFlight
+}
+
+async function runVersionSync(py, running) {
   appLog(`ensure-backend: backend ${running} != app ${app.getVersion()} — `
     + 'restarting service once live executions finish')
   // This backend answered /health moments ago, so a transient probe failure
@@ -508,6 +523,12 @@ async function syncBackendVersion(py, running) {
       unknown = 0
     }
     await new Promise((r) => setTimeout(r, 30_000))
+  }
+  // §3: the drain can take hours — re-probe right before the install, and a
+  // backend already at this app's version (restarted meanwhile) is left alone.
+  if (await backendVersion() === app.getVersion()) {
+    appLog('ensure-backend: version-sync: the backend is already at the app version — no install')
+    return
   }
   runServiceInstall(py, (err, stdout, stderr) => {
     if (err) {
@@ -660,6 +681,17 @@ function hardenWindow(w) {
     // a normal web link, hand it to the browser instead of silently dropping it.
     const here = docKey(w.webContents.getURL())
     if (here && docKey(url) === here) return
+    e.preventDefault()
+    openExternalSafely(url)
+  })
+  // §9.4 (2026-10-31 second sweep): the same rule covers frames. will-navigate
+  // fires for the top frame only, so a result-iframe link whose own
+  // target="_self" overrides the frame's <base target="_blank"> loaded the
+  // remote page inside the card. A subframe keeps only its own document.
+  w.webContents.on('will-frame-navigate', (e) => {
+    if (e.isMainFrame) return
+    const url = String(e.url || '')
+    if (url === 'about:blank' || url.startsWith('about:srcdoc')) return
     e.preventDefault()
     openExternalSafely(url)
   })
@@ -1647,21 +1679,10 @@ async function fetchUpdateState() {
 // version Squirrel staged from it (null until update-install staged one).
 let downloadedVersion = null
 let stagedVersion = null
-// §3: the listener a given-up staging leaves behind, so a staging that lands
-// after the give-up is still recorded (a staged bundle installs on any quit).
-let lateStagingListener = null
-
-function stopWatchingLateStaging() {
-  if (!lateStagingListener) return
-  autoUpdater.removeListener('update-downloaded', lateStagingListener)
-  lateStagingListener = null
-}
 
 function stageWithSquirrel(updater) {
   return new Promise((resolve) => {
     if (updater.squirrelDownloadedUpdate) return resolve(null)
-    stopWatchingLateStaging()
-    const version = downloadedVersion
     let settled = false
     const settle = (error) => {
       if (settled) return
@@ -1671,14 +1692,13 @@ function stageWithSquirrel(updater) {
       autoUpdater.removeListener('error', onErr)
       resolve(error)
     }
+    // §3 (2026-10-31 second sweep): the give-up drops every staging listener —
+    // a late listener left armed refused every later download until restart
+    // although nothing was staged. A staging that still lands afterwards sets
+    // electron-updater's never-reset squirrelDownloadedUpdate flag, which the
+    // download handler refuses on by itself.
     const giveUp = setTimeout(() => {
       settle('the updater stopped responding')
-      lateStagingListener = () => {
-        stopWatchingLateStaging()
-        appLog('update: staging completed after the give-up; the bundle installs on the next quit')
-        stagedVersion = version
-      }
-      autoUpdater.on('update-downloaded', lateStagingListener)
     }, 10 * 60_000)
     const onDone = () => settle(null)
     const onErr = (err) => settle(String(err?.message || err))
@@ -1713,10 +1733,6 @@ async function runDownloadUpdate() {
   // §3: a download while an install is in flight is refused; on macOS
   // re-entering MacUpdater closes the proxy Squirrel is reading from.
   if (installInFlight) return { error: RESTART_TO_FINISH_ERROR }
-  // §3 (2026-10-31): so is one while a given-up staging's late listener is
-  // still armed; a staging that lands after the give-up would otherwise be the
-  // bundle installed under the About row's newer version number.
-  if (lateStagingListener) return { error: RESTART_TO_FINISH_ERROR }
   try {
     const updater = genericUpdater()
     const result = await updater.checkForUpdates()
@@ -1778,6 +1794,30 @@ function installerStaged() {
   }
 }
 
+// §3 (2026-10-31 second sweep, win32/linux): NSIS's doInstall reports a failed
+// installer launch on the error stream only after it has scheduled the quit,
+// too late for the refusal check below — an antivirus quarantine of the
+// unsigned installer quit the app with nothing installed and the backend
+// stopped. So the staged file must exist and be readable before anything is
+// stopped. Answers the refusal text, or null (nothing staged is left to
+// quitAndInstall's own refusal).
+function stagedInstallerUnreadable() {
+  if (plat.UPDATER === 'mac') return null
+  let installer = null
+  try {
+    installer = genericUpdater().installerPath
+  } catch {
+    return null
+  }
+  if (installer == null) return null
+  try {
+    fs.accessSync(installer, fs.constants.R_OK)
+    return null
+  } catch (err) {
+    return String(err?.message || err)
+  }
+}
+
 // §3: Task Scheduler reports the stop ~1.5 s before the backend's process tree
 // is fully gone (the stop-verification gap). NSIS must not start replacing the
 // tree inside it.
@@ -1815,6 +1855,11 @@ function resumeAfterRefusedInstall() {
 // its answer (a second `service stop` child could otherwise still be alive
 // when NSIS starts).
 let installInFlight = null
+// §3 step 0 (2026-10-31 second sweep): what quit-all and an OS quit refuse on
+// — the span from the backend stop to the quitAndInstall hand-off only, never
+// the live-execution gate or the macOS staging wait before it (up to 10 min,
+// during which Cmd+Q was silently ignored).
+let installHandOff = false
 
 function installUpdate() {
   if (!installInFlight) {
@@ -1857,6 +1902,28 @@ async function runInstallUpdate() {
     stagedVersion = downloadedVersion
     if (await executionsLive()) return { busy: true, staged: true }
   }
+  // §3 step 0: a quit that began during the gate or the staging wait (both
+  // outside the hand-off span) goes ahead; the install stands down untouched.
+  // quittingAll/quitting cover a quit flight that already stopped the backend.
+  if (resetInFlight || quitFlight || nativeQuitPending || quitAskTimer || quittingAll || quitting) {
+    return { error: STOP_AND_QUIT_IN_PROGRESS_ERROR }
+  }
+  const unreadable = stagedInstallerUnreadable()
+  if (unreadable) {
+    appLog(`update: the staged installer can't be read: ${unreadable}`)
+    return { error: unreadable }
+  }
+  installHandOff = true
+  try {
+    return await handOffInstall()
+  } finally {
+    installHandOff = false
+  }
+}
+
+// The backend stop (win32) through the quitAndInstall hand-off: the span
+// installHandOff covers.
+async function handOffInstall() {
   appLog('update: quitting to install')
   const stopsBackend = Boolean(plat.stopBackendBeforeInstall) && installerStaged()
   if (stopsBackend && !(await stopBackendBeforeInstall())) {
@@ -2020,8 +2087,8 @@ function stopAndQuit(force, label) {
 ipcMain.handle('quit-all', async (_e, opts) => {
   if (resetInFlight) return { error: 'a reset is in flight' }
   // §3 step 0 (2026-10-31): a quit during the install's backend stop would run
-  // a second `service stop` beside it.
-  if (installInFlight) return { error: STOP_AND_QUIT_IN_PROGRESS_ERROR }
+  // a second `service stop` beside it. Only the hand-off span counts.
+  if (installHandOff) return { error: STOP_AND_QUIT_IN_PROGRESS_ERROR }
   // §3: the native busy dialog is up — this flight is already asking. The
   // late call answers success: the quit is going ahead, and an error here
   // would only toast over the renderer's overlay.
@@ -2043,8 +2110,9 @@ function quitForGood() {
     return
   }
   // §3 step 0 (2026-10-31): an OS quit during an update install is ignored; a
-  // refused install's resume could re-register the backend mid-quit.
-  if (installInFlight) {
+  // refused install's resume could re-register the backend mid-quit. Only the
+  // hand-off span counts; a quit during the staging wait is an ordinary quit.
+  if (installHandOff) {
     appLog('quit: ignored, an update install is in flight')
     return
   }

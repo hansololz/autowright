@@ -719,7 +719,7 @@ def test_ollama_status_autostarts_serve_once(monkeypatch):
 
     # past the cooldown the self-heal retries the spawn
     monkeypatch.setattr(harness, "_serve_last_spawn",
-                        harness.time.time() - harness._SERVE_COOLDOWN_S - 1)
+                        harness.time.monotonic() - harness._SERVE_COOLDOWN_S - 1)
     harness.ollama_status()
     assert len(spawned) == 2
 

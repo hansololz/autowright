@@ -188,6 +188,9 @@ class VersionSave(BaseModel):
     allowedSecrets: list[StrictStr] = None
     paramValues: dict[StrictStr, Any] = None  # §4.2 staged values — lenient name+kind match
     concurrency: ConcurrencyIn = None         # §8 staged concurrency — applied like the PATCH
+    # §4.4 one editor per version: the version the editor seeded from — any
+    # other value than the current one answers 409 (the §20 push sends none).
+    baseVersion: StrictInt | None = None
 
 
 class StepsValidate(BaseModel):
@@ -211,6 +214,8 @@ class DraftPut(BaseModel):
 
     draft: DraftIn
     agentId: StrictStr | None = None
+    # §4.4 one editor per version, as on the version save; ignored for `pending`.
+    baseVersion: StrictInt | None = None
 
 
 class ChatPut(BaseModel):

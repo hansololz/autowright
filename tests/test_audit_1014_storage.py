@@ -122,6 +122,10 @@ def test_retention_moves_on_after_a_database_error(store, monkeypatch):
     a = store.create_automation(make_version(), "Batch", None)
     first = _old_execution(store, a)
     second = _old_execution(store, a)
+    # §5 (2026-10-31): the age is measured from the newest record — one
+    # started now keeps the anchor at the wall clock.
+    store.create_execution(store.create_automation(make_version(), "Fresh", None),
+                           "version", 1, "manual", [], status="succeeded")
     store._refresh_exec_derived()
     store.autos.pop(a["id"])
     real_delete = store.execdb.delete

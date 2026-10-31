@@ -178,6 +178,10 @@ export default function ExecutionsList() {
   const [page, setPage] = useState(0)
   const [busy, setBusy] = useState(false)
   const fetchSeq = useRef(0)
+  // §7 (2026-10-31): true while Next's page fetch is out — the preset tick
+  // skips its refetch then, since bumping fetchSeq would drop the landing
+  // page (no advance, no message).
+  const pageFetchInFlight = useRef(false)
 
   // §7: the filter applies to every section — the live rows filter
   // client-side (the window always holds every live row, so they never fetch).
@@ -214,8 +218,15 @@ export default function ExecutionsList() {
   // deeper unfiltered page refetches too).
   const [firstFetchDone, setFirstFetchDone] = useState(true)
   const fetchedFilterKey = useRef<string | null>(null)
+  const fetchedClockTick = useRef(clockTick)
+  const fetchedReconnects = useRef(reconnects)
   useEffect(() => {
     const filterChanged = fetchedFilterKey.current !== filterKey
+    const tickOnly = !filterChanged && fetchedReconnects.current === reconnects
+      && fetchedClockTick.current !== clockTick
+    fetchedClockTick.current = clockTick
+    fetchedReconnects.current = reconnects
+    if (tickOnly && pageFetchInFlight.current) return
     fetchedFilterKey.current = filterKey
     const n = ++fetchSeq.current
     if (filterChanged) {
@@ -335,6 +346,7 @@ export default function ExecutionsList() {
     const last = finished[finished.length - 1]
     const n = fetchSeq.current
     setBusy(true)
+    pageFetchInFlight.current = true
     void api.listExecutions({
       ...queryFor(Date.now()),
       limit: PAGE,
@@ -348,7 +360,7 @@ export default function ExecutionsList() {
       setServerTotal(r.total)
       if (r.executions.length > 0) setPage(target)
     }, (err: Error) => { if (n === fetchSeq.current) showToast(err.message) })
-      .finally(() => setBusy(false))
+      .finally(() => { pageFetchInFlight.current = false; setBusy(false) })
   }
 
   // §7 filter line: one chip per selected status, per selected automation,

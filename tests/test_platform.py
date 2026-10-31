@@ -518,7 +518,7 @@ def test_windows_registration_pins_the_launchd_equivalents(win_service):
     # RunAtLoad → -AtLogOn (this user only); KeepAlive → restart-on-failure.
     assert ("New-ScheduledTaskAction -Execute "
             r"'C:\Program Files\Autowright\pythonw.exe' "
-            "-Argument '-m autowright.main'") in reg
+            "-Argument '-s -P -m autowright.main'") in reg
     assert "New-ScheduledTaskTrigger -AtLogOn -User $user" in reg
     assert "-RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)" in reg
     # A long-lived backend: no 3-day execution kill, no battery gating.

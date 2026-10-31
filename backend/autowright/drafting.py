@@ -38,6 +38,7 @@ from .events import hub
 from .imports_check import ALLOWED_IMPORTS, disallowed_imports
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import SECRET_REF_RE, STEP_TIMEOUT_MAX_S, _kind_ok, step_json
+from .untrusted_yaml import load_untrusted
 from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.drafting")
@@ -899,7 +900,7 @@ def parse_blockers(text: str, locked_names: set[str] | None = None,
                              f"(only an optional notes.md) — got {extras}")
         notes = (files.get("notes.md") or "").strip() or None
     try:
-        data = yaml.safe_load(text[m.end(): endm.start()])
+        data = load_untrusted(text[m.end(): endm.start()])
     except (yaml.YAMLError, ValueError, RecursionError) as e:
         raise ValueError(f"blocker envelope doesn't parse as yaml: {e}")
     blockers = data.get("blockers") if isinstance(data, dict) else None
@@ -1075,9 +1076,10 @@ def validate_actions(text: str, param_names: list[str] | None = None,
     runs with defaults. `triggers_count` is the CURRENT triggers list's length
     — the range `triggers` op indexes must fall in."""
     try:
-        data = yaml.safe_load(text)
+        data = load_untrusted(text)
     except (yaml.YAMLError, ValueError, RecursionError) as e:
-        # §5: PyYAML raises ValueError on an impossible date (2026-13-45)
+        # §8 (2026-10-31): the untrusted loader refuses anchors and aliases
+        # with a ValueError. §5: PyYAML raises ValueError on an impossible date (2026-13-45)
         # and RecursionError on a deeply nested document — both are agent
         # output errors that feed the repair round, never a 500.
         return {}, [f"actions.yaml doesn't parse as yaml: {e}"]
@@ -1406,7 +1408,9 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
     if errors:
         return {}, errors
     try:
-        manifest = yaml.safe_load(files["manifest.yaml"]) or {}
+        # §8 (2026-10-31): the §5.1 untrusted loader — an anchor or alias is
+        # a ValueError for the repair round, never a stored structure.
+        manifest = load_untrusted(files["manifest.yaml"]) or {}
     except (yaml.YAMLError, ValueError, RecursionError) as e:  # same set as actions.yaml
         return {}, [f"manifest.yaml doesn't parse: {e}"]
     if not isinstance(manifest, dict):
@@ -1573,14 +1577,18 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         if n > 1:
             errors.append(f"step names must be unique: `{name}` appears "
                           + ("twice" if n == 2 else f"{n} times"))
+    # §8: a locked entry the splice refused (empty stored script) stays in
+    # `steps` so the ordering check holds, but is left out of the 1:1 file
+    # match below — its own error line is the one to report.
+    withheld: set[str] = set()
     if syncing and not bad_file:
-        steps = _splice_locked_steps(steps, files, locked_steps or [], errors)
+        steps = _splice_locked_steps(steps, files, locked_steps or [], errors, withheld)
     listed = [s.get("file", "") for s in steps
               if isinstance(s, dict) and isinstance(s.get("file", ""), str)]
     # §8: the sync call may return an optional notes.md beside the manifest — the
     # agent's updated working-knowledge doc, excluded from step-file matching.
     blocks = [f for f in files if f not in ("manifest.yaml", "notes.md")]
-    if not bad_file and sorted(listed) != sorted(blocks):
+    if not bad_file and sorted(f for f in listed if f not in withheld) != sorted(blocks):
         errors.append(f"steps[].file and file blocks don't match 1:1 (manifest: {listed}, blocks: {blocks})")
     for i, fname in enumerate([] if bad_file else listed, 1):
         m = STEP_FILE_RE.match(fname or "")
@@ -1805,6 +1813,8 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
 
 LOCKED_PREFLIGHT_FIX = "Unlock the step so the next sync can rewrite it, or restore what it needs"
 LOCKED_DUPLICATE_NAME_FIX = "Rename or unlock one of them"
+LOCKED_EMPTY_SCRIPT_REASON = "its script is missing or empty — the lock would keep an empty step"
+LOCKED_EMPTY_SCRIPT_FIX = "Restore the script, or unlock the step so the next sync can rewrite it"
 
 
 def locked_step_preflight(current: dict | None, grants: dict | None,
@@ -1817,7 +1827,8 @@ def locked_step_preflight(current: dict | None, grants: dict | None,
     alone, under a position-1 filename (so the ordering rule stays quiet);
     only its own `step <name>:` / `<file>:` lines count, file names reported
     as stored. A locked name shared by two current steps returns the
-    duplicate-name blockers alone, before any validator runs."""
+    duplicate-name blockers alone, before any validator runs. A locked step
+    whose stored script is missing or empty gets that one blocker alone."""
     # §8: a locked step whose name another current step shares (a
     # pre-uniqueness version) blocks first — the by-name splice would keep
     # only one of them. One blocker per such name, no agent call.
@@ -1843,6 +1854,13 @@ def locked_step_preflight(current: dict | None, grants: dict | None,
     for s in locked_steps(current):
         name = str(s.get("name") or "")
         stored_file = str(s.get("file") or "")
+        if not str(s.get("code") or "").strip():
+            # §8 (2026-10-31): a missing or empty stored script would be
+            # spliced as an empty step and sealed by the next save as the
+            # user's locked code — block before any agent call.
+            blockers.append({"reason": LOCKED_EMPTY_SCRIPT_REASON, "fix": LOCKED_EMPTY_SCRIPT_FIX,
+                             "details": "", "kind": "constraint", "step": name.strip()})
+            continue
         probe_file = f"01-{_stored_suffix(stored_file)}"
         manifest = {"steps": [locked_manifest_entry(s, probe_file)], "packages": packages}
         files = {"manifest.yaml": dump_yaml(manifest),
@@ -1886,7 +1904,8 @@ def _same_code(a: str, b: str) -> bool:
 
 
 def _splice_locked_steps(steps: list, files: dict[str, str],
-                         locked: list[dict], errors: list[str]) -> list:
+                         locked: list[dict], errors: list[str],
+                         withheld: set[str] | None = None) -> list:
     """§8 rule 3 lock checks + splice, on a sync's manifest steps: every
     locked step's name exactly once with `locked: true`, `locked: true` on no
     other name, and a returned file block for a locked step (under the
@@ -1895,8 +1914,10 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
     whole by the stored step (its manifest fields, `authored_by`, `locked`),
     keeping the agent's `NN-` position prefix with the stored file's suffix;
     `files` gets the stored code under the spliced name, so every later check
-    reads the spliced script. Mutates `files` and `errors`; returns the
-    spliced step list."""
+    reads the spliced script. A locked step whose stored script is empty is
+    refused instead (an error line, no file written; its spliced filename
+    goes into `withheld` so the caller's 1:1 file match stays quiet).
+    Mutates `files`, `errors` and `withheld`; returns the spliced step list."""
     # §4.1: names compare trimmed, like the uniqueness rule.
     by_name = {str(s.get("name") or "").strip(): s for s in locked}
     counts: dict = {}
@@ -1950,7 +1971,14 @@ def _splice_locked_steps(steps: list, files: dict[str, str],
                     errors.append(f"step `{name}` is locked — do not return its file")
                 if fname not in spliced:
                     files.pop(fname, None)
-        if counts.get(name) == 1:
+        if not code.strip():
+            # §8 (2026-10-31): never splice an empty script over a locked
+            # entry — the next save would seal it as the user's locked code.
+            errors.append(f"step `{name}` is locked but its stored script is empty "
+                          "— restore it or unlock the step")
+            if withheld is not None:
+                withheld.add(spliced_file)
+        elif counts.get(name) == 1:
             files[spliced_file] = code
             spliced.add(spliced_file)
         out.append(locked_manifest_entry(stored, spliced_file))
@@ -2024,6 +2052,92 @@ class Cancelled(Exception):
     pipeline in one place — `_run` catches it once. No boolean plumbing."""
 
 
+class LockedStepTampered(Exception):
+    """§8 locked-bytes guard: a drafting call changed a §4.1 locked step's
+    script on disk (changed, vanished, or appeared). Raised out of `_invoke`
+    after the restore, before any of the response is read — `_run` settles
+    the job `failed` with the message. Deliberately not a HarnessError or
+    ValueError, so the diagnosis call's fallback never swallows it."""
+
+    def __init__(self, name: str):
+        super().__init__(f"the agent changed the locked step '{name}' on disk — "
+                         "the file was restored; nothing from this response was applied")
+        self.name = name
+
+
+def locked_step_paths(current: dict | None, folders: list[Path] | None) -> dict[Path, str]:
+    """§8 locked-bytes guard: every on-disk location of the draft's §4.1
+    locked step scripts — `<folder>/<file>` for each given folder (the
+    owner's current version folder and its draft working copy) — mapped to
+    the step's name. A step whose `file` isn't one plain file name is
+    skipped (it names no script to guard)."""
+    out: dict[Path, str] = {}
+    for folder in folders or []:
+        folder = Path(folder)
+        # A folder may hold the step under another `NN-` position prefix than
+        # the draft's (the editor reordered the draft; the version folder keeps
+        # the saved order), so every file carrying the stored suffix is
+        # guarded too — the lock freezes the script, not its position (§4.1).
+        try:
+            present = [e.name for e in folder.iterdir() if e.is_file()]
+        except OSError:
+            present = []
+        for st in locked_steps(current):
+            fname = st.get("file")
+            if (not isinstance(fname, str) or not fname or fname in (".", "..")
+                    or "/" in fname or "\\" in fname):
+                continue
+            name = str(st.get("name") or "").strip()
+            out.setdefault(folder / fname, name)
+            suffix = _stored_suffix(fname)
+            for existing in present:
+                if existing != fname and re.fullmatch(r"\d+-" + re.escape(suffix), existing):
+                    out.setdefault(folder / existing, name)
+    return out
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        # A directory or an unreadable entry reads as absent, both times.
+        log.warning("locked-bytes guard: can't read %s: %s", path, e)
+        return None
+
+
+def snapshot_locked(guarded: dict[Path, str]) -> dict[Path, bytes | None]:
+    """§8 locked-bytes guard, before a drafting call: each guarded path's
+    bytes (None when absent). Folders that don't exist are skipped whole."""
+    return {path: _read_bytes(path) for path in guarded if path.parent.is_dir()}
+
+
+def restore_locked(guarded: dict[Path, str],
+                   snapshot: dict[Path, bytes | None]) -> str | None:
+    """§8 locked-bytes guard, after a drafting call: re-reads every
+    snapshotted path; a changed or vanished file is written back byte for
+    byte, an appeared one (snapshot None) is left alone. Returns the first
+    tampered step's name, or None when nothing changed."""
+    first: str | None = None
+    for path, before in snapshot.items():
+        if _read_bytes(path) == before:
+            continue
+        if first is None:
+            first = guarded[path]
+        if before is None:
+            log.warning("locked-bytes guard: %s appeared during a drafting call — left alone",
+                        path)
+            continue
+        log.warning("locked-bytes guard: restoring %s after a drafting call changed it", path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(before)
+        except OSError as e:
+            log.error("locked-bytes guard: couldn't restore %s: %s", path, e)
+    return first
+
+
 # §19 background continuation: terminal statuses whose outcome is held for the
 # §11 re-attach until consumed (a cancelled job holds nothing to apply).
 _HELD_STATUSES = ("done", "blocked", "failed")
@@ -2059,8 +2173,11 @@ class DraftJobs:
               chat_history: list | None = None, executions: str | None = None,
               pkg_state: list[dict] | None = None,
               owner_id: str | None = None,
-              admit: Callable[[], str | None] | None = None) -> str:
-        """`admit`, when given, is called inside the registry lock BEFORE the
+              admit: Callable[[], str | None] | None = None,
+              locked_folders: list[Path] | None = None) -> str:
+        """`locked_folders` are the owner's on-disk step-script folders (its
+        current version folder and its draft working copy) the §8 locked-bytes
+        guard brackets every drafting call over. `admit`, when given, is called inside the registry lock BEFORE the
         owner's building job is cancelled or its held outcome consumed (§19
         "decided inside the registry's own lock, before the new job
         supersedes anything"): a reason string raises `DraftRefused` and
@@ -2083,7 +2200,9 @@ class DraftJobs:
                "stageTimes": [{"stage": stage, "time": time.time()}],
                "endedTime": None,
                "error": None, "draft": None, "mode": mode,
-               "_cancel": False, "_proc": {}, "_owner": owner_id}
+               "_cancel": False, "_proc": {}, "_owner": owner_id,
+               # §8 locked-bytes guard: path → locked step name.
+               "_locked_paths": locked_step_paths(current, locked_folders)}
         if mode == "chat":
             # §19 `sentTriggers`: echo the resolved trigger list the §8
             # CURRENT-triggers section renders from, so a §11 re-attach apply
@@ -2330,7 +2449,7 @@ class DraftJobs:
             # cancel() already made the job terminal under the lock — this
             # settle is the no-op belt-and-braces (it never overwrites).
             self._settle(job, "cancelled")
-        except harness.HarnessError as e:
+        except (harness.HarnessError, LockedStepTampered) as e:
             self._settle(job, "failed", error=str(e))
         except Exception as e:  # noqa: BLE001
             # Anything else must still end the job — a thread dying here would
@@ -2589,6 +2708,23 @@ class DraftJobs:
         self._check_cancel(job)
         if harness.writes_files(agent.get("harness") or ""):
             prompt = prompt + "\n\n" + FILE_OUTPUT_BLOCK
+        # §8 locked-bytes guard (2026-10-31): an unsandboxed harness can write
+        # to disk directly — snapshot every locked script before the call and
+        # compare after it however it ends (returned, failed, cancelled); a
+        # tampered call restores the files and discards the response unread.
+        guarded = job.get("_locked_paths") or {}
+        snapshot = snapshot_locked(guarded)
+        try:
+            return self._invoke_unguarded(job, agent, prompt, on_chunk, on_file)
+        finally:
+            tampered = restore_locked(guarded, snapshot)
+            if tampered is not None:
+                raise LockedStepTampered(tampered)
+
+    def _invoke_unguarded(self, job: dict, agent: dict, prompt: str,
+                          on_chunk, on_file) -> str:
+        """The `_invoke` body inside the §8 locked-bytes guard: the harness
+        call with the one-retry policy and the cancel checks."""
 
         def call() -> str:
             try:
@@ -2981,7 +3117,7 @@ class DraftJobs:
             for i, (name, _start, end) in enumerate(marks[:-1]):  # only closed blocks
                 if name == "manifest.yaml":
                     try:
-                        manifest = yaml.safe_load(text[end:marks[i + 1][1]])
+                        manifest = load_untrusted(text[end:marks[i + 1][1]])
                         steps = manifest.get("steps") if isinstance(manifest, dict) else None
                         state["total"] = len(steps) if isinstance(steps, list) and steps else None
                     except (yaml.YAMLError, ValueError, RecursionError):
@@ -2995,7 +3131,7 @@ class DraftJobs:
         manifest document's content (the caller gates on a later document
         proving it complete)."""
         try:
-            manifest = yaml.safe_load(content)
+            manifest = load_untrusted(content)
         except (yaml.YAMLError, ValueError, RecursionError):
             return
         steps = manifest.get("steps") if isinstance(manifest, dict) else None

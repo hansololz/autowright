@@ -5,6 +5,7 @@ Every adapter is one-shot and non-interactive.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import io
 import json
 import logging
@@ -532,6 +533,11 @@ def step_env() -> dict:
     env = dict(os.environ)
     current = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
     env["PATH"] = os.pathsep.join(dict.fromkeys(current + list(_FALLBACK_BIN_DIRS)))
+    # §3 interpreter isolation (2026-10-31): the user site dir and the spawn
+    # cwd stay off the executor's sys.path, so a `pip install --user` or a
+    # stray `email.py` in the cwd can't shadow the curated/stdlib modules.
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
     return env
 
 
@@ -1612,12 +1618,60 @@ def sync_opencode_ollama(model: str) -> None:
     other config keys are never touched, and nothing is written when the entry
     is already in place."""
     with _opencode_cfg_lock:  # two agent steps must not race the read-modify-write
-        _sync_opencode_ollama_locked(model)
+        # §19 merge, never overwrite (2026-10-31): agent calls run in the
+        # separate executor processes too, so the thread lock alone let two
+        # parallel executions on different models each drop the other's
+        # entry — a lock file beside the config serializes them across
+        # processes.
+        with _cross_process_lock(os.path.join(os.path.dirname(_OPENCODE_CONFIG),
+                                              ".opencode.json.lock")):
+            _sync_opencode_ollama_locked(model)
+
+
+@contextlib.contextmanager
+def _cross_process_lock(lock_path: str):
+    """An exclusive advisory lock on `lock_path` (flock on POSIX, msvcrt byte
+    lock on Windows), held for the `with` body. A lock file that can't be
+    created (an unwritable config dir) runs the body unlocked: the sync then
+    writes nothing new or fails its own write with the usual error."""
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    # LK_LOCK retries for ~10 s, then raises — keep waiting.
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    continue
+            try:
+                yield
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield  # released when the fd closes
+    finally:
+        os.close(fd)
 
 
 def _sync_opencode_ollama_locked(model: str) -> None:
+    # §19 (2026-10-31): read and write through the resolved path, so a
+    # dotfile-managed symlinked config keeps being a symlink — the atomic
+    # replace swaps the link's target, never the link itself.
+    config = os.path.realpath(_OPENCODE_CONFIG)
     try:
-        with open(_OPENCODE_CONFIG, encoding="utf-8") as f:
+        with open(config, encoding="utf-8") as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict):
             cfg = {}
@@ -1628,7 +1682,7 @@ def _sync_opencode_ollama_locked(model: str) -> None:
         # with only our entry — that would discard the user's other keys.
         # Preserve the bytes next door and start clean.
         try:
-            os.replace(_OPENCODE_CONFIG, _OPENCODE_CONFIG + ".corrupt")
+            os.replace(config, config + ".corrupt")
             log.warning("opencode.json was not valid JSON — kept as opencode.json.corrupt")
         except OSError:
             pass
@@ -1655,7 +1709,7 @@ def _sync_opencode_ollama_locked(model: str) -> None:
     try:
         # Atomic (§5 pattern): a crash mid-write must never truncate the
         # user's config file.
-        atomic_write_text(Path(_OPENCODE_CONFIG), json.dumps(cfg, indent=2) + "\n")
+        atomic_write_text(Path(config), json.dumps(cfg, indent=2) + "\n")
     except OSError as e:
         raise HarnessError(f"couldn't update opencode.json: {e}") from e
 
@@ -1731,7 +1785,7 @@ def version_at_least(version: str | None, floor: tuple[int, ...]) -> bool:
     return tuple(parts) >= floor
 
 
-_serve_last_spawn = 0.0
+_serve_last_spawn = float("-inf")  # time.monotonic() of the last spawn; never yet
 _SERVE_COOLDOWN_S = 30.0
 _serve_lock = threading.Lock()
 
@@ -1743,9 +1797,11 @@ def _claim_serve_spawn() -> bool:
     spawn `ollama serve`."""
     global _serve_last_spawn
     with _serve_lock:
-        if time.time() - _serve_last_spawn <= _SERVE_COOLDOWN_S:
+        # §6 (2026-10-31): monotonic, so a backward wall-clock step can't
+        # hold the self-heal off until the clock passes the stamp again.
+        if time.monotonic() - _serve_last_spawn <= _SERVE_COOLDOWN_S:
             return False
-        _serve_last_spawn = time.time()
+        _serve_last_spawn = time.monotonic()
         return True
 
 

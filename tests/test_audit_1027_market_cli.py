@@ -233,8 +233,9 @@ def test_a_short_github_api_answer_fails(monkeypatch):
 def test_a_short_pypi_answer_raises(monkeypatch):
     with _serve(_ShortBody) as base:
         real = urllib.request.urlopen
-        monkeypatch.setattr("urllib.request.urlopen",
-                            lambda req, timeout=None: real(f"{base}/x", timeout=timeout))
+        # §5.2: the PyPI lookup opens through transfer.open_https_only (2026-10-31).
+        monkeypatch.setattr("autowright.transfer.open_https_only",
+                            lambda req, timeout=None, refuse=None: real(f"{base}/x", timeout=timeout))
         with pytest.raises(ConnectionError):
             packages._latest_compatible("pkg")
 

@@ -197,7 +197,15 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   retried successfully leaves no chip, status or notification text behind (2026-10-30).
   Only step failures retry: the
   pre-step gates (missing secret, package install) and engine-level failures are not attempts
-  and never retry. Attempts beyond the newest 20 are pruned with their log files (§4.5/§5).
+  and never retry; nor do the executor's **policy verdicts** — a `DisallowedImport` (exit
+  code 4) or a runtime `MissingSecret` (exit code 3) is the same answer on every attempt,
+  so the attempt is marked non-retryable and the step fails once (a hand-edited step with
+  an undeclared import under `infiniteRetries` respawned every second forever, 2026-10-31).
+  A manual in-place retry writes the re-opened record to disk **before** it swaps it into
+  the live table (§5 disk-first): a write that fails (ENOSPC, EIO) leaves the record
+  `failed` and answers 500 with the OS error, instead of an `executing` record with no
+  thread behind it that spun until restart and blocked a second retry and the §4.9
+  data-path switch (2026-10-31). Attempts beyond the newest 20 are pruned with their log files (§4.5/§5).
 - **Failure diagnostics:** when a step fails, the executor reports the exception as a structured
   control event (exception type + message) alongside the traceback err lines; the engine stores
   §4.5 `error` on the record — the failing step's name, the message ("`ExcType: message`",

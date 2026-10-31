@@ -20,6 +20,7 @@ import shutil
 import sys
 import textwrap
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -155,6 +156,14 @@ def _json_reply(c: Client, reply: bytes):
 
 # ---------------------------------------------------------------- lookups
 
+def _name_key(name: str) -> str:
+    """§4.1/§20 name comparison, the same three steps as storage's `name_key`
+    (trimmed, NFC-normalized, casefolded), kept local so the CLI stays a leaf
+    that never imports the store: `café` typed precomposed finds a name
+    stored with a combining accent, `STRASSE` finds `Straße` (2026-10-31)."""
+    return unicodedata.normalize("NFC", (name or "").strip()).casefold()
+
+
 def _resolve(items: list[dict], ref: str, noun: str) -> dict:
     """§20 reference rule, shared by every id-and-name lookup: the id, then an
     exact name (case-insensitive), then a unique id prefix, then a unique name
@@ -172,12 +181,13 @@ def _resolve(items: list[dict], ref: str, noun: str) -> dict:
     # start with those characters. §4.1 names are unique at write time, but
     # duplicates already on disk still load — ambiguity exits with the
     # candidate list, never a silent first-match.
-    matches = [it for it in items if it["name"].lower() == ref.lower()]
+    key = _name_key(ref)
+    matches = [it for it in items if _name_key(it["name"]) == key]
     if not matches:
         # §20: the short ids the CLI prints must resolve back.
         matches = [it for it in items if it["id"].startswith(ref)]
     if not matches:
-        matches = [it for it in items if ref.lower() in it["name"].lower()]
+        matches = [it for it in items if key in _name_key(it["name"])]
     if len(matches) == 1:
         return matches[0]
     # §20 untrusted text on the console: marketplace names come from

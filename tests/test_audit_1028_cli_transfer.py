@@ -253,7 +253,7 @@ def test_the_same_cron_twice_merges_to_one_trigger_with_the_stored_id(tmp_path):
     d = tmp_path / "wd"
     cli.write_workdir(d, FULL_AUTO)
     manifest = yaml.safe_load((d / "manifest.yaml").read_text())
-    manifest["triggers"] = manifest["triggers"] * 2
+    manifest["triggers"] = [copy.deepcopy(t) for t in manifest["triggers"] * 2]  # distinct dicts: safe_dump would alias repeats, which the §8 loader refuses
     (d / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
     c = _WorkdirClient()
     _run(c, "automation", "push", "Daily Report", str(d))

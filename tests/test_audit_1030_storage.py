@@ -374,7 +374,7 @@ def test_next_at_ms_is_still_computed_with_the_run_instant_without_triggers(stor
     from autowright import triggers as triggerlib
 
     a = store.create_automation(make_version(), "No triggers", None)
-    a["_last_exec_at"] = "2026-11-01T05:30:00+00:00"
+    a["_last_exec_at"] = "2026-10-01T05:30:00+00:00"
     seen = []
     real = triggerlib.next_at_ms
 

@@ -84,11 +84,28 @@ function defaultShimPath() {
   return path.join(local, 'Autowright', 'bin', 'autowright.cmd')
 }
 
+// §3 (2026-10-31 second sweep): cmd reads a batch file in the console's OEM
+// code page, so a literal UTF-8 path through a profile folder like
+// C:\Users\José was misread and every command failed. A path under
+// %LOCALAPPDATA% (case-insensitive, at a separator) is written relative to the
+// variable, which cmd expands at run time; anything else stays literal.
+function shimInterpreter(python) {
+  const text = String(python)
+  const base = String(process.env.LOCALAPPDATA || '').replace(/[\\/]+$/, '')
+  if (base && text.length > base.length
+      && text.slice(0, base.length).toLowerCase() === base.toLowerCase()
+      && (text[base.length] === '\\' || text[base.length] === '/')) {
+    return `%LOCALAPPDATA%${text.slice(base.length).replace(/%/g, '%%')}`
+  }
+  return text.replace(/%/g, '%%')
+}
+
 function shimText(python) {
   // §3: batch expands `%NAME%`, and a Windows user name may hold a `%` —
-  // every `%` in the interpreter path is doubled (the Python twin in
-  // platform/windows.py writes the same bytes, so heal never rewrites).
-  return `@echo off\r\n${SHIM_MARKER}\r\n"${String(python).replace(/%/g, '%%')}" -m autowright.cli %*\r\n`
+  // every `%` in the interpreter path is doubled, never the variable
+  // reference (the Python twin in platform/windows.py writes the same bytes,
+  // so heal never rewrites).
+  return `@echo off\r\n${SHIM_MARKER}\r\n"${shimInterpreter(python)}" -m autowright.cli %*\r\n`
 }
 
 // §3: Windows GUI apps inherit the full user PATH — no login shell exists to

@@ -245,7 +245,7 @@ def test_a_listed_asset_that_is_not_https_is_refused_before_any_fetch(monkeypatc
     def never(*a, **kw):
         raise AssertionError("no request may be sent")
 
-    monkeypatch.setattr(transfer, "_github_api", lambda path: listing.get(path))
+    monkeypatch.setattr(transfer, "_github_api", lambda path, deadline=None: listing.get(path))
     monkeypatch.setattr(transfer, "open_https_only", never)
     with pytest.raises(transfer.TransferError, match="isn't https"):
         transfer.fetch_archive("https://github.com/o/r")

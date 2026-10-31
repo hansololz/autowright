@@ -1,23 +1,19 @@
 // audit 2026-10-31: §3 step 0 stop-and-quit lock between update-install and
-// the quit paths, and the late-staging download refusal (spec/packaging.md §3).
+// the quit paths (spec/packaging.md §3). The quit-during-install and
+// late-staging cases moved to audit-1031b-electron.test.ts with the
+// 2026-10-31 second sweep's narrowed hand-off span and dropped late listener.
 // main.cjs exports nothing, so, as in main-cjs-leaf.test.ts, the handlers are
 // reached by evaluating the real source against a stub `electron` module:
 // real code, real handlers, only the Electron surface underneath is a double.
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const ELECTRON_DIR = join(__dirname, '..', 'electron')
-const PLATFORM_DIR = join(ELECTRON_DIR, 'platform')
 const src = readFileSync(join(ELECTRON_DIR, 'main.cjs'), 'utf-8')
 const realRequire = createRequire(join(ELECTRON_DIR, 'main.cjs'))
-const platMod = realRequire(join(PLATFORM_DIR, 'index.cjs')) as {
-  UPDATER: string
-  capabilities: { updates: boolean }
-}
-const HAS_UPDATER = platMod.capabilities.updates
 
 const savedHome = process.env.AUTOWRIGHT_HOME
 const savedCaskroom = process.env.AUTOWRIGHT_CASKROOM
@@ -203,7 +199,7 @@ function loadMain(execFile: (py: string, args: string[], options: unknown, cb: S
   }
 }
 
-describe('main.cjs audit 2026-10-31 (§3 step 0, late staging)', () => {
+describe('main.cjs audit 2026-10-31 (§3 step 0)', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
@@ -213,56 +209,6 @@ describe('main.cjs audit 2026-10-31 (§3 step 0, late staging)', () => {
     else process.env.AUTOWRIGHT_HOME = savedHome
     if (savedCaskroom === undefined) delete process.env.AUTOWRIGHT_CASKROOM
     else process.env.AUTOWRIGHT_CASKROOM = savedCaskroom
-  })
-
-  // An update install held at its live-execution gate: the /executions probe
-  // answers only when the test releases it, so installInFlight stays set.
-  function holdInstall() {
-    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
-    let release: (() => void) | null = null
-    let probes = 0
-    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
-      if (String(input).includes('/executions')) {
-        probes += 1
-        return new Promise<Response>((resolve) => {
-          release = () => resolve({ ok: true, json: async () => ({ executions: [{ id: 'e1' }], total: 1 }) } as Response)
-        })
-      }
-      return Promise.reject(new Error('offline in tests'))
-    })
-    const stops: string[][] = []
-    const m = loadMain((_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') })
-    writeFileSync(join(m.home, 'backend.json'),
-      JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
-    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
-    const install = m.invoke('update-install') as Promise<unknown>
-    return { m, stops, install, probes: () => probes, release: () => release?.() }
-  }
-
-  it('quit-all during an update install answers the in-progress error and stops nothing', async () => {
-    if (!HAS_UPDATER) return
-    const held = holdInstall()
-    await vi.waitFor(() => expect(held.probes()).toBe(1))
-    expect(await held.m.invoke('quit-all', { force: true }))
-      .toEqual({ error: 'another operation is in progress' })
-    expect(held.stops).toEqual([])
-    held.release()
-    expect(await held.install).toEqual({ busy: true })
-  })
-
-  it('an OS quit during an update install is ignored with a log line', async () => {
-    if (!HAS_UPDATER) return
-    const held = holdInstall()
-    await vi.waitFor(() => expect(held.probes()).toBe(1))
-    held.m.openLoadedWindow()
-    // Held (preventDefault), but no quit flow starts: no renderer ask, no stop.
-    expect(held.m.emit('before-quit')).toBe(true)
-    expect(held.m.sent.filter(([channel]) => channel === 'quit-requested')).toEqual([])
-    expect(held.stops).toEqual([])
-    expect(held.m.log()).toContain('quit: ignored, an update install is in flight')
-    expect(held.m.log()).not.toContain('quit: requested')
-    held.release()
-    expect(await held.install).toEqual({ busy: true })
   })
 
   it('update-install while the renderer is being asked to quit answers the in-progress error', async () => {
@@ -280,29 +226,5 @@ describe('main.cjs audit 2026-10-31 (§3 step 0, late staging)', () => {
     expect(m.updater.nativeChecks).toBe(0)
     expect(m.updater.installs).toBe(0)
     expect(stops).toEqual([])
-  })
-
-  it('macOS: a download while a given-up staging\'s late listener is armed asks for a restart', async () => {
-    if (platMod.UPDATER !== 'mac') return
-    vi.useFakeTimers()
-    nodeProcess.resourcesPath = join(tmpdir(), 'aw-no-resources')
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline in tests'))
-    const m = loadMain((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
-    process.env.AUTOWRIGHT_CASKROOM = join(m.home, 'no-caskroom')
-    m.updater.check = { updateInfo: { version: '0.14.0' } }
-    expect(await m.invoke('update-download')).toEqual({ ok: true })
-    m.updater.nativeSilent = true
-    let answer: unknown = null
-    void (m.invoke('update-install') as Promise<unknown>).then((r) => { answer = r })
-    await vi.advanceTimersByTimeAsync(10 * 60_000)
-    expect(answer).toEqual({ error: 'the updater stopped responding' })
-    // Nothing staged yet and the flag unset, but the late listener is armed:
-    // a newer download is refused before MacUpdater is touched.
-    m.updater.check = { updateInfo: { version: '0.14.1' } }
-    const checksBefore = m.updater.checks
-    expect(await m.invoke('update-download'))
-      .toEqual({ error: 'Restart to finish the update you already downloaded.' })
-    expect(m.updater.checks).toBe(checksBefore)
-    expect(m.updater.downloads).toBe(1)
   })
 })

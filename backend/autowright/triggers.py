@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime, time, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 from . import timefmt
 
@@ -111,6 +111,18 @@ def credible_enabled_instant(t: dict, now: datetime | None = None) -> datetime |
     return None if stamp.astimezone(UTC) > now + FUTURE_STAMP_HOLD else stamp
 
 
+def credible_run_baseline(baseline: datetime | None,
+                          now: datetime | None = None) -> datetime | None:
+    """§6: the automation's run baseline (aware, or local naive), or None when
+    it lies more than FUTURE_STAMP_HOLD ahead of `now` (the real clock when
+    omitted) — a record started under a clock set ahead, which the newest
+    `started_at` never lets a later real run replace (2026-10-31)."""
+    if baseline is None:
+        return None
+    now = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+    return None if baseline.astimezone(UTC) > now + FUTURE_STAMP_HOLD else baseline
+
+
 def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime,
                     now: datetime | None = None) -> datetime:
     """§4.3 interval semantics: the later of the trigger's enable stamp and
@@ -119,7 +131,13 @@ def interval_anchor(t: dict, run_baseline: datetime | None, fallback: datetime,
     aware UTC instants: the stamp is read exactly, and a caller may pass an
     aware baseline (the §6 scheduler) or a local naive one. A stamp more than
     FUTURE_STAMP_HOLD ahead of `now` is dropped (§6), so the interval anchors
-    on the run baseline."""
+    on the run baseline; a run baseline that far ahead of a given `now` is
+    dropped the same way (§6, 2026-10-31) — a caller without `now` (the
+    `trigger_next` path) has screened its baseline already, as `is_overdue`
+    does, and a fake-clock caller's baseline must not be read against the
+    real one."""
+    if now is not None:
+        run_baseline = credible_run_baseline(run_baseline, now)
     cands = [x.astimezone(UTC) for x in (credible_enabled_instant(t, now), run_baseline)
              if x is not None]
     return max(cands) if cands else fallback.astimezone(UTC)
@@ -189,9 +207,13 @@ def _parse_field(text: str, name: str, lo: int, hi: int) -> tuple[set[int], bool
         step = 1
         if sep:
             # `sep` not `step_s`: a trailing slash ("5/") must be rejected,
-            # matching the renderer's parser — not silently read as step 1.
+            # not silently read as step 1.
             if not _ascii_digits(step_s) or int(step_s) < 1:
                 raise CronError(f"{name}: bad step {item!r}")
+            if _ascii_digits(body):
+                # §4.3: Vixie reads `5/15` as `5-max/15`; the spec dialect has
+                # no such form (2026-10-31).
+                raise CronError(f"{name}: a step applies to `*` or a range (`*/n`, `a-b/n`)")
             step = int(step_s)
         if body == "*":
             a, b = lo, hi
@@ -207,7 +229,32 @@ def _parse_field(text: str, name: str, lo: int, hi: int) -> tuple[set[int], bool
         if not (lo <= a <= hi and lo <= b <= hi and a <= b):
             raise CronError(f"{name}: {item!r} out of range {lo}-{hi}")
         out.update(range(a, b + 1, step))
-    return out, text == "*"
+    # §4.3 Vixie rule: a `*`-led field (`*`, `*/n`) is unrestricted, so `*/2`
+    # in day-of-month leaves day-of-week the only restriction (2026-10-31).
+    return out, text.startswith("*")
+
+
+def rewrite_legacy_cron(expression: str) -> str:
+    """§21 (c) read-side migration: released versions stored a step on a bare
+    number (`5/15`) and fired it with Vixie's meaning, so each field's `a/n`
+    (each item of a comma list) is rewritten to `a-<field max>/n`. Every other
+    form, and an expression without five fields, is returned untouched
+    (2026-10-31)."""
+    fields = expression.split()
+    if len(fields) != 5:
+        return expression
+    changed = False
+    out = []
+    for text, (_, hi) in zip(fields, _FIELD_RANGES):
+        items = []
+        for item in text.split(","):
+            body, sep, step_s = item.partition("/")
+            if sep and _ascii_digits(body):
+                item = f"{body}-{hi}/{step_s}"
+                changed = True
+            items.append(item)
+        out.append(",".join(items))
+    return " ".join(out) if changed else expression
 
 
 def parse_cron(expression: str) -> list[tuple[set[int], bool]]:
@@ -232,9 +279,10 @@ def cron_next(expression: str, after: datetime | None = None) -> datetime | None
     for _ in range(_SEARCH_DAYS):
         if day.month in months:
             spec_dow = (day.weekday() + 1) % 7  # weekday(): Mon=0 → spec Sun=0
-            # Vixie rule: both dom and dow restricted → a date matching either fires.
-            if (day.day in doms if dow_star else
-                    spec_dow in dows if dom_star else
+            # Vixie rule: both dom and dow restricted → a date matching either
+            # fires; otherwise both must match — a `*`-led field (`*/2`) still
+            # filters by its own values (§4.3, 2026-10-31).
+            if (day.day in doms and spec_dow in dows if dom_star or dow_star else
                     day.day in doms or spec_dow in dows):
                 floor = t if day == t.date() else datetime.combine(day, time.min)
                 for hh, mm in hhmm:
@@ -278,8 +326,7 @@ def _wall_to_local(wall: datetime, zone: ZoneInfo, after: datetime | None) -> da
     if d0.utcoffset() != d1.utcoffset() and not _round_trips(wall, zone):
         # Erased by the spring-forward gap: fold=0 reads it with the
         # pre-transition offset, i.e. the occurrence fires shifted forward by
-        # the gap width ("2:30" fires at 3:30) — §4.3, and the renderer's
-        # cron.ts + the shared parity fixture implement the same rule.
+        # the gap width ("2:30" fires at 3:30) — §4.3.
         loc = _local_reading(d0)
         return loc if after is None or _instant(loc) > _instant(after) else None
     readings = sorted({d.timestamp(): d for d in (d0, d1)}.values(),
@@ -340,9 +387,32 @@ def _to_local(wall: datetime, zone: ZoneInfo) -> datetime:
     return _wall_to_local(wall, zone, None) or wall.replace(tzinfo=zone).astimezone().replace(tzinfo=None)
 
 
+# §4.3: lowercase IANA key → canonical key, built on first use (the zone
+# database listing walks the tzdata tree once).
+_ZONE_KEYS: dict[str, str] | None = None
+
+
+def _zone_keys() -> dict[str, str]:
+    global _ZONE_KEYS
+    if _ZONE_KEYS is None:
+        _ZONE_KEYS = {k.lower(): k for k in available_timezones()}
+    return _ZONE_KEYS
+
+
+def canonical_timezone(timezone: str) -> str:
+    """§4.3: the canonical IANA key for a case-insensitive match against the
+    zone database (`europe/berlin` → `Europe/Berlin`); a key the listing
+    lacks returns unchanged (2026-10-31)."""
+    return _zone_keys().get(timezone.lower(), timezone)
+
+
 def timezone_error(timezone) -> str | None:
-    """Error message for an unusable timezone value, None when valid (or absent)."""
+    """Error message for an unusable timezone value, None when valid (or absent).
+    §4.3: matched case-insensitively against the zone database, so the answer
+    does not hang on the filesystem's case sensitivity (2026-10-31)."""
     if timezone is None:
+        return None
+    if isinstance(timezone, str) and timezone.lower() in _zone_keys():
         return None
     try:
         if not isinstance(timezone, str):
@@ -388,11 +458,15 @@ def run_if_missed(t: dict) -> bool:
     return t.get(RUN_IF_MISSED, True) is not False
 
 
-def validate_trigger(t: dict, allow_past: bool = False) -> str | None:
+def validate_trigger(t: dict, allow_past: bool = False, *, at_load: bool = False) -> str | None:
     """§19 PATCH rule: error message, or None when the trigger is storable.
     `allow_past` skips the future check for one-shots — an EXISTING stored
     trigger whose moment elapsed must not 422 every unrelated edit of the
-    list it rides in (the scheduler consumes it on its own, §4.3)."""
+    list it rides in (the scheduler consumes it on its own, §4.3).
+    `at_load` (the §5 load-time check) skips only the cron "never fires"
+    rule: a stored expression that never fires stays stored and keeps not
+    firing, as it always did; only the API and import refuse it (§21 (c),
+    2026-10-31)."""
     kind = t.get("kind")
     if kind in RESERVED_KINDS:
         return f"{kind} triggers are coming soon"
@@ -453,6 +527,10 @@ def validate_trigger(t: dict, allow_past: bool = False) -> str | None:
             parse_cron(t.get("expression") or "")
         except CronError as e:
             return str(e)
+        if not at_load and cron_next(t.get("expression") or "") is None:
+            # §4.3: valid field by field but no date matches ("0 0 30 2 *") —
+            # it would sit enabled forever without firing (2026-10-31).
+            return "this cron expression never fires — no date matches it"
         return None
     if kind == "interval":
         # §4.3 provenance: required, like a cron. No timezone — a duration has
@@ -523,7 +601,11 @@ def normalize_triggers(raw: list,
             n["every"] = canonical_duration(parse_duration(t["every"]))
             n["source"] = t["source"]
         elif t["kind"] == "time":
-            n["at"] = t["at"]
+            # §4.3: stored canonical (`YYYY-MM-DDTHH:MM`, `:SS` only when
+            # non-zero) whatever ISO spelling arrived — the §9.2 editor reads
+            # `at` by fixed positions (2026-10-31).
+            at = datetime.fromisoformat(t["at"])
+            n["at"] = at.strftime("%Y-%m-%dT%H:%M:%S" if at.second else "%Y-%m-%dT%H:%M")
         elif t["kind"] == "discord":
             n["channel"] = t["channel"].strip()
             n["secret"] = t["secret"].strip()
@@ -543,7 +625,7 @@ def normalize_triggers(raw: list,
         # §4.3: `timezone` belongs to cron/time only — the loader drops it for
         # any other kind, so keeping it here would survive only until restart.
         if t["kind"] in ("cron", "time") and t.get("timezone"):
-            n["timezone"] = t["timezone"]
+            n["timezone"] = canonical_timezone(t["timezone"])  # §4.3 canonical key
         # §4.3 `runIfMissed`: cron/interval/time only, stored only when false
         # (absent = true, the pre-field shape, §21); ignored on every other kind.
         if t["kind"] in ("cron", "interval", "time") and t.get(RUN_IF_MISSED) is False:
@@ -745,13 +827,15 @@ def next_at_ms(triggers: list[dict], after: datetime | None = None,
         if not t["enabled"]:
             continue
         if t["kind"] == "interval":
-            insts.append(interval_instant(t, base, interval_baseline))
+            # `now=base`: a run baseline far ahead of the moment asked about
+            # is ignored (§6), so the countdown never reads "next in 121d".
+            insts.append(interval_instant(t, base, interval_baseline, now=base))
         elif (n := trigger_next(t, after, run_baseline)) is not None:
             insts.append(n.astimezone())
     return int(min(insts).timestamp() * 1000) if insts else None
 
 
-def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = None, *,
+def is_overdue(triggers: list[dict], baseline: datetime | None, now: datetime | None = None, *,
                interval_baseline: datetime | None = None) -> bool:
     """§4.1 overdue: some enabled cron or interval trigger has had two
     consecutive occurrences pass since its baseline with no run — two, not one,
@@ -768,10 +852,16 @@ def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = 
     the baseline as an instant: `interval_baseline` (aware UTC, the store's
     `run_baseline_instant`, the reading `next_at_ms` and the scheduler use)
     when the caller has it, else the naive baseline through `local_instant`
-    (latest reading not after now); the cron math keeps the naive baseline."""
+    (latest reading not after now); the cron math keeps the naive baseline.
+    A baseline more than FUTURE_STAMP_HOLD ahead of now is ignored as if
+    absent (§6, 2026-10-31): the trigger counts from its enable stamp alone,
+    and one with neither has nothing to count from."""
     now = now or datetime.now()
+    baseline = credible_run_baseline(baseline, now.astimezone())
     if interval_baseline is None:
         interval_baseline = _baseline_instant(baseline, now)
+    else:
+        interval_baseline = credible_run_baseline(interval_baseline, now.astimezone())
     for t in triggers:
         if t.get("kind") not in SCHEDULE_KINDS or not t.get("enabled"):
             continue
@@ -785,9 +875,11 @@ def is_overdue(triggers: list[dict], baseline: datetime, now: datetime | None = 
         # the scheduler ignores it). Naive wall time, as `enabled_since` reads it.
         credible = credible_enabled_instant(t, now.astimezone())
         since = credible.replace(tzinfo=None) if credible is not None else None
+        if baseline is None and since is None:
+            continue
+        after = max(baseline, since) if baseline and since else (baseline or since)
         anchor_baseline = interval_baseline if t["kind"] == "interval" else baseline
-        first = trigger_next(t, after=max(baseline, since) if since else baseline,
-                             run_baseline=anchor_baseline)
+        first = trigger_next(t, after=after, run_baseline=anchor_baseline)
         second = trigger_next(t, after=first, run_baseline=anchor_baseline) if first else None
         if second is not None and second < now:
             return True
