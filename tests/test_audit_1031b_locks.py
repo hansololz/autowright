@@ -334,3 +334,129 @@ def test_guard_covers_the_version_copy_when_the_draft_reordered_the_step(client,
     j, _ = _run(client, monkeypatch, a, fake)
     assert (j["status"], j["error"]) == ("failed", TAMPERED)
     assert version_file.read_bytes() == FINISH_CODE.encode()
+
+
+# ---------- §8 rule 3 / §4.1: the agent cannot change a locked step at all ----------
+# The whole mutation matrix the 2026-10-31 adversarial probe ran, kept as
+# tests: every way an agent response could alter a locked step is either
+# rejected outright or overwritten by the stored step field for field.
+
+import pytest
+
+RICH_LOCKED = {"file": "02-fetch.py", "name": "Fetch", "description": "stored desc",
+               "code": LOCKED_CODE, "authored_by": "user", "locked": True,
+               "agent": True, "why": "stored why", "agents": [{"id": "ag1", "why": "stored"}],
+               "timeout": 120, "retries": 3}
+FREE_ENTRY = "{ file: 01-a.py, name: A, description: d }"
+LOCKED_ENTRY = "{ file: 02-fetch.py, name: Fetch, locked: true }"
+
+
+def _fetch_step(draft):
+    return next((s for s in draft.get("steps") or [] if str(s.get("name", "")).strip() == "Fetch"), None)
+
+
+def _baseline():
+    draft, errors = _splice_validate(_envelope(FREE_ENTRY, LOCKED_ENTRY, files={"01-a.py": FREE_CODE}),
+                                     dict(RICH_LOCKED))
+    assert errors == []
+    return _fetch_step(draft)
+
+
+REJECTED = {
+    "different code under the listed file":
+        (_envelope(FREE_ENTRY, LOCKED_ENTRY, files={"01-a.py": FREE_CODE, "02-fetch.py": 'log("evil")\n'}),
+         "do not return its file"),
+    "different code under the stored file while listed elsewhere":
+        (_envelope(FREE_ENTRY, "{ file: 03-fetch.py, name: Fetch, locked: true }",
+                   files={"01-a.py": FREE_CODE, "02-fetch.py": 'log("evil")\n'}),
+         "do not return its file"),
+    "a code key in the manifest entry":
+        (_envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: Fetch, locked: true, code: 'x' }",
+                   files={"01-a.py": FREE_CODE}),
+         "unknown key"),
+    "locked: false":
+        (_envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: Fetch, locked: false }",
+                   files={"01-a.py": FREE_CODE}),
+         "list it with `locked: true`"),
+    "locked absent":
+        (_envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: Fetch, description: d }",
+                   files={"01-a.py": FREE_CODE}),
+         "list it with `locked: true`"),
+    "the locked step omitted":
+        (_envelope(FREE_ENTRY, files={"01-a.py": FREE_CODE}), "is missing"),
+    "the locked step listed twice":
+        (_envelope(FREE_ENTRY, LOCKED_ENTRY, "{ file: 03-fetch.py, name: Fetch, locked: true }",
+                   files={"01-a.py": FREE_CODE}),
+         "listed twice"),
+    "renamed under the same file":
+        (_envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: Fetch2, locked: true }",
+                   files={"01-a.py": FREE_CODE}),
+         "is missing"),
+    "an unlocked step taking the locked name":
+        (_envelope("{ file: 01-fetch.py, name: Fetch, description: d }", LOCKED_ENTRY,
+                   files={"01-fetch.py": FREE_CODE}),
+         "listed twice"),
+    "a case-changed name":
+        (_envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: fetch, locked: true }",
+                   files={"01-a.py": FREE_CODE}),
+         "is missing"),
+    "an identical block with CRLF line endings":
+        (_envelope(FREE_ENTRY, LOCKED_ENTRY,
+                   files={"01-a.py": FREE_CODE, "02-fetch.py": LOCKED_CODE.replace("\n", "\r\n")}),
+         "do not return its file"),
+    "a stray block under another file name":
+        (_envelope(FREE_ENTRY, LOCKED_ENTRY, files={"01-a.py": FREE_CODE, "09-fetch-new.py": 'log("evil")\n'}),
+         "1:1"),
+    "an unlocked step claiming locked: true":
+        (_envelope("{ file: 01-a.py, name: A, description: d, locked: true }", LOCKED_ENTRY,
+                   files={"01-a.py": FREE_CODE}),
+         "only the user can lock a step"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REJECTED), ids=sorted(REJECTED))
+def test_a_locked_step_mutation_is_rejected(case):
+    text, fragment = REJECTED[case]
+    draft, errors = _splice_validate(text, dict(RICH_LOCKED))
+    assert any(fragment in e for e in errors), (case, errors)
+    fetched = _fetch_step(draft)
+    assert fetched is None or fetched["code"] == LOCKED_CODE, case
+
+
+OVERWRITTEN = {
+    "every manifest field re-sent with other values":
+        _envelope(FREE_ENTRY,
+                  "{ file: 02-fetch.py, name: Fetch, locked: true, description: evil, agent: true, "
+                  "why: evil, agents: [{ id: ag1, why: evil }], timeout: 999, retries: 9, "
+                  "no_timeout: true, infinite_retries: true, authored_by: agent }",
+                  files={"01-a.py": FREE_CODE}),
+    "agent flag dropped and no why":
+        _envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: Fetch, locked: true, agent: false }",
+                  files={"01-a.py": FREE_CODE}),
+    "a new file suffix":
+        _envelope(FREE_ENTRY, "{ file: 02-other.py, name: Fetch, locked: true }",
+                  files={"01-a.py": FREE_CODE}),
+    "trailing whitespace in the name":
+        _envelope(FREE_ENTRY, "{ file: 02-fetch.py, name: 'Fetch  ', locked: true }",
+                  files={"01-a.py": FREE_CODE}),
+    "an identical block returned":
+        _envelope(FREE_ENTRY, LOCKED_ENTRY, files={"01-a.py": FREE_CODE, "02-fetch.py": LOCKED_CODE}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(OVERWRITTEN), ids=sorted(OVERWRITTEN))
+def test_a_locked_step_lands_exactly_as_stored(case):
+    draft, errors = _splice_validate(OVERWRITTEN[case], dict(RICH_LOCKED))
+    assert errors == [], (case, errors)
+    assert _fetch_step(draft) == _baseline(), case
+
+
+def test_a_locked_step_may_only_move_position():
+    text = _envelope("{ file: 01-fetch.py, name: Fetch, locked: true }", "{ file: 02-a.py, name: A, description: d }",
+                     files={"02-a.py": FREE_CODE})
+    draft, errors = _splice_validate(text, dict(RICH_LOCKED))
+    assert errors == []
+    moved = _fetch_step(draft)
+    base = _baseline()
+    assert moved["file"] == "01-fetch.py"
+    assert {k: v for k, v in moved.items() if k != "file"} == {k: v for k, v in base.items() if k != "file"}
