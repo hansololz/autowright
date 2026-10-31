@@ -940,7 +940,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
       </span>
       {/* the pair that ends the edit, flush with the row's right edge */}
       <span data-testid="step-edit-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 'none', marginLeft: 'auto', paddingLeft: 12 }}>
-        <TipButton className="ad-btn-text small static ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit}>
+        <TipButton className="ad-btn-text small static ad-focus-inset" tip="Drop all unsaved edits" disabled={saving} onClick={cancelEdit}>
           Cancel
         </TipButton>
         <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>

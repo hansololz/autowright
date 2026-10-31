@@ -1049,8 +1049,8 @@ editors enter with
     buttons flush, no gap, the cluster inset 7 px so the glyphs align optically with the
     fields); right, **Cancel** (`.ad-btn-text.small.static` — the muted text tone at full
     strength, never `.dim`, and `.static` means **no hover color change**: the button reads
-    the same under the pointer, David's call 2026-10-31; tip "Drop your edits and go
-    back to the saved script") and **Save** (`.ad-btn-link.small` accent link, **enabled
+    the same under the pointer, David's call 2026-10-31; tip "Drop all unsaved edits")
+    and **Save** (`.ad-btn-link.small` accent link, **enabled
     whether or not anything changed** — never dimmed for an untouched edit; a Save with
     nothing changed validates nothing, commits nothing and simply returns the row to view
     mode, exactly like Cancel without the discard question, 2026-10-31 — disabled only
