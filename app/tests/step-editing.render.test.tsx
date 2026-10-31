@@ -112,7 +112,8 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(next[1]).toMatchObject({ name: 'New step', file: '02-new-step.py', authoredBy: 'user' })
     expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 2: New step')
     expect(editor().value).toContain('from autowright import params, log, result')
-    expect(saveButton().disabled).toBe(true)
+    // §11 (2026-10-31): Save is never dimmed for an untouched edit
+    expect(saveButton().disabled).toBe(false)
     // edit mode: flipping and find are inert, the footer reads the scope hint
     fireEvent.keyDown(document, { key: 'ArrowLeft' })
     expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 2: New step')
@@ -150,6 +151,24 @@ describe('step editing in the step-script modal (§11)', () => {
     // back to view mode on the same step
     await waitFor(() => expect(screen.queryByTestId('step-editor')).toBeNull())
     expect(dialog().getAttribute('aria-label')).toBe('Step 1 of 1: Fetch the page')
+  })
+
+  it('Save is enabled with nothing changed and returns the row to view mode without a commit; Cancel is not dimmed and has no hover tone', async () => {
+    const onCommit = vi.fn()
+    render(<Harness initial={[step()]} onCommit={onCommit} />)
+    openRow('Fetch page')
+    fireEvent.click(screen.getByLabelText('Edit script'))
+    // §11 (2026-10-31): untouched — Save enabled, Cancel at full muted tone
+    expect(saveButton().disabled).toBe(false)
+    expect(saveButton().className).not.toContain('dim')
+    const cancel = within(dialog()).getByText('Cancel') as HTMLButtonElement
+    expect(cancel.className).toContain('static')
+    expect(cancel.className).not.toContain('dim')
+    expect(cancel.disabled).toBe(false)
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(screen.queryByTestId('step-editor')).toBeNull())
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Edit script')).toBeTruthy()
   })
 
   it('a blank name disables Save with the inline hint', () => {
@@ -541,9 +560,10 @@ describe('step editing in the step-script modal (§11)', () => {
     const field = screen.getByLabelText('Step timeout') as HTMLInputElement
     expect(field.value).toBe('15m')
     expect(field.placeholder).toBe('15m')
-    // retyping the same value another way is nothing to save
+    // retyping the same value another way is nothing to save — Save stays
+    // enabled (§11 2026-10-31) but would only return to view mode
     fireEvent.change(field, { target: { value: '900' } })
-    expect(saveButton().disabled).toBe(true)
+    expect(saveButton().disabled).toBe(false)
     fireEvent.change(field, { target: { value: '2h' } })
     fireEvent.click(saveButton())
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
@@ -637,7 +657,11 @@ describe('step editing in the step-script modal (§11)', () => {
     openRow('Fetch page')
     fireEvent.click(screen.getByLabelText('Edit script'))
     fireEvent.change(screen.getByLabelText('Step retries'), { target: { value: '3 retries' } })
-    expect(saveButton().disabled).toBe(true)
+    // §11 (2026-10-31): Save stays enabled; nothing dirty, so it commits
+    // nothing and returns to view mode
+    expect(saveButton().disabled).toBe(false)
+    fireEvent.click(saveButton())
+    expect(screen.queryByTestId('step-editor')).toBeNull()
   })
 
   it('edit mode keeps a line-number gutter that follows the typed text; the textarea never scrolls on its own (2026-10-29)', () => {
@@ -663,7 +687,7 @@ describe('step editing in the step-script modal (§11)', () => {
     fireEvent.click(screen.getByLabelText('Edit script'))
     fireEvent.change(screen.getByLabelText('Step name'), { target: { value: '  Fetch page  ' } })
     fireEvent.change(screen.getByLabelText('Step description'), { target: { value: 'reads it ' } })
-    expect(saveButton().disabled).toBe(true)
+    expect(saveButton().disabled).toBe(false) // §11 (2026-10-31): never dimmed for an untouched edit
     // nothing dirty: Cancel returns to view mode without the discard confirm
     fireEvent.click(within(dialog()).getByText('Cancel'))
     expect(screen.queryByRole('alertdialog')).toBeNull()

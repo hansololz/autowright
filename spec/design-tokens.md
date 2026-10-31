@@ -101,7 +101,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   (interactive children opt out with `no-drag`).
 - All hover and focus states are CSS classes in `tokens.css` — never JS mouse-state (a JS hover
   flag sticks when a re-render or layout shift moves the node under the cursor). Buttons:
-  `.ad-btn-primary`, `.ad-btn-ghost`, `.ad-btn-soft`, `.ad-btn-text`[`.dim`], `.ad-btn-pill`,
+  `.ad-btn-primary`, `.ad-btn-ghost`, `.ad-btn-soft`, `.ad-btn-text`[`.dim`][`.static`: keeps
+  its resting color under the pointer — the §11 step editor's Cancel], `.ad-btn-pill`,
   `.ad-btn-dashed`, `.ad-btn-x`, `.ad-btn-accent-ghost` (accent-tinted ghost: Add trigger,
   agent chips), `.ad-btn-danger-ghost` (red-tinted confirm), `.ad-btn-text.danger` (red text
   button), `.ad-btn-link` (accent link-styled button), `.ad-btn-tab`, `.ad-attempt-pill`,

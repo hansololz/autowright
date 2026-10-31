@@ -241,6 +241,9 @@ textarea:disabled, input:disabled { opacity: .45; }
    actions stay exactly as tall as headers without */
 .ad-btn-text.small { font-size: 11.5px; padding: 0; line-height: 1; }
 .ad-btn-text.dim:hover:not(:disabled) { color: var(--text-2); }
+/* §14 .static: no hover color change — the §11 step editor's Cancel reads the
+   same under the pointer (2026-10-31) */
+.ad-btn-text.static, .ad-btn-text.static:hover:not(:disabled) { color: var(--text-muted); transition: none; }
 .ad-btn-text.danger { color: var(--red); }
 .ad-btn-text.danger:hover:not(:disabled) { color: var(--red-hover); }
 

@@ -1047,9 +1047,15 @@ editors enter with
     title line in view mode), so the row reads what you can do, then the fields, then the step's tags and
     facts. Left, the `.ad-btn-icon` **step controls** (`data-testid="step-controls"`,
     buttons flush, no gap, the cluster inset 7 px so the glyphs align optically with the
-    fields); right, **Cancel** (`.ad-btn-text.dim.small`, tip "Drop your edits and go
-    back to the saved script") and **Save** (`.ad-btn-link.small` accent link, disabled
-    while nothing changed, "Saving…" while validating; tip "Save your edits (⌘S)"), 10 px
+    fields); right, **Cancel** (`.ad-btn-text.small.static` — the muted text tone at full
+    strength, never `.dim`, and `.static` means **no hover color change**: the button reads
+    the same under the pointer, David's call 2026-10-31; tip "Drop your edits and go
+    back to the saved script") and **Save** (`.ad-btn-link.small` accent link, **enabled
+    whether or not anything changed** — never dimmed for an untouched edit; a Save with
+    nothing changed validates nothing, commits nothing and simply returns the row to view
+    mode, exactly like Cancel without the discard question, 2026-10-31 — disabled only
+    while the name is blank, a timeout or retries value fails the field grammar, or the
+    modal is inert; "Saving…" while validating; tip "Save your edits (⌘S)"), 10 px
     apart, flush with the row's right edge (`data-testid="step-edit-actions"`), 6 px
     above the name field. The header is where the pen was, so the edit starts and ends
     in one place, and every control that changes the step — the instant ones and the

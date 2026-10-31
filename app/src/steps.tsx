@@ -817,7 +817,10 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const saving = !!edit && edit.saving
   const savingRef = useRef(saving)
   savingRef.current = saving
-  const canSave = !!edit && dirty && !!edit.name.trim() && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving && !editing?.disabled
+  // §11 (2026-10-31): Save is never dimmed for an untouched edit — a Save with
+  // nothing changed returns the row to view mode (saveEdit); only a blank
+  // name, a field-grammar error, or an inert modal disables it.
+  const canSave = !!edit && !!edit.name.trim() && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving && !editing?.disabled
   // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
   // backdrop close the modal) and the Remove step confirm
   const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
@@ -937,7 +940,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
       </span>
       {/* the pair that ends the edit, flush with the row's right edge */}
       <span data-testid="step-edit-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 'none', marginLeft: 'auto', paddingLeft: 12 }}>
-        <TipButton className="ad-btn-text dim small ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit}>
+        <TipButton className="ad-btn-text small static ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit}>
           Cancel
         </TipButton>
         <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
@@ -1220,7 +1223,11 @@ export function StepList(props: StepListProps) {
   const saveEdit = async () => {
     const e = editRef.current
     // §11: Save honours the modal's disabled state like every other control
-    if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || stepEditTimeoutBad(e) || stepEditRetriesBad(e) || e.saving || modalClosing.current) return
+    if (!editing || editing.disabled || current === null || !e || !e.name.trim() || stepEditTimeoutBad(e) || stepEditRetriesBad(e) || e.saving || modalClosing.current) return
+    // §11 (2026-10-31): nothing changed — Save validates nothing, commits
+    // nothing (no authorship flip, no touched draft) and returns the row to
+    // view mode, like Cancel without the discard question.
+    if (!stepEditDirty(e)) { dropEdit(); return }
     const at = current
     const base = stepsRef.current
     const name = e.name.trim()
