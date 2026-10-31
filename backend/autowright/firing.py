@@ -92,7 +92,7 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
     `outcome`, when passed, gets `shutdown_refused = True` when the engine
     refused the start because the backend is shutting down (§7) — no
     execution started and no record written, so §4.3 consumes no one-shot."""
-    from .engine import VersionNotFound  # deferred: engine imports firing
+    from .engine import AdmissionRefused, CapacityError, VersionNotFound  # deferred: engine imports firing
 
     # §4.5: the record stores the trigger's machine kind — §4.3 kinds are the
     # §4.5 kinds verbatim; labels are derived at serialization.
@@ -172,7 +172,11 @@ def fire_trigger(store: Store, engine: Engine, a: dict, t: dict,
                         # nothing is busy here — the firing failed outright.
                     except Exception:  # noqa: BLE001
                         log.exception("recording a failed firing on %r", a.get("name"))
-                elif not isinstance(e, RuntimeError):
+                elif not isinstance(e, (AdmissionRefused, CapacityError)):
+                    # §6.1 (2026-10-31): only the admission refusals stay
+                    # quiet; any other failure (a plain RuntimeError included)
+                    # is logged with its traceback, the same test the queue
+                    # drain applies.
                     log.exception("firing %s on %r failed", kind, a.get("name"))
                 elif engine._stopping and outcome is not None:
                     # §4.3: the flag flips under store.lock (held here), so a

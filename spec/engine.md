@@ -152,7 +152,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   which the next finish or tick retries, or the engine's own refusals — slot taken,
   shutting down, being deleted, data path unreachable — raised as the engine's
   `AdmissionRefused` (a `RuntimeError` subclass; any other `RuntimeError` is a failure that
-  will not clear, 2026-10-30 second sweep) and keeping the head waiting) finishes `skipped` with the note "couldn't be
+  will not clear, 2026-10-30 second sweep, and is logged with its traceback by the queue
+  drain and by a direct firing alike, 2026-10-31: a trigger firing swallowed every
+  `RuntimeError` silently) and keeping the head waiting) finishes `skipped` with the note "couldn't be
   started" rather than wedging the queue behind it. Promotion reuses the queued record:
   the same record's steps are filled in and its status flips `queued` → `executing`, so a
   firing produces exactly one execution record from admission to finish. Cancelling a queued

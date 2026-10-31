@@ -1074,10 +1074,12 @@ already neutralize. The provider config and
   the row's fields, since `/state` rows carry the full fields too — the §9.2 detail page, the
   §11 editor — also re-`GET`s that record on reconnect, and the §22 marketplace page
   refetches its table on reconnect too, since a `marketplace.changed` missed while the socket
-  was down is never replayed, and the §9 executions list refetches from its first page on
-  reconnect (the pager resets — a deeper page's cursor may name rows that are gone), since
+  was down is never replayed, and the §9 executions list keeps its page on reconnect and refetches every
+  finished row up to that page whenever a filter is active or a deeper page is shown (the
+  unfiltered first page is the snapshot's own window), since
   an `execution.deleted` missed meanwhile — a retention sweep, a deleted automation — would
-  otherwise leave ghost rows on a filtered or deeper page (2026-10-28): the snapshot's list rows carry no
+  otherwise leave ghost rows on a filtered or deeper page (2026-10-28; page kept 2026-10-30
+  second sweep; deeper unfiltered pages refetched too 2026-10-31): the snapshot's list rows carry no
   steps/spec/versions, and an `automation.changed` missed while the socket was down would
   otherwise leave the page showing a new version number over old bodies until navigation), and that refresh applies the snapshot's `version` alongside the data fields — after the §3 launch-time version-sync restarts the backend onto the new bundle, this reconnect refresh is what carries the new running version to the §9.4 About page (without it the page shows the pre-update number until the app is relaunched). The handler streams from a hub queue while concurrently watching the socket for
   the client's disconnect, so a dropped client ends the handler immediately — an idle open

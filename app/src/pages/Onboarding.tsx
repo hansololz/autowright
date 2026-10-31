@@ -383,13 +383,21 @@ export default function Onboarding() {
   const manualSigninKey = ob.phase === 'connect' && ob.det === 'cards'
     ? ob.provs.filter(showsManualSignin).map((p) => p.id).join(',')
     : ''
+  // §10 (2026-10-31): a sign-in answer landing after unmount must not start a
+  // connection check on a page that is gone. Re-armed on mount: StrictMode's
+  // dev remount runs the cleanup between the two effect passes.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
   useEffect(() => {
     if (!manualSigninKey) return
     const ids = manualSigninKey.split(',')
     const timer = window.setInterval(() => {
       for (const id of ids) {
         void api.signinStatus(id).then((s) => {
-          if (s.signedIn !== true) return
+          if (!mounted.current || s.signedIn !== true) return
           const p = ob.provs.find((x) => x.id === id)
           if (!p || !showsManualSignin(p)) return
           const signedIn = { ...p, signedIn: true }

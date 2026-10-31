@@ -302,7 +302,7 @@ gone — an automation or agent deleted while its page is shown, or reached agai
 back — redirects to its list by **replacing** the history entry, never pushing one, so back
 never traps on a dead page. Page navigation (`go()`) always lands in the app
 shell: if the create/edit surface is active, it exits back to `surface: app` — so sidebar tabs work
-while editing an automation. Popovers close on outside mousedown **and on Escape** (every menu goes through the shared `usePopover`, whose capture-phase Escape closes the menu and stops the key there, so a modal behind an open menu stays open — one Escape per layer). Modals render through a React portal on
+while editing an automation. Popovers close on outside mousedown **and on Escape** (every menu goes through the shared `usePopover`, whose capture-phase Escape closes the menu and stops the key there, so a modal behind an open menu stays open — one Escape per layer). **An IME composition owns Enter and Escape until it ends** (2026-10-31): while a key event's `isComposing` is set, no field shortcut, the modal's own Escape and a menu's Escape act on it, and a field handler that would otherwise stop the key still stops it from reaching the modal (a composing Escape in the §9.2 find bar had closed the whole step-script modal). Modals render through a React portal on
 `document.body`: page containers animate `transform` (`.ad-anim-page`, fill
 both), which makes them the containing block for `position: fixed` — an
 in-tree modal would anchor to the scrolled page instead of the viewport and

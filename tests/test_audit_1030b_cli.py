@@ -128,7 +128,9 @@ def test_a_workdir_pushed_into_another_automation_ignores_the_baseline(tmp_path)
     _run(c, "automation", "push", "Other Report", str(d))
     body = _version_body(c)
     assert [(t["kind"], t["expression"]) for t in _schedules(body)] == [("cron", "0 8 * * *")]
-    assert body["name"] == "Daily Report"
+    # 2026-10-31: pulled_name still gates the name, so the source's name
+    # equal to it is not sent to the target
+    assert "name" not in body
     # no pulled_* rewrite for a workdir pulled from another automation
     assert (d / "manifest.yaml").read_text() == before
 

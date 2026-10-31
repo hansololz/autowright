@@ -101,7 +101,8 @@ applies unchanged; the chat pane never collapses.
     `failed`. Each carries the stage's §11 label (`title`) plus the stage's own slice of
     the §8 `events` feed (grouped by each event's `stage` stamp). A cancelled job leaves
     no entry for its in-flight stage — its request text returns to the input instead —
-    but stages that already settled stay in the thread. **A shown block is never
+    but stages that already settled stay in the thread; a start request that fails after
+    the cancel adds nothing either, neither a failed block nor an error line (2026-10-31). **A shown block is never
     removed:** the neutral "Working on the request" stage settles on every chat turn,
     feed or no feed — the live entry displays that title from the moment
     of send (the pre-poll default), so the editor seeds the stage into the settle list
@@ -1058,7 +1059,7 @@ editors enter with
     (`fa-trash`, the `.danger` icon variant — muted at rest, red on hover; aria-label
     "Remove step", tip "Remove this step from the automation (you will be asked to
     confirm)"). Unviewed rows carry no controls. The detail page's modal (no editor)
-    shows neither the pen nor a footer. All of them are disabled while a §8 job is in
+    shows neither the pen nor the edit header. All of them are disabled while a §8 job is in
     flight or an old version is viewed, and while Save's validation is in flight (the
     ⌥↑ / ⌥↓ shortcuts are inert then too — a move landing under an in-flight validation
     would drop the Save with no word, 2026-10-30); Move
@@ -1114,7 +1115,8 @@ editors enter with
     (`900`); one with a unit suffix `s` / `sec` / `secs`, `m` / `min` / `mins`, `h` / `hr`
     / `hrs` (`90s`, `15m`, `2h`); `no limit`, `none` or `unlimited` for `noTimeout: true`;
     and blank, which removes both keys so the step falls back to the §6 default. Anything
-    else (`0`, `1.5m`, `1h30m`, `30 minutes`) disables Save with the inline red hint "Use
+    else (`0`, `1.5m`, `1h30m`, `30 minutes`), or a value above one year (`9000h`, the §4.1
+    cap, 2026-10-31), disables Save with the inline red hint "Use
     seconds, or 90s / 15m / 2h, or no limit" under the field. Dirtiness compares the parsed
     value, so retyping `900` as `15m` is nothing to save; typing the default `15m` on a step
     that set nothing pins `timeout: 900` (a value, not an absence). The §8 sync treats the
@@ -1160,9 +1162,13 @@ editors enter with
     `NN-` prefix from the new positions (the suffixes are kept, so a move never renames
     a script beyond its prefix), keep the moved step viewed at its new position, and
     land the chip "Step '<name>' moved to position N." (`fa-arrows-up-down`, N the
-    1-based new position). **⌥↑ / ⌥↓** (Alt+↑ / Alt+↓) do the same in edit mode while
+    1-based new position); a move control that held keyboard focus when pressed keeps it in
+    the step's new row, so a second press moves again (when the move lands at an end, where
+    that control is disabled, focus goes to the opposite move control instead of being
+    lost), while a move pressed with the caret in a text field leaves focus and the caret
+    where they are (2026-10-31). **⌥↑ / ⌥↓** (Alt+↑ / Alt+↓) do the same in edit mode while
     focus is outside a text field (the textarea and the name, description, timeout and
-    rule fields keep every key for themselves); inert in view mode, where no move
+    retries fields keep every key for themselves); inert in view mode, where no move
     control shows, on the detail page, and at the ends. In view mode the plain arrows
     keep flipping. A locked step moves like any other — §4.1
     freezes its content, not its position. A move is a manual edit: draft touched,
@@ -1170,7 +1176,7 @@ editors enter with
     steps out as the spec implies, an order that matters belongs in the spec: while
     the move chip is the thread's last entry, the turn action row offers **Remember
     this order** (below), which writes the current order as one build rule.
-  - **Lock toggle** flips the draft step's `locked` (the footer glyph swaps and the
+  - **Lock toggle** flips the draft step's `locked` (the edit header's lock glyph swaps and the
     navigator's "Locked" chip appears or goes) and lands the chip "Step '<name>'
     locked." / "… unlocked." (`fa-lock` / `fa-lock-open`). **Remove step** confirms
     ("Remove step N, '<name>'?", body "The script is deleted from the draft." plus, for an

@@ -811,9 +811,8 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const find = useFind(lines, scroller, i)
   const editActive = !!edit
   const dirty = !!edit && stepEditDirty(edit)
-  const unsaved = !!edit && stepEditDirty(edit)
-  const dirtyRef = useRef(unsaved)
-  dirtyRef.current = unsaved
+  const dirtyRef = useRef(dirty)
+  dirtyRef.current = dirty
   // §11: while Save's validation is in flight the editor is inert
   const saving = !!edit && edit.saving
   const savingRef = useRef(saving)
@@ -876,6 +875,24 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
       <i className="fa-solid fa-pen" />
     </TipButton>
   ) : null
+  // §11 (2026-10-31): a move control that held keyboard focus when pressed
+  // keeps it in the step's new row (the rows are keyed by position, so the
+  // pressed button unmounts with the old one), and a second press moves
+  // again; a move pressed while the script textarea holds focus leaves the
+  // caret where it is (the 2026-10-30 rule).
+  const refocusMoveRef = useRef<string | null>(null)
+  useEffect(() => {
+    const label = refocusMoveRef.current
+    refocusMoveRef.current = null
+    if (!label) return
+    const find = (l: string) => document.querySelector<HTMLButtonElement>(`.ad-stepmodal button[aria-label="${l}"]`)
+    const same = find(label)
+    // At an end the pressed control is disabled: focus the opposite one
+    // rather than letting focus fall to the body.
+    const target = same && !same.disabled ? same
+      : find(label === 'Move step down' ? 'Move step up' : 'Move step down')
+    target?.focus()
+  }, [i])
   const controls = editing && editActive ? (
     <>
       <span data-testid="step-controls" style={{ display: 'contents' }}>
@@ -885,7 +902,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
           aria-label="Move step up"
           tip={`Run this step one position earlier (${keys.alt}↑)`}
           disabled={handsOff || saving || i === 0}
-          onClick={() => onMove(-1)}
+          onClick={(e) => { if (document.activeElement === e.currentTarget) refocusMoveRef.current = 'Move step up'; onMove(-1) }}
         >
           <i className="fa-solid fa-arrow-up" />
         </TipButton>
@@ -894,7 +911,7 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
           aria-label="Move step down"
           tip={`Run this step one position later (${keys.alt}↓)`}
           disabled={handsOff || saving || i === steps.length - 1}
-          onClick={() => onMove(1)}
+          onClick={(e) => { if (document.activeElement === e.currentTarget) refocusMoveRef.current = 'Move step down'; onMove(1) }}
         >
           <i className="fa-solid fa-arrow-down" />
         </TipButton>

@@ -22,8 +22,6 @@
   MenuRow compositions use `{...menuStyle, position: 'static'}` inside a ~280px-wide frame.
 - `SpecBlock` type is not re-exported by `app/ds-entry.ts` — previews inline
   `type SpecBlock = { k: 'h1' | 'h2' | 'p' | 'li'; text: string }`.
-- PyCode ships no default pre styling — pass the app's style
-  `{font: '400 11.5px/1.7 var(--mono)', color: 'var(--text-2em)', background: 'var(--bg-code)', borderRadius: 8, padding: '10px 14px'}`.
 - Toast/Modal/ConfirmModal have `cardMode: single` + viewport overrides in config; their
   previews use the sized `translateZ(0)` dark frame (Toast h≈160, Modal h≈360).
 

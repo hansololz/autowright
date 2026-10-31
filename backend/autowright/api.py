@@ -20,6 +20,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnected
 
 from . import __version__, harness, imessage, installer, keychain, marketplace, models, paths, platform
 from . import drafting, packages as pkglib, reqlog, timefmt, transfer, triggers as triggerlib
@@ -1083,11 +1084,13 @@ def duplicate_auto(automation_id: str, body: models.AutomationDuplicate) -> dict
         # clears), never only the loaded flag.
         flags_before = _modified_flags(source)
         modified = next(iter(store.disk_modified_steps(source)), None)
+        if _modified_flags(source) != flags_before:
+            # §4.1: the gate's disk read flipped a step flag, published so
+            # the problem shows (or clears) at once (like the export gate),
+            # refused or not (2026-10-31: a cleared flag on a duplicate that
+            # proceeds was never published for the source).
+            _publish_auto_changed(source)
         if modified is not None:
-            if _modified_flags(source) != flags_before:
-                # §4.1: the gate's disk read flipped a step flag, published
-                # so the problem shows at once (like the export gate).
-                _publish_auto_changed(source)
             raise HTTPException(409, f"Step `{modified.get('name')}` was edited on disk — "
                                      "pull and push it, or save it from the editor, "
                                      "before duplicating")
@@ -3392,6 +3395,11 @@ async def ws(sock: WebSocket, token: str = Query(""), role: str = Query("")) -> 
                 await sock.send_text(json.dumps(msg, default=str))
             except asyncio.CancelledError:
                 raise
+            except (WebSocketDisconnect, WebSocketDisconnected):
+                # §19 (2026-10-31): a client that went away mid-send is a
+                # normal end, not a failure worth an ERROR record.
+                log.debug("websocket client went away during a send")
+                return
             except Exception:  # noqa: BLE001
                 log.exception("websocket send failed; closing the socket")
                 try:

@@ -103,7 +103,10 @@ can override it.
   param-values check) and `label` / `help`, when present, must be text (an unquoted `Yes`,
   `No`, `On` or `Off` is a YAML boolean, so the error tells the agent to quote it), each a
   validation error for the repair round, since the Review card and the runtime would otherwise
-  disagree about the default, 2026-10-30 second sweep). The
+  disagree about the default, 2026-10-30 second sweep; a number param's `min`, when present,
+  must itself be a number, since `1e3` reads from YAML as text and would otherwise be served
+  as the default, 2026-10-31). These checks judge what an agent drafts; a version stored
+  before they existed is normalized at load (§5, §21 2026-10-31) so it keeps saving. The
   known manifest keys include everything the §20 workdir `pull` writes (`name`,
   `description`, `note`, `triggers`, `params`, `packages`, `steps`). The validator never
   raises on a wrongly typed value: a `steps` or `params` that isn't a list, a `kind` or
@@ -165,7 +168,9 @@ can override it.
   trigger's identifying details come from the SPEC, never invented: absent, the trigger is
   omitted and the steps are written against `execution.trigger_payload`), the
   cron/interval/time-only `runIfMissed` option as a user knob the agent never emits, the timeout and retry
-  mechanics (`timeout` / `no_timeout`, the 900 s default; `retries` 1–10 /
+  mechanics (`timeout` / `no_timeout`, the 900 s default, a `timeout` a positive whole number
+  of seconds of at most one year, the §4.1 cap, anything above it a repair-round error rather
+  than a value the engine would silently read as absent, 2026-10-31; `retries` 1–10 /
   `infinite_retries`, ≥ 1 s spacing for infinite, attempts pruned past 20; every retry
   re-runs the script from the top; an in-place retry keeps the workspace and result dir and
   re-executes only still-queued steps) with the pointer that the build instructions set
@@ -934,8 +939,12 @@ notes rewrite (§11).
      interval. No `timezone` on an interval.
    - `{ imessage: handle }` (+ optional `pattern`) — `handle` a §4.3-valid sender (E.164
      phone or email), mapped to the stored `from` field; an unquoted number reads as a YAML
-     integer and loses its `+`, so an integer handle is read as `+<digits>` (2026-10-30
-     second sweep: the repair round kept asking for the form the agent had written).
+     integer and loses its `+`, and a number written without the country code reads as the
+     same kind of integer, so an integer handle is a repair-round error that tells the
+     agent to quote it (`imessage: "+15551234567"`) rather than being read back as
+     `+<digits>` (2026-10-31: the read-back turned `imessage: 5551234567` into a trigger
+     that could never fire; 2026-10-30 second sweep had added the read-back because the
+     repair round kept asking for the form the agent had written, which the hint now names).
    - `{ discord: channel-id, secret: <id> }` (+ optional `pattern`, `mention`, `author`) —
      channel a numeric id, `secret` a granted secret's §4.8 id copied exactly from the
      grants yaml (a validation error when it is neither a granted secret's id — same rule

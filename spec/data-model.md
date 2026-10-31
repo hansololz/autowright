@@ -149,7 +149,10 @@ steps: [{ name, file, description, code, agent?, why?, agents?, secrets?, packag
   at most one year (31,536,000 s; a lenient text form like `"30"` included — a `1e300`
   would overflow the §6 watchdog timer and leave the step with no limit), `retries` when it reads as an integer
   1–10; anything else is the absent value, so a hand-edited `retries: 500` or `timeout: .inf`
-  never makes the engine do what the UI does not show. On disk and in the §8
+  never makes the engine do what the UI does not show. The same cap is enforced where a value
+  enters: the §8 validator (so every §19 save), and the §11 editor's Timeout field refuse a
+  `timeout` above one year (2026-10-31: a validated `9000h` saved without the key and ran
+  under the default while the editor had accepted it). On disk and in the §8
   manifest the keys are spelled `no_timeout`, `infinite_retries` (§5 yaml is snake_case); the
   API serialization is `noTimeout`, `infiniteRetries` in every payload that carries steps,
   the §19 draft-job result included. On **input** the §19 step model accepts either

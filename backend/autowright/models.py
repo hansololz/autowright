@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from .marketplace import MAX_ENTRIES
+from .storage import STEP_TIMEOUT_MAX_S
 
 # A recurring pattern below: `field: StrictX = None` (no `| None` in the
 # annotation). Pydantic never validates defaults, so this reads "the key may be
@@ -39,7 +40,10 @@ class StepIn(BaseModel):
     code: StrictStr = None
     description: StrictStr = None
     file: StrictStr | None = None
-    timeout: StrictInt = None
+    # §4.1 (2026-10-31): the same one-year cap the stored timeout is read
+    # back under is enforced where the value enters, so it never saves and
+    # then silently reads as absent.
+    timeout: StrictInt = Field(default=None, le=STEP_TIMEOUT_MAX_S)
     retries: StrictInt = None
     no_timeout: bool | None = Field(default=None, alias="noTimeout")
     infinite_retries: bool | None = Field(default=None, alias="infiniteRetries")

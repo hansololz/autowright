@@ -611,8 +611,13 @@ the update bullets below).
   0. A reset already in flight, or a quit flight, native quit or update install in
      progress, refuses the call (`{ error }`) — one stop-and-quit at a time, in either
      direction (2026-10-30: a second `reset-all` ran a second delete concurrently);
-     symmetrically `update-install` refuses `{ error }` while a reset, a quit flight or a
-     native quit is in progress (2026-10-30 second sweep: only the reset side checked).
+     symmetrically `update-install` refuses `{ error }` while a reset, a quit flight, a
+     native quit or a pending quit question (the renderer has been asked and not yet
+     answered) is in progress (2026-10-30 second sweep: only the reset side checked), and
+     `quit-all` refuses `{ error }` and an OS quit is ignored with a log line while an
+     update install is in flight (2026-10-31: a quit during the install's backend stop ran
+     a second `service stop` beside it, and a refused install's resume could re-register
+     the backend in the middle of the quit).
   1. The same live-execution gate as quit-all/update-install (busy → `{ busy: true }`,
      nothing touched; an unreachable backend counts as idle — but a reachable backend that
      answers the probe with anything but 200 (a stale token, a 500 mid-execution) is
@@ -835,7 +840,10 @@ the update bullets below).
     download alone is replaceable — or when electron-updater's never-reset
     `squirrelDownloadedUpdate` flag is set with no version recorded; a download while an
     `update-install` is in flight is refused with the same line, since re-entering
-    `MacUpdater` closes the proxy Squirrel is reading from, 2026-10-30 second sweep). The Squirrel hand-off moves to `update-install`:
+    `MacUpdater` closes the proxy Squirrel is reading from, 2026-10-30 second sweep; and so
+    is one while a given-up staging's late listener is still armed, since a staging that
+    completes after the give-up would otherwise be the bundle installed under the About
+    row's newer version number, 2026-10-31). The Squirrel hand-off moves to `update-install`:
     behind the gate, the darwin handler subscribes to Electron's `autoUpdater`
     `update-downloaded`/`error` events, calls its `checkForUpdates()` (Squirrel fetches
     the zip from the proxy, verifies the code signature, stages the bundle) and only then

@@ -131,7 +131,10 @@ export default function ExecutionsList() {
   // §7 presets are relative: a 60 s clock tick re-renders the page while a
   // preset is applied, so a row that ages out of "Last hour" leaves the page
   // left open. Custom ranges and Any time never move, so they need no tick.
-  const [, setClockTick] = useState(0)
+  // The tick also refetches the filtered rows up to the current page (the
+  // fetch effect below lists it), so the total and the pager age out with
+  // them (§7, 2026-10-31).
+  const [clockTick, setClockTick] = useState(0)
   const presetActive = filters.time.preset !== 'any' && filters.time.preset !== 'custom'
   useEffect(() => {
     if (!presetActive) return
@@ -204,9 +207,11 @@ export default function ExecutionsList() {
   // Finished section to fetch for.
   // §7 reset rule: only a filter-dimension change resets fetched pages and the
   // page number. A §19 reconnect alone keeps both: unfiltered, the absorption
-  // and the execution.deleted ring below keep the set honest; under a filter
-  // it refetches every row up to the current page (an execution.deleted
-  // missed while the socket was down is never replayed).
+  // and the execution.deleted ring below keep the set honest on the first
+  // page (the window itself); under a filter, or unfiltered past the first
+  // page, it refetches every row up to the current page (an execution.deleted
+  // missed while the socket was down is never replayed; §19, 2026-10-31: a
+  // deeper unfiltered page refetches too).
   const [firstFetchDone, setFirstFetchDone] = useState(true)
   const fetchedFilterKey = useRef<string | null>(null)
   useEffect(() => {
@@ -218,7 +223,11 @@ export default function ExecutionsList() {
       setServerTotal(null)
       setPage(0)
     }
-    if (!filtered || !hasFinished) {
+    // Unfiltered, only a reconnect on a deeper page fetches: the query is the
+    // same `status: finished` shape Next pages with, so the landed rows merge
+    // with the window the same way. A filter change resets the page to 0, so
+    // clearing the filters never fetches.
+    if (!hasFinished || (!filtered && (filterChanged || page === 0))) {
       setFirstFetchDone(true)
       return
     }
@@ -230,7 +239,7 @@ export default function ExecutionsList() {
       setServerTotal(r.total)
     }, (err: Error) => { if (n === fetchSeq.current) showToast(err.message) })
       .finally(() => { if (n === fetchSeq.current) setFirstFetchDone(true) })
-  }, [filterKey, reconnects])
+  }, [filterKey, reconnects, clockTick])
 
   // §7 absorption: a /state refresh replaces the window wholesale, and new
   // finishes push old rows out of it — a row that leaves the window

@@ -15,11 +15,16 @@ from collections.abc import Callable
 
 import uvicorn
 
-from . import __version__, api, paths, platform
-from .listeners import Listeners
-from .scheduler import Scheduler
-from .storage import store
-from .yamlio import atomic_write_text
+# §17 (2026-10-31): fastapi >= 0.143 imports OpenTelemetry's propagator setup
+# at import time, and an unknown OTEL_PROPAGATORS name there raises ValueError
+# before the app exists; cleared before the API import below.
+os.environ.pop("OTEL_PROPAGATORS", None)
+
+from . import __version__, api, paths, platform  # noqa: E402
+from .listeners import Listeners  # noqa: E402
+from .scheduler import Scheduler  # noqa: E402
+from .storage import store  # noqa: E402
+from .yamlio import atomic_write_text  # noqa: E402
 
 
 LOG_CAP = 100 * 1024 * 1024  # §5 log size cap

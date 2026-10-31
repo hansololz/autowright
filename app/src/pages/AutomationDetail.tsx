@@ -580,8 +580,10 @@ export default function AutomationDetail() {
       {/* recent executions */}
       <RecentExecutions execs={recentExecs} />
 
-      {/* memory (§9.2 MEMORY card, snapshots per §6.3) */}
-      <MemoryCard auto={auto} executing={executing} />
+      {/* memory (§9.2 MEMORY card, snapshots per §6.3); keyed by automation
+          like its siblings so a pending toggle never carries across a
+          detail → detail navigation (2026-10-31) */}
+      <MemoryCard key={`memory:${auto.id}`} auto={auto} executing={executing} />
 
       {/* steps */}
       {steps.length > 0 && (

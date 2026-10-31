@@ -32,7 +32,6 @@
     "PageTitle": "src/ui.tsx",
     "Modal": "src/ui.tsx",
     "ConfirmModal": "src/ui.tsx",
-    "PyCode": "src/ui.tsx",
     "Markdown": "src/result.tsx",
     "SpecMarkdown": "src/result.tsx"
   }

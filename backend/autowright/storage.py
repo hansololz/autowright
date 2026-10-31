@@ -25,7 +25,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +141,41 @@ def strip_param_values(params: list | None) -> list[dict]:
     from the merged API shape carries."""
     return [{k: v for k, v in p.items() if k not in PARAM_VALUE_KEYS}
             for p in params or [] if isinstance(p, dict)]
+
+
+def normalize_param_definitions(params: list[dict]) -> list[dict]:
+    """§5 migrate-on-load (§21 2026-10-31): a stored version's param
+    definitions as the §8 validator now accepts them. An entry without a
+    non-empty text `name` is dropped, a `default` that is present, not null
+    and not a value of its `kind` becomes the kind's empty default (what
+    `param_default` already resolved it to at runtime), and a non-text
+    `label` / `help` is removed. `kind` is kept as is. Nothing is written
+    here: the normalized form lands on disk with the next save."""
+    out = []
+    for p in params:
+        name = p.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        entry = {k: v for k, v in p.items()
+                 if not (k in ("label", "help") and not isinstance(v, str))}
+        default = entry.get("default")
+        if default is not None and not _kind_ok(entry.get("kind"), default):
+            entry["default"] = param_default({k: v for k, v in entry.items() if k != "default"})
+        out.append(entry)
+    return out
+
+
+def scalar_text(v: Any) -> str | None:
+    """§5 the one text-form rule for a hand-edited scalar field (2026-10-31):
+    a date or datetime its ISO form, a boolean `true` / `false`, a number its
+    digits, text as is; anything else (None, a list, a mapping) is None."""
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float, str)):
+        return v if isinstance(v, str) else str(v)
+    return None
 
 
 def exec_version_label(h: dict) -> str:
@@ -396,7 +431,10 @@ def param_default(d: dict) -> Any:
     if kind == "toggle":
         return False
     if kind == "number":
-        return d.get("min", 0)
+        # §5 export (2026-10-31): a `min` that is not itself a number
+        # (`min: 1e3` is YAML text) falls back to 0, never a text default.
+        minimum = d.get("min", 0)
+        return minimum if _kind_ok("number", minimum) else 0
     if kind == "list":
         return []
     if kind == "kv":
@@ -985,22 +1023,20 @@ class Store:
             # §5: directory name IS the id — a mismatch means hand-edited disk.
             log.warning("automation dir %s doesn't match its id %r — skipping it at load", d, top["id"])
             return None
-        # §5: a hand-edited name of the wrong type — a plain scalar loads as
-        # its text form (`name: 2024` → "2024"), anything else (missing,
-        # empty, a bool, a list or mapping) as the directory name, so a
-        # name-collision check or rename never raises on it.
-        name = top.get("name")
-        if isinstance(name, (int, float)) and not isinstance(name, bool):
-            name = str(name)
-        elif not isinstance(name, str) or not name:
-            name = d.name
-        # §5 (2026-10-30 second sweep): a description that is not text loads
-        # as its text form for a plain scalar (a YAML date `2026-10-30` →
-        # "2026-10-30"), "" otherwise (missing, a list, a mapping).
-        description = top.get("description")
-        if not isinstance(description, str):
-            description = "" if description is None or isinstance(description, (list, dict)) \
-                else str(description)
+        # §5: a hand-edited name or description of the wrong type loads
+        # through the one text-form rule (2026-10-31): a plain scalar as its
+        # text form (`name: 2026-10-30` → "2026-10-30", `true` → "true"), and
+        # anything else (missing, empty, a list or mapping) as the directory
+        # name / "", so a name-collision check, rename or the §19 event
+        # stream never raises on it.
+        name = scalar_text(top.get("name")) or d.name
+        description = scalar_text(top.get("description")) or ""
+        # §5 (2026-10-31): wrong-type list and mapping fields load empty, and
+        # the lists keep only their text entries, so the §19 serialization
+        # never raises on them.
+        enabled_agents = top.get("enabled_agents")
+        allowed_secrets = top.get("allowed_secrets")
+        param_values = top.get("param_values")
         a: dict = {
             "id": top["id"],
             "name": name,
@@ -1008,10 +1044,12 @@ class Store:
             "current_version": int(top.get("current_version", 1)),
             "triggers": self._load_triggers(top.get("triggers", []) or []),
             "agent_id": top.get("agent_id"),
-            "enabled_agents": top.get("enabled_agents", []) or [],
-            "allowed_secrets": top.get("allowed_secrets", []) or [],
+            "enabled_agents": [x for x in enabled_agents if isinstance(x, str)]
+                              if isinstance(enabled_agents, list) else [],
+            "allowed_secrets": [x for x in allowed_secrets if isinstance(x, str)]
+                               if isinstance(allowed_secrets, list) else [],
             "memory_snapshots": self._load_snapshot_settings(top.get("memory_snapshots")),
-            "param_values": top.get("param_values", {}) or {},
+            "param_values": param_values if isinstance(param_values, dict) else {},
             # §6 concurrency settings — absent keys default to one at a time
             # and skip-on-busy; a hand-edited out-of-range value is clamped
             # rather than dropping the automation at load.
@@ -1303,7 +1341,9 @@ class Store:
             # §21.4 (2026-09-05): versions written by v0.6.0–v0.8.3 carry resolved
             # value keys inside the definitions — strip at the read seam, never
             # rewrite on disk (a frozen old version is never written again).
-            "params": strip_param_values(meta.get("params")),
+            # §21.4 (2026-10-31): the definitions are also normalized to what
+            # the §8 validator accepts, so the next editor save is not a 422.
+            "params": normalize_param_definitions(strip_param_values(meta.get("params"))),
             "packages": self._mapping_entries(meta.get("packages", []) or [], vd, "packages"),
             "steps": steps,
             "spec": md_to_blocks(spec_md),
@@ -1933,8 +1973,11 @@ class Store:
                 log.warning("version folder %s is a crash orphan above v%s, set aside as %s",
                             vd, a["current_version"], target.name)
             except OSError as exc:
-                # The numbering below still skips a folder it cannot move.
+                # §5 (2026-10-31): never number past an orphan that stays under
+                # its `vN` name, which the next load would adopt as a real
+                # version; the save or restore is refused with this error.
                 log.warning("couldn't set aside crash-orphan version folder %s: %s", vd, exc)
+                raise
 
     def save_new_version(self, a: dict, ver: dict) -> int:
         """§4.4/§5: write vN+1 folder, then flip the pointer atomically."""
@@ -3321,7 +3364,9 @@ class Store:
                     log.warning("snapshot %s has id %r in snapshot.yaml — skipping it",
                                 name, meta["id"])
                 elif self._snapshot_meta_ok(meta):
-                    out.append(meta)
+                    # §5 (2026-10-31): an unquoted `created_at` loads as a YAML
+                    # date; coerced to text so the sort never mixes types.
+                    out.append({**meta, "created_at": str(meta["created_at"])})
                 elif meta:
                     log.warning("snapshot %s has unusable snapshot.yaml — skipping it", name)
         out.sort(key=lambda m: m.get("created_at") or "", reverse=True)

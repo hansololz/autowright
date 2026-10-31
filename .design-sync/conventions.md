@@ -36,7 +36,7 @@ succeeded / failed / cancelled / skipped / interrupted / none), `MiniBadge`, `Ch
 `BtnPrimary`, `BtnGhost`, `Toggle`, `RadioRing`, `Spinner`, `ProgressBar`, `GreenCheck`,
 `Eyebrow`, `CountPill`, `PageTitle`, `MenuRow` (+ `menuStyle` object for the popover container),
 `Modal` (children is a render function `(close) => …`), `ConfirmModal`, `Toast`, `FailureNotice`,
-`Markdown`, `SpecMarkdown`, `PyCode`. Each component's `.d.ts` is the exact prop contract and its
+`Markdown`, `SpecMarkdown`. Each component's `.d.ts` is the exact prop contract and its
 `.prompt.md` shows a verified composition — read them before use. Status colors and labels only
 ever come from `Badge`; never hand-roll a status chip.
 

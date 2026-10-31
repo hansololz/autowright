@@ -316,7 +316,8 @@ function bundledPython() {
 // that stranger as our backend would mark ensure-backend 'ok', never install
 // the service, and wait forever. Only a /health body that identifies this app
 // (`app === 'Autowright'`), carries a non-empty version and answers with the
-// backend.json pid (when one is recorded) counts as healthy; non-JSON, a
+// backend.json pid counts as healthy (the pid is compared only when both
+// /health and backend.json carry one, 2026-10-31); non-JSON, a
 // foreign app name, an empty version and another Autowright backend's pid all
 // read as unreachable, so ensure-backend installs (or version-syncs) instead
 // of hanging.
@@ -1712,6 +1713,10 @@ async function runDownloadUpdate() {
   // §3: a download while an install is in flight is refused; on macOS
   // re-entering MacUpdater closes the proxy Squirrel is reading from.
   if (installInFlight) return { error: RESTART_TO_FINISH_ERROR }
+  // §3 (2026-10-31): so is one while a given-up staging's late listener is
+  // still armed; a staging that lands after the give-up would otherwise be the
+  // bundle installed under the About row's newer version number.
+  if (lateStagingListener) return { error: RESTART_TO_FINISH_ERROR }
   try {
     const updater = genericUpdater()
     const result = await updater.checkForUpdates()
@@ -1813,8 +1818,9 @@ let installInFlight = null
 
 function installUpdate() {
   if (!installInFlight) {
-    // §3 step 0, the other direction: one stop-and-quit at a time.
-    if (resetInFlight || quitFlight || nativeQuitPending) {
+    // §3 step 0, the other direction: one stop-and-quit at a time. A pending
+    // quit question (the renderer was asked, quitAskTimer armed) counts too.
+    if (resetInFlight || quitFlight || nativeQuitPending || quitAskTimer) {
       return Promise.resolve({ error: STOP_AND_QUIT_IN_PROGRESS_ERROR })
     }
     installInFlight = runInstallUpdate().finally(() => { installInFlight = null })
@@ -2013,6 +2019,9 @@ function stopAndQuit(force, label) {
 
 ipcMain.handle('quit-all', async (_e, opts) => {
   if (resetInFlight) return { error: 'a reset is in flight' }
+  // §3 step 0 (2026-10-31): a quit during the install's backend stop would run
+  // a second `service stop` beside it.
+  if (installInFlight) return { error: STOP_AND_QUIT_IN_PROGRESS_ERROR }
   // §3: the native busy dialog is up — this flight is already asking. The
   // late call answers success: the quit is going ahead, and an error here
   // would only toast over the renderer's overlay.
@@ -2031,6 +2040,12 @@ ipcMain.handle('quit-all', async (_e, opts) => {
 function quitForGood() {
   if (resetInFlight) {
     appLog('quit: ignored — a reset is in flight')
+    return
+  }
+  // §3 step 0 (2026-10-31): an OS quit during an update install is ignored; a
+  // refused install's resume could re-register the backend mid-quit.
+  if (installInFlight) {
+    appLog('quit: ignored, an update install is in flight')
     return
   }
   // Already underway — a repeated Cmd+Q, or one while the native busy

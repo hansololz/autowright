@@ -398,7 +398,10 @@ half-save). The next save (or restore) that numbers a new version first renames 
 such folder aside to `vN.orphan` (`vN.orphan-2`, … when taken): once a later save has
 numbered past it, nothing would distinguish it from a real version at the next load, so it
 must never stay under a `vN` name below the pointer (2026-10-30 second sweep); the startup
-walk's `v<digits>` match ignores the renamed folder, and deleting the automation removes it. A save whose pointer flip fails rolls
+walk's `v<digits>` match ignores the renamed folder, and deleting the automation removes it.
+A set-aside that fails (an `OSError`: a Windows sharing violation, permissions) refuses the
+save or restore with that error instead of numbering past the orphan, which the next load
+would otherwise adopt as a real version (2026-10-31). A save whose pointer flip fails rolls
 back everything the attempt touched: the version leaves memory and disk, and the
 automation's cached reference ids (memoized per version number) are dropped too, so the
 next save — which reuses the same number — is judged on its own content, never on the
@@ -531,7 +534,9 @@ a parameter `default` arriving by import is type-checked against its kind with t
 param-values check (null allowed); the §8 validator applies the same check to a drafted
 default (2026-10-30 second sweep), and export writes each param's `default` as
 `param_default` resolves it — the stored default when it matches its kind, the kind default
-otherwise — so an automation saved before that rule still exports instead of being refused
+otherwise, and for a number param a `min` fallback only when `min` is itself a number
+(2026-10-31: `min: 1e3` is YAML text, and export's own check then refused it) — so an
+automation saved before that rule still exports instead of being refused
 with "repair the automation first". Step file names and the §5 archive/export file names also reject the Windows
 device stems (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any case, with
 any extension) — on Windows a write to `nul.py` goes to the device and seals over empty
@@ -543,7 +548,21 @@ is not text loads as its text form when it is a plain scalar (`name: 2024` → "
 as the directory name otherwise (missing, empty, a list or mapping), so a name-collision
 check or rename never raises on it; a `description` that is not text loads the same way — its
 text form for a plain scalar, `""` otherwise (2026-10-30 second sweep: `description:
-2026-10-30` is a YAML date, which the §19 event stream could not serialize).
+2026-10-30` is a YAML date, which the §19 event stream could not serialize). One text-form
+rule serves both fields: a date or datetime its ISO form, a boolean `true` / `false`, a
+number its digits (2026-10-31: `name: 2026-10-30` fell to the directory name and
+`description: true` loaded as Python's `True`). The same seam covers the list and mapping
+fields: `enabled_agents` and `allowed_secrets` that are not lists load as empty lists and
+keep only their text entries, `param_values` that is not a mapping loads as empty, and a
+stored version's `params` entry without a text `name` is dropped, so none of them can raise
+inside the §19 serialization and turn every `GET /state` into a 500 (2026-10-31). A stored
+version's param definitions are also normalized at load (migrate-on-load, §21 2026-10-31):
+a `default` that is present, not null and not a value of the param's `kind` becomes the
+kind's empty default (what `param_default` already resolved it to at runtime), and a
+`label` / `help` that is not text is dropped, so a version saved before the §8 validator
+checked those (2026-10-30 second sweep) still saves from the §11 editor and pushes from a
+§20 workdir instead of answering 422 on every step edit, lock or move; the written shape
+only changes when that version is next saved.
 **Relocated data path, unreachable (decided):** only the default data path is ever created
 on first run. A relocated `dataPath` whose `executions/` directory isn't there at load (an
 unmounted volume, a typo) opens an **in-memory index for the session** and never re-creates
@@ -560,7 +579,8 @@ read seam (an unquoted ISO timestamp loads from YAML as a `datetime`, and one su
 would otherwise make the latest-execution comparison raise at boot), and an unparsable one
 still skips the record with a warning. Every other YAML the store reads on a request path — a
 version's `automation.yaml`, the draft slot's `test.yaml` and container files, a snapshot's
-`snapshot.yaml` — goes through the same mapping-or-default seam: a file whose root is not a
+`snapshot.yaml` (whose `created_at` is coerced to text like the execution fields, 2026-10-31:
+an unquoted date made the listing's sort raise) — goes through the same mapping-or-default seam: a file whose root is not a
 mapping loads as absent with a warning, never as an attribute error that turns every
 `GET /state` into a 500. A snapshot whose `snapshot.yaml` `id` differs from its directory
 name is damaged and skipped by the listing (§6.3: the id *is* the dir name), so the prune
@@ -903,8 +923,10 @@ answers 422 and writes nothing):
   `infinite_retries` — an archive can't land a step no drafting call could produce. Step
   filenames obey the §8 `NN-name.py` rule in listed order (`01-…`, `02-…`), like every other
   ingest path — otherwise the app's own save endpoints would 422 on a version import created.
-  Step code must parse as Python (`ast.parse`) — a syntactically broken step answers 422
-  naming the step, for the same reason: the app's own save endpoints would reject the
+  Step code must parse as Python (`ast.parse`) — a step it cannot parse for any reason (a
+  syntax error, a null byte, an expression nested deeply enough to raise `MemoryError` or
+  `RecursionError`, 2026-10-31: only `SyntaxError` was caught at this seam and a crafted
+  archive answered 500) answers 422 naming the step, for the same reason: the app's own save endpoints would reject the
   user's first edit of code they never wrote. The §6.2 import allowlist is deliberately
   **not** enforced at import — the curated list can grow within one format version, so an
   archive exported by a newer app must keep importing on an older one; the §6.1 executor's

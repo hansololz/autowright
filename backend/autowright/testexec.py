@@ -207,8 +207,8 @@ def _finish_before_run(engine: Engine, h: dict, reason: str) -> None:
 
 
 class _CopyAborted(Exception):
-    """Raised from the memory copy's `ignore` hook when the test was stopped
-    (a cancel or the shutdown sweep) while the copy ran."""
+    """Raised from the memory copy's `ignore` or `copy_function` hook when the
+    test was stopped (a cancel or the shutdown sweep) while the copy ran."""
 
 
 def _copy_stop_check(state: dict):
@@ -219,6 +219,17 @@ def _copy_stop_check(state: dict):
             raise _CopyAborted()
         return []
     return check
+
+
+def _copy_file_stop_check(state: dict):
+    """A `shutil.copytree` copy_function: `shutil.copy2`, after the same stop
+    check as `_copy_stop_check`, so a cancel lands per file and a flat
+    directory of many large files stops promptly too (§19, 2026-10-31)."""
+    def copy(source: str, destination: str) -> str:
+        if state.get("cancel") or state.get("shutdown"):
+            raise _CopyAborted()
+        return shutil.copy2(source, destination)
+    return copy
 
 
 def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, h: dict,
@@ -263,9 +274,11 @@ def _set_up_and_run(engine: Engine, auto: dict | None, shadow: dict, ver: dict, 
         if auto is not None and not src.exists():
             src = store.auto_dir(auto) / "memory"
         if src.exists():
-            # §19: the copy re-checks for a stop at each directory it enters,
-            # so a cancel during a large memory copy stops it promptly.
-            shutil.copytree(src, mem_dir, ignore=_copy_stop_check(state))
+            # §19: the copy re-checks for a stop at each directory it enters
+            # and before each file it copies (2026-10-31), so a cancel during
+            # a large memory copy stops it promptly.
+            shutil.copytree(src, mem_dir, ignore=_copy_stop_check(state),
+                            copy_function=_copy_file_stop_check(state))
         mem_dir.mkdir(parents=True, exist_ok=True)
         (dbase / "test.yaml").unlink(missing_ok=True)  # wiped at each test start (§5)
 

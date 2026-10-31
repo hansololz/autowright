@@ -100,7 +100,7 @@ def _hand_edit_name(store, a, value):
     (1.5, "1.5"),
     (["a"], None),
     ({"k": "v"}, None),
-    (True, None),
+    (True, "true"),  # §5 2026-10-31: a boolean is a plain scalar, its text form is true/false
     ("", None),
     (None, None),
 ])

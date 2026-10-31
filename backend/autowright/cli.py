@@ -234,7 +234,10 @@ def find_execution(c: Client, ref: str | None) -> dict:
     # The count comes from the envelope's `total`, never from the capped page:
     # a `limit` the server honored would otherwise report "and 30 more" for a
     # history of thousands.
-    shown = [f"{e['id'][:8]} ({e['automationName']}, {e['status']}, {e['started']})"
+    # §20 untrusted text on the console (2026-10-31): an imported archive
+    # names the automation.
+    shown = [f"{e['id'][:8]} ({_console_safe(e['automationName'])}, {e['status']}, "
+             f"{e['started']})"
              for e in execs[:20]]
     more = f", … and {total - len(shown)} more" if total > len(shown) else ""
     sys.exit(f"no unique execution matches {ref!r} — "
@@ -977,7 +980,9 @@ def cmd_automation_list(c: Client, args) -> None:
         # §20 needs-fixing parity: mark rows whose §4.1 problems list is
         # non-empty; `automation show` prints the labels.
         fixing = "needs fixing  " if a.get("problems") else ""
-        print(f"{a['name']:<32} {chip:<16} {a['lastStatus']:<11} "
+        # §20 untrusted text on the console (2026-10-31): an imported archive
+        # names the automation.
+        print(f"{_console_safe(a['name']):<32} {chip:<16} {a['lastStatus']:<11} "
               f"{fixing}{a.get('resultChip') or ''}  [{a['id'][:8]}]")
 
 
@@ -987,9 +992,11 @@ def cmd_automation_show(c: Client, args) -> None:
     if args.json:
         _pjson(full)
         return
-    print(f"{full['name']} [{full['id']}] — {full['specMeta']}")
+    # §20 untrusted text on the console (2026-10-31): the names, description
+    # and trigger labels below come from what an imported archive carried.
+    print(f"{_console_safe(full['name'])} [{full['id']}] — {full['specMeta']}")
     if full.get("description"):
-        print(full["description"])
+        print(_console_safe(full["description"]))
     print(f"status: {full['lastStatus']}"
           + (f" · {full['resultChip']}" if full.get("resultChip") else ""))
     if full.get("problems"):
@@ -998,9 +1005,9 @@ def cmd_automation_show(c: Client, args) -> None:
         for p in full["problems"]:
             print(f"  {p['label']}")
     for i, t in enumerate(full.get("triggers") or [], 1):
-        print(f"trigger {i}: {t['label']}" + _trigger_marks(t))
+        print(f"trigger {i}: {_console_safe(t['label'])}" + _trigger_marks(t))
     for p in full.get("params") or []:
-        print(f"param {p['name']} ({p['kind']}): {_param_value(p)!r}")
+        print(f"param {_console_safe(p['name'])} ({p['kind']}): {_param_value(p)!r}")
     # §4.1: step secrets entries carry ids — resolve to names for display
     # (a dangling id shows its short prefix).
     secret_names = {s["id"]: s["name"] for s in c.req("GET", "/secrets")} \
@@ -1017,7 +1024,7 @@ def cmd_automation_show(c: Client, args) -> None:
             tags += " locked"
         elif s.get("authoredBy") == "user":
             tags += " user-written"
-        print(f"step {i}: {s['name']}{tags}")
+        print(f"step {i}: {_console_safe(s['name'])}{tags}")
     vs = [f"v{v['version']}" for v in full.get("versions") or []]
     if vs:
         print(f"history: {', '.join(vs)}")
@@ -1051,12 +1058,16 @@ def cmd_automation_push(c: Client, args) -> None:
     # disk, which is what the pulled_from rewrite after the save starts from.
     manifest_on_disk = files.get("manifest.yaml")
     baseline = _pulled_baseline(files)
-    # §20: the baseline and the stale check apply only when `pulled_id` names
-    # the automation being pushed; a workdir pulled from another automation
-    # is judged as a manifest without the `pulled_*` keys.
+    # §20: the `pulled_from` baseline, `pulled_triggers` and the stale check
+    # apply only when `pulled_id` names the automation being pushed; a workdir
+    # pulled from another automation is judged as a manifest without those
+    # keys, while `pulled_name` / `pulled_description` still gate the identity
+    # fields (2026-10-31: dropping them made every such push try to rename
+    # the target to the source's name).
     foreign = "pulled_id" in baseline and baseline["pulled_id"] != a["id"]
     if foreign:
-        baseline = {}
+        baseline = {k: v for k, v in baseline.items()
+                    if k not in ("pulled_from", "pulled_triggers")}
     # §20: a stale workdir does not push silently - versions saved in the app
     # since the pull would be overwritten unseen. A manifest without the key
     # is never refused on this ground.

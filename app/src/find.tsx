@@ -158,8 +158,14 @@ export function FindBar({ find, label }: { find: Find; label: string }) {
         autoFocus
         onChange={(e) => find.setQuery(e.target.value)}
         onKeyDown={(e) => {
-          // An IME composition owns Enter and Escape until it ends.
-          if (e.nativeEvent.isComposing) return
+          // An IME composition owns Enter and Escape until it ends. §14
+          // (2026-10-31): the field still stops a composing Enter / Escape
+          // so the step modal's own Escape never sees it.
+          if (e.nativeEvent.isComposing) {
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation() }
+            else if (e.key === 'Escape') e.stopPropagation()
+            return
+          }
           if (e.key === 'Enter') { e.preventDefault(); find.step(e.shiftKey ? -1 : 1) }
           else if (e.key === 'Escape') { e.stopPropagation(); find.close() }
           else if (e.key.startsWith('Arrow')) e.stopPropagation()

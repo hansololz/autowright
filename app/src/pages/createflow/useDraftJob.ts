@@ -659,6 +659,9 @@ export function useDraftJob(d: DraftJobDeps) {
       // handler marks touched when it actually changes the draft.
       chatBusy: true, genStage: null, genDetail: null, genEvents: [], genStageStartedAt: null,
     }))
+    // §11 (2026-10-31): a start request that fails after the cancel adds
+    // nothing, neither a failed block nor an error line
+    const sendGen = cancelGenRef.current
     try {
       await startJob({
         mode: 'chat', text: request, ...(isEdit && auto ? { automationId: auto.id } : {}),
@@ -667,6 +670,7 @@ export function useDraftJob(d: DraftJobDeps) {
         enabledAgents: rev.enabledAgents, allowedSecrets: rev.allowedSecrets,
       }, makeChatHandlers({ request, hadSnap, planEntryId: null }))
     } catch (e) {
+      if (cancelGenRef.current !== sendGen) return
       // §11: the live block shown since send settles as failed above the
       // error entry, never vanishing.
       setRev((r) => r && ({
@@ -795,6 +799,9 @@ export function useDraftJob(d: DraftJobDeps) {
       // §11 draft undo: a repair amend replaces the spec outside the undo flow
       ...(specOverride ? { spec: specOverride, dirty: true, undo: null } : {}),
     })
+    // §11 (2026-10-31): a start request that fails after the cancel adds
+    // nothing (the cancel already flushed the held chips)
+    const syncGen = cancelGenRef.current
     try {
       await startJob({
         mode: 'sync', ...(isEdit && auto ? { automationId: auto.id } : {}),
@@ -802,6 +809,7 @@ export function useDraftJob(d: DraftJobDeps) {
         enabledAgents: rev.enabledAgents, allowedSecrets: rev.allowedSecrets,
       }, makeSyncHandlers())
     } catch (e) {
+      if (cancelGenRef.current !== syncGen) return
       // §11 hold-and-flush: a POST that never became a job is an outcome too —
       // the held chips land like on any other failure.
       // §11: the live sync block settles as failed first, never vanishing.

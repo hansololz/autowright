@@ -322,6 +322,16 @@ version that writes the new shape, and the oldest shape still read.
   above `current_version` is ignored at load (§5 crash orphan). (d) Agent and secret rows
   skipped at load are written back raw by the next save (§4.7/§4.8). None changes a
   written shape; nothing to migrate.
+- **2026-10-31 - audit batch.** (a) A stored version's param definitions are normalized
+  at load (§5): a `default` that is not a value of its `kind` becomes the kind's empty
+  default, the value `param_default` already resolved it to at runtime, and a non-text
+  `label` / `help` is dropped. Read-side migration: nothing is rewritten at load, the
+  normalized form is written by the next save, and every release's loader reads both forms;
+  without it a version saved before the 2026-10-30 validator rule answered 422 on every
+  save. Fixture: a v0.13.2-shape version with a mismatched default and a boolean label.
+  (b) Wrong-type top-level `enabled_agents` / `allowed_secrets` / `param_values`, a param
+  entry without a name, and a date-typed snapshot `created_at` are coerced at load (§5);
+  no written shape changes.
 - **2026-10-30 (second sweep) - audit batch.** (a) A crash-orphan version folder (§5,
   above `current_version`) is renamed aside to `vN.orphan` by the next save that numbers
   past it; older releases' loaders never match that name (their `v<digits>` match), nothing

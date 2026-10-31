@@ -273,7 +273,11 @@ migrate-on-load migration so data written by released versions keeps loading (§
   keepAwake assertion plus the per-execution hold; `platform/darwin.py` delegates here).
   Further modules: `main.py` (backend entry point, `python -m autowright.main` — bind localhost,
   write `backend.json` per the §3 bind-before-publish handshake, start the scheduler, serve the
-  API), `installer.py` (§19 real harness installers + sign-in help), `packages.py` (§6.2
+  API; it clears `OTEL_PROPAGATORS` from its own environment before importing the API, since
+  fastapi ≥ 0.143 imports OpenTelemetry's propagator setup at import time and an unknown
+  propagator name there raises before the app exists, 2026-10-31: a developer's instrumented
+  shell or a persistent user variable on Linux/Windows would otherwise stop the backend from
+  booting), `installer.py` (§19 real harness installers + sign-in help), `packages.py` (§6.2
   declared-package check/ensure/upgrade via the bundled interpreter's pip), `execdb.py`
   (`executions.db`, the §5 list/filter index over execution headers — any `SCHEMA_VERSION` bump
   drops the table and startup's yaml reconcile rebuilds it), `reqlog.py` (§5 per-request log

@@ -300,10 +300,14 @@ whatever the user is drafting in the app. Files:
   skipped as deleted-in-app included, so the next push skips them again instead of reading
   them as new lines (2026-10-30 second sweep: a schedule deleted in the app came back on
   the second push) — so a later in-app edit is judged against the workdir's last push, not
-  its last pull. The baseline and the stale check below apply only when `pulled_id` names
-  the automation being pushed; a workdir pulled from one automation and pushed into another
-  is judged as a manifest without the keys (2026-10-30 second sweep). A
-  manifest without those keys (an older pull) keeps the earlier behaviour. `pulled_id` is what `validate` and `push` send as the §19 `automationId`,
+  its last pull. The `pulled_from` baseline, `pulled_triggers` and the stale check below apply only when
+  `pulled_id` names the automation being pushed; a workdir pulled from one automation and
+  pushed into another is judged as a manifest without those keys (2026-10-30 second sweep),
+  while `pulled_name` / `pulled_description` still gate the identity fields — a name or
+  description equal to the one pulled is the source automation's, not an edit, and is not
+  applied to the target (2026-10-31: dropping the whole baseline made every such push try
+  to rename the target to the source's name, a 422 while the source exists). A
+  manifest without those keys (an older pull) keeps the earlier behaviour. `pulled_id` is what `validate` sends as the §19 `automationId`; `push` posts to the automation it resolved and uses `pulled_id` only to decide whether the baseline applies (2026-10-31 wording),
   and the §5.1 unresolved-reference map rides the local pre-pass too, so their lines
   match a refused save word for word. **A stale workdir does not push silently** (2026-10-28): when
   `pulled_from` is below the automation's current version — versions were saved in the app
@@ -321,7 +325,10 @@ whatever the user is drafting in the app. Files:
 - `notes.md` — the version's §4.1 notes document, when nonempty; push saves it verbatim.
 
 **Untrusted text on the console** (2026-10-30): whatever the CLI prints from a catalog, an
-archive or a marketplace entry (`marketplace list`, `marketplace audit`, catalog fields) has
+archive or a marketplace entry (`marketplace list`, `marketplace audit`, catalog fields, and
+the automation names, descriptions, step and param names and trigger labels that
+`automation list` / `automation show` and the execution candidate lists print, since an
+imported archive names them, 2026-10-31) has
 its control characters (C0 other than newline and tab, DEL, and the C1 range) shown as
 `\xNN` escapes and ANSI
 escape sequences stripped, so a lone carriage return or an escape sequence cannot hide a

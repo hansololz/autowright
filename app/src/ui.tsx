@@ -139,7 +139,7 @@ export function useTip(title?: string) {
  * is the longer, plain-language line, not the name. The hover lives on a
  * same-size wrapper span, and a disabled button drops its pointer events, so
  * the tip still shows while the button is disabled (a disabled button swallows
- * hover itself) — Save before an edit, the chevrons at the ends. */
+ * hover itself): Save before an edit, Move up / Move down at the ends. */
 export function TipButton({ tip, children, style, disabled, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { tip?: string }) {
   const t = useTip(tip)
   return (
@@ -677,7 +677,8 @@ export function usePopover(): [boolean, (v: boolean) => void, React.RefObject<HT
     // there, so a modal behind the menu stays open. The §9.3 developer-log
     // overlay owns Escape while it is open, as it does over a Modal.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || devlogOverlayOpen()) return
+      // §14 (2026-10-31): an IME composition owns Escape until it ends
+      if (e.key !== 'Escape' || e.isComposing || devlogOverlayOpen()) return
       e.stopPropagation()
       setOpen(false)
     }
@@ -826,10 +827,14 @@ export function stepTimeoutText(s: Step): string {
 export const STEP_TIMEOUT_DEFAULT_LABEL = stepTimeoutLabel({ name: '' } as Step)
 export const STEP_TIMEOUT_HINT = 'Use seconds, or 90s / 15m / 2h, or no limit'
 export type StepTimeoutParse = { timeout?: number; noTimeout?: true }
+/** §4.1 cap on a step's `timeout` (one year in seconds, 2026-10-31): a parsed
+ * value above it is invalid input, like any other. */
+export const STEP_TIMEOUT_MAX_S = 31536000
 /** §11 timeout field grammar: blank → neither key (engine default); "no limit"
  * / "none" / "unlimited" → noTimeout; a positive whole number, bare (seconds)
  * or with an s / sec / m / min / h / hr suffix → timeout in seconds. null when
- * the text is none of these (0, 1.5m, 1h30m, "30 minutes"). */
+ * the text is none of these (0, 1.5m, 1h30m, "30 minutes") or the value is
+ * above the §4.1 one-year cap (9000h). */
 export function parseStepTimeout(text: string): StepTimeoutParse | null {
   const t = text.trim().toLowerCase().replace(/\s+/g, ' ')
   if (t === '') return {}
@@ -839,7 +844,7 @@ export function parseStepTimeout(text: string): StepTimeoutParse | null {
   const n = Number(m[1])
   const unit = m[2]?.[0]
   const secs = unit === 'h' ? n * 3600 : unit === 'm' ? n * 60 : n
-  if (!Number.isSafeInteger(secs) || secs <= 0) return null
+  if (!Number.isSafeInteger(secs) || secs <= 0 || secs > STEP_TIMEOUT_MAX_S) return null
   return { timeout: secs }
 }
 /** The parse as a comparable key — invalid text is its own key, so a bad value
@@ -1135,6 +1140,8 @@ export function Modal({ onClose, width, zIndex = 60, cardStyle, role = 'dialog',
       // §9.3: the developer-log overlay owns Escape while it is open — a modal
       // open underneath yields to it, like every other shortcut.
       if (devlogOverlayOpen()) return
+      // §14 (2026-10-31): an IME composition owns Escape until it ends
+      if (e.isComposing) return
       if (topModal()?.id !== entry.id) return
       if (e.key === 'Escape') escape()
       else if (e.key === 'Tab') trap(e)

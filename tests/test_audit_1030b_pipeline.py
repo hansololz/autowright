@@ -113,18 +113,25 @@ def test_a_parser_overflow_is_never_raised(monkeypatch, exc):
     assert "01-a.py: couldn't be parsed (too deeply nested)" in errors
 
 
-# ---------- P4 · §8 rule 9: an unquoted iMessage handle keeps its `+` ----------
+# ---------- P4 · §8 rule 9: an unquoted iMessage handle is an error ----------
+# Flipped 2026-10-31: the int read-back became a repair-round error (§8 "an
+# integer handle is a repair-round error"); pinned again in
+# test_audit_1031_pipeline.py.
 
-def test_an_integer_imessage_handle_reads_as_plus_digits():
+IMESSAGE_QUOTE_HINT = ('triggers: an iMessage handle must be quoted text like '
+                       '"+15551234567" (an unquoted number loses its +)')
+
+
+def test_an_integer_imessage_handle_is_an_error():
     entry, error = parse_dialect_entry({"imessage": 15551234567}, cron_source="spec")
-    assert error is None
-    assert entry["from"] == "+15551234567"
+    assert entry is None
+    assert error == IMESSAGE_QUOTE_HINT
 
 
-def test_an_unquoted_imessage_handle_in_a_manifest_validates():
+def test_an_unquoted_imessage_handle_in_a_manifest_is_an_error():
     draft, errors = _validate(extra="triggers:\n  - imessage: +15551234567")
-    assert errors == []
-    assert draft["triggers"][0]["from"] == "+15551234567"
+    assert draft == {}
+    assert IMESSAGE_QUOTE_HINT in errors
 
 
 # ---------- P5 · §8 rules 7 and 9: flags are booleans, never truthiness ----------

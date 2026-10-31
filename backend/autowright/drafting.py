@@ -37,7 +37,7 @@ from . import harness, packages as pkglib, paths, reqlog, triggers as triggerlib
 from .events import hub
 from .imports_check import ALLOWED_IMPORTS, disallowed_imports
 from .specmd import blocks_to_md, md_to_blocks
-from .storage import SECRET_REF_RE, _kind_ok, step_json
+from .storage import SECRET_REF_RE, STEP_TIMEOUT_MAX_S, _kind_ok, step_json
 from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.drafting")
@@ -1025,10 +1025,12 @@ def parse_dialect_entry(t, allow_time: bool = False, *,
         return entry, None
     if "imessage" in keys and keys <= {"imessage", "pattern"}:
         handle = t["imessage"]
-        # §8: an unquoted +15551234567 reads as a YAML integer and loses its
-        # `+`, so an integer handle is read back as `+<digits>`.
-        if isinstance(handle, int) and not isinstance(handle, bool) and handle >= 0:
-            handle = f"+{handle}"
+        # §8 (2026-10-31): an unquoted +15551234567 reads as a YAML integer and
+        # loses its `+` (and any leading zero), so an integer handle is a
+        # repair-round error, never read back.
+        if isinstance(handle, int) and not isinstance(handle, bool):
+            return None, ('triggers: an iMessage handle must be quoted text like '
+                          '"+15551234567" (an unquoted number loses its +)')
         entry = {"kind": "imessage",
                  "from": triggerlib.normalize_handle(str(handle)), "enabled": True,
                  **({"pattern": str(t["pattern"]).strip()} if t.get("pattern") else {})}
@@ -1465,6 +1467,10 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
                 errors.append(f"param {p['name']}: `{field}` must be text{hint}")
         if p["kind"] == "number" and "min" not in p:
             p["min"] = 0
+        elif p["kind"] == "number" and not _kind_ok("number", p["min"]):
+            # §8 rule 3 (2026-10-31): a number param's `min` must itself be a
+            # number (a quoted "1e3" or text would reach the editor's bound).
+            errors.append(f"param {p['name']}: `min` must be a number")
         # §8: unknown param keys drop silently (unlike unknown manifest and
         # step keys, which are errors) — the entry is normalized to the §4.2
         # definition fields, so a stray key never reaches a version file or
@@ -1649,6 +1655,11 @@ def validate_steps(files: dict[str, str], grants: dict | None = None,
         t = s.get("timeout")
         if t is not None and (isinstance(t, bool) or not isinstance(t, int) or t <= 0):
             errors.append(f"step {s.get('name')}: timeout must be a positive integer of seconds")
+        elif t is not None and t > STEP_TIMEOUT_MAX_S:
+            # §8 rule 8 (2026-10-31): at most one year, the §4.1 cap a stored
+            # timeout is read back under.
+            errors.append(f"step {s.get('name')}: timeout must be at most one year "
+                          f"({STEP_TIMEOUT_MAX_S} seconds)")
         nt = s.get("no_timeout")
         if nt is not None and not isinstance(nt, bool):
             errors.append(f"step {s.get('name')}: no_timeout must be true")

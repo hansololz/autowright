@@ -582,7 +582,10 @@ bottom:
   automations, so Apply is in view without scrolling; past that the card scrolls inside
   (the `Modal` primitive's scroller). Presets are
   **relative**: they resolve against the clock at every use (each fetch, each render of the
-  client-side predicate), so "Last 24 hours" stays honest on a page left open. Custom range
+  client-side predicate), so "Last 24 hours" stays honest on a page left open; the once-a-minute
+  re-render that ages rows out also refetches the filtered rows up to the current page, so the
+  total and the pager age out with them (2026-10-31: the readout kept counting rows the page
+  no longer showed). Custom range
   reveals two native `type="datetime-local"` fields (`.ad-input compact mono`, `colorScheme:
   dark`, 16 px apart under FROM / TO eyebrows, local time) below the grid; either may stay
   empty (an open end), both empty reads as any time, and a FROM later than TO disables

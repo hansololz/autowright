@@ -724,6 +724,12 @@ def _validate(z: zipfile.ZipFile) -> dict:
         except SyntaxError as e:
             raise TransferError(f"step {excerpt(s['file'])} isn't valid Python "
                                 f"(line {e.lineno}): {e.msg}") from None
+        except (ValueError, MemoryError, RecursionError):
+            # §5.1 (2026-10-31): code the parser can't handle for any other
+            # reason (a NUL byte, nesting deep enough to exhaust the parser)
+            # is the same 422, never a 500.
+            raise TransferError(f"step {excerpt(s['file'])} isn't valid Python "
+                                "(it couldn't be parsed)") from None
         entry = {"file": s["file"], "name": s["name"],
                  "description": s.get("description") or "", "code": code}
         # A scalar where a list belongs (hand-written YAML `agents: 5`) must

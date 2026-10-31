@@ -265,19 +265,22 @@ describe('H3 a reconnect alone keeps the Executions page (§7)', () => {
 
   beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(NOW) })
 
-  it('unfiltered: page 2 survives a reconnect with no fetch', async () => {
+  it('unfiltered: page 1 reconnects with no fetch, page 2 survives a reconnect with a refetch', async () => {
     const all = rows(120)
     mockedApi.listExecutions.mockImplementation(keyset(all))
     storeMod.useStore.setState({ page: 'executions', executions: all.slice(0, 50), executionsTotal: 120 })
     render(<ExecutionsList />)
+    // §19 (2026-10-31): the unfiltered first page is the snapshot's own window
+    act(() => { storeMod.useStore.setState({ reconnects: 1 }) })
+    await act(async () => {})
+    expect(mockedApi.listExecutions).not.toHaveBeenCalled()
     fireEvent.click(pagerButton('Next'))
     await waitFor(() => expect(within(pager()).getByText('51–100 of 120')).toBeTruthy())
-    const calls = mockedApi.listExecutions.mock.calls.length
-    act(() => { storeMod.useStore.setState({ reconnects: 1 }) })
+    act(() => { storeMod.useStore.setState({ reconnects: 2 }) })
     await act(async () => {})
     expect(within(pager()).getByText('51–100 of 120')).toBeTruthy()
     expect(screen.getByText('e-0050')).toBeTruthy()
-    expect(mockedApi.listExecutions.mock.calls.length).toBe(calls)
+    expect(mockedApi.listExecutions).toHaveBeenLastCalledWith({ status: 'finished', limit: 100 })
   })
 
   it('filtered: a reconnect refetches up to the current page and stays on it', async () => {

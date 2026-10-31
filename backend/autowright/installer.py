@@ -102,6 +102,11 @@ def start(provider_id: str, publish) -> bool:
         _phases[provider_id] = gen
 
     def emit(line: str | None = None, percent: int | None = None) -> None:
+        # §19 (2026-10-31): the publish stays inside the lock with the
+        # generation check, so a give-up (which swaps the token under this
+        # lock) can't land between the check and the publish and leave a
+        # progress event streaming after the terminal one. The publish callback
+        # is the hub's fan-out, which never takes this lock.
         with _lock:
             snap = _jobs.get(provider_id)
             if snap is None or snap.get("_gen") != gen:
@@ -112,7 +117,7 @@ def start(provider_id: str, publish) -> bool:
                 snap["line"] = line
             if percent is not None:
                 snap["percent"] = percent
-        publish(line=line, percent=percent, done=False)
+            publish(line=line, percent=percent, done=False)
 
     def run() -> None:
         # Wall-clock cap on the whole install, not just its phases: a phase
