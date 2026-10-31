@@ -306,11 +306,10 @@ export function appendNewStep(steps: Step[]): Step[] {
   }]
 }
 
-// What a hand edit did, so the editor page lands the matching thread chip
-// (and, for a remembered edit, the spec's build rule).
+// What a hand edit did, so the editor page lands the matching thread chip.
 export type StepEditEffect =
   | { kind: 'add' }
-  | { kind: 'save'; rule: { name: string; text: string } | null }
+  | { kind: 'save' }
   | { kind: 'lock'; name: string; locked: boolean }
   | { kind: 'move'; name: string; from: number; to: number } // 1-based positions
   | { kind: 'remove' }
@@ -338,14 +337,12 @@ export type StepEdit = {
   // §11 the retries field's text: a bare number, 'infinite', or '' (= 0)
   retries: string
   orig: { code: string; name: string; description: string; timeout: string; retries: string }
-  remember: boolean
-  rule: string
   errors: string[]
   saving: boolean
 }
 const beginEdit = (s: Step): StepEdit => {
   const orig = { code: s.code || '', name: s.name, description: s.description || '', timeout: stepTimeoutText(s), retries: stepRetriesText(s) }
-  return { ...orig, orig, remember: false, rule: '', errors: [], saving: false }
+  return { ...orig, orig, errors: [], saving: false }
 }
 // §11: name and description compare trimmed (Save trims them), so a
 // whitespace-only change is nothing to save and never flips authorship; the
@@ -354,9 +351,6 @@ const stepEditDirty = (e: StepEdit) =>
   e.code !== e.orig.code || e.name.trim() !== e.orig.name.trim() || e.description.trim() !== e.orig.description.trim()
   || stepTimeoutKey(e.timeout) !== stepTimeoutKey(e.orig.timeout)
   || stepRetriesKey(e.retries) !== stepRetriesKey(e.orig.retries)
-// §11 close guard: a typed remember rule is unsaved work too (the guard asks
-// before dropping it), though it never enables Save on its own
-const stepEditUnsaved = (e: StepEdit) => stepEditDirty(e) || (e.remember && e.rule.trim() !== '')
 // §11: a timeout or retries value the field grammar rejects blocks Save (inline hint)
 const stepEditTimeoutBad = (e: StepEdit) => parseStepTimeout(e.timeout) === null
 const stepEditRetriesBad = (e: StepEdit) => parseStepRetries(e.retries) === null
@@ -817,16 +811,14 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   const find = useFind(lines, scroller, i)
   const editActive = !!edit
   const dirty = !!edit && stepEditDirty(edit)
-  const unsaved = !!edit && stepEditUnsaved(edit)
+  const unsaved = !!edit && stepEditDirty(edit)
   const dirtyRef = useRef(unsaved)
   dirtyRef.current = unsaved
   // §11: while Save's validation is in flight the editor is inert
   const saving = !!edit && edit.saving
   const savingRef = useRef(saving)
   savingRef.current = saving
-  // §11: a checked remember box with a blank rule disables Save
-  const ruleMissing = !!edit && edit.remember && !edit.rule.trim()
-  const canSave = !!edit && dirty && !!edit.name.trim() && !ruleMissing && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving && !editing?.disabled
+  const canSave = !!edit && dirty && !!edit.name.trim() && !stepEditTimeoutBad(edit) && !stepEditRetriesBad(edit) && !edit.saving && !editing?.disabled
   // §11: the discard confirm (Cancel returns to view mode, ✕ / Escape /
   // backdrop close the modal) and the Remove step confirm
   const [discardAsk, setDiscardAsk] = useState<null | 'cancel' | 'close'>(null)
@@ -1038,36 +1030,13 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
                     />
                   </div>
                 </ScrollArea>
-                <div style={{ ...DOC_FOOTER_STYLE, gap: 12 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none', cursor: 'pointer', color: 'var(--text-2)' }}>
-                    <input
-                      type="checkbox"
-                      checked={edit.remember}
-                      disabled={saving}
-                      onChange={(e) => { const remember = e.target.checked; setEdit((x) => x && { ...x, remember }) }}
-                    />
-                    Remember this edit as a build rule
-                  </label>
-                  {edit.remember ? (
-                    <>
-                    <input
-                      className="ad-input compact"
-                      aria-label="Build rule"
-                      placeholder="What every future sync must keep — one line"
-                      value={edit.rule}
-                      disabled={saving}
-                      onChange={(e) => { const rule = e.target.value; setEdit((x) => x && { ...x, rule }) }}
-                      style={{ flex: 1, minWidth: 0, padding: '4px 9px' }}
-                    />
-                    {ruleMissing && (
-                      <span style={{ flex: 'none', font: "400 11px/1.4 var(--sans)", color: 'var(--red-text)' }}>Write the rule to remember</span>
-                    )}
-                    </>
-                  ) : (
-                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      Saving keeps the workflow in sync — a hand edit changes the steps, not the spec.
-                    </span>
-                  )}
+                {/* §11 the 36 px hint footer: what Save does to the workflow's
+                    sync state, and nothing else (Cancel / Save sit in the
+                    navigator row's edit header) */}
+                <div style={DOC_FOOTER_STYLE}>
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    Saving changes only this step. The spec and notes are unaffected.
+                  </span>
                 </div>
               </>
             ) : (
@@ -1177,7 +1146,7 @@ export function StepList(props: StepListProps) {
     // click, so it only consumes the marker here, never re-applies it.
     if (ownChange.current) { ownChange.current = null; return }
     const e = editRef.current
-    if (e && stepEditUnsaved(e)) { setSwapAsk(true); return }
+    if (e && stepEditDirty(e)) { setSwapAsk(true); return }
     if (e) dropEdit()
     setViewing(null)
   }, [steps]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1235,8 +1204,6 @@ export function StepList(props: StepListProps) {
     const e = editRef.current
     // §11: Save honours the modal's disabled state like every other control
     if (!editing || editing.disabled || current === null || !e || !stepEditDirty(e) || !e.name.trim() || stepEditTimeoutBad(e) || stepEditRetriesBad(e) || e.saving || modalClosing.current) return
-    // §11: a checked remember box needs its rule
-    if (e.remember && !e.rule.trim()) return
     const at = current
     const base = stepsRef.current
     const name = e.name.trim()
@@ -1269,8 +1236,7 @@ export function StepList(props: StepListProps) {
       setEditState((x) => x && { ...x, saving: false, errors })
       return
     }
-    const rule = e.remember ? { name, text: e.rule.trim() } : null
-    commit(next, at, 'drop', { kind: 'save', rule })
+    commit(next, at, 'drop', { kind: 'save' })
   }
   const toggleLock = () => {
     // §11: inert while Save's validation is in flight (the keyboard path —

@@ -1,10 +1,9 @@
 // Regression tests for the 2026-10-30 step-editor audit (src/steps.tsx,
 // src/pages/createflow/DocEditorModal.tsx, src/pages/createflow/model.ts):
 // a move during an edit leaves focus and the caret alone, the keyboard move
-// is inert while Save validates, Save honours the disabled state, a typed
-// remember rule counts as unsaved work for the close guard, ⌘S yields to the
-// developer-log overlay, a mid-edit move clears stale validation lines, and
-// the sync chip ignores the envelope's newline framing.
+// is inert while Save validates, Save honours the disabled state, ⌘S yields
+// to the developer-log overlay, a mid-edit move clears stale validation lines,
+// and the sync chip ignores the envelope's newline framing.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useRef, useState } from 'react'
@@ -110,37 +109,6 @@ describe('U3: Save is disabled while the modal is disabled', () => {
     expect(saveButton().disabled).toBe(false)
     rerender(<Harness initial={[step()]} disabled />)
     expect(saveButton().disabled).toBe(true)
-  })
-})
-
-describe('U4: a typed remember rule is unsaved work for the close guard', () => {
-  it('Cancel and Escape ask before dropping a rule; Save stays disabled', async () => {
-    render(<Harness initial={[step()]} />)
-    openRow('Fetch page')
-    fireEvent.click(screen.getByLabelText('Edit script'))
-    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
-    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: 'keep the log line' } })
-    expect(saveButton().disabled).toBe(true)
-    fireEvent.click(within(dialog()).getByText('Cancel'))
-    let ask = screen.getByRole('alertdialog')
-    expect(ask.getAttribute('aria-label')).toBe('Discard your script edits?')
-    fireEvent.click(within(ask).getByText('Cancel'))
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    expect((screen.getByLabelText('Build rule') as HTMLInputElement).value).toBe('keep the log line')
-    fireEvent.keyDown(document, { key: 'Escape' })
-    ask = screen.getByRole('alertdialog')
-    expect(ask.getAttribute('aria-label')).toBe('Discard your script edits?')
-  })
-
-  it('a blank rule asks nothing', async () => {
-    render(<Harness initial={[step()]} />)
-    openRow('Fetch page')
-    fireEvent.click(screen.getByLabelText('Edit script'))
-    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
-    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: '   ' } })
-    fireEvent.click(within(dialog()).getByText('Cancel'))
-    expect(screen.queryByRole('alertdialog')).toBeNull()
-    await waitFor(() => expect(screen.queryByTestId('step-editor')).toBeNull())
   })
 })
 

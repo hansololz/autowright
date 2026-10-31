@@ -55,17 +55,13 @@ export const blockerLine = (b: Blocker) => `${b.reason.trim()} — ${b.fix.trim(
 // is its reason with the workaround in the fix's place.
 export const workaroundBlocker = (b: Blocker): Blocker => ({ ...b, fix: b.workaround ?? '' })
 
-// §11 step editing "Remember this edit as a build rule": one bullet under the
-// spec's `## Build rules` section. The Build rules section rule: the first
-// `h2` whose text is "Build rules" (case-insensitive, a trailing colon
-// ignored) holds the editor's bullets, which end at the next heading of the
-// same or higher level; created at the end of the spec when absent.
+// §11 the Build rules section rule (Remember this order): the first `h2`
+// whose text is "Build rules" (case-insensitive, a trailing colon ignored)
+// holds the editor's bullets, which end at the next heading of the same or
+// higher level; created at the end of the spec when absent.
 const BUILD_RULES_TITLE = 'Build rules'
 function isBuildRulesHeading(b: SpecBlock): boolean {
   return b.kind === 'h2' && b.text.trim().replace(/:$/, '').trimEnd().toLowerCase() === BUILD_RULES_TITLE.toLowerCase()
-}
-export function appendBuildRule(spec: SpecBlock[], stepName: string, text: string): SpecBlock[] {
-  return appendUnderSection(spec, BUILD_RULES_TITLE, [{ kind: 'li', text: `Step "${stepName}": ${text}` }], isBuildRulesHeading)
 }
 
 // §11 "Remember this order": the draft's step order as the one `Step order:`

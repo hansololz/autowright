@@ -1,11 +1,10 @@
 // Component tests for the §11 step editing surface on the shared step list
 // (src/steps.tsx): the §4.1 lock / authorship marks on rows and in the
 // step-script modal, Add step, the modal's edit mode (validate-then-apply
-// Save, the blank-name gate, the remember-as-build-rule control, the close
-// guard), Move up / Move down, the lock toggle, and Remove step's confirm +
-// renumbering. The list renders under a small harness that owns the steps the
-// way the editor page does, so each hand edit's commit flows back in as new
-// props.
+// Save, the blank-name gate, the close guard), Move up / Move down, the lock
+// toggle, and Remove step's confirm + renumbering. The list renders under a
+// small harness that owns the steps the way the editor page does, so each hand
+// edit's commit flows back in as new props.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useRef, useState } from 'react'
@@ -114,11 +113,11 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 2: New step')
     expect(editor().value).toContain('from autowright import params, log, result')
     expect(saveButton().disabled).toBe(true)
-    // edit mode: flipping and find are inert, the footer reads the in-sync hint
+    // edit mode: flipping and find are inert, the footer reads the scope hint
     fireEvent.keyDown(document, { key: 'ArrowLeft' })
     expect(dialog().getAttribute('aria-label')).toBe('Step 2 of 2: New step')
     expect((screen.getByLabelText('Find in script') as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByText('Saving keeps the workflow in sync — a hand edit changes the steps, not the spec.')).toBeTruthy()
+    expect(screen.getByText('Saving changes only this step. The spec and notes are unaffected.')).toBeTruthy()
   })
 
   it('Save validates the edited steps: errors render inline and keep the text; a clean pass applies and returns to view mode', async () => {
@@ -145,7 +144,7 @@ describe('step editing in the step-script modal (§11)', () => {
     fireEvent.click(saveButton())
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
     const [next, effect] = onCommit.mock.calls[0]
-    expect(effect).toEqual({ kind: 'save', rule: null })
+    expect(effect).toEqual({ kind: 'save' })
     // the file keeps its name — a rename never renames the script
     expect(next[0]).toMatchObject({ code: 'log("b")', name: 'Fetch the page', file: '01-fetch.py', authoredBy: 'user' })
     // back to view mode on the same step
@@ -164,36 +163,6 @@ describe('step editing in the step-script modal (§11)', () => {
     expect(screen.getByText('Give the step a name')).toBeTruthy()
   })
 
-  it('the remember box swaps the hint for the rule field and Save hands the rule over', async () => {
-    const onCommit = vi.fn()
-    render(<Harness initial={[step()]} onCommit={onCommit} />)
-    openRow('Fetch page')
-    fireEvent.click(screen.getByLabelText('Edit script'))
-    fireEvent.change(editor(), { target: { value: 'log("kept")' } })
-    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
-    const rule = screen.getByPlaceholderText('What every future sync must keep — one line')
-    fireEvent.change(rule, { target: { value: 'keep the log line' } })
-    fireEvent.click(saveButton())
-    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1))
-    expect(onCommit.mock.calls[0][1]).toEqual({ kind: 'save', rule: { name: 'Fetch page', text: 'keep the log line' } })
-  })
-
-  it('a checked remember box with a blank rule disables Save with the inline hint', () => {
-    render(<Harness initial={[step()]} />)
-    openRow('Fetch page')
-    fireEvent.click(screen.getByLabelText('Edit script'))
-    fireEvent.change(editor(), { target: { value: 'log("c")' } })
-    expect(saveButton().disabled).toBe(false)
-    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
-    expect(saveButton().disabled).toBe(true)
-    expect(screen.getByText('Write the rule to remember')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: '   ' } })
-    expect(saveButton().disabled).toBe(true)
-    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: 'keep it' } })
-    expect(saveButton().disabled).toBe(false)
-    expect(screen.queryByText('Write the rule to remember')).toBeNull()
-  })
-
   it('while Save validates, the editor is inert: typing is impossible and Escape asks nothing; the edit commits when validation answers', async () => {
     let answer: (errors: string[]) => void = () => {}
     const validate = vi.fn(() => new Promise<string[]>((resolve) => { answer = resolve }))
@@ -204,14 +173,13 @@ describe('step editing in the step-script modal (§11)', () => {
     fireEvent.change(editor(), { target: { value: 'log("saved")' } })
     fireEvent.click(saveButton())
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(1))
-    // the text fields turn read-only and busy (focus survives), the checkbox,
-    // Cancel and ✕ are disabled; Save shows its busy state
+    // the text fields turn read-only and busy (focus survives), Cancel and ✕
+    // are disabled; Save shows its busy state
     for (const field of [editor(), screen.getByLabelText('Step name'), screen.getByLabelText('Step description')] as HTMLInputElement[]) {
       expect(field.readOnly).toBe(true)
       expect(field.disabled).toBe(false)
       expect(field.getAttribute('aria-busy')).toBe('true')
     }
-    expect((screen.getByLabelText('Remember this edit as a build rule') as HTMLInputElement).disabled).toBe(true)
     expect((within(dialog()).getByText('Cancel') as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByLabelText('Close') as HTMLButtonElement).disabled).toBe(true)
     const busy = within(dialog()).getByText('Saving…') as HTMLButtonElement

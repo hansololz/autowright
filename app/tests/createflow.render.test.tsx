@@ -928,22 +928,18 @@ describe('CreateFlow blockers thread entries (§11)', () => {
 describe('CreateFlow step editing (§11)', () => {
   beforeEach(armPendingPoll)
 
-  it('a remembered hand edit validates the draft, applies, adds the build rule and stays in sync', async () => {
+  it('a hand edit validates the draft, applies, and stays in sync', async () => {
     render(<CreateFlow />)
     expect(screen.getByText('In sync with the spec.')).toBeTruthy()
     fireEvent.click(screen.getAllByText('Fetch pages')[0])
     fireEvent.click(screen.getByLabelText('Edit script'))
     fireEvent.change(screen.getByTestId('step-editor'), { target: { value: 'log("b")' } })
-    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
-    fireEvent.change(screen.getByPlaceholderText('What every future sync must keep — one line'), { target: { value: 'log b, never a' } })
     fireEvent.click(within(screen.getByRole('dialog')).getByText('Save'))
-    await waitFor(() => expect(screen.getByText('Build rule added.')).toBeTruthy())
+    // the modal returns to view mode once the edit applies
+    await waitFor(() => expect(screen.queryByTestId('step-editor')).toBeNull())
     // §19 POST /validate-steps got the draft as it would be after the edit
     const sent = (mockedApi.validateSteps as ReturnType<typeof vi.fn>).mock.calls[0][0] as { steps: { code: string; authoredBy?: string }[] }
     expect(sent.steps[0]).toMatchObject({ code: 'log("b")', authoredBy: 'user' })
-    // the rule lands under a new "## Build rules" section of the spec
-    expect(screen.getAllByText('Build rules').length).toBeGreaterThan(0)
-    expect(bodyLi('Step "Fetch pages": log b, never a')).toBeTruthy()
     // a hand edit never marks the workflow out of sync, and the row now
     // carries the Written by you tag
     expect(screen.queryByText('Out of sync — steps still match the old spec.')).toBeNull()

@@ -4,9 +4,8 @@
 // src/pages/createflow/SectionCards.tsx): an IME composition owns Enter and
 // Escape in the title, description and find fields; a lost poll or a failed
 // POST settles the live block it was showing instead of removing it; the
-// document editor ignores Save and Escape during its exit; a sync swap asks
-// before dropping a typed remember rule; and a New secret lands in the store
-// list at once.
+// document editor ignores Save and Escape during its exit; and a New secret
+// lands in the store list at once.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { Agent, Automation, SecretMeta, Step } from '../src/types'
@@ -236,22 +235,6 @@ describe('U3: the document editor ignores Save and Escape during its exit', () =
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('alertdialog')).toBeNull()
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1))
-  })
-})
-
-describe('U4: a sync swap asks before dropping a typed remember rule', () => {
-  it('a rule with no field change raises the discard confirm', () => {
-    const editing: StepEditing = { disabled: false, validate: async () => [], commit: () => {}, addRef: { current: null } }
-    const first: Step[] = [{ name: 'Fetch', description: '', code: 'log("a")', file: '01-a.py' }]
-    const { rerender } = render(<StepList variant="editor" steps={first} availAgents={AGENTS} allAgents={AGENTS} secrets={[]} packages={[]} editing={editing} />)
-    fireEvent.click(screen.getAllByText('Fetch')[0])
-    fireEvent.click(screen.getByLabelText('Edit script'))
-    fireEvent.click(screen.getByLabelText('Remember this edit as a build rule'))
-    fireEvent.change(screen.getByLabelText('Build rule'), { target: { value: 'keep the log line' } })
-    const swapped: Step[] = [{ name: 'Fetch', description: '', code: 'log("synced")', file: '01-a.py' }]
-    rerender(<StepList variant="editor" steps={swapped} availAgents={AGENTS} allAgents={AGENTS} secrets={[]} packages={[]} editing={editing} />)
-    expect(screen.getByRole('alertdialog').getAttribute('aria-label')).toBe('Discard your script edits?')
-    expect((screen.getByLabelText('Build rule') as HTMLInputElement).value).toBe('keep the log line')
   })
 })
 

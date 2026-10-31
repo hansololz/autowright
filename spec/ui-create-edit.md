@@ -278,13 +278,20 @@ applies unchanged; the chat pane never collapses.
     followed by a remove never revives it (2026-10-28); the rule must name the steps as
     they were moved). It
     writes the draft's current step order as the one build rule `Step order: "<name
-    1>", "<name 2>", …` under the spec's `## Build rules` section (the Step editing
-    section rule) — replacing every existing `Step order:` bullet under any such
-    heading, appending under the first otherwise, creating the section at
-    the end of the spec when absent — without marking the workflow out of sync (the
-    Step editing remember rule), and lands the system chip "Build rule added."
+    1>", "<name 2>", …` under the spec's `## Build rules` section (**Build rules section
+    rule:** the first `h2` whose text is "Build rules", compared case-insensitively with
+    a trailing colon ignored, holds the editor's bullets, which end at the next heading
+    of the same or higher level; created at the end of the spec when absent) — replacing
+    every existing `Step order:` bullet under any such heading, appending under the
+    first otherwise — without marking the workflow out of sync (the rule describes what
+    the steps already do), and lands the system chip "Build rule added."
     (`fa-list-check`), which ends the offer. The rule is binding on every later sync by
     the §8 three-layer rule; the user prunes it in the spec editor like any spec text.
+    This is the editor's one shortcut for writing a build rule: the step editor's
+    "Remember this edit as a build rule" checkbox was removed on 2026-10-30 — a hand
+    edit is already kept by the §8 keep-`user` rule, the lock, and the "rewritten" chip
+    below, and a rule worth keeping is written into the spec by hand or asked for in
+    chat, where the user can see and prune it.
 - **Input:** pinned footer composer, two stacked rows. Top row: a full-width auto-growing
   textarea — the **ask-box pattern** referenced throughout this spec: sized to its
   content, never scrolls, no manual resize handle, Enter sends (the primary send path),
@@ -734,7 +741,7 @@ from the turn action row's pill styling) — a quiet **Dismiss** plus, by source
   draft step of that name — renamed or already unlocked — toasts "No locked step named
   '<step>' — unlock it in the step editor" and runs no sync) or **Remove
   the rule** for a `rule` blocker (deletes the first `li` block under the in-editor spec's
-  `## Build rules` section (the Step editing section rule) whose text contains the quoted
+  `## Build rules` section (the Build rules section rule, Remember this order above) whose text contains the quoted
   rule, case-insensitive — never a bullet elsewhere that happens to quote it; none
   matching → the toast "Rule not
   found — edit the spec by hand" and no sync; else the "Spec updated." system chip
@@ -1087,9 +1094,7 @@ editors enter with
     its toolbar, which this modal keeps as the reader strip), ⌘S / Ctrl+S saves; ✕, Escape and the
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
     changes you typed into the script editor will be lost.", confirm "Discard edits"),
-    while Cancel returns to view mode through the same guard. The guard counts a typed
-    remember rule as unsaved work too (a rule with no field change asks before it is
-    dropped, though it never enables Save on its own, 2026-10-30). ⌘S yields to the §9.3
+    while Cancel returns to view mode through the same guard. ⌘S yields to the §9.3
     developer-log overlay like every other shortcut. In edit mode the find
     button stays visible but disabled and the pen is hidden.
     The modal's frame height is fixed when it opens and never recomputed by an edit. The navigator's viewed row shows the step's **name** and
@@ -1128,16 +1133,18 @@ editors enter with
     value (`3` and `3 retries` are the same; `0` and blank are the same). Save replaces
     the pair the way it replaces the timeout pair: `retries: n`, or
     `infiniteRetries: true`, or neither. Beneath the
-    textarea a 36 px footer (the doc modal's hint style) carries a checkbox **Remember
-    this edit as a build rule** and, enabled by it, a text field (placeholder "What every
-    future sync must keep — one line"; checked with a blank field, Save disables with the
-    inline hint "Write the rule to remember"); unchecked, the footer reads "Saving keeps the
-    workflow in sync — a hand edit changes the steps, not the spec." (ellipsized, never
-    wrapped). The bar carries nothing else: Cancel and Save sit in the row's edit header
-    (above).
+    textarea a 36 px footer (the doc modal's hint style) reads "Saving changes only
+    this step. The spec and notes are unaffected." (ellipsized, never wrapped; until
+    2026-10-30 it read "Saving keeps the workflow in sync — a hand edit changes the
+    steps, not the spec.", which explained the mechanism rather than the consequence the
+    user is asking about — what else this Save touches) and carries nothing else: Cancel and Save sit in the row's edit header
+    (above). (Until 2026-10-30 the footer also held a "Remember this edit as a build
+    rule" checkbox and rule field that appended a `Step "<name>": <text>` bullet to the
+    spec's Build rules on Save; removed as a shortcut that duplicated the lock and the
+    spec — see Remember this order, §11 chat, for what remains.)
   - **Save** first asks the backend (`POST /validate-steps`, §19) with the draft's steps as
     they would be after the edit — while that answer is in flight the textarea, the name,
-    description and timeout fields, the remember controls, Cancel, ✕, Escape, the backdrop and ⌘S are
+    description, timeout and retries fields, Cancel, ✕, Escape, the backdrop and ⌘S are
     inert and Save shows its busy state, so nothing typed or decided meanwhile can be lost
     or saved against the user's intent, and a Save whose modal has started closing is
     dropped; validation errors render as a red `Notice` strip between
@@ -1147,16 +1154,8 @@ editors enter with
     dropped, or neither) to the draft step (the
     `file` keeps its suffix — a rename never renames the script), sets `authoredBy: user`
     (`locked` unchanged), marks the draft touched, clears the Draft-undo snapshot (a manual
-    save, like the documents'), and returns the pane to view mode on the same step. A
-    checked remember box appends `- Step "<name>": <text>` to the spec's `## Build rules`
-    section (**Build rules section rule:** the first `h2` whose text is "Build rules",
-    compared case-insensitively with a trailing colon ignored, holds the editor's bullets,
-    which end at the next heading of the same or higher level; created at the end of the
-    spec when absent) **without** marking the workflow
-    out of sync — the rule describes what the steps already do — and lands the system chip
-    "Build rule added." (`fa-list-check`). The remembered rule is binding on every later
-    sync by the §8 three-layer rule, and the user prunes it in the spec editor like any
-    spec text.
+    save, like the documents'), and returns the pane to view mode on the same step. Save
+    never touches the spec.
   - **Move up / Move down** swap the viewed step with its neighbour, renumber every
     `NN-` prefix from the new positions (the suffixes are kept, so a move never renames
     a script beyond its prefix), keep the moved step viewed at its new position, and
@@ -1241,8 +1240,8 @@ editors enter with
 - **Dirty gating** — any spec/chat-rewrite change marks the workflow out of sync and
   **blocks saving** until the BUILD card's "Sync now" button makes one §8 `sync` call
   regenerating the steps ("Steps synced with the spec — review them, then save."). Hand
-  edits to the steps (Step editing above) and the build rules the step editor's remember
-  controls write never do — they describe the implementation the steps already have. The
+  edits to the steps (Step editing above) and the `Step order:` rule Remember this order
+  writes never do — they describe the implementation the steps already have. The
   out-of-sync state persists with the draft (§4.4 `outOfSync`) and is restored on resume —
   keeping a locked draft and reopening it must not unlock Save around the gate. Grant
   toggles (agent enablement, secret allowance) never mark the workflow out of sync by

@@ -19,7 +19,7 @@ import {
   PopMenu, ScrollArea, Spinner, usePopover,
 } from '../ui'
 import {
-  type Rev, amendSpec, analyzeTestMessage, appendBuildRule, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
+  type Rev, amendSpec, analyzeTestMessage, blockerLine, chatSinceBoundary, holdsDraftEdits, instructionCache,
   jobStageTitle, loadVersionInto,
   newEntry, persistChat, removeRuleBlock, secretRefsOf, seedEmpty, seedFromAuto, seedFromPayload, serializeDraft,
   stepsFingerprint, testOutcomeStale, workaroundBlocker, upsertStepOrderRule,
@@ -877,8 +877,7 @@ export default function CreateFlow() {
   // §11 step editing: hand edits to the draft's steps. None marks the
   // workflow out of sync — they change the implementation, not the spec —
   // each marks the draft touched and clears the Draft-undo snapshot (a
-  // manual edit, like the documents' saves). A remembered edit adds its
-  // build rule to the spec without dirtying it either.
+  // manual edit, like the documents' saves).
   // §11 "Remember this order": the id of the move chip the offer hangs on and
   // the step names as they were moved — page state, never persisted; any
   // later entry, a step added, removed or renamed since (or a reload)
@@ -886,9 +885,6 @@ export default function CreateFlow() {
   const [orderOffer, setOrderOffer] = useState<{ chipId: string; names: string[] } | null>(null)
   const commitStepEdit = (steps: Step[], effect: StepEditEffect) => {
     const chips: ChatEntry[] = []
-    if (effect.kind === 'save' && effect.rule) {
-      chips.push(newEntry({ kind: 'system', icon: 'fa-list-check', text: 'Build rule added.' }))
-    }
     if (effect.kind === 'lock') {
       chips.push(newEntry({
         kind: 'system', icon: effect.locked ? 'fa-lock' : 'fa-lock-open',
@@ -907,7 +903,6 @@ export default function CreateFlow() {
     }
     setRev((r) => r && ({
       ...r, steps, touched: true, undo: null,
-      ...(effect.kind === 'save' && effect.rule ? { spec: appendBuildRule(r.spec, effect.rule.name, effect.rule.text) } : {}),
       ...(chips.length ? { chat: [...r.chat, ...chips] } : {}),
     }))
   }
