@@ -18,17 +18,17 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 beautifulsoup4==4.15.0
-certifi==2026.7.22
+certifi==2026.10.23
 # Linux only: keyring's freedesktop Secret Service backend (secretstorage +
 # jeepney, plus secretstorage's cryptography closure) — without these keyring
 # silently resolves the null backend and every secret read answers nothing;
 # without the pins a Linux build would resolve them unconstrained (SPEC §17
 # marker rule).
 cffi==2.1.1; sys_platform == "linux"
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
 click==8.5.0
-cryptography==50.0.1; sys_platform == "linux"
-fastapi==0.141.1
+cryptography==50.0.2; sys_platform == "linux"
+fastapi==0.162.0
 feedparser==6.0.14
 feedparser-sgmllib==2.1.0
 h11==0.16.0
@@ -41,12 +41,14 @@ jaraco.functools==4.6.0
 jeepney==0.9.0; sys_platform == "linux"
 keyring==25.7.0
 lxml==6.1.3
-more-itertools==11.1.0
+more-itertools==11.2.1
+# fastapi>=0.143 hard dependency (its auto-configured exporter is opt-in; only the API shim ships).
+opentelemetry-api==1.45.2
 packaging==26.3
-pycparser==3.0; sys_platform == "linux"
-pydantic==2.13.5
-pydantic-core==2.46.5
-python-dateutil==2.9.0.post0
+pycparser==3.12; sys_platform == "linux"
+pydantic==2.14.2
+pydantic-core==2.50.2
+python-dateutil==3.0.0
 # Windows only: keyring's Credential Locker backend needs it; without the pin
 # a Windows build would resolve it unconstrained (SPEC §17 marker rule).
 pywin32-ctypes==0.2.3; sys_platform == "win32"
@@ -54,13 +56,15 @@ PyYAML==6.0.3
 requests==2.34.2
 secretstorage==3.5.0; sys_platform == "linux"
 six==1.17.0
-soupsieve==2.9.2
-starlette==1.6.0
+soupsieve==3.0.4
+starlette==1.10.0
 typing-extensions==4.16.0
 typing-inspection==0.4.4
-# Windows only: no system IANA tz database exists there (python-build-standalone
-# ships none either) — zoneinfo needs this or no timezone resolves (SPEC §17).
-tzdata==2026.4; sys_platform == "win32"
+# Every platform: a hard dependency of python-dateutil>=3 (which no longer bundles
+# its own IANA data). On Windows it is also what makes zoneinfo work at all: no
+# system tz database exists there and python-build-standalone ships none, so
+# without it no timezone resolves (SPEC §17).
+tzdata==2026.6
 urllib3==2.8.0
-uvicorn==0.53.0
-websockets==17.1
+uvicorn==0.54.0
+websockets==17.4

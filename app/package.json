@@ -17,12 +17,12 @@
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "@fortawesome/fontawesome-free": "^7.3.1",
-    "electron-updater": "^6.8.9",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "electron-updater": "^6.8.11",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "zustand": "^5.0.15"
+    "zustand": "^5.0.16"
   },
   "desktopName": "ai.autowright.app.desktop",
   "build": {
@@ -113,14 +113,14 @@
     "@testing-library/react": "^16.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.1",
-    "@vitest/coverage-v8": "^5.0.1",
-    "electron": "44.4.3",
-    "electron-builder": "^26.15.3",
-    "happy-dom": "^20.14.5",
-    "playwright-core": "1.63.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "electron": "45.2.1",
+    "electron-builder": "^26.18.1",
+    "happy-dom": "^21.0.4",
+    "playwright-core": "1.64.1",
     "typescript": "^7.0.2",
-    "vite": "^8.3.0",
-    "vitest": "^5.0.1"
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
   }
 }

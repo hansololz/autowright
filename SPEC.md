@@ -293,12 +293,14 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `pyproject.toml` defines the `autowright` / `autowright-backend` entry points, and
   `constraints.txt` beside it pins the full runtime dependency closure (direct **and**
   transitive) at exact versions, so two §3 distributables built from one commit ship the
-  same packages; platform-conditional pins carry environment markers, under
-  `sys_platform == "win32"`: `pywin32-ctypes` (keyring's Windows Credential Locker backend)
-  and `tzdata` (the IANA timezone database — Windows has no system copy and
+  same packages; `tzdata` (the IANA timezone database) is pinned on every platform: it is a
+  hard dependency of `python-dateutil` 3.x, so pip installs it everywhere, and on Windows it
+  is also what makes `zoneinfo` work at all (Windows has no system copy and
   python-build-standalone ships none, so without it `zoneinfo` resolves no timezone at all
-  and every §4.3 timezone-bearing trigger fails validation); under
-  `sys_platform == "linux"`: `secretstorage` and `jeepney` (keyring's freedesktop Secret
+  and every §4.3 timezone-bearing trigger fails validation; `pyproject.toml` still declares
+  that Windows need directly); platform-conditional pins carry environment markers, under
+  `sys_platform == "win32"`: `pywin32-ctypes` (keyring's Windows Credential Locker backend);
+  under `sys_platform == "linux"`: `secretstorage` and `jeepney` (keyring's freedesktop Secret
   Service backend — without them keyring silently resolves the null backend and every
   secret read answers nothing);
   `prod.sh` passes it as `pip install -c` (§18).
