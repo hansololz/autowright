@@ -334,10 +334,15 @@ describe('step editing in the step-script modal (§11)', () => {
     expect((within(controls).getByLabelText('Move step down') as HTMLButtonElement).disabled).toBe(false)
     expect((within(controls).getByLabelText('Lock step') as HTMLButtonElement).disabled).toBe(false)
     expect((within(controls).getByLabelText('Remove step') as HTMLButtonElement).disabled).toBe(false)
-    // Cancel and Save sit in the same edit footer as the controls
-    const footer = controls.parentElement!
-    expect(within(footer).getByText('Cancel')).toBeTruthy()
-    expect(within(footer).getByText('Save')).toBeTruthy()
+    // Cancel and Save share the edit header with the controls, and the header
+    // is the top line of the row: it precedes the name field in the DOM
+    const header = controls.parentElement!
+    const actions = screen.getByTestId('step-edit-actions')
+    expect(actions.parentElement).toBe(header)
+    expect(within(actions).getByText('Cancel')).toBeTruthy()
+    expect(within(actions).getByText('Save')).toBeTruthy()
+    const name = within(dialog()).getByLabelText('Step name')
+    expect(header.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByLabelText('Edit script')).toBeNull()
   })
 

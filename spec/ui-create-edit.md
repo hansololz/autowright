@@ -1024,14 +1024,21 @@ editors enter with
     mode is otherwise a reader: no move, lock or remove control shows until an edit
     starts.
     In edit mode the pen goes (the name is an input) and the row gains an **edit
-    footer** between the fields and the tag row — under the Timeout row (and its hint),
-    above the chips, so the row reads fields, then what to do with them, then the
-    step's tags and facts: left, the `.ad-btn-icon` **step controls**
-    (`data-testid="step-controls"`, buttons flush, no gap, the cluster inset 7 px so the
-    glyphs align optically with the name); right, **Cancel** (`.ad-btn-text.dim.small`,
-    tip "Drop your edits and go back to the saved script") and **Save** (`.ad-btn-link.small`
-    accent link, disabled while nothing changed, "Saving…" while validating; tip "Save
-    your edits (⌘S)"), 10 px apart, flush with the row's right edge. The step controls,
+    header**: one line at the top of the row, where the title line sat, above the name
+    field (the row's number centres on the 26 px header, as it centres on the 18 px
+    title line in view mode), so the row reads what you can do, then the fields, then the step's tags and
+    facts. Left, the `.ad-btn-icon` **step controls** (`data-testid="step-controls"`,
+    buttons flush, no gap, the cluster inset 7 px so the glyphs align optically with the
+    fields); right, **Cancel** (`.ad-btn-text.dim.small`, tip "Drop your edits and go
+    back to the saved script") and **Save** (`.ad-btn-link.small` accent link, disabled
+    while nothing changed, "Saving…" while validating; tip "Save your edits (⌘S)"), 10 px
+    apart, flush with the row's right edge (`data-testid="step-edit-actions"`), 6 px
+    above the name field. The header is where the pen was, so the edit starts and ends
+    in one place, and every control that changes the step — the instant ones and the
+    pair that settles the fields — reads from one line before any field is touched
+    (David's placement, 2026-10-30: the five shared a footer between the fields and the
+    chips until then, and Cancel / Save briefly sat in the code pane's bottom bar the
+    same day). The step controls,
     in order: **Move up** (`fa-arrow-up`,
     aria-label "Move step up", tip "Run this step one position earlier (⌥↑)") and **Move
     down** (`fa-arrow-down`, "Move step down", tip "Run this step one position later
@@ -1076,7 +1083,8 @@ editors enter with
     reader's numbers point at the same line; the numbers stay unselectable. The find bar
     closes and ⌘F is inert; flipping steps (arrow keys, navigator rows) is
     disabled; the toolbar keeps the live line count; **Cancel** / **Save** sit in the
-    navigator row's edit footer (above), ⌘S / Ctrl+S saves; ✕, Escape and the
+    navigator row's edit header (above; the document-editor modal keeps its own pair in
+    its toolbar, which this modal keeps as the reader strip), ⌘S / Ctrl+S saves; ✕, Escape and the
     backdrop go through the §14 close guard ("Discard your script edits?", body "The
     changes you typed into the script editor will be lost.", confirm "Discard edits"),
     while Cancel returns to view mode through the same guard. The guard counts a typed
@@ -1124,7 +1132,9 @@ editors enter with
     this edit as a build rule** and, enabled by it, a text field (placeholder "What every
     future sync must keep — one line"; checked with a blank field, Save disables with the
     inline hint "Write the rule to remember"); unchecked, the footer reads "Saving keeps the
-    workflow in sync — a hand edit changes the steps, not the spec."
+    workflow in sync — a hand edit changes the steps, not the spec." (ellipsized, never
+    wrapped). The bar carries nothing else: Cancel and Save sit in the row's edit header
+    (above).
   - **Save** first asks the backend (`POST /validate-steps`, §19) with the draft's steps as
     they would be after the edit — while that answer is in flight the textarea, the name,
     description and timeout fields, the remember controls, Cancel, ✕, Escape, the backdrop and ⌘S are

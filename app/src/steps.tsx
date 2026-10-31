@@ -612,10 +612,11 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
   navDisabled?: boolean
   edit?: StepEdit | null
   setEdit?: (fn: (e: StepEdit | null) => StepEdit | null) => void
-  // §11 edit footer (move / lock / remove, Cancel / Save) — rendered on the
-  // viewed row of the editor variant in edit mode, beneath the tag row: the
+  // §11 edit header (move / lock / remove left, Cancel / Save right) —
+  // rendered on the viewed row of the editor variant in edit mode, one line
+  // at the top of the row where the title line sat, above the name field: the
   // row is what moves, so the arrows sit on the thing they move, not in the
-  // toolbar
+  // toolbar, and the edit starts and ends where the pen was.
   controls?: React.ReactNode
   // §11 the Edit pen, right-aligned on the viewed row's title line (view mode)
   editButton?: React.ReactNode
@@ -646,10 +647,18 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
           : {}),
       }}
     >
-      <span style={{ font: "500 11px/18px var(--mono)", color: 'var(--text-faint)', width: 16, flex: 'none' }}>{j + 1}</span>
+      {/* the number centres on the title line (18 px), or on the 26 px edit header */}
+      <span style={{ font: "500 11px/18px var(--mono)", color: 'var(--text-faint)', width: 16, flex: 'none', paddingTop: editing ? 4 : 0 }}>{j + 1}</span>
       <div style={{ flex: 1, minWidth: 0 }}>
         {editing ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {/* §11 edit header: step controls left, Cancel / Save right — the
+                top line of the row, above the name field (edit mode only). */}
+            {controls && (
+              <div style={{ display: 'flex', alignItems: 'center', marginLeft: -7, userSelect: 'none' }}>
+                {controls}
+              </div>
+            )}
             <input
               className="ad-input compact"
               aria-label="Step name"
@@ -729,13 +738,6 @@ function StepNavRow({ step, j, viewed, editor, tags, facts, onNav, navDisabled, 
           <>
             {!editing && step.description && (
               <div style={{ font: "400 11.5px/1.45 var(--sans)", color: 'var(--text-muted)', marginTop: 4, whiteSpace: 'pre-wrap' }}>{step.description}</div>
-            )}
-            {/* §11 edit footer: step controls left, Cancel / Save right —
-                between the fields and the tag row (edit mode only). */}
-            {controls && (
-              <div style={{ display: 'flex', alignItems: 'center', marginTop: 8, marginLeft: -7, userSelect: 'none' }}>
-                {controls}
-              </div>
             )}
             {/* §9.2 tag row: the same chips the step row carries (tooltips
                 hold the detail), plus package chips in the detail modal. */}
@@ -874,9 +876,9 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
   // shortcut in the platform's key names
   const keys = shortcutKeys(useStore((st) => st.platformOs))
   // §11: everything that changes a step lives on the navigator's viewed row —
-  // the pen in view mode; in edit mode the edit footer: the step controls
-  // (instant, and the edit rides along) left, Cancel / Save right. The code
-  // toolbar stays the reader strip in both modes.
+  // the pen in view mode; in edit mode the edit header at the top of the row:
+  // the step controls (instant, and the edit rides along) left, Cancel / Save
+  // right. The code toolbar stays the reader strip in both modes.
   const editButton = editing && !editActive ? (
     <TipButton className="ad-btn-icon" aria-label="Edit script" tip="Edit this step: its script, name, description, timeout and retries" disabled={editing.disabled} onClick={startEdit}>
       <i className="fa-solid fa-pen" />
@@ -924,13 +926,15 @@ function StepModal({ steps, i, editor, tagsByStep, factsByStep, onNav, onClose, 
           <i className="fa-solid fa-trash" />
         </TipButton>
       </span>
-      <span style={{ flex: 1 }} />
-      <TipButton className="ad-btn-text dim small ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit} style={{ marginRight: 10 }}>
-        Cancel
-      </TipButton>
-      <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
-        {saving ? 'Saving…' : 'Save'}
-      </TipButton>
+      {/* the pair that ends the edit, flush with the row's right edge */}
+      <span data-testid="step-edit-actions" style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 'none', marginLeft: 'auto', paddingLeft: 12 }}>
+        <TipButton className="ad-btn-text dim small ad-focus-inset" tip="Drop your edits and go back to the saved script" disabled={saving} onClick={cancelEdit}>
+          Cancel
+        </TipButton>
+        <TipButton className="ad-btn-link small ad-focus-inset" tip={`Save your edits (${keys.mod}S)`} disabled={!canSave} aria-busy={saving || undefined} onClick={() => saveRef.current()}>
+          {saving ? 'Saving…' : 'Save'}
+        </TipButton>
+      </span>
     </>
   ) : null
   return (
