@@ -343,13 +343,13 @@ migrate-on-load migration so data written by released versions keeps loading (§
   `preInit` hook (electron-builder `nsis.include`) that reopens an already-installed
   same-version app instead of reinstalling it.
   The Vite dev server allows serving from the repo root (`server.fs.allow` in
-  `vite.config.ts`): the §9.4 doc modals raw-import documents from `docs/`
+  `vite.config.mts`): the §9.4 doc modals raw-import documents from `docs/`
   (`docs/PRIVACY.md`, `docs/TERMS.md`, `docs/CHANGELOG.md`), and Vite's default
   allowlist stops at `app/`, which 403s those imports in the dev loop (the production
   build bundles them and needs no allowance).
   Renderer tests live here too: `app/tests/` (vitest unit/render suites) and `app/e2e/`
   (end-to-end specs driving the real Electron app, shared `harness.ts`); both Vitest configs
-  (`vitest.config.ts`, `vitest.e2e.config.ts`) sit at the `app/` root — `npm run test:e2e`
+  (`vitest.config.mts`, `vitest.e2e.config.mts`) sit at the `app/` root — `npm run test:e2e`
   passes the e2e one via `--config`. Two TypeScript configs sit there too: `tsconfig.json`
   (the shipped renderer, `src` only) and `tsconfig.test.json` extending it over everything
   else that is TypeScript but never shipped: `tests/`, `e2e/`, the Vite/Vitest configs, and

@@ -102,7 +102,15 @@ describe('§9 commit rule: the import confirm in flight', () => {
     expect(screen.getByText('Shared job')).toBeTruthy()
     // the confirm landing still closes the modal on its own
     await act(async () => {
-      land({ automation: { ...auto(), id: 'a2', name: 'Shared job' }, summary: {} })
+      // A full §19 ImportSummary: the landed-summary modal reads its arrays, so
+      // an empty object here renders a thrown error into the boundary instead.
+      land({
+        automation: { ...auto(), id: 'a2', name: 'Shared job' },
+        summary: {
+          secretsMatched: [], agentsMatched: [], unresolved: [], packages: [],
+          renamedFrom: null, os: null, osMismatch: false,
+        },
+      })
     })
     await waitFor(() => expect(screen.queryByText('Importing…')).toBeNull(), { timeout: 3000 })
   })

@@ -4025,7 +4025,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### cryptography 50.0.1 — Apache-2.0 OR BSD-3-Clause (Linux only)
+### cryptography 50.0.2 — Apache-2.0 OR BSD-3-Clause (Linux only)
 
 ```
 This software is made available under the terms of *either* of the licenses
@@ -4891,12 +4891,12 @@ found in LICENSE.APACHE or LICENSE.BSD. Contributions to this software is made
 under the terms of *both* these licenses.
 ```
 
-### pycparser 3.0 — BSD-3-Clause (Linux only)
+### pycparser 3.12 — BSD-3-Clause (Linux only)
 
 ```
 pycparser -- A C parser in Python
 
-Copyright (c) 2008-2022, Eli Bendersky
+Copyright (c) 2008-2027, Eli Bendersky
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification,

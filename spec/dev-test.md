@@ -155,7 +155,7 @@ can never disagree silently.
 
 **Line coverage.** Both unit tiers can report coverage on demand, never as a gate: the
 renderer through Vitest's v8 provider (`@vitest/coverage-v8`, a dev dependency — `cd app &&
-npx vitest run --coverage`; `vitest.config.ts` pins the include list to `src/**/*.{ts,tsx}`,
+npx vitest run --coverage`; `vitest.config.mts` pins the include list to `src/**/*.{ts,tsx}`,
 since `src/` also holds raw-imported Markdown the provider would abort on) and the backend through pytest-cov
 (`.venv/bin/python -m pytest tests/ --cov=autowright --cov-report=term-missing`). The
 reports are a periodic audit input (which modules or branches no test reaches), not a
@@ -279,7 +279,7 @@ CLIs. The backend subprocess runs real `notify.post`, so a failed-execution test
 real macOS notification — accepted, per the no-dev-only-branches rule.
 
 **End-to-end tests** live under `app/e2e/` (run `npm run test:e2e` in `app/` — it builds
-first, then runs a second Vitest config, `vitest.e2e.config.ts`, sequentially with long
+first, then runs a second Vitest config, `vitest.e2e.config.mts`, sequentially with long
 timeouts and one automatic retry per test: launching a real Electron per test occasionally
 dies to a transient helper-process crash outside our code — "Target page, context or browser
 has been closed" — and a genuine failure still fails both attempts). The suite runs on
@@ -465,7 +465,12 @@ Dev workflow:
   a dependency), and the editable backend install's setuptools scratch output
   (`backend/build/`, `backend/*.egg-info/`) is deleted immediately afterwards, because a
   stale full copy of the package tree there is invisible to the running app yet poisons
-  every repo-wide search.
+  every repo-wide search. One self-heal after the install: when `app/node_modules/electron`
+  is present but its `dist/` (the unpacked Electron binary) is not — the package's
+  postinstall download was interrupted, or the lockfile check above skipped a reinstall
+  that would have re-run it — the step runs that postinstall (`node install.js` inside
+  the package) itself, so `npx electron .` never fails with "Electron failed to install
+  correctly" on a dev machine whose `node_modules` otherwise looks current.
 - **`./scripts/release-start.sh <version>`** - prepares the repo for a release, the first
   of the three steps a release is (`release-start.sh` prepares, the developer curates and
   commits, `release.sh` cuts; the Windows and Linux legs then append their artifacts).

@@ -481,6 +481,16 @@ interface LoadOptions {
   trayThrows?: boolean
 }
 
+// §3: stage an installer the way a finished download leaves one — a real,
+// readable file in the test home. The install handler's readability check
+// (win32/linux; macOS skips it) refuses a path with nothing behind it.
+function stageInstaller(m: MainStub, name = 'Autowright Setup.exe'): string {
+  const staged = join(m.home, name)
+  writeFileSync(staged, 'MZ')
+  m.updater.installerPath = staged
+  return staged
+}
+
 function loadMain(options: LoadOptions = {}): MainStub {
   const handlers = new Map<string, (e: unknown, ...args: unknown[]) => unknown>()
   // Listeners take the Electron event: `before-quit` calls preventDefault on it.
@@ -545,8 +555,12 @@ function loadMain(options: LoadOptions = {}): MainStub {
     async downloadUpdate() {
       updater.downloads += 1
       if (updater.downloadError) throw updater.downloadError
-      updater.installerPath = 'installer.exe'
-      return ['installer.exe']
+      // §3: the install handler checks the staged file exists and is readable
+      // on win32/linux before anything is stopped, so the fake stages a real
+      // file — a bare name passes only on macOS, which skips that check.
+      updater.installerPath = join(home, 'installer.exe')
+      writeFileSync(updater.installerPath, 'MZ')
+      return [updater.installerPath]
     }
 
     quitAndInstall() {
@@ -2291,7 +2305,7 @@ describe('main.cjs update-install refusals (§3)', () => {
     const order: string[] = []
     const { m, done } = win32Install((_py, args, _o, cb) => { order.push(`service ${args[2]}`); cb(null, 'stopped', '') })
     try {
-      m.updater.installerPath = 'Autowright Setup.exe'
+      stageInstaller(m)
       m.updater.onInstall = () => { order.push('quitAndInstall') }
       const answer = m.invoke('update-install') as Promise<unknown>
       await vi.advanceTimersByTimeAsync(1_499)
@@ -2317,7 +2331,7 @@ describe('main.cjs update-install refusals (§3)', () => {
         })
         writeFileSync(join(m.home, 'backend.json'),
           JSON.stringify({ port: 4321, token: 'token', python: '/usr/bin/python3' }))
-        m.updater.installerPath = 'staged'
+        stageInstaller(m, 'staged')
         m.updater.onInstall = () => { order.push('quitAndInstall') }
         expect(await m.invoke('update-install')).toEqual({ ok: true })
         return order
@@ -2355,7 +2369,7 @@ describe('main.cjs update-install refusals (§3)', () => {
       if (args[2] === 'stop') cb(new Error('boom'), '', 'boom')
     })
     try {
-      m.updater.installerPath = 'Autowright Setup.exe'
+      stageInstaller(m)
       expect(await m.invoke('update-install'))
         .toEqual({ error: 'couldn\'t stop the background service — try again' })
       expect(m.updater.installs).toBe(0)
@@ -2374,7 +2388,7 @@ describe('main.cjs update-install refusals (§3)', () => {
     vi.useFakeTimers()
     const { m, health, done } = win32Install((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
     try {
-      m.updater.installerPath = 'Autowright Setup.exe'
+      stageInstaller(m)
       m.updater.installError = new Error('spawn Autowright Setup.exe ENOENT')
       const answer = m.invoke('update-install') as Promise<unknown>
       // Nothing probed the backend on the way in (the stop and the gap).
@@ -2392,7 +2406,7 @@ describe('main.cjs update-install refusals (§3)', () => {
     vi.useFakeTimers()
     const { m, health, done } = win32Install((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
     try {
-      m.updater.installerPath = 'Autowright Setup.exe'
+      stageInstaller(m)
       m.updater.installThrows = new Error('installer locked')
       const answer = m.invoke('update-install') as Promise<unknown>
       // Nothing probed the backend on the way in (the stop and the gap).
@@ -2410,7 +2424,7 @@ describe('main.cjs update-install refusals (§3)', () => {
     vi.useFakeTimers()
     const { m, health, done } = win32Install((_py, _args, _o, cb) => { cb(null, 'stopped', '') })
     try {
-      m.updater.installerPath = 'Autowright Setup.exe'
+      stageInstaller(m)
       const answer = m.invoke('update-install') as Promise<unknown>
       await vi.advanceTimersByTimeAsync(1_500)
       expect(await answer).toEqual({ ok: true })
@@ -2429,7 +2443,7 @@ describe('main.cjs update-install refusals (§3)', () => {
     const stops: string[][] = []
     const { m, done } = win32Install((_py, args, _o, cb) => { stops.push(args); cb(null, 'stopped', '') })
     try {
-      m.updater.installerPath = 'Autowright Setup.exe'
+      stageInstaller(m)
       const first = m.invoke('update-install')
       const second = m.invoke('update-install')
       expect(second).toBe(first)

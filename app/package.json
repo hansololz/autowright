@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.mts",
     "app": "electron .",
     "postinstall": "node brand-electron.cjs"
   },

@@ -44,6 +44,15 @@ if [ ! -d "$ROOT/app/node_modules" ] \
   echo "· npm ci"
   (cd "$ROOT/app" && npm ci --no-audit --no-fund)
 fi
+# Self-heal (§18): the electron package downloads and unpacks its binary in its
+# own postinstall. An interrupted download — or a lockfile check above that saw
+# nothing to reinstall — leaves node_modules/electron without dist/, and
+# `npx electron .` then dies with "Electron failed to install correctly".
+# Re-run that postinstall ourselves instead of asking for a full reinstall.
+if [ -d "$ROOT/app/node_modules/electron" ] && [ ! -d "$ROOT/app/node_modules/electron/dist" ]; then
+  echo "· electron binary missing — running its postinstall download"
+  (cd "$ROOT/app/node_modules/electron" && node install.js)
+fi
 
 # ---- acknowledgements (§4.9) — regenerate so it tracks dependency changes ----
 echo "· regenerating app/src/acknowledgements.md"
