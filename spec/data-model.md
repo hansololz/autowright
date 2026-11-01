@@ -659,7 +659,10 @@ both restricted, a date matching either one fires — a field is "restricted" wh
 or Monday, 2026-10-31). Times are wall clock in the trigger's zone
 (`timezone`, default local; stored as the canonical IANA key, matched case-insensitively
 against the zone database — `europe/berlin` resolves on a case-insensitive filesystem and
-nowhere else, so it stores as `Europe/Berlin`, 2026-10-31); an occurrence erased by DST (spring forward) still fires, shifted
+nowhere else, so it stores as `Europe/Berlin`; and every zone lookup — validation, the
+next-fire math, a stored key the load has not rewritten yet — resolves through that canonical
+key, never the raw spelling, so the same value behaves the same on every OS, 2026-10-31); an
+occurrence erased by DST (spring forward) still fires, shifted
 forward by the gap width (a "2:30" on the day the clock jumps 2:00→3:00 fires at 3:30 — the
 erased wall time read with the pre-transition offset), and one repeated by
 fall-back fires once. Invalid expressions are rejected at the API (422), never stored; so is

@@ -296,8 +296,12 @@ def cron_next(expression: str, after: datetime | None = None) -> datetime | None
 # ---------- timezone (§4.3 `timezone`): wall clock in the trigger's zone ----------
 
 def zone_of(t: dict) -> ZoneInfo | None:
-    """The trigger's zone, None when local. Assumes a validated `timezone`."""
-    return ZoneInfo(t["timezone"]) if t.get("timezone") else None
+    """The trigger's zone, None when local. Assumes a validated `timezone`.
+    §4.3: resolved through the canonical IANA key, never the raw spelling —
+    `ZoneInfo("europe/berlin")` opens on macOS's case-insensitive filesystem
+    only, and this runs on a not-yet-rewritten value (validation, a stored
+    pre-canonical key) on every platform (2026-10-31)."""
+    return ZoneInfo(canonical_timezone(t["timezone"])) if t.get("timezone") else None
 
 
 def _to_wall(local: datetime, zone: ZoneInfo) -> datetime:
