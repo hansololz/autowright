@@ -372,6 +372,23 @@ version that writes the new shape, and the oldest shape still read.
   crafted archive) and every later `GET /state` failed to encode as UTF-8. The written
   shape is unchanged; the replaced text is written by the next save. Fixture: an
   automation.yaml whose name and description carry one.
+- **2026-10-31 - import normalizes param definitions like the loader (marketplace
+  install regression).** Not an on-disk shape but a `.autowright` archive written by a
+  released version, so it is logged here. Exports up to v0.14.x wrote param definitions
+  verbatim (the `param_default` resolution at export is a 2026-10-31 rule), so archives
+  in the wild carry the shapes the §5 loader has normalized since the first 2026-10-31
+  batch: a `default` that is not a value of its `kind`, a non-text `label` / `help`, a
+  non-finite `min`, `kv` rows that are not text/text. The same day's §5.1 import rule
+  refused every one of them, and the built-in catalog's v0.12.0 "Congress stock buys"
+  archive (a `list` param `watchlist` whose default is one-ticker-per-line text) failed to
+  install with "param 'watchlist': the default isn't a list value". Import now runs
+  `normalize_param_definitions` over the definitions after the structural checks (dict,
+  text `name`, known `kind`, a `default` key present, no duplicate name) instead of
+  refusing, so the stored version holds the normalized form - the text default becomes
+  the kind's empty list, what the author's own machine resolved it to at runtime. Nothing
+  on disk changes shape. Fixture: a v0.12.0-shape archive with a text `list` default,
+  a boolean `label`, `min: "1e3"`, integer `kv` keys and a `.inf` number default, all
+  importing into the loader's normalized form.
 - **2026-10-30 (second sweep) - audit batch.** (a) A crash-orphan version folder (§5,
   above `current_version`) is renamed aside to `vN.orphan` by the next save that numbers
   past it; older releases' loaders never match that name (their `v<digits>` match), nothing

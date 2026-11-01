@@ -1,6 +1,6 @@
 """2026-10-31 second sweep audit batch (transfer, marketplace, drafting,
-installer, paths): the §5.1 import door mirroring the §8 param-definition
-checks, the one-year timeout cap at import, archive param values kind-checked,
+installer, paths): the §5.1 import door normalizing param definitions like
+the §5 loader (§21 2026-10-31), the one-year timeout cap at import, archive param values kind-checked,
 the §8 untrusted loader on agent output, a failed catalog-save write
 unlinking its archive, the §5 file-name byte cap, the Ollama download's https
 and byte cap, a bounded archive-slot wait, and one §5.2 deadline per URL
@@ -34,25 +34,61 @@ def _current(a):
     return a["versions"][a["current_version"]]
 
 
-# ---------- A · §5.1: import mirrors the §8 param-definition checks ----------
+# ---------- A · §5.1: import normalizes like the §5 loader (§21 2026-10-31) ----------
 
-@pytest.mark.parametrize("param, message", [
-    (_number(min="1e3"), "`min` must be a number"),
-    (_number(min=None), "`min` must be a number"),
-    (_number(min=True), "`min` must be a number"),
-    (_number(min=float("inf")), "`min` must be a number"),
-    (_number(label=True), "`label` must be text"),
-    (_number(help=3), "`help` must be text"),
+_NUMBER_STORED = {"name": "n", "kind": "number", "label": "N", "default": 5}
+
+
+@pytest.mark.parametrize("param, stored", [
+    (_number(min="1e3"), _NUMBER_STORED),
+    (_number(min=None), _NUMBER_STORED),
+    (_number(min=True), _NUMBER_STORED),
+    (_number(min=float("inf")), _NUMBER_STORED),
+    (_number(label=True), {"name": "n", "kind": "number", "default": 5}),
+    (_number(help=3), _NUMBER_STORED),
     ({"name": "h", "kind": "kv", "label": "H", "default": [{"key": 1, "value": "v"}]},
-     "the default isn't a kv value"),
+     {"name": "h", "kind": "kv", "label": "H", "default": [{"key": "1", "value": "v"}]}),
     ({"name": "h", "kind": "kv", "label": "H", "default": [{"key": "k", "value": 2}]},
-     "the default isn't a kv value"),
-    (_number(default=float("nan")), "the default isn't a number value"),
-    (_number(default=float("inf")), "the default isn't a number value"),
+     {"name": "h", "kind": "kv", "label": "H", "default": [{"key": "k", "value": "2"}]}),
+    (_number(default=float("nan")), {**_NUMBER_STORED, "default": 0}),
+    (_number(default=float("inf")), {**_NUMBER_STORED, "default": 0}),
+    (_number(default=float("nan"), min=2),
+     {"name": "n", "kind": "number", "label": "N", "default": 2, "min": 2}),
+    ({"name": "w", "kind": "list", "label": "W", "default": "NVDA\nAAPL"},
+     {"name": "w", "kind": "list", "label": "W", "default": []}),
+    ({"name": "t", "kind": "text", "label": "T", "default": [1, 2]},
+     {"name": "t", "kind": "text", "label": "T", "default": ""}),
 ])
-def test_import_refuses_a_definition_the_validator_refuses(store, param, message):
-    with pytest.raises(transfer.TransferError, match=message):
-        transfer.import_automation(store, _archive(params=[param]))
+def test_import_normalizes_a_definition_the_loader_normalizes(store, param, stored):
+    a, _ = transfer.import_automation(store, _archive(params=[param]))
+    assert _current(a)["params"][0] == stored
+
+
+def test_a_v0_12_0_catalog_archive_shape_imports(store):
+    """§21 2026-10-31: the built-in catalog's v0.12.0 "Congress stock buys"
+    archive shape installs. Before the fix the import refused it with
+    "param 'watchlist': the default isn't a list value"."""
+    params = [
+        {"name": "include_sales", "kind": "toggle", "label": "Include sales too",
+         "help": "Off means only purchases.", "default": False},
+        {"name": "min_amount", "kind": "number", "label": "Smallest trade worth reporting",
+         "default": 15000, "min": 0},
+        {"name": "watchlist", "kind": "list", "label": "Watch-list tickers",
+         "help": "One ticker per line.", "default": "NVDA\nAAPL\nMSFT\nTSLA"},
+        {"name": "post_to_discord", "kind": "toggle", "label": "Post the roundup to Discord",
+         "help": "On days with new trades", "send the headline": None, "default": True},
+        {"name": "discord_channel", "kind": "text", "label": "Discord channel id",
+         "default": "0"},
+    ]
+    a, _ = transfer.import_automation(store, _archive(params=params, param_values={}))
+    stored = {p["name"]: p for p in _current(a)["params"]}
+    assert stored["watchlist"]["default"] == []
+    assert stored["include_sales"]["default"] is False
+    assert stored["min_amount"]["default"] == 15000
+    assert stored["post_to_discord"]["default"] is True
+    assert stored["discord_channel"]["default"] == "0"
+    assert "send the headline" not in stored["post_to_discord"]
+    assert a["param_values"] == {}
 
 
 def test_a_number_min_and_text_label_help_import(store):

@@ -537,11 +537,13 @@ refused** (a document using either answers the same 422 / catalog error: a few h
 bytes of aliases can describe a billion-element structure that PyYAML's safe loader
 expands happily, hanging the request thread at preview or Audit time, 2026-10-30), error
 text never embeds an untrusted value's full repr (a capped, escaped excerpt at most), and
-a parameter `default` arriving by import is type-checked against its kind with the §19
-param-values check (null allowed); the §8 validator applies the same check to a drafted
-default (2026-10-30 second sweep), and export writes each param's `default` as
-`param_default` resolves it — the stored default when it matches its kind, the kind default
-otherwise, and for a number param a `min` fallback only when `min` is itself a number
+a parameter definition arriving by import is normalized the way the §5 loader normalizes a
+stored one (`normalize_param_definitions`, a null default allowed; the import list below)
+so no default that is not a value of its kind lands verbatim; the §8 validator refuses a
+drafted default of the wrong kind outright (2026-10-30 second sweep), and export writes
+each param's `default` as `param_default` resolves it — the stored default when it
+matches its kind, the kind default otherwise, and for a number param a `min` fallback only
+when `min` is itself a number
 (2026-10-31: `min: 1e3` is YAML text, and export's own check then refused it) — so an
 automation saved before that rule still exports instead of being refused
 with "repair the automation first". The §5 archive/export file name derived from an
@@ -967,12 +969,19 @@ answers 422 and writes nothing):
   entry carries one, a step listing several `agents:` entries carries one per entry (§8
   rule 7 — a single entry's is optional, as the app's own exports write it), and a
   package has a nonempty `why` and a bare pip name, step names are non-blank and
-  unique once trimmed (§4.1, 2026-10-28), a number param's `min` is a finite number, a
-  `label` / `help` is text, a `kv` default's rows carry a text key and a text value, a
-  number `default` is finite, unknown definition keys are trimmed to the §8 field list
-  exactly as the validator trims them, and a step `timeout` is at most the §4.1 one-year
-  cap (2026-10-31: an archive was the one door past each of these) — import rejects exactly what
-  `POST /versions` would; the archive's `param_values` entries are user state rather
+  unique once trimmed (§4.1, 2026-10-28), unknown definition keys are trimmed to the §8
+  field list exactly as the validator trims them, and a step `timeout` is at most the §4.1
+  one-year cap (2026-10-31: an archive was the one door past each of these) — import
+  rejects exactly what `POST /versions` would, except for the definition shapes the §5
+  loader normalizes rather than refuses: a `default` that is not a value of its kind (a
+  non-finite number among them), a non-text `label` / `help`, a number param's `min` that
+  is not a finite number, and `kv` default rows that are not text key / text value go
+  through `normalize_param_definitions` at import exactly as a stored version's do at
+  load, so the stored form is the normalized one and the first edit never 422s (2026-10-31,
+  §21: a released version's export wrote definitions verbatim, so the built-in catalog's
+  v0.12.0 archive carries a `list` param whose default is one-ticker-per-line text, and
+  the same day's refusal rule turned its install into "param 'watchlist': the default
+  isn't a list value"); the archive's `param_values` entries are user state rather
   than drafted definitions, so an entry that is not a value of its definition's kind is
   dropped at import, the §5 load rule, never a refusal),
   §4.7 agent configs

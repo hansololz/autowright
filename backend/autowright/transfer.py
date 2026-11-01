@@ -12,7 +12,6 @@ import http.client
 import io
 import json
 import logging
-import math
 import re
 import time
 import urllib.error
@@ -29,8 +28,8 @@ from . import __version__, harness, packages as pkglib, paths, textsafe, timefmt
 from .drafting import PARAM_FIELDS, STEP_FILE_RE, validate_step_refs
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import (AGENT_REF_RE, SECRET_REF_RE, STEP_TIMEOUT_MAX_S, MissingStepScriptError,
-                      Store, new_id, _kind_ok, param_default, step_script_sha,
-                      strip_param_values)
+                      Store, _kind_ok, new_id, normalize_param_definitions, param_default,
+                      step_script_sha, strip_param_values)
 from .untrusted_yaml import excerpt, load_untrusted
 
 FORMAT_VERSION = 2
@@ -305,8 +304,8 @@ def export_automation(store: Store, a: dict, include_values: bool = True) -> byt
         # strip may still hold resolved values; they must never leave the
         # machine outside the include-values gate. Each `default` is written
         # as param_default resolves it: a stored default that doesn't match its
-        # kind (a save checks presence only) exports as the kind default, so
-        # the import-side kind check below never refuses this archive.
+        # kind (a save checks presence only) exports as the kind default, the
+        # form the §5 loader and the import door normalize to anyway.
         meta: dict = {"description": a.get("description", ""),
                       "params": [{**p, "default": param_default(p)}
                                  for p in strip_param_values(ver.get("params"))]}
@@ -531,20 +530,6 @@ def _entry_ref(g: dict) -> str | None:
     return None
 
 
-def _archive_value_ok(kind: str | None, v: Any) -> bool:
-    """§4.2/§5.1 (2026-10-31): `_kind_ok` plus the rules the archive door
-    keeps closed on its own — a number is finite, and a `kv` row carries a
-    text key and a text value."""
-    if not _kind_ok(kind, v):
-        return False
-    if kind == "number":
-        return math.isfinite(v)
-    if kind == "kv":
-        return all(isinstance(row.get("key"), str) and isinstance(row.get("value"), str)
-                   for row in v)
-    return True
-
-
 def _validate(z: zipfile.ZipFile) -> dict:
     """Parse + validate everything up front; returns the parsed archive."""
     _check_sizes(z)
@@ -669,24 +654,20 @@ def _validate(z: zipfile.ZipFile) -> dict:
         # 422 on a definition the user never wrote.
         if "default" not in p:
             raise TransferError(f"param {excerpt(p['name'])}: missing default")
-        # §5 untrusted-YAML rule: the default is type-checked against its
-        # kind with the §4.2 value check (`_kind_ok`), so a structure that is
-        # no value of that kind never lands verbatim in the version.
-        if p["default"] is not None and not _archive_value_ok(p["kind"], p["default"]):
-            raise TransferError(f"param {excerpt(p['name'])}: the default isn't a "
-                                f"{p['kind']} value")
-        # §5.1/§8 rule 3 (2026-10-31): the validator's other definition
-        # checks — an archive was the one door past them, and the first
-        # edit of the imported version would 422.
-        for field in ("label", "help"):
-            if field in p and not isinstance(p[field], str):
-                raise TransferError(f"param {excerpt(p['name'])}: `{field}` must be text")
-        if p["kind"] == "number" and "min" in p and not _archive_value_ok("number", p["min"]):
-            raise TransferError(f"param {excerpt(p['name'])}: `min` must be a number")
     # §5.1/§8: unknown definition keys are trimmed to the §4.2 field list
     # exactly as the validator trims them, so a stray key never reaches a
     # version file.
     params = [{k: p[k] for k in PARAM_FIELDS if k in p} for p in params]
+    # §5.1 / §21 (2026-10-31): the shapes the §5 loader normalizes rather
+    # than refuses — a `default` that is no value of its kind (a non-finite
+    # number among them), a non-text `label` / `help`, a `min` that is not a
+    # finite number, `kv` rows that are not text key / text value — are
+    # normalized here exactly as a stored version's are at load. The archive
+    # is untrusted, so none of them lands verbatim; and a released version's
+    # export wrote definitions verbatim, so refusing them turned the built-in
+    # catalog's v0.12.0 archive (a `list` param whose default is one-ticker-
+    # per-line text) into "the default isn't a list value" at install.
+    params = normalize_param_definitions(params)
     # §5.1: definitions only — an archive exported before the §4.2 save-side
     # strip can carry resolved values inside its definitions; they never land.
     params = strip_param_values(params)
@@ -1457,7 +1438,7 @@ def _land_archive(store: Store, arch: dict) -> tuple[dict, dict]:
     # §5 load rule, 2026-10-31): values are user state, never a refusal.
     kinds = {p["name"]: p.get("kind") for p in ver["params"] or []}
     values = {k: v for k, v in arch["param_values"].items()
-              if k in kinds and _archive_value_ok(kinds[k], v)}
+              if k in kinds and _kind_ok(kinds[k], v)}
     if values:
         # Values are the one manifest field creation can't seed. The
         # automation already landed — a failing values write degrades to an

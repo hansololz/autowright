@@ -417,13 +417,14 @@ def test_a_catalog_format_error_quotes_a_capped_excerpt():
     assert len(str(e.value)) < 400
 
 
-def test_an_imported_param_default_is_type_checked_against_its_kind(client):
+def test_an_imported_param_default_of_the_wrong_kind_is_normalized(client):
+    """§5.1 / §21 2026-10-31: import normalizes the definition like the §5
+    loader instead of refusing it."""
     from autowright.storage import store
 
-    with pytest.raises(transfer.TransferError) as e:
-        transfer.import_automation(store, _archive(params=[
-            {"name": "p", "kind": "text", "default": [1, 2]}]))
-    assert str(e.value) == "param 'p': the default isn't a text value"
+    a, _ = transfer.import_automation(store, _archive(params=[
+        {"name": "p", "kind": "text", "default": [1, 2]}]))
+    assert a["versions"][a["current_version"]]["params"][0]["default"] == ""
 
 
 def test_an_import_error_never_embeds_a_whole_untrusted_value(client):
