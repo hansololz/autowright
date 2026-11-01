@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.15.0 - 2026-10-31
+
+- Autowright now warns you when you save a trigger that can never fire.
+- Old runs are now kept for the full retention window you set, instead of disappearing early.
+- Showing an automation's files now tells you when the folder cannot be opened, instead of doing nothing.
+- A draft you are part way through is no longer lost silently if it cannot be saved.
+
 ## v0.14.0 - 2026-10-31
 
 - You can now edit, add, remove, reorder, and lock the steps of an automation's script directly in the step viewer.
