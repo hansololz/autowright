@@ -205,6 +205,13 @@ def backend_json() -> Path:
     return app_support() / "backend.json"
 
 
+def backend_renamed_marker() -> Path:
+    """§3 backend identity: left by `service install` when it replaces a
+    registration that ran the loose `python3`, consumed once by the §6
+    listener manager (the one-time Full Disk Access re-grant notice)."""
+    return app_support() / "backend-renamed"
+
+
 def default_data_path() -> Path:
     return app_support() / "executions"
 

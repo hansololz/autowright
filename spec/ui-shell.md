@@ -784,7 +784,10 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
   icon + name + live status + action button:
   - **Full Disk Access** — status from §19 `GET /imessage/permissions` (`fullDisk`), re-polled
     every 3 s while the checklist is visible: granted → green check, "Granted"; missing →
-    amber dot, "Needed — Autowright reads incoming messages from the Messages database" and
+    amber dot, "Needed — turn on “Autowright” in the Full Disk Access list; it reads
+    incoming messages from the Messages database" (the §3 backend helper, displayed as
+    "Autowright", is the process macOS lists — the copy names the row so the user looks in
+    the list rather than expecting a prompt) and
     an **Open System Settings** button (opens
     `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles` externally,
     like every external link), so the status flips to granted moments after the user toggles

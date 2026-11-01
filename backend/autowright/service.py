@@ -240,6 +240,35 @@ def _load(p: Path) -> str | None:
     return None
 
 
+def _note_identity_change(p: Path) -> None:
+    """§3 backend identity: a v0.16.0-or-earlier registration ran the loose
+    `bin/python3`; replacing it with the `Autowright Backend` helper changes
+    the identity macOS keyed the backend's permission grants to, so leave the
+    `backend-renamed` marker for the §6 listener manager's one-time notice.
+    Only a python-named program replaced by a non-python-named one counts: a
+    dev venv moving, or the app moving under an old release, is no rename.
+    Best effort — an unreadable plist is no reason to fail the install."""
+    if Path(sys.executable).name.startswith("python"):
+        return
+    try:
+        with open(p, "rb") as f:
+            old = plistlib.load(f)
+        program = (old.get("ProgramArguments") or [None])[0]
+    except (OSError, ValueError, TypeError, AttributeError, IndexError,
+            plistlib.InvalidFileException):
+        return
+    if not isinstance(program, str) or program == sys.executable:
+        return
+    if not Path(program).name.startswith("python"):
+        return
+    try:
+        marker = paths.backend_renamed_marker()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+    except OSError as e:
+        _log.warning("couldn't write the backend-renamed marker: %s", e)
+
+
 @_budgeted
 def install() -> str:
     plist = {
@@ -256,6 +285,7 @@ def install() -> str:
     }
     paths.logs_dir().mkdir(parents=True, exist_ok=True)  # launchd won't create it for the log paths
     p = plist_path()
+    _note_identity_change(p)  # §3: before the old registration is overwritten
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         # §5: every write is temp-write + rename — a crash mid-write must never

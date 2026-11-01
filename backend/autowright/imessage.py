@@ -29,8 +29,10 @@ REPLY_LIMIT = 4000  # §6.1: iMessage reply truncation cap
 _APPLE_EPOCH = 978307200
 _NS_CUTOFF = 10_000_000_000
 
-FDA_ERROR = ("needs Full Disk Access — grant it in System Settings → "
-             "Privacy & Security → Full Disk Access")
+# §3 backend identity: the row macOS lists is the backend helper, never the
+# "Autowright" GUI — the text names it so the user toggles the right one.
+FDA_ERROR = ("needs Full Disk Access — turn on “Autowright” in System "
+             "Settings → Privacy & Security → Full Disk Access")
 NO_DB_ERROR = ("Messages database not found — open Messages.app on this Mac "
                "and sign in first")
 

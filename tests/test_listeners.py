@@ -884,6 +884,128 @@ def test_imsg_watcher_reports_a_chat_db_yanked_mid_tick(store, monkeypatch):
         "error": "couldn't read the Messages database — database disk image is malformed"}
 
 
+# ---------- §3 backend identity: the one-time re-grant notice ----------
+
+def _renamed_setup(store, monkeypatch, *, marker=True, imessage_trigger=True):
+    """A store with one automation (optionally holding an enabled imessage
+    trigger), the `backend-renamed` marker (optionally) on disk, and
+    notify.post_targeted recorded. Returns (automation, marker path, posts)."""
+    from autowright import notify, paths
+
+    a = store.create_automation(make_version(), "Chat", None)
+    if imessage_trigger:
+        a["triggers"] = [{"id": "t9", "kind": "imessage", "enabled": True,
+                          "from": "dave@example.com"}]
+    path = paths.backend_renamed_marker()
+    if marker:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    posts = []
+    monkeypatch.setattr(notify, "post_targeted",
+                        lambda title, body, *, kind, target:
+                        posts.append((title, body, kind, target)))
+    return a, path, posts
+
+
+def _fda_denied(monkeypatch):
+    from autowright import imessage
+
+    def denied():
+        raise imessage.DbError(imessage.FDA_ERROR)
+
+    monkeypatch.setattr(imessage, "open_db", denied)
+
+
+def _wait_for(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_renamed_marker_posts_once_on_full_disk_access_error(store, monkeypatch):
+    from autowright import listeners as li_mod
+
+    a, marker, posts = _renamed_setup(store, monkeypatch)
+    _fda_denied(monkeypatch)
+    watcher = li_mod._ImsgWatcher(li_mod.Listeners(store, None))
+    watcher.tick({"dave@example.com"})
+    assert _wait_for(lambda: posts)
+    assert posts == [(li_mod.RENAMED_TITLE, li_mod.RENAMED_BODY, "permission",
+                      {"page": "automation", "automationId": a["id"]})]
+    assert not marker.exists()
+
+    watcher.tick({"dave@example.com"})  # the same park again: at most one notice
+    time.sleep(0.2)
+    assert len(posts) == 1
+
+
+def test_renamed_marker_dropped_silently_when_db_opens(store, monkeypatch):
+    from autowright import imessage
+    from autowright import listeners as li_mod
+
+    _, marker, posts = _renamed_setup(store, monkeypatch)
+    monkeypatch.setattr(imessage, "open_db", lambda: object())
+    monkeypatch.setattr(imessage, "max_rowid", lambda db: 99)
+    monkeypatch.setattr(imessage, "messages_after", lambda db, cur, top, senders: [])
+    li_mod._ImsgWatcher(li_mod.Listeners(store, None)).tick({"dave@example.com"})
+    assert not marker.exists()
+    time.sleep(0.2)
+    assert posts == []
+
+
+def test_renamed_marker_survives_other_db_errors(store, monkeypatch):
+    from autowright import imessage
+    from autowright import listeners as li_mod
+
+    _, marker, posts = _renamed_setup(store, monkeypatch)
+
+    def no_db():
+        raise imessage.DbError(imessage.NO_DB_ERROR)
+
+    monkeypatch.setattr(imessage, "open_db", no_db)
+    li_mod._ImsgWatcher(li_mod.Listeners(store, None)).tick({"dave@example.com"})
+    assert marker.exists()
+    time.sleep(0.2)
+    assert posts == []
+
+
+def test_renamed_marker_honors_global_never(store, monkeypatch):
+    from autowright import listeners as li_mod
+
+    _, marker, posts = _renamed_setup(store, monkeypatch)
+    store.settings["notifications"] = "never"
+    _fda_denied(monkeypatch)
+    li_mod._ImsgWatcher(li_mod.Listeners(store, None)).tick({"dave@example.com"})
+    assert not marker.exists()
+    time.sleep(0.2)
+    assert posts == []
+
+
+def test_renamed_marker_dropped_by_reconcile_without_imessage_triggers(store, monkeypatch):
+    from autowright import listeners as li_mod
+
+    built = []
+    monkeypatch.setattr(li_mod, "_ImsgWatcher", lambda mgr: built.append(mgr))
+    _, marker, posts = _renamed_setup(store, monkeypatch, imessage_trigger=False)
+    Listeners(store, None)._reconcile()
+    assert not marker.exists()
+    assert built == []
+    time.sleep(0.2)
+    assert posts == []
+
+
+def test_no_renamed_marker_posts_nothing_on_full_disk_access_error(store, monkeypatch):
+    from autowright import listeners as li_mod
+
+    _, marker, posts = _renamed_setup(store, monkeypatch, marker=False)
+    _fda_denied(monkeypatch)
+    li_mod._ImsgWatcher(li_mod.Listeners(store, None)).tick({"dave@example.com"})
+    time.sleep(0.2)
+    assert posts == []
+    assert not marker.exists()
+
+
 def test_dispatch_survives_one_failing_firing(store, monkeypatch, caplog):
     """§6: one automation's firing must never drop the others' - the Discord
     twin of the iMessage per-hit guard."""

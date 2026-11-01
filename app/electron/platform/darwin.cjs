@@ -18,8 +18,15 @@ const OS_NAME = 'macOS' // §4.1 display form
 function dataRootDefault() { return roots.dataRootDefault('darwin') }
 function logsRootDefault() { return roots.logsRootDefault('darwin') }
 
+// §3 backend identity: the interpreter is the main executable of the
+// `Autowright Backend.app` helper inside the Python tree, so macOS names the
+// backend "Autowright" (the helper's display name) in permission prompts and the Privacy &
+// Security lists and keys its grants by bundle id. Never bin/python3 (kept as
+// a symlink for pre-0.17 plists): a loose executable is named by its file name
+// ("python3") and keyed by its path, so a grant died when the app moved.
 function bundledPythonPath(resourcesPath) {
-  return path.join(resourcesPath, 'python', 'bin', 'python3')
+  return path.join(resourcesPath, 'python', 'Autowright Backend.app',
+    'Contents', 'MacOS', 'Autowright Backend')
 }
 
 // ---- §9/§13 window chrome, tray, panel -------------------------------------

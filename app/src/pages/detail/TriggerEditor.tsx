@@ -88,7 +88,9 @@ function ImsgPermissions() {
         'Full Disk Access',
         perms == null ? 'Checking…'
           : perms.fullDisk ? 'Granted'
-          : 'Needed — Autowright reads incoming messages from the Messages database',
+          // §3 backend identity: the row macOS lists is the backend helper,
+          // never the "Autowright" GUI row — name it so the right one is toggled.
+          : 'Needed — turn on “Autowright” in the Full Disk Access list; it reads incoming messages from the Messages database',
         perms != null && !perms.fullDisk
           ? btn('Open System Settings', () =>
               window.open('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'))

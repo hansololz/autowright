@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const require = createRequire(__filename)
@@ -411,6 +411,16 @@ describe('§3 Windows packaging config (electron-builder)', () => {
       .toBe('X:/app/resources/python/python.exe')
     expect(build.win.icon).toBe('electron/icon/icon.ico')
     expect(existsSync(join(ELECTRON_DIR, 'icon', 'icon.ico'))).toBe(true)
+  })
+
+  it('runs the macOS backend as the Autowright Backend helper, never a python-named binary (§3)', () => {
+    // §3 backend identity on macOS: the process name (Activity Monitor, the
+    // Full Disk Access list, Login Items) is the executable's basename, so the
+    // backend runs as the helper bundle's main executable — never "python3".
+    const helper = darwin.bundledPythonPath('/Applications/Autowright.app/Contents/Resources')
+    expect(helper).toBe('/Applications/Autowright.app/Contents/Resources/python/'
+      + 'Autowright Backend.app/Contents/MacOS/Autowright Backend')
+    expect(basename(helper)).not.toMatch(/python/i)
   })
 })
 

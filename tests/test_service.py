@@ -158,6 +158,74 @@ def test_install_writes_plist_and_reloads(svc):
     ]
 
 
+# §3 backend identity: install() leaves the `backend-renamed` marker only when
+# a python-named registration is replaced by the `Autowright Backend` helper.
+_HELPER_EXECUTABLE = ("/Applications/Autowright.app/Contents/Resources/python/"
+                      "Autowright Backend.app/Contents/MacOS/Autowright Backend")
+_OLD_PYTHON = "/Applications/Autowright.app/Contents/Resources/python/bin/python3"
+
+
+def _write_old_plist(svc, program):
+    svc.plist.parent.mkdir(parents=True, exist_ok=True)
+    with open(svc.plist, "wb") as f:
+        plistlib.dump({"Label": svc.mod.LABEL,
+                       "ProgramArguments": [program, "-s", "-P", "-m", "autowright.main"]}, f)
+
+
+@launchd_only
+def test_install_marks_python_to_helper_rename(svc, monkeypatch):
+    from autowright import paths
+
+    _write_old_plist(svc, _OLD_PYTHON)
+    monkeypatch.setattr(sys, "executable", _HELPER_EXECUTABLE)
+    out = svc.mod.install()
+    assert out.startswith("installed and started")
+    assert paths.backend_renamed_marker().exists()
+    with open(svc.plist, "rb") as f:
+        assert plistlib.load(f)["ProgramArguments"][0] == _HELPER_EXECUTABLE
+
+
+@launchd_only
+def test_install_without_old_plist_leaves_no_marker(svc, monkeypatch):
+    from autowright import paths
+
+    monkeypatch.setattr(sys, "executable", _HELPER_EXECUTABLE)
+    assert svc.mod.install().startswith("installed and started")
+    assert not paths.backend_renamed_marker().exists()
+
+
+@launchd_only
+def test_install_over_same_helper_leaves_no_marker(svc, monkeypatch):
+    from autowright import paths
+
+    _write_old_plist(svc, _HELPER_EXECUTABLE)
+    monkeypatch.setattr(sys, "executable", _HELPER_EXECUTABLE)
+    assert svc.mod.install().startswith("installed and started")
+    assert not paths.backend_renamed_marker().exists()
+
+
+@launchd_only
+def test_install_from_python_named_interpreter_leaves_no_marker(svc):
+    """A dev venv or an old release moving is no rename: the current
+    interpreter is still python-named."""
+    from autowright import paths
+
+    _write_old_plist(svc, _OLD_PYTHON)
+    assert svc.mod.install().startswith("installed and started")
+    assert not paths.backend_renamed_marker().exists()
+
+
+@launchd_only
+def test_install_over_corrupt_plist_leaves_no_marker(svc, monkeypatch):
+    from autowright import paths
+
+    svc.plist.parent.mkdir(parents=True, exist_ok=True)
+    svc.plist.write_bytes(b"\x00not a plist\xff")
+    monkeypatch.setattr(sys, "executable", _HELPER_EXECUTABLE)
+    assert svc.mod.install().startswith("installed and started")
+    assert not paths.backend_renamed_marker().exists()
+
+
 @launchd_only
 def test_wedged_launchctl_times_out_into_a_plain_failure(svc, monkeypatch):
     """§3: every launchctl call is time-boxed — the app's ensure-backend step

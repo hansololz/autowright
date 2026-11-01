@@ -639,15 +639,78 @@ def test_macos_interpreter_signs_with_the_library_validation_exception():
     # §3 native-wheel probe: the signed interpreter's pip installs a real numpy
     # wheel outside the bundle, in packages.ensure's --only-binary/--target
     # form, and imports it - the exact path a user's step takes. Both halves
-    # must sit after the signing step and run the bundled python3.
+    # must sit after the signing step and run the backend helper executable
+    # (§3 backend identity: the file the LaunchAgent and every step run).
     signed = src[src.index('echo "· signed interpreter loads ad-hoc extensions OK"'):]
     assert "--only-binary ':all:'" in signed and '--target "$WHEEL_PROBE" numpy' in signed, (
         "the post-sign native-wheel probe no longer pip-installs numpy under the signed interpreter")
     assert 'PYTHONPATH="$WHEEL_PROBE"' in signed and "import numpy" in signed, (
         "the post-sign native-wheel probe no longer imports the installed wheel")
-    assert signed.count('PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3"') >= 1 \
-        and 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$APP/Contents/Resources/python/bin/python3"' in signed, (
+    assert signed.count('PYTHONDONTWRITEBYTECODE=1 "$BACKEND_EXE"') >= 1 \
+        and 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$BACKEND_EXE"' in signed, (
         "the native-wheel probe must run the bundled interpreter without writing .pyc into the sealed tree")
+
+
+HELPER_REL = "Autowright Backend.app/Contents/MacOS/Autowright Backend"
+
+
+def test_macos_backend_runs_as_the_helper_bundle():
+    """§3 backend identity (2026-11-01): macOS names a process in permission
+    prompts and the Privacy & Security lists by its bundle when the executable
+    is a bundle's main executable, and by the bare file name otherwise — and it
+    keys a loose executable's grants by path, a bundle's by bundle id. Through
+    0.16.0 the LaunchAgent ran the loose `bin/python3`, so every prompt the
+    backend caused read "python3" and a Full Disk Access grant died when the app
+    moved. `prod.sh` must wrap the interpreter as the `Autowright Backend.app`
+    helper inside the Python tree (bundle id = the LaunchAgent label), keep
+    `bin/python3.14` as a symlink to it for pre-0.17 plists, do so before pip
+    runs, run every later interpreter invocation through the helper executable
+    (`$BACKEND_EXE`), and sign the helper as a bundle with the interpreter
+    entitlement. Only a release build exercises any of it, so pin the text."""
+    src = _read("scripts/prod.sh")
+    wrap = src.index('echo "· wrapping the interpreter as Autowright Backend.app"')
+    assert wrap < src.index('echo "· upgrading bundled pip"'), (
+        "the helper bundle must be built before pip runs, so the whole pipeline uses the shipped layout")
+    assert f'HELPER_REL="{HELPER_REL}"' in src
+    assert 'mv "$PYSTAGE/bin/python$PY_MINOR" "$HELPER/Contents/MacOS/Autowright Backend"' in src, (
+        "the real interpreter binary must become the helper's main executable")
+    assert 'ln -s "../$HELPER_REL" "$PYSTAGE/bin/python$PY_MINOR"' in src, (
+        "bin/python3.x must stay a symlink to the helper: a pre-0.17 plist names bin/python3")
+    info = src[src.index('cat > "$HELPER/Contents/Info.plist" <<EOF'):]
+    info = info[:info.index("\nEOF")]
+    service_label = re.search(r'^LABEL = "([^"]+)"', _read("backend/autowright/service.py"), re.M).group(1)
+    assert f"<key>CFBundleIdentifier</key><string>{service_label}</string>" in info, (
+        "the helper's bundle id must be the LaunchAgent label (ai.autowright.backend)")
+    # Display name "Autowright" (David's call 2026-11-01): the GUI never appears
+    # in Full Disk Access or Automation on its own, so the product name reads
+    # best. The folder/executable keep the internal "Autowright Backend" name.
+    for key, value in (("CFBundleName", "Autowright"),
+                       ("CFBundleDisplayName", "Autowright"),
+                       ("CFBundleExecutable", "Autowright Backend"),
+                       ("CFBundleIconFile", "icon.icns"),
+                       ("CFBundleShortVersionString", "$VERSION")):
+        assert f"<key>{key}</key><string>{value}</string>" in info, key
+    assert "<key>LSUIElement</key><true/>" in info, "the helper must never show a Dock tile"
+    assert 'cp "$ROOT/app/electron/icon/icon.icns" "$HELPER/Contents/Resources/icon.icns"' in src
+    copy_python = src.index('cp -R "$PYSTAGE" "$APP/Contents/Resources/python"')
+    assert 'BACKEND_EXE="$APP/Contents/Resources/python/$HELPER_REL"' in src[copy_python:], (
+        "every interpreter run after bundling goes through $BACKEND_EXE")
+    after_copy = src[copy_python:]
+    assert '"$APP/Contents/Resources/python/bin/python3"' not in after_copy, (
+        "an interpreter invocation still runs the loose bin/python3 after bundling — "
+        "every one must run the helper executable ($BACKEND_EXE), the file the LaunchAgent "
+        "and every step actually run")
+    sign_bin = src.index('done < <(find "$APP/Contents/Resources/python/bin" -type f -perm +111 -print0)')
+    helper_sign = src.index('--entitlements "$PY_ENTITLEMENTS" "$APP/Contents/Resources/python/Autowright Backend.app"')
+    assert sign_bin < helper_sign < src.index("# 2."), (
+        "the helper bundle must be signed as a bundle, with the interpreter entitlement, "
+        "between the loose Python-tree executables and the Frameworks step")
+    # The shell half resolves the same executable (§2 darwin.cjs), never bin/python3.
+    darwin = _read("app/electron/platform/darwin.cjs")
+    resolver = darwin[darwin.index("function bundledPythonPath"):]
+    resolver = resolver[:resolver.index("\n}")]
+    assert "'Autowright Backend.app'" in resolver and "'Autowright Backend'" in resolver
+    assert "python3" not in resolver
 
 
 # ---------------------------------------------------------------- bundle trimming
@@ -757,13 +820,13 @@ def test_bundled_bytecode_is_recompiled_unchecked_hash_and_probed():
         "the bytecode compile must sit after the copy into the bundle and before the "
         "smoke check and signing")
     step = src[compile_step:smoke]
-    assert ('PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m compileall -q -f \\\n'
+    assert ('PYTHONDONTWRITEBYTECODE=1 "$BACKEND_EXE" -m compileall -q -f \\\n'
             '  --invalidation-mode unchecked-hash "$APP/Contents/Resources/python/lib"') in step, (
         "the bundled interpreter must recompile Resources/python/lib in place as unchecked-hash bytecode")
     assert 'touch "$BYTECODE_MARK"' in step and '-newer "$BYTECODE_MARK"' in step, (
         "the write probe must compare the tree against a marker touched before the import run")
     probe = step[step.index('touch "$BYTECODE_MARK"'):]
-    assert '\n"$APP/Contents/Resources/python/bin/python3" -c \\\n' in probe, (
+    assert '\n"$BACKEND_EXE" -c \\\n' in probe, (
         "the write probe's import run must NOT set PYTHONDONTWRITEBYTECODE — it proves nothing is written")
     assert "bundled Python wrote into the bundle at import time" in probe, (
         "a write into the bundle at import time must fail the build")

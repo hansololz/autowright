@@ -79,7 +79,14 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   cannot be opened — no Full Disk Access, or no `chat.db` at all (Messages never signed in) —
   parks the watcher in the `connection` error state shared by every `imessage` trigger (§4.3),
   re-probed each tick, so granting the permission heals it without a restart;
-  `automation.changed` fires on every state change. **A dropped message
+  `automation.changed` fires on every state change. The Full Disk Access error names the row
+  to toggle — "needs Full Disk Access — turn on “Autowright” in System Settings →
+  Privacy & Security → Full Disk Access" — because the §3 backend helper, not the GUI, is
+  what macOS lists. The manager also consumes the §3 `backend-renamed` marker here: deleted
+  silently when no enabled `imessage` trigger exists or when the watcher opens the db, and on
+  the Full Disk Access park it posts the one-time "Autowright needs Full Disk Access"
+  notification (§3 wording, §4.9 global `never` honored, click target = one automation holding
+  an enabled `imessage` trigger) and deletes the marker — once, never per tick. **A dropped message
   firing answers its sender** — a dropped message would otherwise leave a person waiting on a
   bot that silently ignored them, so the engine posts a short busy notice ("I'm working on
   something else right now and couldn't take this message — please send it again in a

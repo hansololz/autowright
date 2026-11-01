@@ -46,8 +46,10 @@ the update bullets below).
 - The backend ships inside the Electron `.app` bundle
   (`Contents/Resources/python/`). **Ensure-backend:** at every app launch, the Electron main
   process probes the backend (`backend.json` + unauthenticated `GET /health`, short timeout); if
-  unreachable, it runs the bundled service module — `Contents/Resources/python/bin/python3 -m
-  autowright.service install` — which writes the LaunchAgent plist and bootstraps it via
+  unreachable, it runs the bundled service module — the §3 backend helper executable
+  (`Contents/Resources/python/Autowright Backend.app/Contents/MacOS/Autowright Backend`, the
+  bundled interpreter; see the backend-identity bullet below) with `-m autowright.service
+  install` — which writes the LaunchAgent plist and bootstraps it via
   `launchctl`. **The probe validates the payload, not just reachability** (`backendVersion()`):
   a response counts as our backend only when it parses as JSON whose `app` field equals
   `Autowright` and whose `version` field is a non-empty string. Anything else - a bare 200, an
@@ -106,8 +108,75 @@ the update bullets below).
   resume used to start a second loop) and re-probes `/health` right before its
   `service install`, skipping the install when the backend already reports the app's
   version (2026-10-31).
+- **Backend identity on macOS (decided 2026-11-01):** the bundled interpreter ships as the
+  main executable of a **helper app bundle** inside the Python tree —
+  `Contents/Resources/python/Autowright Backend.app/Contents/MacOS/Autowright Backend` — and
+  every process the app launches on that interpreter (the LaunchAgent, `service` verbs, the
+  CLI shim, the §6.1 executor and §6.2 pip children, and therefore every step process) runs
+  that executable. **Why:** macOS names a process in permission prompts and in the Privacy &
+  Security lists by its bundle when the executable is a bundle's main executable, and by the
+  bare file name otherwise, and it keys a grant for a loose executable by path plus signature
+  but a grant for a bundle by bundle id plus signature. Through v0.16.0 the LaunchAgent ran
+  `Resources/python/bin/python3` directly, so the §6 iMessage watcher's Full Disk Access row,
+  the Messages automation prompt, and any Keychain or folder prompt a step caused all read
+  "python3", a grant died when the app was moved or renamed, and users toggled the GUI's
+  "Autowright" row to no effect (the GUI never opens `chat.db` — only the backend does). The
+  helper gives the backend its own stable identity: bundle id `ai.autowright.backend` (the
+  LaunchAgent label, see the identifiers bullet), `CFBundleName`/`CFBundleDisplayName`
+  **"Autowright"** (decided 2026-11-01: the GUI app never appears in Full Disk Access or
+  Automation on its own — nothing it does is gated there — so the product name is the one
+  the user expects; the accepted trade-off is that a GUI row a user adds by hand with "+"
+  would be indistinguishable from the backend's and do nothing), `CFBundleExecutable`
+  "Autowright Backend" (the internal name — the folder `Autowright Backend.app` and the
+  executable keep it, so the §2 resolver and the tests pin one path), the app's `icon.icns`
+  as `CFBundleIconFile`, `CFBundleShortVersionString` / `CFBundleVersion` = the app version,
+  and `LSUIElement` true (never a Dock tile). Prompts and the lists then read "Autowright"
+  with the app icon, and the grant survives moves, renames and updates as long as the bundle
+  id and the Developer ID team stay the same — the display name, the executable name and the
+  folder name are free to change in any later release without a re-grant; only the bundle id
+  and the signing team are permanent. **Layout:** `prod.sh` restructures the staged tree right after extraction, before pip
+  runs, so the whole build pipeline (pip, trimming, bytecode compile, smoke checks, probes)
+  exercises the shipped layout: the real interpreter binary moves from `bin/python3.14` into
+  the helper's `Contents/MacOS/`, `bin/python3.14` becomes a relative symlink to it and
+  `bin/python3` stays the symlink to `python3.14`, so nothing is duplicated (the binary is
+  ~19 MB) and a v0.16.0 plist that still names `bin/python3` keeps starting a working backend
+  until the §3 launch-time version-compare rewrites it. The helper sits inside
+  `Resources/python/` on purpose: python-build-standalone finds its home by walking up from
+  the executable's directory to the first ancestor holding `lib/python3.x/os.py`, which is
+  `Resources/python/`, so no `pyvenv.cfg` and no `PYTHONHOME` is needed (verified 2026-11-01:
+  `sys.prefix` resolves to the tree and `autowright` imports from its site-packages). The
+  Windows (`python\python.exe`, `pythonw.exe`) and Linux (`python/bin/python3`) layouts are
+  unchanged — neither OS has the prompt. **Signing:** the helper bundle is signed as a bundle,
+  with the interpreter entitlement (its main executable is the interpreter), after the loose
+  Python-tree executables and before the Frameworks step (signing-order step 1b below); the
+  `bin/` signing loop skips symlinks (`-type f`) so the binary is signed exactly once. Every
+  interpreter invocation in `prod.sh` after staging — the bytecode compile, the write probe,
+  the smoke check, both post-sign probes — runs the helper executable (`$BACKEND_EXE`), and a
+  §15 drift guard pins the layout, the Info.plist keys and those invocations. **Re-grant and
+  the one-time notice:** an identity change cannot carry grants over (macOS has no API for it),
+  so a user who granted "python3" grants the backend's "Autowright" row once more after the
+  update.
+  `service install` reads the plist it is about to replace and, when that plist's program is a
+  different file whose name starts with `python` while the installing interpreter's name does
+  not (a v0.16.0-or-earlier registration replaced by the helper — a dev venv moving, or the
+  app moving under an old release, is no rename), writes
+  the marker file `backend-renamed` in the §5 data root. The §6 listener manager consumes the
+  marker: when no enabled `imessage` trigger exists it is deleted silently (nothing to
+  re-grant), when the watcher opens `chat.db` it is deleted silently, and when the watcher
+  parks on the Full Disk Access error it posts **one** notification — title "Autowright needs
+  Full Disk Access", body "This update changed how Autowright's backend runs. Turn on
+  “Autowright” in System Settings → Privacy & Security → Full Disk Access to keep your
+  iMessage triggers working." — through the §6 carrier rule with the click target of one automation holding an
+  enabled `imessage` trigger (its §9.2 page leads to the trigger editor's permission
+  checklist and its Open System Settings button), then deletes the marker. The notice honors
+  the §4.9 global `notifications` setting (`never` suppresses it; the marker is still
+  consumed). The Messages automation grant re-asks on its own at the first reply, and the
+  checklist's Grant button covers it. The §4.3 `connection` error text and the §9 checklist
+  row name the entry to toggle ("Autowright"), so a user who never sees the
+  notification still finds the right row.
 - **Bundled Python (decided):** the app ships its own relocatable CPython (python-build-standalone
-  builds) inside the bundle (`Contents/Resources/python/`; on Windows the packaged layout is
+  builds) inside the bundle (`Contents/Resources/python/`, where on macOS the interpreter is
+  the backend helper's main executable, above; on Windows the packaged layout is
   `resources\python\` and the interpreter sits flat at `python\python.exe` — the
   `*-pc-windows-msvc-install_only` builds have no `bin/` directory — resolved per-OS by the §2
   platform layer's `bundledPythonPath`). The backend, the engine, and every
@@ -141,7 +210,9 @@ the update bullets below).
   `codesign --deep`, which leaves Electron Framework's nested dylibs (libEGL, libGLESv2,
   libffmpeg, libvk_swiftshader…) unsigned/un-timestamped and breaks the outer seal (notarization
   rejects with "signature of the binary is invalid"). Order: (1) all `.so`/`.dylib` + executables
-  in the Python tree, the Mach-O executables with the interpreter entitlement below, (2) every
+  in the Python tree, the Mach-O executables with the interpreter entitlement below, (1b) the
+  `Autowright Backend.app` helper bundle (the backend-identity bullet above) as a bundle, with
+  the interpreter entitlement — its main executable is the interpreter, (2) every
   Mach-O inside `Contents/Frameworks`, detected by file content
   rather than name/location — executables hide in odd places (Squirrel's `Resources/ShipIt`,
   Electron's `Helpers/chrome_crashpad_handler`),

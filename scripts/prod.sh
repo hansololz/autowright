@@ -62,18 +62,70 @@ rm -rf "$PYSTAGE"
 mkdir -p "$PYSTAGE"
 tar -xzf "$TARBALL" -C "$PYSTAGE" --strip-components 1   # tarball root is python/
 
+# ---- backend helper bundle (SPEC §3 backend identity) ----
+# The interpreter ships as the main executable of a helper app bundle, so macOS
+# names the backend "Autowright" (bundle id ai.autowright.backend) in
+# permission prompts and the Privacy & Security lists, and keys its grants by
+# bundle id instead of by the path of a loose python3 (through 0.16.0 every
+# prompt the backend caused read "python3", and a grant died when the app was
+# moved). The real binary moves into the helper; bin/python3.14 becomes a
+# symlink to it (nothing duplicated, and a pre-0.17 plist naming bin/python3
+# keeps starting a working backend until the launch-time version-compare
+# rewrites it). The helper sits inside the Python tree on purpose:
+# python-build-standalone finds its home by walking up from the executable to
+# the first ancestor holding lib/python3.x/os.py, which is this tree. Done
+# before pip runs, so the whole pipeline below exercises the shipped layout.
+VERSION="$(node -p "require('$ROOT/app/package.json').version")"
+PY_MINOR="${PY_FULL%.*}"                                  # 3.14
+HELPER_REL="Autowright Backend.app/Contents/MacOS/Autowright Backend"
+HELPER="$PYSTAGE/Autowright Backend.app"
+echo "· wrapping the interpreter as Autowright Backend.app"
+[ -f "$PYSTAGE/bin/python$PY_MINOR" ] && [ ! -L "$PYSTAGE/bin/python$PY_MINOR" ] \
+  || { echo "unexpected bundled Python layout: bin/python$PY_MINOR is not the interpreter binary"; exit 1; }
+[ "$(readlink "$PYSTAGE/bin/python3")" = "python$PY_MINOR" ] \
+  || { echo "unexpected bundled Python layout: bin/python3 is not a symlink to python$PY_MINOR"; exit 1; }
+mkdir -p "$HELPER/Contents/MacOS" "$HELPER/Contents/Resources"
+mv "$PYSTAGE/bin/python$PY_MINOR" "$HELPER/Contents/MacOS/Autowright Backend"
+ln -s "../$HELPER_REL" "$PYSTAGE/bin/python$PY_MINOR"
+cp "$ROOT/app/electron/icon/icon.icns" "$HELPER/Contents/Resources/icon.icns"
+cat > "$HELPER/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>Autowright</string>
+  <key>CFBundleExecutable</key><string>Autowright Backend</string>
+  <key>CFBundleIconFile</key><string>icon.icns</string>
+  <key>CFBundleIdentifier</key><string>ai.autowright.backend</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Autowright</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+EOF
+# The helper must resolve the Python tree as its home, from its own location
+# and through the bin/ symlink chain a pre-0.17 plist still uses.
+"$PYSTAGE/$HELPER_REL" -s -P -c 'import sys; assert sys.prefix == sys.argv[1], sys.prefix' "$PYSTAGE" \
+  || { echo "the helper interpreter does not resolve build/python as its home"; exit 1; }
+"$PYSTAGE/bin/python3" -s -P -c 'import sys; assert sys.prefix == sys.argv[1], sys.prefix' "$PYSTAGE" \
+  || { echo "bin/python3 no longer reaches the helper interpreter"; exit 1; }
+
 # Backend + curated packages (§6.2) install into the bundled interpreter.
 # pip's bin/ entry-point scripts get absolute staging-path shebangs, so inside
 # the bundle the backend/CLI execute as `python3 -m autowright.main` / `-m autowright.cli`.
 echo "· upgrading bundled pip"
-"$PYSTAGE/bin/python3" -m pip -q install --upgrade pip
+"$PYSTAGE/$HELPER_REL" -m pip -q install --upgrade pip
 
 # -c backend/constraints.txt pins the whole runtime closure (SPEC §17): the
 # pyproject floors alone would let two DMGs from the same commit ship different
 # fastapi/lxml/requests, and the §6.2 curated packages are the user-facing step
 # environment.
 echo "· installing backend into bundled Python (pinned by backend/constraints.txt)"
-"$PYSTAGE/bin/python3" -m pip -q install -c "$ROOT/backend/constraints.txt" "$ROOT/backend"
+"$PYSTAGE/$HELPER_REL" -m pip -q install -c "$ROOT/backend/constraints.txt" "$ROOT/backend"
 
 # ---- trim the bundled Python (SPEC §3 bundle trimming) ----
 # Only what runs ships. Tcl/Tk goes (a GUI toolkit; the backend and every step
@@ -149,6 +201,11 @@ APP="$BUILD/pkg/Autowright-darwin-$ARCH/Autowright.app"
 echo "· bundling Python → Contents/Resources/python"
 rm -rf "$APP/Contents/Resources/python"
 cp -R "$PYSTAGE" "$APP/Contents/Resources/python"
+# SPEC §3 backend identity: every interpreter run from here on is the helper's
+# executable — the exact file the LaunchAgent, the shim and every step run.
+BACKEND_EXE="$APP/Contents/Resources/python/$HELPER_REL"
+[ -f "$BACKEND_EXE" ] && [ -L "$APP/Contents/Resources/python/bin/python$PY_MINOR" ] \
+  || { echo "bundling lost the Autowright Backend.app helper layout"; exit 1; }
 
 # ---- shipped bytecode (SPEC §3): valid, never rewritten at runtime ----
 # The standalone distribution's .pyc files are timestamp-validated against a
@@ -162,7 +219,7 @@ cp -R "$PYSTAGE" "$APP/Contents/Resources/python"
 # bundled interpreter runs it so the magic number matches; the env var keeps
 # compileall's own imports from writing timestamp .pyc first.
 echo "· compiling shipped bytecode (unchecked-hash)"
-PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m compileall -q -f \
+PYTHONDONTWRITEBYTECODE=1 "$BACKEND_EXE" -m compileall -q -f \
   --invalidation-mode unchecked-hash "$APP/Contents/Resources/python/lib" \
   || { echo "compiling shipped bytecode failed"; exit 1; }
 # Prove it rather than assume it: an import run WITHOUT PYTHONDONTWRITEBYTECODE
@@ -170,7 +227,7 @@ PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m compil
 # sealed bundle would have taken at runtime.
 BYTECODE_MARK="$BUILD/bytecode-probe.mark"
 touch "$BYTECODE_MARK"
-"$APP/Contents/Resources/python/bin/python3" -c \
+"$BACKEND_EXE" -c \
   'import autowright, fastapi, uvicorn, websockets, yaml, keyring, requests, httpx, bs4, lxml, feedparser, dateutil' \
   || { echo "bundled Python write probe failed to import"; exit 1; }
 WROTE="$(find "$APP/Contents/Resources/python" -type f -newer "$BYTECODE_MARK" | head -5)"
@@ -205,7 +262,7 @@ EOF
 # MUST run before signing: imports write .pyc files into Resources/python, and
 # any write after signing breaks the bundle's resource seal (notarization then
 # rejects the main binary). PYTHONDONTWRITEBYTECODE keeps the tree untouched.
-PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -c \
+PYTHONDONTWRITEBYTECODE=1 "$BACKEND_EXE" -c \
   'import autowright, fastapi, uvicorn, websockets, yaml, keyring, requests, httpx, bs4, lxml, feedparser, dateutil' \
   || { echo "bundled Python smoke check failed"; exit 1; }
 echo "· bundled Python imports OK"
@@ -262,6 +319,12 @@ while IFS= read -r -d '' f; do
   fi
 done < <(find "$APP/Contents/Resources/python/bin" -type f -perm +111 -print0)
 
+# 1b. the backend helper bundle (SPEC §3 backend identity): signed as a bundle
+# so its Info.plist and icon are sealed together with its main executable, the
+# interpreter, which therefore carries the interpreter entitlement. The bin/
+# loop above skips symlinks, so the binary is signed exactly once, here.
+"${SIGN[@]}" --entitlements "$PY_ENTITLEMENTS" "$APP/Contents/Resources/python/Autowright Backend.app"
+
 # 2. every Mach-O inside Frameworks — detect by content, not name/location:
 # executables hide in odd places (Squirrel's Resources/ShipIt, Electron's
 # Helpers/chrome_crashpad_handler) and any one left unsigned fails notarization.
@@ -312,11 +375,11 @@ echo "· signed interpreter loads ad-hoc extensions OK"
 # into the sealed tree (the seal is re-verified below regardless).
 WHEEL_PROBE="$BUILD/wheel-probe"
 rm -rf "$WHEEL_PROBE"
-PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -m pip -q install \
+PYTHONDONTWRITEBYTECODE=1 "$BACKEND_EXE" -m pip -q install \
   --no-input --disable-pip-version-check --only-binary ':all:' \
   --target "$WHEEL_PROBE" numpy \
   || { echo "signed interpreter's pip could not install the numpy probe wheel (SPEC §3)"; exit 1; }
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$APP/Contents/Resources/python/bin/python3" -c \
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$WHEEL_PROBE" "$BACKEND_EXE" -c \
   'import numpy; numpy.zeros(1)' \
   || { echo "signed interpreter cannot import a native wheel (numpy): interpreter entitlement missing (SPEC §3)"; exit 1; }
 rm -rf "$WHEEL_PROBE"
@@ -340,8 +403,8 @@ xcrun stapler staple "$APP"
 
 # ---- update zip (SPEC §3: the electron-updater/Squirrel update artifact) ----
 # Built from the same stapled bundle the DMG carries, so the app inside
-# already passes Gatekeeper offline; the zip itself needs no notarization.
-VERSION="$(node -p "require('$ROOT/app/package.json').version")"
+# already passes Gatekeeper offline; the zip itself needs no notarization
+# (VERSION was read at the helper-bundle step above).
 ZIP="$BUILD/Autowright-$VERSION-darwin-$ARCH.zip"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"

@@ -170,12 +170,16 @@ class _FakeMgr:
     def __init__(self):
         self.status = []
         self.fired = []
+        self.renamed = []  # §3 consume_renamed_marker calls (notify_fda flag)
 
     def set_status(self, key, state, error=None):
         self.status.append((key, state, error))
 
     def dispatch_imessage(self, m):
         self.fired.append(m)
+
+    def consume_renamed_marker(self, *, notify_fda):
+        self.renamed.append(notify_fda)
 
 
 def test_watcher_cursor_and_fence(chat_db, monkeypatch):

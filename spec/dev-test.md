@@ -617,7 +617,9 @@ Dev workflow:
   the computed electron-updater `node_modules` closure, and ignores every other top-level
   entry under `app/`; the renderer is fully bundled and main/preload use Electron builtins
   plus electron-updater), copies
-  the interpreter to `Contents/Resources/python/`, drops every non-English `*.lproj` from the
+  the interpreter to `Contents/Resources/python/` (restructured at staging into the §3
+  `Autowright Backend.app` helper, whose executable every later interpreter invocation in the
+  script runs), drops every non-English `*.lproj` from the
   app and the Electron framework (§3), smoke-checks that the bundled interpreter
   imports `autowright` + every curated package from inside the bundle, codesigns per §3
   (Developer ID + hardened runtime on every Mach-O, inside-out), runs the two §3 post-sign

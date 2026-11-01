@@ -311,7 +311,8 @@ migrate-on-load migration so data written by released versions keeps loading (§
 - `app/` — Electron app: `electron/main.cjs` + `preload.cjs` (window, tray panel, backend.json
   bridge), `electron/platform/` (the §2 platform layer's shell half: `index.cjs` selects the
   per-OS module once; `darwin.cjs` holds the macOS values and helpers — window-chrome options,
-  tray icon spec, panel placement, dock icon, data/log roots, CLI shim path+text, login-shell
+  tray icon spec, panel placement, dock icon, data/log roots, the §3 bundled-interpreter path
+  (the `Autowright Backend.app` helper's executable), CLI shim path+text, login-shell
   PATH probe, update feed URL, Homebrew managed-install probe, reveal bundle rule, the
   settings deep-link scheme; `win32.cjs` holds the §2 Windows groundwork values;
   `linux.cjs` holds the §2 Linux values; `fallback.cjs` the degraded unknown-platform

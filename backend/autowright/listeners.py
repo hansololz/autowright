@@ -17,10 +17,10 @@ import threading
 import time
 from collections import OrderedDict
 
-from . import imessage, keychain, platform
+from . import imessage, keychain, notify, paths, platform
 from .events import hub
 from .firing import fire_trigger
-from .storage import Store
+from .storage import Store, effective_notifications
 
 log = logging.getLogger("autowright.listeners")
 
@@ -38,6 +38,14 @@ BUSY_TEXT = ("I'm working on something else right now and couldn't take this "
 # triggers share it. Not a uuid, so it can never collide with a Discord
 # entry's key (§4.8 secret ids are uuids).
 IMSG_KEY = "imessage"
+# §3 backend identity: the one-time notice after an update replaced the loose
+# `python3` registration with the `Autowright Backend` helper — macOS keyed the
+# old Full Disk Access grant to the old identity, so the watcher's first park
+# on that error names the row to toggle. Posted once, never per tick.
+RENAMED_TITLE = "Autowright needs Full Disk Access"
+RENAMED_BODY = ("This update changed how Autowright's backend runs. Turn on "
+                "“Autowright” in System Settings → Privacy & Security → Full "
+                "Disk Access to keep your iMessage triggers working.")
 # §6: how many recent (automation id, Discord message id) firings the manager
 # remembers — enough to cover one message reaching several connections.
 DISCORD_SEEN_LIMIT = 512
@@ -449,6 +457,8 @@ class _ImsgWatcher:
                 self._has_cursor = True
                 self._db = db
                 self.mgr.set_status(IMSG_KEY, "connected")
+                # §3: the db opened, so no re-grant is owed — drop the marker.
+                self.mgr.consume_renamed_marker(notify_fda=False)
             except Exception as e:  # noqa: BLE001
                 if db is not None:
                     try:
@@ -456,6 +466,11 @@ class _ImsgWatcher:
                     except Exception:  # noqa: BLE001
                         pass
                 self.mgr.set_status(IMSG_KEY, "error", str(e))
+                # §3: the Full Disk Access park after the rename is the one
+                # moment the user is owed a notice. Any other error (no db,
+                # a read failure) leaves the marker for a later tick.
+                if str(e) == imessage.FDA_ERROR:
+                    self.mgr.consume_renamed_marker(notify_fda=True)
                 return
         try:
             top = imessage.max_rowid(self._db)
@@ -501,6 +516,52 @@ class Listeners:
         # tokens watching one channel sees each message on both gateways and
         # must fire once. Bounded LRU, guarded by store.lock (dispatch holds it).
         self._discord_seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # §3 backend identity: whether `service install` left the
+        # `backend-renamed` marker (read once; the file is the memory across
+        # restarts, this flag is the memory within one). Consumed by
+        # consume_renamed_marker — at most one notice, ever.
+        self._renamed_marker = paths.backend_renamed_marker()
+        try:
+            self._renamed_pending = self._renamed_marker.exists()
+        except OSError:
+            self._renamed_pending = False
+
+    def consume_renamed_marker(self, *, notify_fda: bool) -> None:
+        """§3 backend identity: settle the one-time re-grant notice. Deletes
+        the marker; with `notify_fda` (the watcher parked on the Full Disk
+        Access error) also posts the RENAMED_* notification through the §6
+        carrier rule, targeting one automation that holds an enabled imessage
+        trigger (its page leads to the trigger editor's permission checklist).
+        The §4.9 global `notifications` setting is honored: `never` posts
+        nothing, and the marker is consumed all the same. Posted off this
+        thread — the native notifier can block for its full timeout and the
+        reconcile loop must not."""
+        if not self._renamed_pending:
+            return
+        self._renamed_pending = False
+        try:
+            self._renamed_marker.unlink()
+        except OSError:
+            pass
+        if not notify_fda:
+            return
+        with self.store.lock:
+            if effective_notifications(self.store.settings, {}) == "never":
+                return
+            target = next(({"page": "automation", "automationId": a["id"]}
+                           for a in self.store.autos.values()
+                           if any(t["kind"] == "imessage" and t["enabled"]
+                                  for t in a["triggers"])), None)
+        if target is None:
+            return
+
+        def _post() -> None:
+            try:
+                notify.post_targeted(RENAMED_TITLE, RENAMED_BODY,
+                                     kind="permission", target=target)
+            except Exception:  # noqa: BLE001
+                log.exception("backend-renamed notice failed")
+        threading.Thread(target=_post, daemon=True, name="ad-renamed-notice").start()
 
     def start(self) -> None:
         t = threading.Thread(target=self._loop, daemon=True, name="ad-listeners")
@@ -577,6 +638,11 @@ class Listeners:
         # it closes the watcher (same rule as the Discord creation above): a
         # stop can never miss a watcher made here, and a tick never queries a
         # database stop() just closed.
+        # §3 backend identity: with no enabled imessage trigger (or no iMessage
+        # on this OS) nothing was ever granted, so nothing is owed — the
+        # renamed marker is dropped silently.
+        if not senders or not platform.current().capabilities.imessage:
+            self.consume_renamed_marker(notify_fda=False)
         with self._conns_lock:
             if self._stop.is_set():
                 return

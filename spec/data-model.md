@@ -642,8 +642,9 @@ phone** — `+` then 3–15 digits, matching the form Messages stores; obvious p
 never match a stored handle, and a trigger that silently never fires is the worst failure
 mode. `pattern` when present a nonempty string. Serialized `imessage` triggers carry the same derived **`connection`** field as Discord —
 all of them share the one §6 watcher, so they all report its state; the plain-word errors
-name permissions where relevant (e.g. "needs Full Disk Access — grant it in System Settings →
-Privacy & Security → Full Disk Access").
+name permissions where relevant and the row to toggle (e.g. "needs Full Disk Access — turn on
+“Autowright” in System Settings → Privacy & Security → Full Disk Access" — the §3
+backend helper is the process macOS lists).
 
 **Cron dialect** (implemented in `triggers.py` — the one trigger-math implementation, no new
 dependency; the renderer has none and previews via §19 `POST /triggers/preview`): five

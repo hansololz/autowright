@@ -68,6 +68,20 @@ Interaction with existing rules:
 Newest first. One entry per compatibility decision: what changed, the migration, the first
 version that writes the new shape, and the oldest shape still read.
 
+- **2026-11-01 - the macOS backend runs as the `Autowright Backend.app` helper (§3 backend
+  identity).** Not a stored-shape change, but the LaunchAgent plist a released version wrote
+  names `Contents/Resources/python/bin/python3` as its program, so it is logged here. The
+  shipped bundle keeps `bin/python3` → `python3.14` → the helper's executable as symlinks,
+  so a v0.16.0-or-earlier plist still starts a working backend after the update, and the §3
+  launch-time version-compare rewrites the plist with the helper path at the first app launch
+  (`sys.executable` of the interpreter the app now runs). Nothing on disk is rewritten at
+  load. What does not carry over: macOS permission grants (Full Disk Access, Messages
+  automation, Keychain access-list entries) given to "python3" — macOS keys them to the old
+  identity and has no transfer API — so affected users grant the backend's "Autowright" row
+  once; the
+  one-time `backend-renamed` marker and notification (§3) point them at the row. Fixture: a
+  `service install` over a plist naming `…/bin/python3` writes the marker; one over a plist
+  already naming the helper executable, or no plist, does not.
 - **2026-10-27 (later) - step-name uniqueness, restore gate narrowed, duplicate 409.** Not a
   stored-shape change: the §4.1 uniqueness rule is enforced by the save/sync validators
   only, so stored versions with duplicate names keep loading, displaying, and executing
