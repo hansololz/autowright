@@ -239,7 +239,9 @@ Console.app picks them up): `app.log` (backend application log), `backend.out.lo
 (§15) logs go to `<home>/logs/` instead, keeping dev/test sessions fully isolated.
 
 **Log size cap:** each backend log (`app.log`, `backend.out.log`, `backend.err.log`) is
-capped at 100 MB. At backend startup, before anything logs, any file over the cap is trimmed
+capped at 100 MB. At backend startup, before anything logs, and again from the §6
+scheduler's hourly housekeeping (the service runs for months and the §8 call log alone adds
+tens of MB a day on a busy agent cron, third sweep 2026-10-31), any file over the cap is trimmed
 in place to its newest 50 MB (half the cap, so a saturated log is not rewritten on every
 boot) — oldest lines are deleted first, cutting at the next line boundary. Trimming is
 in place (read the tail, rewrite from offset 0, truncate) because launchd holds
@@ -572,7 +574,13 @@ kind's empty default (what `param_default` already resolved it to at runtime), a
 number is dropped (the validator's 2026-10-31 rule had no load-side twin, so `min: 1e3`,
 YAML text, answered 422 on every save the day after the default rule was migrated), and a
 `kv` default's rows are coerced to the §4.2 text key / text value form (`scalar_text`; a
-row whose key is null is dropped), so a version saved before the §8 validator
+row whose key is null is dropped), every string the loader reads has a lone UTF-16
+surrogate replaced by U+FFFD with a warning (the text can't be encoded as UTF-8, so one
+such name made every `GET /state` a 500 until the file was hand-edited; the API and the
+§5.1 import refuse it at the door with 422 "text must not contain lone surrogate
+characters", the JSON encoder replaces one as a last defence, and a memory file whose
+name isn't valid UTF-8 is skipped from the §6.3 listing with a warning, third sweep
+2026-10-31), so a version saved before the §8 validator
 checked those (2026-10-30 second sweep) still saves from the §11 editor and pushes from a
 §20 workdir instead of answering 422 on every step edit, lock or move; the written shape
 only changes when that version is next saved. A stored `param_values` entry that is not a
@@ -599,6 +607,11 @@ folder in Settings". A record created there would start a second, hidden history
 boot disk, and the next boot would find the directory and open a fresh index over it while
 the real one sat under the remounted volume. Switching the data path (§4.9) reloads and
 ends the degraded session. The same backstop covers
+a hand-edited file written with a UTF-8 BOM (PowerShell and some editors add one): every
+text file the store reads (`spec.md`, `notes.md`, step scripts, the YAML files) and every
+§20 workdir file is read with the BOM stripped, since a BOM turned `# Title` into a
+paragraph and failed a step script's compile with "invalid non-printable character U+FEFF"
+(third sweep, 2026-10-31); and
 a hand-edited `execution.yaml`: every timestamp and id field is coerced to a string at the
 read seam (an unquoted ISO timestamp loads from YAML as a `datetime`, and one such record
 would otherwise make the latest-execution comparison raise at boot), and an unparsable one
@@ -641,7 +654,11 @@ Rules:
   violation (2026-10-30: a reader that holds the target open without delete-sharing —
   the request-log settings read, a `GET /chat`, the search indexer or an antivirus on
   `execution.yaml` — made the replace fail at random); on POSIX the parent directory is fsynced after the rename, so a committed
-  write survives a power loss on ext4 as well as APFS; a committed transaction for the `executions.db` index — WAL with `synchronous=NORMAL`: a
+  write survives a process crash on every filesystem and a power loss wherever `fsync` reaches the medium (ext4; on APFS `fsync` stops at the drive cache, accepted); the temp file takes the
+  **existing file's mode** when the caller names none (a new file gets 0644; a caller that
+  needs 0600, the token-bearing `backend.json`, says so), and the rename targets the real
+  path behind a symlink, so saving a user's own `catalog.yaml` keeps it readable on a shared
+  volume and never swaps the link for a copy (third sweep, 2026-10-31); a committed transaction for the `executions.db` index — WAL with `synchronous=NORMAL`: a
   process crash loses nothing, a power loss can drop the newest index rows, which the startup
   scan below rebuilds from the yaml; and a top-level `automation.yaml` write that fails
   (disk full, read-only volume) rolls the in-memory record back to its pre-write fields —
@@ -676,14 +693,24 @@ Rules:
 - Retention cleanup (§4.9 `days`) deletes execution directories and DB rows, then their
   in-memory records. `days` is read leniently like every other numeric setting — a
   non-numeric hand-edited value falls back to the 90-day default rather than silently
-  disabling the sweep for the session. The age is measured from the **earlier** of the
-  wall clock and the newest `started_at` of any record (a `started_at` in the future is
-  the §6 forward-glitch class — a bad RTC, a date set ahead for a test — and the sweep
-  must never read it as "everything is ancient": with the clock a year ahead, the plain
-  `now - days` cutoff deleted every record but each automation's latest on the next tick,
-  2026-10-31; anchoring on the newest real record keeps a sweep under a correct clock
-  within one record age of the plain rule and makes a glitched one delete nothing it
-  would not have deleted anyway). Records still `executing` or waiting in the §6 queue (`queued`) are
+  disabling the sweep for the session. The age is measured from a **session clock**, never
+  the wall clock alone (a `started_at` in the future is the §6 forward-glitch class, a bad
+  RTC or a date set ahead for a test, and the sweep must never read it as "everything is
+  ancient": with the clock a year ahead, the plain `now - days` cutoff deleted every record
+  but each automation's latest on the next tick, 2026-10-31). At load the store records the
+  wall clock, the elapsed clock (`time.monotonic()`; `CLOCK_BOOTTIME` on Linux, which keeps
+  counting through suspend) and the **base**: the newest parsable `started_at` among the
+  records loaded from disk that lies at most 15 min (the §6 credibility hold) ahead of that
+  wall clock, or none. A sweep's anchor is the wall clock when there is no base, else the
+  **earlier** of the wall clock and `base + elapsed since load`; the cutoff is the anchor
+  minus `days`. Records created during this session never feed the anchor (third sweep,
+  2026-10-31: anchoring on the newest record of any age was defeated in the common path,
+  because the same tick's catch-up firings under the glitched clock had already stamped a
+  record at the bogus "now" before the sweep thread started, and the sweep then wiped the
+  history it was meant to keep). Under a correct clock the session clock tracks the wall
+  clock to within the idle gap before boot; a clock stepped ahead at any point, before or
+  during the session, leaves the anchor on real time, and a clock stepped back only makes
+  the sweep keep more. Records still `executing` or waiting in the §6 queue (`queued`) are
   exempt — deleting a queued record would silently drop a firing that never ran. Each
   **existing** automation's **latest real execution** (the newest record in the §4.1
   `lastStatus` population — `skipped`, `queued`, and test records excluded; read off the
@@ -822,7 +849,8 @@ automation/                  # exactly the §5 version-folder shape; import copi
   spec.md                    #   verbatim
                              #   (no instructions.md — retired 2026-09-07; an archive from an
                              #   older release may carry one, and import ignores it)
-  notes.md                   #   verbatim; absent when empty (§4.1 notes)
+  notes.md                   #   verbatim; absent when empty (§4.1 notes); import normalizes
+                             #   CRLF to LF like every other text member (third sweep)
   NN-name.py                 #   every step script, verbatim except the ref-form
                              #   secrets["1"]/agents["2"] code subscripts (below)
 agents.yaml                  # configs of referenced agents (the automation's drafting
@@ -1007,7 +1035,11 @@ answers 422 and writes nothing):
   first-enabled-agent fallback lands on the authoring agent). Both are passed **directly
   into the automation-creation call** as its grant
   lists (one write): there is no post-create grant patch, so no window ever exists in which
-  the automation is stored with different grants than it ends up with. A clean import
+  the automation is stored with different grants than it ends up with (and `POST
+  /automations` applies the same discipline to the writes that follow its create: the
+  pending slot is consumed first, and a failing param-value, concurrency or chat-migration
+  write is logged and the created automation answered rather than a 500 that invites a
+  second Create and a "Name (2)", third sweep 2026-10-31). A clean import
   therefore works immediately; the review gate is that every trigger arrives off - nothing
   fires until the user reviews and enables - and a similarity match is visible before it
   lands (`matchedBy` in the §19 preview and summary).

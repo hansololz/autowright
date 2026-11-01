@@ -126,7 +126,9 @@ def hold_read_carry(raw: str, carry: str, carry_len: int,
         cut = plain
     return raw[:cut], raw[cut:]
 
-REPLY_BUDGET = 100  # §6.1: replies one step attempt may send; the rest are dropped
+REPLY_BUDGET = 100  # §6.1: replies one execution may send; the rest are dropped
+# §6.1: execution statuses a queued reply is never delivered for.
+_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "interrupted"})
 
 
 def step_retries_for(s: dict) -> int:
@@ -361,6 +363,34 @@ def kill_orphan_agent_group(pgid: int) -> None:
     procs.kill_group(pgid)
 
 
+_MEMORY_TEMP_RE = re.compile(r"^\..*\.tmp$")
+
+
+def _sweep_memory_temps(memory_dir: Path) -> None:
+    """§6.3: remove the `.<name>.*.tmp` files a killed step's §6.1
+    `memory.save` left in `memory_dir`. Best-effort: any error is ignored."""
+    try:
+        entries = list(os.scandir(memory_dir))
+    except OSError:
+        return
+    for entry in entries:
+        if not _MEMORY_TEMP_RE.match(entry.name):
+            continue
+        try:
+            if entry.is_file(follow_symlinks=False):
+                os.unlink(entry.path)
+        except OSError:
+            pass
+
+
+def _control_str(value: Any) -> str:
+    """§7: a control-line string field read defensively: None is "", any
+    other non-str value its str() form."""
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
 def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                      holder: dict, timeout_s: float | None,
                      on_reply=None, step_i: int | None = None,
@@ -394,8 +424,10 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
         # §2 console-interpreter rule: never pythonw — with the hidden-console
         # spawn policy below, a step's own console children (tool calls)
         # inherit an invisible console instead of each opening a terminal
-        # window under the §3 pythonw service.
-        [paths.console_python(), "-m", "autowright.executor", str(script)],
+        # window under the §3 pythonw service. §3 interpreter isolation rides
+        # as the `-s -P` flags, never environment variables a step's own
+        # subprocesses would inherit (third sweep, 2026-10-31).
+        [paths.console_python(), "-s", "-P", "-m", "autowright.executor", str(script)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         # §2 pipe-encoding contract: explicit UTF-8, never the locale codec;
         # errors="replace" so binary garbage on stdout can't kill the read loop.
@@ -557,9 +589,15 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                         msg = json.loads(line[len(CTRL):])
                     except ValueError:
                         continue
+                    # §7 (third sweep, 2026-10-31): a payload that parses but
+                    # isn't a JSON object is dropped like an unparsable one,
+                    # and the string fields are coerced, so a stray child
+                    # print of `@@AD@@null` can't crash the read loop.
+                    if not isinstance(msg, dict):
+                        continue
                     op = msg.get("op")
                     if op == "log":
-                        log(msg.get("kind", "out"), msg.get("text", ""))
+                        log(_control_str(msg.get("kind")) or "out", _control_str(msg.get("text")))
                     elif op == "result":
                         holder["result_touched"] = True
                         f, v = msg.get("field"), msg.get("value")
@@ -569,17 +607,17 @@ def run_step_process(script: Path, ctx: dict, state: dict, log, result: dict,
                             result["chip"] = v
                             holder["chip_touched"] = True
                     elif op == "notify":
-                        holder["text"] = msg.get("text")
+                        holder["text"] = _control_str(msg.get("text"))
                     elif op == "reply":
                         # §6.1 reply(): routed engine-side so the bot token
                         # never enters the step process; fire-and-forget.
                         if on_reply:
-                            on_reply(msg.get("text", ""))
+                            on_reply(_control_str(msg.get("text")))
                     elif op == "error":
                         # §7 failure diagnostics — the executor's structured report
                         # of the exception that failed the step.
                         holder["error"] = {"type": msg.get("type"),
-                                           "message": msg.get("message")}
+                                           "message": _control_str(msg.get("message"))}
                     elif op == "agent_audit":
                         # §6: the FULL redacted prompt/response go to logs for audit
                         # (the 200k prompt/reply size caps already apply upstream).
@@ -790,6 +828,11 @@ class Engine:
                      for s in ver["steps"]]
             # §7: snapshot the resolved param values — the execution page shows them as used by this execution.
             params = self.store.merged_params(auto, ver)
+            # §6.3 (third sweep, 2026-10-31): with no execution of this
+            # automation live, no step can be mid-`memory.save`, so any
+            # `.<name>.*.tmp` left in the memory dir is a killed step's.
+            if not self.store.autos.get(auto["id"], auto).get("_live"):
+                _sweep_memory_temps(self._memory_dir(auto, kind))
             if adopt is not None:
                 h = self.store.promote_execution(adopt, steps, params=params)
             else:
@@ -988,7 +1031,7 @@ class Engine:
                     [(s["name"], s.get("file"), _step_sha(s)) for s in ver["steps"]]:
                 raise RuntimeError("the draft's steps changed since this execution — execute it fresh instead")
             # §7 disk-first (2026-10-31): the re-opened record is a copy,
-            # written (log line + execution.yaml) BEFORE it replaces the
+            # written (execution.yaml) BEFORE it replaces the
             # failed one in the live table — `exec_full` may hand back the
             # very object store.execs holds. A write that raises (ENOSPC,
             # EIO) leaves the stored record `failed` with no live entry, and
@@ -1005,11 +1048,18 @@ class Engine:
             # step that isn't re-executed can't set it again; a re-executed
             # step that sets one overrides it at the end of the pass.
             idx = next((i for i, s in enumerate(h["steps"]) if s["status"] == "queued"), None)
-            if idx is not None:
-                n = _next_attempt_n(h["steps"][idx])
-                self._log(h, "sys", f"retrying from step {idx + 1} — attempt {n}", {})
             self.store.update_execution(h)
             self.store.execs[h["id"]] = h  # the live in-memory record is the full one
+            # §7: the retry line is written only once the write above landed,
+            # so a failed write leaves no "retrying" line behind (third sweep,
+            # 2026-10-31). A failed append only loses the line: the record is
+            # already live and its thread must still launch.
+            if idx is not None:
+                n = _next_attempt_n(h["steps"][idx])
+                try:
+                    self._log(h, "sys", f"retrying from step {idx + 1} — attempt {n}", {})
+                except OSError:
+                    log.warning("couldn't append the retry log line for %s", h["id"])
             return self._launch(auto, ver, h)
 
     def _launch(self, auto: dict, ver: dict, h: dict) -> dict:
@@ -2011,20 +2061,21 @@ class Engine:
             },
         }
 
-        # §6.1 reply budget: counted per step attempt (this method runs once
-        # per attempt) — the delivery queue is shared by every listener, so a
-        # looping step must not grow it without bound.
-        replies = {"sent": 0}
-
         def on_reply(text: str) -> None:
             # §6.1: send back through the listener module — a failed send logs
             # an err line and never fails the step.
-            replies["sent"] += 1
-            if replies["sent"] > REPLY_BUDGET:
-                if replies["sent"] == REPLY_BUDGET + 1:
+            # §6.1 reply budget: counted per execution, across every step and
+            # attempt (third sweep, 2026-10-31: a per-attempt count let a step
+            # under infiniteRetries grow the shared delivery queue forever).
+            # In-memory `_` key, never serialized; set under store.lock so
+            # the header never resizes while a reader copies it.
+            with self.store.lock:
+                sent = h["_reply_sent"] = h.get("_reply_sent", 0) + 1
+            if sent > REPLY_BUDGET:
+                if sent == REPLY_BUDGET + 1:
                     # One err line for the whole overflow, then silence.
                     self._log(h, "err",
-                              f"reply dropped — more than {REPLY_BUDGET} replies in one step",
+                              f"reply dropped — more than {REPLY_BUDGET} replies in one execution",
                               redactions)
                 return
             payload = h.get("trigger_payload") or {}
@@ -2046,9 +2097,18 @@ class Engine:
             # reply() — the worker may deliver after the step moved on, and
             # `h["_cur"]` would then name a later attempt's file (or none).
             cur = h.get("_cur")
+            # §6.1: the queued entry holds only the text the listener would send.
+            clipped = text[:listeners.reply_limit(payload)]
 
             def deliver() -> None:
-                err = listeners.send_reply(payload, text)
+                # §6.1 (third sweep, 2026-10-31): a send queued for a record
+                # that is gone or already terminal is dropped silently, so a
+                # cancel stops the backlog instead of posting it for hours.
+                with self.store.lock:
+                    live = self.store.execs.get(h["id"])
+                    if live is None or live.get("status") in _TERMINAL_STATUSES:
+                        return
+                err = listeners.send_reply(payload, clipped)
                 # §5 (2026-10-31): a late delivery whose record was deleted
                 # meanwhile (a §11 test record replaced by keep-latest) logs
                 # nothing — appending would re-create executions/<id>/logs/.

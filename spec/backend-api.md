@@ -29,6 +29,19 @@ handler 422: `detail` is one sentence (pydantic's per-field entries are flattene
 `<field>: <reason>` joined by `; `, with the location prefix — `body`, `query`, `path`,
 `header` — stripped alike, so a query 422 reads `limit: …` exactly like a body one), so
 clients render every 422 the same way.
+Every request body is also refused with 422 "text must not contain lone surrogate
+characters" when any string in it holds a lone UTF-16 surrogate (a `\ud800` escape in the
+JSON, or a Linux CLI directory name that isn't UTF-8): the store writes YAML and answers
+JSON, both UTF-8, and one such string made every later `GET /state` fail to encode (third
+sweep, 2026-10-31). Responses encode with replacement rather than failing, as the last
+defence behind that door and the §5 load-time replacement.
+An `OSError` that escapes a handler (a store write hitting ENOSPC, EIO or a read-only
+volume: the manual retry, a secret save, a settings write) answers a JSON 500 whose
+`detail` is "couldn't write to disk — <strerror>: <path>" when the error names a file or
+carries a disk errno (ENOSPC, EROFS, EIO, EACCES, EDQUOT), and "the backend hit an I/O
+error — <message>" for any other `OSError` subclass that escapes (a `URLError`, a socket
+timeout: never labelled a disk error) (third sweep, 2026-10-31), never
+starlette's bare text page, which the §20 CLI misread as the backend being unreachable.
 The store-state cross-field checks live in the handlers, answering the same 422:
 `paramValues` entries are checked against the automation's param definitions (names **and**
 kinds), `agentId`/`stepAgents` entries must reference configured agents, and
@@ -466,7 +479,9 @@ remain plain dicts (§2).
   (same caps) → `{ token, preview }`: validates fully, writes nothing into the store, parks the
   bytes under the one-time `token` (§5.2 — spooled to a file under `import-spool/`, not held in
   memory; 15-minute expiry, with expired spool files swept on every preview *and* every
-  confirm — never left on disk until the next preview; at most 4 archives are parked at once, and
+  confirm *and* by a timer armed per parked slot at expiry — never left on disk until the
+  next preview, and never for the life of the process when the user simply closes the
+  modal (third sweep, 2026-10-31); at most 4 archives are parked at once, and
   a 5th preview evicts the oldest — a confirm against an evicted token answers 404 exactly
   like an expired one; a spool file that can't be written answers 507 with the reason, and one
   that has vanished by confirm time answers the same 404 as an expired token). `preview` is `{ name, landsAs, description, steps: [{name,
@@ -805,6 +820,9 @@ remain plain dicts (§2).
   downloaded first (curl's own exit code and error line decide — offline, 404, TLS, a
   stream cut off mid-way are all reported as the install's failure carrying curl's line),
   then executed; a pipe would run an empty or partial script, exit 0, and report success.
+  The download is https-only end to end (`--proto '=https' --proto-redir '=https'`): a
+  redirect to plain http fails the install like every other outbound read in the backend
+  (third sweep, 2026-10-31; this is the one download that runs as code).
   Claude Code — the official installer script (`curl -fsSL https://claude.ai/install.sh |
   bash`), lands in `~/.local/bin/claude` (the script only prints PATH instructions, so the
   terminal-access guarantee closes the install), indeterminate ·
@@ -825,7 +843,10 @@ remain plain dicts (§2).
   Ollama — the official Mac app: `Ollama-darwin.zip` from `https://ollama.com/download`
   (the exact payload the vendor's own install.sh ships), unpacked with `ditto` and moved to
   `/Applications` (or `~/Applications` when /Applications isn't writable); vendor-script
-  parity: a running Ollama app is quit and an existing `Ollama.app` replaced first. The
+  parity: a running Ollama app is quit and an existing `Ollama.app` replaced first (moved
+  aside as `Ollama.app.old-<pid>` and removed after the swap; a leftover aside of any pid
+  from an install that crashed between the two renames is removed at the next install,
+  third sweep 2026-10-31). The
   CLI symlink to the app's `Contents/Resources/ollama` goes to the vendor script's own
   `/usr/local/bin` when that dir is writable without sudo (the exact manual-install
   location, already on every PATH), else to `~/.local/bin` with the terminal-access
@@ -857,7 +878,10 @@ remain plain dicts (§2).
   pull runs under a 30-minute wall-clock cap (past it the child is killed and the terminal
   event is `ok: false` with a "pull timed out" line), and a CLI-mode pull child is
   registered with the §3 shutdown sweep so quit-all and reset never leave a multi-GB
-  download running. The pull rides the
+  download running (and so is every pip run the §6.2 package routes or an import start and
+  every vendor installer script, third sweep 2026-10-31: a surviving pip kept writing the
+  §6.2 directory while the next backend's preflight ran a second one into it, and re-created
+  the directory after a reset had erased it). The pull rides the
   **server's `/api/pull` HTTP stream whenever the server answers** — never the CLI in that
   case. `/ollama/status` reports installed/active from the server answering, so a pull must
   succeed in exactly that state even when no `ollama` binary is resolvable (server reachable
@@ -908,7 +932,16 @@ already neutralize. The provider config and
   use (readiness checks and invocations alike), the backend syncs the Ollama provider entry
   into `~/.config/opencode/opencode.json` (merge, never overwrite: provider `ollama` via npm
   `@ai-sdk/openai-compatible`, `baseURL` = `AUTOWRIGHT_OLLAMA_URL` + `/v1`, the agent's model
-  listed under `models`) so `opencode run --model ollama/<model>` resolves.
+  listed under `models`) so `opencode run --model ollama/<model>` resolves. A config file
+  that doesn't parse as plain JSON (OpenCode itself accepts JSONC: comments, trailing
+  commas) is **left untouched** and the check fails with "opencode.json isn't plain JSON —
+  add the ollama provider by hand" (third sweep, 2026-10-31: it used to be renamed aside and
+  replaced by a file holding only the ollama provider, which dropped the user's other
+  providers and MCP settings). Every backend
+  request to the Ollama server (the status probes, the version read, the HTTP pull) is made
+  with proxies disabled: a loopback call never rides a system or environment proxy (third
+  sweep, 2026-10-31: a macOS system web proxy, whose default bypass list omits localhost,
+  made Ollama read as not running and the install fail "server didn't start").
 - `GET /secrets` (each entry: `id` — the §4.8 uuid every reference binds by — + name +
   `description` + `set` + usedBy — `{ id, name }` automation entries — never
   values) · `POST /secrets` `{ name, value, description? }` — create: validates the name
@@ -938,7 +971,10 @@ already neutralize. The provider config and
   values go straight to the Keychain (account = the secret's id, §4.8), never
   into responses or files. Routes are id-keyed (§4.8: the id is the reference identity;
   names exist for display and the create call)
-- `GET /settings` · `PATCH /settings` (validates before storing: `days` must be an int —
+- `GET /settings` (and the `settings` block of `/state`) answers the §4.9 keys plus
+  `dataPath`, `dataSize` and `appPath`, nothing else: the hidden `imessageAutomation` value
+  and any unknown key hand-added to `settings.yaml` stay out (third sweep, 2026-10-31) ·
+  `PATCH /settings` (validates before storing: `days` must be an int —
   strict, no coercion, 422 otherwise — and is
   clamped ≥ 1, `notifications` must be `attention | all | never` — 422 otherwise, so a bad value can never
   persist and silently break the retention sweep; flipping `keepAwake` starts/stops the §3
@@ -1055,12 +1091,17 @@ already neutralize. The provider config and
   with no verdict while the backend thread stays blocked), for `POST /automations/{id}/duplicate` (its
   `copyMemory` copies the whole memory directory, like the memory routes), and for the §22 marketplace routes that read
   the network or a slow disk — add, per-source refresh, refresh-all, the entry archive,
-  catalog create and save — like the §20 CLI; 90 s for marketplace images, whose backend
-  slot wait plus fetch can reach that) — a wedged-but-listening
+  catalog create and save, and `POST /packages/outdated` — like the §20 CLI; 120 s for
+  marketplace images, whose backend slot wait plus fetch deadline plus one per-read socket
+  timeout can reach that) — a wedged-but-listening
   backend fails requests instead of hanging every surface and pinning the coalesced
   refresh. A client timeout or a connection failure surfaces as plain words — "The backend
   didn't answer in time." / "The backend isn't reachable." — never the browser's "signal
-  timed out" or "Failed to fetch"; the raw-bytes routes (export, catalog file, preview
+  timed out" or "Failed to fetch"; each client timeout exceeds the route's backend worst
+  case (the §22 image route: slot wait + fetch deadline + one per-read socket timeout;
+  `POST /packages/outdated` sits on the long list, since its per-lookup deadlines run in
+  waves), so the surface shows the backend's own `detail` rather than the client giving up
+  first (third sweep, 2026-10-31); the raw-bytes routes (export, catalog file, preview
   image, result file) go through the same timed wrapper and surface the API's `detail` the
   same way — never a bare status text when the API sent a `detail` (a non-JSON body,
   such as a proxy's 500 page, still falls back to the status line). A newer `GET /automations/{id}` that fails hands its

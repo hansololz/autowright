@@ -1255,7 +1255,7 @@ async function cliStatus() {
   // rewrites without a directory write). A failed rewrite only logs: the
   // next status read retries it.
   try {
-    fs.writeFileSync(shim, shimText(python), { mode: 0o755 })
+    writeShimAtomically(shim, shimText(python))
     // `mode` only applies where writeFileSync *creates* the file, so a heal
     // rewrite leaves whatever mode the old shim had — set it outright.
     fs.chmodSync(shim, 0o755)
@@ -1263,6 +1263,20 @@ async function cliStatus() {
     appLog(`cli-status: couldn't heal ${shim}: ${e?.message || e}`)
   }
   return { state: 'installed', path: shim, onPath }
+}
+
+// §3 (third sweep, 2026-10-31): a shim write lands whole or not at all: a
+// temp file in the same directory, renamed into place, so a crash mid-write
+// never leaves a truncated shim (one without the marker would read as foreign).
+function writeShimAtomically(shim, text) {
+  const temp = path.join(path.dirname(shim), `.${path.basename(shim)}.${process.pid}.tmp`)
+  try {
+    fs.writeFileSync(temp, text, { mode: 0o755 })
+    fs.renameSync(temp, shim)
+  } catch (e) {
+    try { fs.unlinkSync(temp) } catch { /* never written */ }
+    throw e
+  }
 }
 
 function cliInstall() {
@@ -1284,7 +1298,7 @@ function cliInstall() {
   } catch { /* nothing there yet — the write below creates it */ }
   try {
     fs.mkdirSync(path.dirname(shim), { recursive: true })
-    fs.writeFileSync(shim, shimText(python), { mode: 0o755 })
+    writeShimAtomically(shim, shimText(python))
     // `mode` only applies where writeFileSync creates the file: a write over
     // an existing shim keeps its old mode, so set it after every write.
     fs.chmodSync(shim, 0o755)
@@ -1362,7 +1376,11 @@ function insideRevealRoots(abs) {
 }
 
 ipcMain.handle('reveal-path', async (_e, p) => {
-  if (typeof p !== 'string' || !p) return
+  // §9 (third sweep, 2026-10-31): the reply says whether the reveal happened —
+  // { ok: true }, or { ok: false, error } for a path that is missing, outside
+  // the roots, or that the shell refused — so the renderer never reports a
+  // reveal that didn't happen.
+  if (typeof p !== 'string' || !p) return { ok: false, error: 'no path was given' }
   // `..` is collapsed here, so a traversal cannot dress itself up as a path
   // under one of the roots.
   const resolved = path.resolve(p === '~' || p.startsWith('~/')
@@ -1371,22 +1389,32 @@ ipcMain.handle('reveal-path', async (_e, p) => {
   // §9: the root check and the directory/extension decision run on the real
   // path, so a symlink planted inside the executions dir (a step script could
   // write one) can't point a reveal outside the roots or at a bundle. A path
-  // that can't be resolved is a no-op.
+  // that can't be resolved reveals nothing.
   let abs
-  try { abs = fs.realpathSync(resolved) } catch { return }
+  try { abs = fs.realpathSync(resolved) } catch (err) {
+    return { ok: false, error: err && err.code === 'ENOENT' ? 'the path no longer exists' : String((err && err.message) || err) }
+  }
   if (!insideRevealRoots(abs)) {
     // The data dir moves (§5), so a miss may just mean our cached copy is one
     // poll behind — refresh once, then give up.
     await syncShellSettings()
-    if (!insideRevealRoots(abs)) return
+    if (!insideRevealRoots(abs)) return { ok: false, error: 'the path is outside Autowright\'s folders' }
   }
   let isDir = false
   try { isDir = fs.statSync(abs).isDirectory() } catch { /* fall through */ }
   // §2 platform rule: reveal shows a location, never starts something — on
   // macOS an extension-carrying directory is a bundle and openPath on one
   // *launches* it, so only extension-less plain dirs open in place.
-  if (plat.revealPrefersOpen(abs, isDir)) void shell.openPath(abs)
-  else shell.showItemInFolder(abs)
+  try {
+    if (plat.revealPrefersOpen(abs, isDir)) {
+      // openPath answers an error string, empty on success
+      const failure = await shell.openPath(abs)
+      if (failure) return { ok: false, error: failure }
+    } else shell.showItemInFolder(abs)
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) }
+  }
+  return { ok: true }
 })
 // §9: every native dialog below is sheet-attached to the main window when
 // there is one. `win` is null whenever the window was closed (tray-only) or

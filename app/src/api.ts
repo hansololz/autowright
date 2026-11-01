@@ -20,7 +20,8 @@ declare global {
       openCatalog(): Promise<{ path: string } | null>
       // §22.3 drop zone: a dropped File's on-disk path (Electron webUtils).
       pathForFile(file: File): string
-      revealPath(p: string): Promise<void>
+      // §9: a refused or failed reveal answers ok: false with the reason
+      revealPath(p: string): Promise<{ ok: true } | { ok: false; error: string }>
       // §9.5 report modal: OS details + bundle version for the info block
       platformInfo(): Promise<{ platform: string; osName?: string; release: string; arch: string; version: string; trayPanel?: boolean }>
       applySettings(s: { login?: boolean; menuBarIcon?: boolean; automaticUpdateCheck?: boolean }): Promise<void>
@@ -104,10 +105,12 @@ export const LONG_REQUEST_TIMEOUT_MS = 660_000
 // macOS consent prompt up to 300 s), and the memory operations that copy the whole
 // memory directory (duplicate, clear, snapshot create, snapshot restore), plus the §22
 // marketplace routes that read the network or a slow disk (add, per-source
-// refresh, refresh-all, the entry archive, catalog create and save).
-// Marketplace images get 90 s: the backend's slot wait plus the fetch can
-// reach that.
-export const IMAGE_REQUEST_TIMEOUT_MS = 90_000
+// refresh, refresh-all, the entry archive, catalog create and save), plus the
+// outdated-package lookup, whose per-lookup deadlines run in waves (§19, third
+// sweep 2026-10-31). Marketplace images get 120 s: each client timeout exceeds
+// the route's backend worst case, here the slot wait (30 s) + the fetch
+// deadline (60 s) + one per-read socket timeout (30 s).
+export const IMAGE_REQUEST_TIMEOUT_MS = 120_000
 
 export function requestTimeoutMs(method: string, path: string): number {
   const route = path.split('?')[0]
@@ -115,7 +118,7 @@ export function requestTimeoutMs(method: string, path: string): number {
     return IMAGE_REQUEST_TIMEOUT_MS
   }
   const long = (method === 'POST' && (
-    route === '/packages/install' || route === '/packages/update'
+    route === '/packages/install' || route === '/packages/update' || route === '/packages/outdated'
     || route.startsWith('/automations/import')
     || route === '/imessage/permissions/automation-probe'
     || /^\/marketplace\/sources\/[^/]+\/entries\/[^/]+\/preview$/.test(route)

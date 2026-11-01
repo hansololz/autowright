@@ -666,7 +666,11 @@ fall-back fires once. Invalid expressions are rejected at the API (422), never s
 an expression with no occurrence at all inside the scheduler's search window (`0 0 30 2 *`
 validates field by field and would sit enabled forever without firing — the error says
 "never fires", 2026-10-31; the §5 load-time check does not apply this rule, so a stored
-one keeps loading, §21).
+one keeps loading, §21, and neither does the save-side re-validation of a **stored**
+trigger whose expression is unchanged: a trigger PATCH or editor Save that carries the
+stored `0 0 30 2 *` untouched passes, like an elapsed one-shot under the spent rule, so one
+such trigger can't block every edit of the automation; a changed expression is validated
+in full, third sweep 2026-10-31).
 (The scheduler's per-trigger baseline is an **instant**; each tick reads it as a wall time
 in the current local zone, so a system-timezone change neither re-fires occurrences whose
 instant lies before the baseline (an eastward change used to fire the evening cron at 3 AM
@@ -857,7 +861,11 @@ Detail-page trigger status line (under the §9.2 TRIGGERS rows):
 - Draft persistence is **continuous, not exit-only**: once a draft holds anything worth
   keeping (touched edit-mode changes; a landed create-mode spec or steps), the editor
   writes it with a debounced PUT (~1 s after the last change) as the state evolves, and the
-  exit paths write one final time. A quit, force-quit, or crash therefore loses at most the
+  exit paths write one final time. A debounced write that fails (the backend restarting,
+  a 500) is retried every 5 s, and at once when the backend reconnects, until it lands or the
+  editor settles; after two consecutive failures the §11 hint beside Save reads "Draft not
+  saved yet — retrying…" and clears on the next success (third sweep, 2026-10-31: a single
+  silent failure followed by a quit lost every edit since the last landed write). A quit, force-quit, or crash therefore loses at most the
   debounce window — never the draft (unmount cleanup alone doesn't run when the app
   quits). Settling (discard, save, Create, Start over) stops the debounced writer before
   deleting, so a trailing write can't resurrect a settled draft. A §8 drafting job is
@@ -1172,7 +1180,8 @@ carries a name — creation), and the Keychain entry is keyed by it (the keyring
 the secret's id, so the stored value survives nothing being named after it and never needs
 touching on metadata edits). `usedBy` is the list of automations whose current version uses
 the secret, each entry `{ id, name }` (the UI joins the names; empty list renders "Not used
-yet"). Names uppercase, `[A-Z][A-Z0-9_]*` — sanitization (uppercase,
+yet"). Names uppercase, `[A-Z][A-Z0-9_]*` matched against the whole string (a trailing
+newline is not a name, third sweep) — sanitization (uppercase,
 invalid chars → `_`) is UI input behavior; the backend validates strictly and rejects nonconforming
 names with HTTP 422. Names are **unique** — enforced at create (§19 `POST /secrets` answers
 422 on a name another secret already holds) — and **immutable** - no rename path exists

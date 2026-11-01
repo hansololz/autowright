@@ -329,11 +329,10 @@ def _query_state() -> tuple[str, str | None]:
     return "", _error_of(code, out, err)
 
 
-# §3 interpreter isolation (2026-10-31 second sweep): a Task Scheduler action
-# carries no environment of its own, so the PYTHONNOUSERSITE=1 /
-# PYTHONSAFEPATH=1 pair rides as the equivalent interpreter flags: `-s` keeps
-# the user site-packages off sys.path, `-P` keeps the action's working
-# directory off it.
+# §3 interpreter isolation (2026-10-31 second sweep): the interpreter flags
+# `-s` (the user site-packages off sys.path) and `-P` (the action's working
+# directory off it), like every other service definition; flags, never
+# environment variables (third sweep, 2026-10-31).
 _BACKEND_ARGUMENTS = "-s -P -m autowright.main"
 
 

@@ -45,7 +45,8 @@ class PosixProcessControl:
         answers False — never kill what can't be verified."""
         try:
             out = subprocess.run(["ps", "-axo", "pgid=,command="],
-                                 capture_output=True, text=True, timeout=10).stdout
+                                 capture_output=True, encoding="utf-8",
+                                 errors="replace", timeout=10).stdout
         except (OSError, subprocess.SubprocessError):
             return False
         for line in out.splitlines():
@@ -59,7 +60,8 @@ class PosixProcessControl:
         never kill what can't be verified."""
         try:
             out = subprocess.run(["ps", "-axo", "pid=,pgid=,command="],
-                                 capture_output=True, text=True, timeout=10).stdout
+                                 capture_output=True, encoding="utf-8",
+                                 errors="replace", timeout=10).stdout
         except (OSError, subprocess.SubprocessError):
             return []
         rows = []

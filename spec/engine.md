@@ -195,7 +195,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   the interval anchor candidates, 2026-10-30) — never clamped to `now`, which would move
   the baseline forward on every tick and silence the trigger for good; the automation's
   **run baseline** (§4.3: the newest `started_at`) gets the same 15-minute credibility
-  rule in the interval anchor and the §4.1 overdue audit — a record started under a
+  rule in the interval anchor and the §4.1 overdue audit (and the §5 retention sweep
+  measures age from its session clock, never from a `started_at` stamped this session) — a record started under a
   clock set ahead would otherwise anchor every interval and silence the overdue check
   until the wall clock reaches it, since the newest `started_at` never gets replaced by a
   later real run (2026-10-31). The §5 retention sweep anchors its cutoff on the same
@@ -239,7 +240,9 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   so the per-site last-hit times live in the execution record's `.sites.json`, which the
   engine names in the executor context (`sites_file`) and every `fetch_page` reads before
   and writes after a hit; retry twice; respect robots.txt (the parsed robots.txt is cached
-  per process, so the second step of an execution re-reads it — accepted); user agent
+  per process, so the second step of an execution re-reads it — accepted; the robots read
+  is a site hit like any other: it is spaced, it stamps the site, and it runs under the
+  same 60 s deadline and 8 MB cap as the page, third sweep 2026-10-31); user agent
   "Autowright/1.0".
 - **Workspace per execution** — every step executes with its cwd set to the execution's `workspace/`
   directory; scripts are executed in place from their version folder (or `draft/automation/`), never
@@ -338,7 +341,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   step receives only the secrets it declares in the manifest (`secrets` entry ids) plus the
   literal `secrets["<id>"]` subscripts its own code
   references — and redacted from logs (the redaction set holds, per secret, the whole
-  value and its JSON-escaped, `repr`, and trailing-newline-stripped forms, every line of a
+  value and its JSON-escaped, `repr`, trailing-newline-stripped and whitespace-stripped
+  forms (a pasted value with a trailing space that the step `strip()`s, third sweep), every line of a
   multi-line value — each line also whitespace-stripped and JSON-escaped — and, for a value
   that parses as JSON, its secret-material string leaves of 8+ characters with the same
   per-line and escaped forms — a leaf counts when its nearest enclosing object key,
@@ -493,10 +497,15 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   Fire-and-forget: a failed send logs an
   err line ("reply failed — …") but never fails the step; a successful send logs a sys line
   naming the medium it actually went to (Discord channel or iMessage chat).
-  **Reply budget:** a step attempt may send at most 100 replies; the 101st and later are
-  dropped with one err line ("reply dropped — more than 100 replies in one step") and the
+  **Reply budget:** an execution may send at most 100 replies across all of its steps and
+  attempts (third sweep, 2026-10-31: a per-attempt budget let a step under `infiniteRetries`
+  queue 100 sends a second for as long as it looped); the 101st and later are
+  dropped with one err line ("reply dropped — more than 100 replies in one execution") and the
   step continues — the delivery queue is shared by every listener, and a looping step must
-  not grow it without bound.
+  not grow it without bound. A queued send checks its record under the store lock right
+  before the network call and is dropped silently when the record is gone or already
+  terminal (cancelled, failed, succeeded), so a cancel stops the backlog instead of posting
+  it for hours; the queued entry holds only the clipped text the listener would send.
   Calling `reply` in an execution not started by a message trigger raises — a §11 test
   whose request carried a mocked payload (§19 `triggerMock`) counts as message-started:
   a Discord reply sends **for real** (the mock carries the trigger's real `channel` and
@@ -529,7 +538,10 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   result (§4.5), so there is no attach call, and tables are markdown tables in result.md.
   The chip is stored on the execution record, so it is **redacted exactly like a log line**
   before it is persisted or published (§5: secret values never appear in any file); it is
-  capped at 1,000 characters by a §7 guarded cut, never a fixed slice ahead of redaction.
+  capped at 1,000 characters by a §7 guarded cut, never a fixed slice ahead of redaction
+  (a cut that keeps only the first piece, as the chip, the notification body and the error
+  message do, moves before any redaction probe that straddles it whatever the probe's
+  length, so a 2 KB token straddling the cut never leaves its head behind, third sweep).
 - `notify(text)` — requests the end-of-execution notification (engine still applies the §6
   effective notifications setting — the §4.1 override, else the §4.9 global —
   and the one-notification rule; the text is capped at 10,000 characters by a §7 guarded cut). The notification title is the automation name, overridable by a
@@ -555,7 +567,11 @@ SDK name it uses** — `from autowright import params, log, result` (or `import 
   retries, robots.txt, UA).
 
 Executor↔engine protocol: stdout/stderr are captured line-by-line as `out`/`err`; structured calls
-(log/result/notify/reply) emit `@@AD@@{json}` control lines on stdout. Both ends are
+(log/result/notify/reply) emit `@@AD@@{json}` control lines on stdout; a control line whose
+payload isn't a JSON object is dropped like an unparsable one, and its `text`, `message`
+and `kind` fields are read as text whatever type arrived (a step's child writing
+`@@AD@@null` to the inherited stdout used to fail the execution with an engine error, which
+no retry budget covers, third sweep 2026-10-31). Both ends are
 explicit UTF-8 (§2 pipe-encoding contract): the engine opens the pipes with
 `encoding="utf-8", errors="replace"`, and the executor reconfigures its real stdout/stderr
 to UTF-8 (errors="replace") at boot — the protocol never depends on the OS locale codec. Context (param values, secret
@@ -614,8 +630,8 @@ helper children never show a terminal window under the §3 `pythonw.exe` service
 with `PIP_USER=0` and `PIP_REQUIRE_VIRTUALENV=0` in its environment, since a user's
 `pip.conf` with `user = true` or `require-virtualenv = true` made every `--target` install
 fail outright — never `--isolated`, which would also discard the §15 `PIP_NO_INDEX` /
-`PIP_FIND_LINKS` the test suites rely on — plus the §3 interpreter-isolation variables
-`PYTHONNOUSERSITE=1` / `PYTHONSAFEPATH=1`, 2026-10-31), wheels
+`PIP_FIND_LINKS` the test suites rely on; the §3 interpreter-isolation flags `-s -P`
+ride on pip's own command line, never as environment variables, 2026-10-31), wheels
 only (`--only-binary :all:` — a source-only
 distribution fails fast with pip's "no matching distribution" rather than hitting a compiler
 users don't have). After pip exits 0 the ensure re-runs the import check: a declared
@@ -745,7 +761,9 @@ destructive moments recoverable.
   mishandle the old memory shape, restoring it undoes the damage);
   `pre-restore` (automatic, current memory saved right before a restore replaces it).
 - **Automatic-snapshot toggles** — every automatic reason has a per-automation on/off setting,
-  edited on the §9.2 MEMORY card and stored top-level as
+  edited on the §9.2 MEMORY card (the listing, the size and every copy skip `.<name>.*.tmp`
+  files, the §6.1 `memory.save` temp files a killed step left behind, and an execution start
+  that finds no execution live sweeps them, third sweep 2026-10-31) and stored top-level as
   `memory_snapshots: {pre_version, pre_clear, pre_restore}` (§5 — user-operational state,
   never versioned; absent keys default **on**). A reason toggled off skips its snapshot
   silently — the action itself (execution, clear, restore) still proceeds, it just leaves no
@@ -769,7 +787,12 @@ destructive moments recoverable.
   and, via `pre-restore`, undoable.
 - **Manual snapshot** — 409 while any execution is live (a mid-execution copy could catch a
   half-written file). Automatic reasons never race an execution: `pre-clear` rides the clear
-  request, which is itself 409-gated the same way. **Raced-copy rule:** every gated copy
+  request, which is itself 409-gated the same way, and its order is stage the copy, clear
+  the folder, then commit the snapshot: a clear that fails (a file held open on Windows)
+  discards the staged copy and answers its 409 with nothing committed and nothing pruned,
+  and the automation-changed event is published whenever a commit landed (third sweep,
+  2026-10-31: committing first pruned the oldest snapshot and then failed the clear, so the
+  card listed a snapshot that was gone and missed the one that existed). **Raced-copy rule:** every gated copy
   (manual, pre-clear, restore's stage and pre-restore, duplicate's copy) reads the
   automation's **execution-start counter** (bumped under the store lock whenever a record is
   created or promoted into a run) at its first gate and abandons the copy at commit if the

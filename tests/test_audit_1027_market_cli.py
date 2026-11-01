@@ -356,7 +356,7 @@ def test_a_dollar_in_the_interpreter_path_is_doubled_in_exec_start(monkeypatch):
     from autowright.platform import linux
 
     monkeypatch.setattr(linux, "sys", SimpleNamespace(executable="/home/a$HOME/py3"))
-    assert 'ExecStart="/home/a$$HOME/py3" -m autowright.main\n' in linux.unit_text()
+    assert 'ExecStart="/home/a$$HOME/py3" -s -P -m autowright.main\n' in linux.unit_text()
 
 
 def test_a_percent_in_the_interpreter_path_is_doubled_in_the_cmd_shim(monkeypatch):

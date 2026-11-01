@@ -34,6 +34,7 @@ function ImsgPermissions() {
     fullDisk: boolean; automation: 'granted' | 'denied' | 'unknown'
   } | null>(null)
   const [probing, setProbing] = useState(false)
+  const showToast = useStore((s) => s.showToast)
   useEffect(() => {
     let live = true
     const poll = () => {
@@ -53,7 +54,8 @@ function ImsgPermissions() {
         const automation = r.automation
         setPerms((p) => (p ? { ...p, automation } : p))
       })
-      .catch(() => {})
+      // §9: a user action never fails silently (third sweep, 2026-10-31)
+      .catch((err: unknown) => showToast((err as Error).message))
       .finally(() => setProbing(false))
   }
   const row = (icon: React.ReactNode, name: string, note: string, action?: React.ReactNode) => (

@@ -7,6 +7,7 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from './api'
 import { usePlatformCopy } from './platformCopy'
+import { revealPath } from './reveal'
 import { useStore } from './store'
 import { Caret, Collapse, EmptyLine, EmptyNotice, Eyebrow, LoadingRow, MetaChip, resultChipColors, Tag } from './ui'
 import type { ResultFile, ExecutionResult, SpecBlock } from './types'
@@ -368,8 +369,7 @@ function FilesFooter({ files, path, executionId, stamp, defaultOpen = true }: {
             <button
               className="ad-btn-ghost"
               onClick={() => {
-                window.autowright?.revealPath(path)
-                  .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+                void revealPath(path, copy.fileManager, showToast)
               }}
               style={{ flex: 'none' }}
             >

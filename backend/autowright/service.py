@@ -76,8 +76,10 @@ def _heal_one(p: Path) -> str | None:
     if current == wanted:
         return f"CLI at {p}"
     try:
-        p.write_text(wanted)
-        p.chmod(0o755)
+        # §3: temp file + rename, so a crash mid-write never leaves a
+        # marker-less shim that reads as foreign forever (third sweep,
+        # 2026-10-31).
+        atomic_write_text(p, wanted, mode=0o755)
         return f"CLI at {p}"
     except OSError as e:
         return (f"CLI shim at {p} not rewritable ({e}) — "
@@ -88,8 +90,7 @@ def _heal_shim() -> str:
     """§3: healing only, never creation. Creating a shim belongs to the
     Electron shell's cli-install flow (silent, ~/.local/bin). Here: a shim
     that is ours and points at another interpreter (moved bundle, dev↔prod
-    switch, update) is rewritten in place — sudo-free, since a user-owned
-    file rewrites without a directory write."""
+    switch, update) is rewritten through a temp file and a rename."""
     notes = [n for n in (_heal_one(p) for p in shim_paths()) if n]
     if not notes:
         return f"CLI not installed — use `{sys.executable} -m autowright.cli`"
@@ -176,7 +177,8 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess | _TimedOut:
         timeout = min(timeout, remaining)
     try:
         return subprocess.run(["launchctl", *args], capture_output=True,
-                              text=True, timeout=timeout)
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout)
     except subprocess.TimeoutExpired:
         return _TimedOut()
 
@@ -242,12 +244,13 @@ def _load(p: Path) -> str | None:
 def install() -> str:
     plist = {
         "Label": LABEL,
-        "ProgramArguments": [sys.executable, "-m", "autowright.main"],
+        # §3 interpreter isolation (2026-10-31): the user site dir and the
+        # launch cwd stay off the backend's sys.path, by flags and never by
+        # environment variables every descendant would inherit (third sweep,
+        # 2026-10-31).
+        "ProgramArguments": [sys.executable, "-s", "-P", "-m", "autowright.main"],
         "RunAtLoad": True,
         "KeepAlive": True,
-        # §3 interpreter isolation (2026-10-31): the user site dir and the
-        # launch cwd stay off the backend's sys.path.
-        "EnvironmentVariables": {"PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1"},
         "StandardOutPath": str(paths.logs_dir() / "backend.out.log"),
         "StandardErrorPath": str(paths.logs_dir() / "backend.err.log"),
     }

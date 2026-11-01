@@ -525,7 +525,10 @@ steps' log tails (the cause is often upstream), and on success the result chip p
 clipped `result.md` excerpt and the result-file list. Log lines are the already-redacted
 execution output (§6), and the `result.md` excerpt — a file the step wrote directly, which the
 engine never rewrites — is redacted like a log line (the automation's granted secret values, the
-§6 redaction set) before it enters the prompt; secret values never travel. The section is bounded: each log-tail
+§6 redaction set) before it enters the prompt; secret values never travel. Only the head of
+the file is read: the excerpt length plus the longest redaction probe, never the whole file
+(third sweep, 2026-10-31: a step that dumped a scrape into `result.md` made every chat call
+load gigabytes on a request thread). The section is bounded: each log-tail
 line is clipped to 2,000 characters (marker `… [clipped]`), each run's block to 24 K
 characters (its per-step tails shrink — fewer lines per step, the last lines kept — until
 it fits; the §4.5 error message is itself capped at 4,000 characters, so no block exceeds
@@ -775,7 +778,9 @@ arms, the BUILD card's Sync now, a repair-block apply: always against the provid
    same way (`reason`: "two steps are named `X` — the lock splice can't tell them apart",
    `fix`: "Rename or unlock one of them"), since the by-name splice would otherwise keep
    only one of them (2026-10-28). The preflight surfaces **every** validator line about a
-   locked step — its file name failing the `NN-name.py` rule, a blank name, a missing
+   locked step — its file name failing the `NN-name.py` rule (which also caps the file name
+   at 120 characters: a 300-character name made the create a 500 and left an orphan version
+   folder; Windows MAX_PATH bites near 150, third sweep), a blank name, a missing
    file — not only the grant and import lines (2026-10-30: a line the preflight filtered
    out still failed every repair round and ended in a diagnosis blocker). A locked step
    whose stored script is **empty or missing** (its file gone from the version folder —
@@ -1227,6 +1232,14 @@ vanished, or appeared where the snapshot had none is restored from the snapshot 
 byte (a vanished file re-created, an appeared one left alone), the agent's response is
 discarded unparsed, and the job settles `failed` with "the agent changed the locked step
 '<name>' on disk — the file was restored; nothing from this response was applied". The
+restore is a §5 atomic write after unlinking whatever sits at the path (a symlink the agent
+planted is replaced, never written through), it never creates a missing parent folder (a
+version or draft folder that vanished during the call was deleted by a Discard, a Save or
+an automation delete, which is not tampering: that file is skipped), and when the restore
+itself fails the sentence ends "— it couldn't be restored: <reason>; nothing from this
+response was applied" instead of claiming a restore (third sweep, 2026-10-31). A user's
+hand edit of a locked step's file during an agent call is indistinguishable from the agent's
+and is restored the same way: locked means locked, edit it in the editor. The
 guard runs before any block of the response is read, so a tampered call can never land a
 draft, and the version seal (§4.1 `step-modified`) is never left tripped by an agent.
 A poll-based **scratch watcher** (0.3 s) turns each response document that lands into a

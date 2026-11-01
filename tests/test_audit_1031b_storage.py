@@ -74,8 +74,9 @@ def test_old_shape_min_kv_rows_and_inf_load_serialize_and_save(client):
     assert "min" not in params["low"]
     assert params["headers"]["default"] == [{"key": "8080", "value": "port"}]
     assert params["big"]["default"] == 0
-    # Values not of their definition's kind are ignored; others stay.
-    assert b["param_values"] == {"wait": 7, "gone": "kept"}
+    # Values not of their definition's kind are ignored; others stay. A `kv`
+    # value's rows are coerced like a default's first (third sweep).
+    assert b["param_values"] == {"headers": [{"key": "1", "value": "a"}], "wait": 7, "gone": "kept"}
     assert manifest.read_text(encoding="utf-8") == before  # nothing written at load
 
     json.dumps(store.auto_json(b), allow_nan=False)  # the §19 payload serializes
@@ -120,7 +121,9 @@ def test_retention_with_the_clock_a_year_ahead_deletes_nothing_newer_than_the_wi
         h["started_at"] = (datetime.now() - timedelta(days=days_ago)).isoformat(timespec="seconds")
         store.update_execution(h)
         records[days_ago] = h["id"]
-    store._refresh_exec_derived()
+    # Loaded from disk, so the records feed the §5 session clock's base
+    # (third sweep: records created this session never do).
+    store.load_all()
     store.settings["days"] = 30
 
     real = datetime
@@ -443,7 +446,7 @@ def test_duplicate_copy_abandons_when_a_source_run_started_and_finished(store, m
 def test_invalidations_during_a_walk_start_one_rewalk_not_more_threads(store, monkeypatch):
     a = store.create_automation(make_version(), "Walked", None)
     (store.auto_dir(a) / "memory" / "seen.yaml").write_text("v: 1\n", newline="")
-    real_stats = storage_mod.iter_file_stats
+    real_stats = storage_mod.iter_memory_file_stats
     release = threading.Event()
     entered = threading.Event()
     calls = []
@@ -463,7 +466,7 @@ def test_invalidations_during_a_walk_start_one_rewalk_not_more_threads(store, mo
             started.append(kwargs)
         return real_thread(*args, **kwargs)
 
-    monkeypatch.setattr(storage_mod, "iter_file_stats", gated)
+    monkeypatch.setattr(storage_mod, "iter_memory_file_stats", gated)
     monkeypatch.setattr(threading, "Thread", recording)
     try:
         store.memory_stats(a)

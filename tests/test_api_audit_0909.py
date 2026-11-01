@@ -237,9 +237,7 @@ def test_second_pull_of_the_same_model_is_409(client, monkeypatch, pull_state):
 def test_pull_past_the_wall_clock_cap_publishes_a_failed_terminal_event(monkeypatch, pull_state):
     """§19: past the cap the pull ends `ok: false` with a "pull timed out" line —
     the §12 card watches for the terminal event and would pull forever without it."""
-    import urllib.request
-
-    from autowright import api
+    from autowright import api, harness
     from autowright.events import hub
 
     class _Stream:
@@ -253,7 +251,7 @@ def test_pull_past_the_wall_clock_cap_publishes_a_failed_terminal_event(monkeypa
             while True:  # a server dribbling progress lines forever
                 yield b'{"status": "pulling manifest"}'
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _Stream())
+    monkeypatch.setattr(harness, "ollama_urlopen", lambda *a, **kw: _Stream())
     monkeypatch.setattr(api, "PULL_DEADLINE_S", 0)  # the deadline is already past
     published = []
     monkeypatch.setattr(hub, "publish", lambda ev, **kw: published.append({"event": ev, **kw}))

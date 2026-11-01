@@ -231,7 +231,7 @@ def test_exit_http_survives_a_body_that_is_not_utf8():
 
     from autowright.cli import _exit_http
 
-    err = urllib.error.HTTPError("http://x", 500, "Server Error", {},
+    err = urllib.error.HTTPError("http://x", 404, "Not Found", {},
                                  io.BytesIO(b"boom \xff\xfe"))
     with pytest.raises(SystemExit) as ei:
         _exit_http(err)
@@ -245,7 +245,7 @@ def test_exit_http_never_prints_a_body_that_is_not_json():
 
     from autowright.cli import _exit_http
 
-    err = urllib.error.HTTPError("http://x", 500, "Server Error", {},
+    err = urllib.error.HTTPError("http://x", 404, "Not Found", {},
                                  io.BytesIO(b"plain text error"))
     with pytest.raises(SystemExit) as ei:
         _exit_http(err)

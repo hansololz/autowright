@@ -22,13 +22,11 @@ os.environ.pop("OTEL_PROPAGATORS", None)
 
 from . import __version__, api, paths, platform  # noqa: E402
 from .listeners import Listeners  # noqa: E402
+from .paths import trim_logs  # noqa: E402,F401 (§5 log cap, moved to paths in the third sweep)
 from .scheduler import Scheduler  # noqa: E402
 from .storage import store  # noqa: E402
 from .yamlio import atomic_write_text  # noqa: E402
 
-
-LOG_CAP = 100 * 1024 * 1024  # §5 log size cap
-LOG_TRIM_TO = LOG_CAP // 2  # trim target — half the cap, so a saturated log isn't rewritten every boot
 
 # §3 time-boxed graceful shutdown: the renderer keeps /ws open during quit-all
 # and reset, and an unbounded uvicorn shutdown waits on open WebSockets forever,
@@ -36,29 +34,6 @@ LOG_TRIM_TO = LOG_CAP // 2  # trim target — half the cap, so a saturated log i
 # force-closes connections; the lifespan shutdown and the backend.json unlink
 # below still run after it.
 SHUTDOWN_GRACE_S = 5
-
-
-def trim_logs() -> None:
-    """§5 log size cap: at startup, trim any over-cap backend log in place to
-    its newest LOG_TRIM_TO bytes (cut at a line boundary) — oldest lines die
-    first. In place because launchd holds backend.out/err.log open in append
-    mode; renaming would leave the live fd writing to the renamed file."""
-    for name in ("app.log", "backend.out.log", "backend.err.log"):
-        path = paths.logs_dir() / name
-        try:
-            if path.stat().st_size <= LOG_CAP:
-                continue
-            with open(path, "rb+") as f:
-                f.seek(-LOG_TRIM_TO, os.SEEK_END)
-                tail = f.read()
-                nl = tail.find(b"\n")
-                if nl != -1:
-                    tail = tail[nl + 1:]
-                f.seek(0)
-                f.write(tail)
-                f.truncate()
-        except OSError:
-            continue
 
 
 def route_logs() -> None:
@@ -137,6 +112,11 @@ def republish_if_lost(payload: str, stopped: Callable[[], bool] | None = None) -
 
 
 def main() -> None:
+    # §3 interpreter isolation (third sweep, 2026-10-31): flags, never these
+    # inherited variables; a v0.14.0 service definition that still sets them
+    # stops leaking them to every agent harness and step from the first boot.
+    os.environ.pop("PYTHONNOUSERSITE", None)
+    os.environ.pop("PYTHONSAFEPATH", None)
     paths.ensure_dirs()
     trim_logs()  # before route_logs: the trim must find no handle held open
     route_logs()

@@ -7,6 +7,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
+import { revealPath } from '../reveal'
 import { useStore } from '../store'
 import { BackLink, Badge, EmptyNotice, executingToast, Eyebrow, FailureNotice, FlaggedResultNotice, HeaderActions, LoadingRow, MetaChip, PageLoading, PageTitle, paramSummary, PULSE, settingsRow, settingsRowSub, settingsRowTitle, Spinner, waitedLabel } from '../ui'
 import { ResultSection, ViewCard } from '../result'
@@ -113,8 +114,7 @@ function WorkspaceCard({ path }: { path: string }) {
           <button
             className="ad-btn-ghost"
             onClick={() => {
-              window.autowright?.revealPath(path)
-                .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+              void revealPath(path, copy.fileManager, showToast)
             }}
             title="Opens the scratch directory the steps ran in"
             style={{ flex: 'none' }}

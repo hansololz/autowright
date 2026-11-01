@@ -157,9 +157,9 @@ describe('client request timeout (§19)', () => {
     expect(timeout.mock.calls.map((c) => c[0])).toEqual([REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT_MS, LONG_REQUEST_TIMEOUT_MS])
   })
 
-  it('gives the install/import/delete/memory-copy/slow marketplace routes 660 s, images 90 s, and everything else 30 s', () => {
+  it('gives the install/import/delete/memory-copy/slow marketplace routes 660 s, images 120 s, and everything else 30 s', () => {
     const long = [
-      ['POST', '/packages/install'], ['POST', '/packages/update'],
+      ['POST', '/packages/install'], ['POST', '/packages/update'], ['POST', '/packages/outdated'],
       ['POST', '/automations/import'], ['POST', '/automations/import/preview'],
       ['POST', '/automations/import/url'], ['POST', '/automations/import/confirm'],
       ['POST', '/marketplace/sources/s1/entries/3/preview'],
@@ -180,9 +180,9 @@ describe('client request timeout (§19)', () => {
       ['PATCH', '/marketplace/sources/s1'],
     ]
     for (const [method, path] of short) expect(requestTimeoutMs(method, path)).toBe(REQUEST_TIMEOUT_MS)
-    // §22.3 marketplace images: the backend slot wait plus the fetch
+    // §22.3 marketplace images: slot wait + fetch deadline + one per-read socket timeout
     expect(requestTimeoutMs('GET', '/marketplace/sources/s1/entries/3/image')).toBe(IMAGE_REQUEST_TIMEOUT_MS)
-    expect(IMAGE_REQUEST_TIMEOUT_MS).toBe(90_000)
+    expect(IMAGE_REQUEST_TIMEOUT_MS).toBe(120_000)
   })
 })
 

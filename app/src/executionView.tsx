@@ -9,6 +9,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { devlogOverlayOpen } from './devlog'
 import { FindBar, useFind } from './find'
 import { usePlatformCopy } from './platformCopy'
+import { revealPath } from './reveal'
 import { LOG_TAIL, logKey, useStore } from './store'
 import { anyModalOpen, badgeOf, BLINK, EmptyLine, Eyebrow, LoadingRow, logColor, MetaChip, PULSE, ScrollArea, waitedLabel } from './ui'
 import type { Attempt, Execution, ExecutionStep, LogLine } from './types'
@@ -517,8 +518,7 @@ export function ExecutionView({ executionId, full, summary, layout, toolbarRight
                 disabled={!full.logs}
                 onClick={() => {
                   if (!full.logs) return
-                  window.autowright?.revealPath(full.logs)
-                    .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+                  void revealPath(full.logs, copy.fileManager, showToast)
                 }}
               >
                 <i className="fa-regular fa-folder-open" />

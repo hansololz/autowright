@@ -45,6 +45,16 @@ def _app_log(text: str) -> None:
         pass
 
 OLLAMA_URL = os.environ.get("AUTOWRIGHT_OLLAMA_URL", "http://localhost:11434")
+# §19 (third sweep, 2026-10-31): every request to the Ollama server goes through
+# this opener, which carries no proxy handler at all — a loopback call must never
+# ride a system or environment proxy (a macOS system web proxy, whose default
+# bypass list omits localhost, made Ollama read as not running).
+_OLLAMA_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def ollama_urlopen(url_or_request, timeout: float):
+    """`urlopen` for `OLLAMA_URL` requests: proxies disabled, nothing else."""
+    return _OLLAMA_OPENER.open(url_or_request, timeout=timeout)
 
 
 class HarnessError(Exception):
@@ -533,11 +543,12 @@ def step_env() -> dict:
     env = dict(os.environ)
     current = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
     env["PATH"] = os.pathsep.join(dict.fromkeys(current + list(_FALLBACK_BIN_DIRS)))
-    # §3 interpreter isolation (2026-10-31): the user site dir and the spawn
-    # cwd stay off the executor's sys.path, so a `pip install --user` or a
-    # stray `email.py` in the cwd can't shadow the curated/stdlib modules.
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONSAFEPATH"] = "1"
+    # §3 interpreter isolation is the executor spawn's `-s -P` flags, never
+    # these variables: every subprocess a step spawns would inherit them. A
+    # v0.14.0 service definition still sets them, so they are dropped here
+    # (third sweep, 2026-10-31).
+    env.pop("PYTHONNOUSERSITE", None)
+    env.pop("PYTHONSAFEPATH", None)
     return env
 
 
@@ -659,7 +670,9 @@ def _deterministic_failure(stderr_tail: str) -> bool:
 # them and drafting imports harness, never the reverse); drafting aliases them.
 FILE_MARK_RE = re.compile(r"^===FILE: (.+?)===\s*$", re.M)
 BLOCKED_MARK_RE = re.compile(r"^===BLOCKED===\s*$", re.M)
-STEP_FILE_RE = re.compile(r"^(\d{2})-[a-z0-9][a-z0-9-]*\.py$")
+# §8: the lookahead caps the whole file name at 120 characters (third sweep,
+# 2026-10-31: a 300-character name made the create a 500; Windows MAX_PATH).
+STEP_FILE_RE = re.compile(r"^(?=.{1,120}$)(\d{2})-[a-z0-9][a-z0-9-]*\.py$")
 # §8 fence line: three backticks then anything holding no further backtick
 # (an info string such as "yaml title=x", trailing whitespace) — matched
 # against the rstripped line.
@@ -1677,16 +1690,12 @@ def _sync_opencode_ollama_locked(model: str) -> None:
             cfg = {}
     except OSError:
         cfg = {}
-    except ValueError:
-        # A corrupt (e.g. half-written) config must not be silently replaced
-        # with only our entry — that would discard the user's other keys.
-        # Preserve the bytes next door and start clean.
-        try:
-            os.replace(config, config + ".corrupt")
-            log.warning("opencode.json was not valid JSON — kept as opencode.json.corrupt")
-        except OSError:
-            pass
-        cfg = {}
+    except ValueError as e:
+        # §19 (third sweep, 2026-10-31): OpenCode accepts JSONC (comments,
+        # trailing commas), which json can't read. The file is left untouched:
+        # renaming it aside and writing only our entry dropped the user's
+        # other providers and MCP settings.
+        raise HarnessError("opencode.json isn't plain JSON — add the ollama provider by hand") from e
     before = json.dumps(cfg, sort_keys=True)
     provider = cfg.setdefault("provider", {})
     if not isinstance(provider, dict):
@@ -1743,7 +1752,7 @@ def ollama_bin() -> str | None:
 def _ollama_models() -> list[str] | None:
     """Model names if the server answers, else None."""
     try:
-        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=2) as r:
+        with ollama_urlopen(f"{OLLAMA_URL}/api/tags", timeout=2) as r:
             tags = json.loads(r.read().decode())
         return [m["name"] for m in tags.get("models", [])]
     except Exception:  # noqa: BLE001
@@ -1753,7 +1762,7 @@ def _ollama_models() -> list[str] | None:
 def _ollama_version() -> str | None:
     """The server's version string if it answers, else None (§19)."""
     try:
-        with urllib.request.urlopen(f"{OLLAMA_URL}/api/version", timeout=2) as r:
+        with ollama_urlopen(f"{OLLAMA_URL}/api/version", timeout=2) as r:
             return str(json.loads(r.read().decode()).get("version") or "") or None
     except Exception:  # noqa: BLE001
         return None

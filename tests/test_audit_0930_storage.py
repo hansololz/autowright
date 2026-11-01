@@ -73,8 +73,8 @@ def test_patch_settings_failed_write_keeps_memory(client, monkeypatch):
 
     before = store.settings.get("days")
     monkeypatch.setattr(store, "save_settings", _fail)
-    with pytest.raises(OSError):
-        client.patch("/settings", json={"days": 3})
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.patch("/settings", json={"days": 3}).status_code == 500
     assert store.settings.get("days") == before
 
 
@@ -84,10 +84,10 @@ def test_add_and_patch_agent_failed_write_keeps_memory(client, monkeypatch):
     agents_before = [dict(g) for g in store.agents]
     default_before = store.default_agent_id
     monkeypatch.setattr(store, "save_agents", _fail)
-    with pytest.raises(OSError):
-        client.post("/agents", json={"name": "Second", "harness": "Codex", "mode": "default"})
-    with pytest.raises(OSError):
-        client.patch("/agents/mock", json={"name": "Renamed", "default": True})
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.post("/agents", json={"name": "Second", "harness": "Codex", "mode": "default"}).status_code == 500
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.patch("/agents/mock", json={"name": "Renamed", "default": True}).status_code == 500
     assert store.agents == agents_before
     assert store.default_agent_id == default_before
 
@@ -101,8 +101,8 @@ def test_delete_agent_failed_write_repoints_nothing(client, monkeypatch):
                                              "stepAgents": [second["id"]]}).json()
     agents_before = [dict(g) for g in store.agents]
     monkeypatch.setattr(store, "save_agents", _fail)
-    with pytest.raises(OSError):
-        client.delete(f"/agents/{second['id']}")
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.delete(f"/agents/{second['id']}").status_code == 500
     assert store.agents == agents_before
     a = store.autos[auto["id"]]
     assert a["agent_id"] == second["id"]
@@ -136,8 +136,8 @@ def test_create_secret_failed_write_leaves_no_row_and_no_keychain_value(client, 
 
     monkeypatch.setattr(keychain, "set_secret", recording_set)
     monkeypatch.setattr(store, "save_secrets", _fail)
-    with pytest.raises(OSError):
-        client.post("/secrets", json={"name": "MY_TOKEN", "value": "abc"})
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.post("/secrets", json={"name": "MY_TOKEN", "value": "abc"}).status_code == 500
     assert not any(s["name"] == "MY_TOKEN" for s in store.secrets)
     assert written and keychain.get_secret(written[0]) is None
 
@@ -149,12 +149,12 @@ def test_put_and_delete_secret_failed_write_keeps_memory(client, monkeypatch):
                                         "description": "old"}).json()["id"]
     before = [dict(s) for s in store.secrets]
     monkeypatch.setattr(store, "save_secrets", _fail)
-    with pytest.raises(OSError):
-        client.put(f"/secrets/{sid}", json={"description": "new"})
-    with pytest.raises(OSError):
-        client.delete(f"/secrets/{sid}")
-    with pytest.raises(OSError):
-        client.delete("/secrets")
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.put(f"/secrets/{sid}", json={"description": "new"}).status_code == 500
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.delete(f"/secrets/{sid}").status_code == 500
+    # §19: an escaping OSError answers a JSON 500 (third sweep).
+    assert client.delete("/secrets").status_code == 500
     assert store.secrets == before
 
 
@@ -230,13 +230,13 @@ def test_memory_stats_walk_never_runs_under_the_lock(store, monkeypatch):
     a = store.create_automation(make_version(), "Walker", None)
     (store.auto_dir(a) / "memory" / "seen.yaml").write_text("v: 1\n", newline="")
     walks = []
-    real = storage_mod.iter_file_stats
+    real = storage_mod.iter_memory_file_stats
 
     def recording(d):
         walks.append((threading.current_thread(), store.lock._is_owned()))
         return real(d)
 
-    monkeypatch.setattr(storage_mod, "iter_file_stats", recording)
+    monkeypatch.setattr(storage_mod, "iter_memory_file_stats", recording)
     with store.lock:  # the /state and detail serializers hold it
         full = store.auto_json(a)
     assert full["memory"]["size"] == store.MEMORY_STATS_COMPUTING
@@ -258,7 +258,7 @@ def test_memory_file_413_names_the_directory_without_a_walk(client, monkeypatch)
     auto = client.post("/automations", json={"draft": make_version(), "agentId": "mock"}).json()
     a = store.autos[auto["id"]]
     (store.auto_dir(a) / "memory" / "blob.bin").write_bytes(b"\xff\xfe\x00")
-    monkeypatch.setattr(storage_mod, "iter_file_stats", lambda d: pytest.fail("walked"))
+    monkeypatch.setattr(storage_mod, "iter_memory_file_stats", lambda d: pytest.fail("walked"))
     r = client.get(f"/automations/{a['id']}/memory/files/blob.bin")
     assert r.status_code == 422
     assert str(store.auto_dir(a) / "memory") in r.json()["detail"]
@@ -639,7 +639,7 @@ def test_invalidate_voids_an_in_flight_walk_and_the_new_walk_lands(store, monkey
 
     a = store.create_automation(make_version(), "InFlight", None)
     (store.auto_dir(a) / "memory" / "seen.yaml").write_text("v: 1\n", newline="")
-    real = storage_mod.iter_file_stats
+    real = storage_mod.iter_memory_file_stats
     release = threading.Event()
     entered = threading.Event()
     calls = []
@@ -651,7 +651,7 @@ def test_invalidate_voids_an_in_flight_walk_and_the_new_walk_lands(store, monkey
             release.wait(5)
         return real(d)
 
-    monkeypatch.setattr(storage_mod, "iter_file_stats", gated)
+    monkeypatch.setattr(storage_mod, "iter_memory_file_stats", gated)
     published = []
     store.on_memory_stats_changed = published.append
     try:

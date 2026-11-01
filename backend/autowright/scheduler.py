@@ -157,6 +157,12 @@ class Scheduler:
                 self._overdue_sweep(autos, now)
             except Exception:  # noqa: BLE001
                 log.exception("overdue sweep failed")
+            # §5 log size cap, hourly as well as at startup: the service runs
+            # for months (third sweep, 2026-10-31). Outside store.lock.
+            try:
+                paths.trim_logs()
+            except Exception:  # noqa: BLE001
+                log.exception("log trim failed")
         self._prev_tick, self._prev_tick_utc = now, now_utc
 
     def _tick_automation(self, a: dict, now: datetime, now_utc: datetime,

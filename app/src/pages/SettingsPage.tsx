@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { usePlatformCopy } from '../platformCopy'
+import { revealPath } from '../reveal'
 import { useStore } from '../store'
 import {
   BlockingOverlay, CommandBlock, ConfirmModal, Eyebrow, PageLoading, PageTitle, RadioRing,
@@ -196,8 +197,7 @@ export default function SettingsPage() {
   }
   // §9: a user action never fails silently — the bridge can refuse a reveal.
   const reveal = (path: string) => {
-    void window.autowright?.revealPath(path)
-      .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+    void revealPath(path, copy.fileManager, showToast)
   }
 
   // Native folder picker; the chosen directory simply becomes the

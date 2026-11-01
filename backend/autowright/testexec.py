@@ -439,6 +439,14 @@ def executions_context(auto: dict | None, current_steps: list[dict],
                 redaction_cache["map"] = None
         redactions = redaction_cache["map"]
         return None if redactions is None else redact_text(text, redactions)
+
+    def longest_probe() -> int:
+        """§8: the longest redaction value, so the bounded result.md read
+        covers a value straddling the excerpt cut (0 when the map failed)."""
+        redact("")
+        return max((len(v) for v in redaction_cache["map"] or {}), default=0)
+
+    redact.longest_probe = longest_probe  # type: ignore[attr-defined]
     # §4.1: a record's sha hashes the raw bytes that ran while the draft holds
     # LF text — a CRLF-written step file counts as the same step.
     cur_shas = [(_step_sha(s), _crlf_step_sha(s)) for s in current_steps or []]
@@ -539,7 +547,12 @@ def _execution_block(h: dict, cur_shas: list[tuple[str, str]], detail: bool,
             # A step writes result.md itself — any encoding, and it can vanish or
             # be unreadable between the check and the read. Never fail the §8
             # context over it: the run just contributes no result text.
-            text = rmd.read_text(encoding="utf-8", errors="replace").strip()
+            # §8 (third sweep, 2026-10-31): only the head is read, the excerpt
+            # plus the longest redaction value (plus one char, so a longer file
+            # still gets its truncation marker), never the whole file.
+            probe = redact.longest_probe() if hasattr(redact, "longest_probe") else 0
+            with rmd.open(encoding="utf-8", errors="replace") as f:
+                text = f.read(RESULT_EXCERPT + probe + 1).strip()
         except OSError:
             text = ""
         # §8: redacted before the clip, so a value straddling the cut can't

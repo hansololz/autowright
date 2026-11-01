@@ -32,6 +32,25 @@ _EXITED_DRAIN_S = 2.0
 # and a draft-stage install may race the engine's pre-execution ensure.
 _pip_lock = threading.Lock()
 
+# §3 shutdown sweep (third sweep, 2026-10-31): every pip child this module
+# spawns is tracked here and group-killed by `kill_running`, so quit-all,
+# reset and an update install never leave a pip writing the §6.2 directory
+# behind the next backend.
+_running_lock = threading.Lock()
+_running: set = set()
+
+
+def kill_running() -> None:
+    """§3 shutdown: hard-kill every tracked pip child by group."""
+    with _running_lock:
+        procs = list(_running)
+        _running.clear()
+    for proc in procs:
+        try:
+            platform.current().processes.signal_group(proc)
+        except Exception:  # noqa: BLE001 — a dead child must not break the sweep
+            pass
+
 
 class PackagesBusy(RuntimeError):
     """§6.2: another pip run holds the process-wide lock. The §19 packages
@@ -330,12 +349,14 @@ def _pip_env() -> dict:
     `require-virtualenv = true`, either of which made every `--target`
     install fail; never `--isolated`, which would also drop the §15
     `PIP_NO_INDEX` / `PIP_FIND_LINKS` the suites rely on. Plus the §3
-    interpreter-isolation pair."""
+    interpreter isolation rides as the `-s -P` flags on the pip command
+    line, never as environment variables (third sweep, 2026-10-31), and a
+    pair inherited from a v0.14.0 service definition is dropped here."""
     env = dict(os.environ)
+    env.pop("PYTHONNOUSERSITE", None)
+    env.pop("PYTHONSAFEPATH", None)
     env["PIP_USER"] = "0"
     env["PIP_REQUIRE_VIRTUALENV"] = "0"
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONSAFEPATH"] = "1"
     return env
 
 
@@ -362,7 +383,8 @@ def _pip_install(name: str, pin_installed: bool = False,
     target.mkdir(parents=True, exist_ok=True)
     # §2 console-interpreter rule: never pythonw — pip's helper children must
     # inherit the hidden console instead of opening terminal windows.
-    cmd = [paths.console_python(), "-m", "pip", "install",
+    # §3 interpreter isolation: `-s -P` (third sweep, 2026-10-31).
+    cmd = [paths.console_python(), "-s", "-P", "-m", "pip", "install",
            *(["--upgrade"] if upgrade else []),
            "--no-input", "--disable-pip-version-check",
            # §6.2: wheels only — a source-only package would need a
@@ -371,6 +393,7 @@ def _pip_install(name: str, pin_installed: bool = False,
            "--only-binary", ":all:",
            "--target", str(target)]
     constraints = None
+    proc = None
     try:
         if pin_installed:
             pins = {n: v for n, v in _installed_versions().items()
@@ -393,6 +416,9 @@ def _pip_install(name: str, pin_installed: bool = False,
                                     **platform.current().processes.session_kwargs())
         except OSError as e:
             return str(e)
+        # §3 shutdown sweep: tracked until it settles (third sweep, 2026-10-31).
+        with _running_lock:
+            _running.add(proc)
 
         def _kill() -> None:
             # `sig=None` means kill hard (§2: SIGKILL is not importable on
@@ -451,6 +477,9 @@ def _pip_install(name: str, pin_installed: bool = False,
         tail = (err or out or "").strip().splitlines()[-3:]
         return " · ".join(ln.strip() for ln in tail) or f"pip exited {proc.returncode}"
     finally:
+        if proc is not None:
+            with _running_lock:
+                _running.discard(proc)
         if constraints:
             try:
                 os.unlink(constraints)

@@ -115,11 +115,20 @@ the update bullets below).
   and never installed — users install nothing, and every Mac gets the identical interpreter
   version. The interpreter is **isolated from the user's Python environment** wherever the
   app launches it (the backend service definitions on every OS, the §6 executor spawn, the
-  §6.2 pip spawn): `PYTHONNOUSERSITE=1` keeps `~/.local/lib/pythonX.Y/site-packages` off
-  `sys.path` (a `pip install --user requests` for the same minor version shadowed the
-  curated one and ran its `.pth` hooks at startup) and `PYTHONSAFEPATH=1` keeps the spawn
-  cwd off it (`-m` puts the cwd first, and a systemd user unit's default cwd is `$HOME`,
-  where a stray `email.py` shadowed the stdlib for every step, 2026-10-31). Developer mode
+  §6.2 pip spawn), by the **interpreter flags `-s -P`** on each of those command lines:
+  `-s` keeps `~/.local/lib/pythonX.Y/site-packages` off `sys.path` (a `pip install --user
+  requests` for the same minor version shadowed the curated one and ran its `.pth` hooks at
+  startup) and `-P` keeps the spawn cwd off it (`-m` puts the cwd first, and a systemd user
+  unit's default cwd is `$HOME`, where a stray `email.py` shadowed the stdlib for every
+  step, 2026-10-31). Flags, never the `PYTHONNOUSERSITE` / `PYTHONSAFEPATH` environment
+  variables (third sweep, 2026-10-31): an environment variable is inherited by every
+  descendant, so the pair set on the executor reached every subprocess a step spawns (a
+  `python3 tool.py` whose imports sit beside it failed, and a `--user`-installed `yt-dlp` on
+  the system Python lost its modules), and set on the service it reached every agent
+  harness through the backend's own environment. The isolation belongs to the interpreter
+  the app launches, and to nothing it launches in turn. The backend and the executor also
+  drop both variables from their own environment at startup, so a v0.14.0 service
+  definition that still sets them stops leaking them from the first boot. Developer mode
   runs the same way: the repo's editable install lives in the venv's own site-packages,
   which neither variable touches. The launchd plist points at the bundled interpreter by absolute path (`sys.executable`
   at install time; python-build-standalone resolves its own home relative to the binary, so no
@@ -249,7 +258,7 @@ the update bullets below).
   `autowright`: `#!/bin/sh` with an `# autowright CLI shim` marker line, then
   `exec '<python>' -m autowright.cli "$@"` (module form per the shebang rule above; `<python>`
   is the backend's real interpreter, embedded **single-quoted** with any `'` in it written as
-  `'\''` — a path holding `$`, a backtick, `"` or `\` must not expand or break inside the shim). The shim path is written only when it is absent or a
+  `'\''` — a path holding `$`, a backtick, `"` or `\` must not expand or break inside the shim). Every writer of the shim (the app's install and heal, the backend's heal) writes a temp file and renames it into place, so a crash mid-write never leaves a marker-less shim that reads as foreign forever (third sweep, 2026-10-31). The shim path is written only when it is absent or a
   regular file: a symlink there, dangling or not, is treated as foreign — never written,
   rewritten or chmodded through, since every operation would land wherever the link points
   (every probe uses `lstat`). On Windows (§2 groundwork, defined by `win32.cjs`) the
@@ -436,6 +445,13 @@ the update bullets below).
   and startup recovery SIGKILLs any group a crashed backend orphaned (via the record's
   persisted `pgid`, §4.5, with a pid-reuse guard) before marking its record interrupted —
   otherwise the orphan keeps writing `memory/` while the next cron tick starts a second copy.
+  The repair is **disk-first per record** (§5, third sweep 2026-10-31): each repaired
+  record is written before it replaces the live row, a record whose write fails (ENOSPC, a
+  read-only volume at boot) is logged and left as it was on disk and in the table while the
+  rest are still repaired, but it is dropped from its automation's live set (no engine
+  thread owns it, and the next boot repairs it again), and the derived execution state is
+  refreshed whatever happened, so one failing write can never leave the in-memory table
+  ahead of disk or hold the automation's capacity slot for the whole session.
   The repair trusts the yaml, not the §5 index row it iterates: a crash between an
   execution's final yaml write and its sqlite commit leaves the row one transition behind,
   and a record whose yaml already holds a terminal status is re-adopted as it stands (index
@@ -615,9 +631,10 @@ the update bullets below).
   to write there.
   A stopped backend returns at next login (`RunAtLoad`) or next app launch (ensure-backend
   re-heals) — stopped, never uninstalled.
-  Every service definition (the launchd plist's `EnvironmentVariables`, the systemd unit's
-  `Environment=`, the Task Scheduler action) carries the §3 interpreter-isolation pair
-  `PYTHONNOUSERSITE=1` / `PYTHONSAFEPATH=1` (2026-10-31).
+  Every service definition (the launchd plist's `ProgramArguments`, the systemd unit's
+  `ExecStart=`, the Task Scheduler action) launches the interpreter with the §3
+  interpreter-isolation flags `-s -P` before `-m autowright.main` (2026-10-31; flags, never
+  environment variables, third sweep).
   On Linux the systemd user unit carries `Environment=` lines for `XDG_DATA_HOME`,
   `XDG_STATE_HOME`, `XDG_CONFIG_HOME` and `AUTOWRIGHT_HOME` whenever the installing
   process has them set (2026-10-30): the GUI runs with the desktop session's environment

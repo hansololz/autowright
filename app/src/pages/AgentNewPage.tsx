@@ -94,8 +94,10 @@ export default function AgentNewPage() {
   const [editAgent] = useState<Agent | null>(
     () => (agentEditId ? agents.find((a) => a.id === agentEditId) ?? null : null))
   // Editing an agent that no longer exists (deleted, or a stale history entry
-  // restored before boot loaded the list) — bail out to the Agents page.
-  const missingEdit = !!agentEditId && !editAgent
+  // restored before boot loaded the list) — bail out to the Agents page. Read
+  // off the live list, not the mount snapshot: an agent removed elsewhere while
+  // this page is shown redirects too (third sweep, 2026-10-31).
+  const missingEdit = !!agentEditId && !agents.some((a) => a.id === agentEditId)
   // Replacing the history entry: back never re-enters the dead edit page (§9).
   useEffect(() => { if (missingEdit) go('agents', {}, { replace: true }) }, [missingEdit, go])
   const editHid = editAgent ? (HARNESS_ID[editAgent.harness] ?? 'claude') : null

@@ -134,7 +134,12 @@ start" line plus the §2 `serviceDiagnostics` capture.
 
 **Platform gating (§2, renderer half):** the store keeps the backend's `os` token and
 `capabilities` flag set from §19 `GET /health`, read at every backend connection (the same
-cycle that re-reads `backend.json`, §3 — a reconnect refreshes them). Every surface that
+cycle that re-reads `backend.json`, §3 — a reconnect refreshes them). The coalesced
+`/state` refresh never applies a snapshot that live events have overtaken: when events
+arrive while a fetch is in flight the fetch is retried, and past its retry budget it
+re-arms one more coalesced attempt a second later rather than applying the stale body
+(third sweep, 2026-10-31: applying it undid an `execution.finished` and left the row and
+its play button executing until an unrelated refresh). Every surface that
 offers an OS-coupled feature gates on these store fields and never sniffs the platform
 itself (no user-agent or preload-side `process.platform` checks — the §2 rule). The boot
 sequence connects before the app shell mounts, so gated surfaces never render with the flags
@@ -360,7 +365,10 @@ animation animates `transform` and would knock the toast off-center while it pla
   the renderer displays is AI-authored or leniently loaded (§4, §8).
 - Every "Show in Finder"/reveal action rides one main-process IPC (`reveal-path`) that
   confines the resolved path to the app's own roots — the app-support home, the logs dir,
-  and the executions data dir — and no-ops on anything else, so renderer state (much of it
+  and the executions data dir — and answers `{ ok: false, error }` for a path that is
+  missing or outside them (every caller toasts "Couldn't open <file manager> — <reason>",
+  the §9 per-OS word, instead of reporting a reveal that didn't happen, third sweep
+  2026-10-31), so renderer state (much of it
   AI-authored, per the boundary rationale above) can never open an arbitrary filesystem
   location. The root check and the directory/extension decision run on the **real** path
   (`fs.realpathSync`), so a symlink planted inside the executions dir (a step script could
@@ -431,7 +439,10 @@ discarded. This can't be undone." — the draft's name in curly quotes, omitted 
 draft has none; confirm button "Discard and start new") deletes the slot
 (`DELETE /draft/pending`) and then clears the slot's chat thread (`PUT /chat/pending`
 with `[]` — the one discard that deletes the thread, §4.4 thread lifetime) before opening
-the create flow, so the fresh session starts with an empty thread. Without a
+the create flow, so the fresh session starts with an empty thread; while that chain runs,
+New automation and Resume draft are disabled (a second click can't start a second chain),
+and the create flow opens only if the Automations list is still the shown page when the
+chain lands (the §9 landing rule, third sweep 2026-10-31). Without a
 pending draft, the single New automation button opens the create flow directly. Left of
 these sits a ghost **Import** button: it opens the **import modal**
 (§5.2 two-phase import). Input step: title "Import automation" over a one-line muted intro
@@ -783,7 +794,8 @@ one fixed 30 px height, so fields sitting side by side align exactly. An out-of-
     Automation" (plain text, no deep link — macOS has no pane-level URL for one app's
     Automation row); unknown → muted dot, "Not asked yet — Autowright sends replies through
     Messages" and a **Grant** button calling §19 `POST /imessage/permissions/automation-probe`
-    (spinner while it blocks on the macOS prompt; the row re-renders from the result).
+    (spinner while it blocks on the macOS prompt; the row re-renders from the result, and a
+    probe request that fails toasts its message rather than clearing the spinner silently).
   Neither state blocks Add — a trigger saved without permissions parks in the §4.3 `connection`
   error state and heals when granted. Then the editor
   inputs: a **sender input** (placeholder "Sender — +15551234567 or an email"; §4.3 `from`;

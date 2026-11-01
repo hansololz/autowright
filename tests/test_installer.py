@@ -452,7 +452,7 @@ def test_claude_recipe_pipes_official_installer_and_requires_binary(monkeypatch)
     assert len(calls) == 2
     script = calls[1][1]
     assert calls[0] == ["/bin/bash", "-c",
-                        f"curl -fsSL -o {script} {installer.CLAUDE_INSTALLER}"]
+                        f"curl -fsSL --proto '=https' --proto-redir '=https' -o {script} {installer.CLAUDE_INSTALLER}"]
     assert calls[1] == ["/bin/bash", script]
     assert required == ["claude"]
     # the vendor script lands in ~/.local/bin but only prints PATH
@@ -720,7 +720,7 @@ def test_codex_recipe_pipes_official_installer_non_interactive(monkeypatch):
     installer._install_codex(lambda **k: None)
     script = calls["cmd"][1]
     assert calls["download"] == ["/bin/bash", "-c",
-                                 f"curl -fsSL -o {script} {installer.CODEX_INSTALLER}"]
+                                 f"curl -fsSL --proto '=https' --proto-redir '=https' -o {script} {installer.CODEX_INSTALLER}"]
     assert calls["cmd"] == ["/bin/sh", script]
     # §19: no TTY on the backend — the script must never wait on a prompt
     assert calls["env"] == {"CODEX_NON_INTERACTIVE": "1"}

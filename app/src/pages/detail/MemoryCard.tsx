@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import { usePlatformCopy } from '../../platformCopy'
+import { revealPath } from '../../reveal'
 import { useStore } from '../../store'
 import type { Automation, SnapshotSettings } from '../../types'
 import { EmptyLine, Eyebrow, Toggle } from '../../ui'
@@ -46,10 +47,11 @@ export function MemoryCard({ auto, executing }: { auto: Automation; executing: b
   const revealMemory = () => {
     const p = auto.memory?.path
     if (!p) return
-    window.autowright?.revealPath(p)
-      .then(() => showToast(`Shown in ${copy.fileManager} — Autowright › Memory › ${auto.name}`))
-      // a user action never fails silently
-      .catch(() => showToast(`Couldn’t open ${copy.fileManager}.`))
+    // the success toast only for a reveal that happened (§9, third sweep);
+    // a failed one toasts its reason inside revealPath
+    void revealPath(p, copy.fileManager, showToast).then((ok) => {
+      if (ok) showToast(`Shown in ${copy.fileManager} — Autowright › Memory › ${auto.name}`)
+    })
   }
 
   const doClearMemory = () => {

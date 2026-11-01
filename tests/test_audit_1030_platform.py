@@ -18,16 +18,11 @@ def clean_environment(monkeypatch):
     return monkeypatch
 
 
-# §3 interpreter isolation (2026-10-31): every unit carries this pair first.
-ISOLATION_LINES = ["Environment=PYTHONNOUSERSITE=1", "Environment=PYTHONSAFEPATH=1"]
-
-
 def _environment_lines(text: str) -> list[str]:
-    """The unit's root-variable Environment= lines (the fixed §3 isolation
-    pair checked, then left out)."""
-    lines = [line for line in text.splitlines() if line.startswith("Environment=")]
-    assert lines[:2] == ISOLATION_LINES
-    return lines[2:]
+    """The unit's root-variable Environment= lines. §3 interpreter isolation
+    rides as ExecStart flags, never Environment= lines (third sweep,
+    2026-10-31)."""
+    return [line for line in text.splitlines() if line.startswith("Environment=")]
 
 
 def test_unit_carries_no_environment_lines_when_none_are_set(clean_environment):

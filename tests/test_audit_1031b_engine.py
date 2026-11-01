@@ -94,17 +94,21 @@ def test_a_test_runs_memory_copy_keeps_a_directory_link_as_a_link(client, monkey
 
 # ---------- R / S: §3 interpreter isolation, §6.2 pip environment ----------
 
-def test_the_executor_spawn_env_isolates_the_interpreter():
+def test_the_executor_spawn_env_carries_no_isolation_variables(monkeypatch):
+    """§3 (third sweep): the isolation is the spawn's `-s -P` flags; the env
+    pair would reach every subprocess a step spawns."""
     from autowright import harness
 
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
     env = harness.step_env()
-    assert env["PYTHONNOUSERSITE"] == "1"
-    assert env["PYTHONSAFEPATH"] == "1"
+    assert "PYTHONNOUSERSITE" not in env
+    assert "PYTHONSAFEPATH" not in env
 
 
 def test_a_step_never_imports_a_module_from_its_cwd(store):
-    """§3: with PYTHONSAFEPATH the workspace (the spawn cwd) is off sys.path,
-    so a stray email.py there can't shadow the stdlib."""
+    """§3: with `-P` the workspace (the spawn cwd) is off sys.path, so a
+    stray email.py there can't shadow the stdlib."""
     from autowright.engine import Engine
 
     engine = Engine(store)
@@ -150,26 +154,29 @@ def test_pip_runs_with_the_isolation_and_pip_config_overrides(home, monkeypatch)
     packages._pip_install("pkg")
     env = seen["env"]
     assert env["PIP_USER"] == "0" and env["PIP_REQUIRE_VIRTUALENV"] == "0"
-    assert env["PYTHONNOUSERSITE"] == "1" and env["PYTHONSAFEPATH"] == "1"
+    # §3 (third sweep): flags on the pip command line, never the variables.
+    assert "PYTHONNOUSERSITE" not in env and "PYTHONSAFEPATH" not in env
+    assert seen["cmd"][1:5] == ["-s", "-P", "-m", "pip"]
     assert env["PIP_NO_INDEX"] == "1"  # §15: the suites' pip variables survive
     assert "--isolated" not in seen["cmd"]
 
 
 @launchd_only
-def test_the_launchd_plist_carries_the_isolation_pair(svc):  # noqa: F811
+def test_the_launchd_plist_carries_the_isolation_flags(svc):  # noqa: F811
+    # §3 (third sweep): flags, never an EnvironmentVariables pair.
     svc.mod.install()
     with open(svc.plist, "rb") as f:
         plist = plistlib.load(f)
-    assert plist["EnvironmentVariables"] == {"PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1"}
+    assert plist["ProgramArguments"][1:] == ["-s", "-P", "-m", "autowright.main"]
+    assert "EnvironmentVariables" not in plist
 
 
-def test_the_systemd_unit_carries_the_isolation_pair():
+def test_the_systemd_unit_carries_the_isolation_flags():
     from autowright.platform import linux
 
     text = linux.unit_text()
-    service = text.index("[Service]\n")
-    for line in ("Environment=PYTHONNOUSERSITE=1\n", "Environment=PYTHONSAFEPATH=1\n"):
-        assert service < text.index(line) < text.index("ExecStart=")
+    assert " -s -P -m autowright.main\n" in text
+    assert "PYTHONNOUSERSITE" not in text and "PYTHONSAFEPATH" not in text
 
 
 # ---------- AF: §5.2 the PyPI lookup refuses a hop off https ----------
@@ -532,7 +539,7 @@ def test_fetch_page_spacing_is_shared_through_the_sites_file(pages, tmp_path, mo
     sites = tmp_path / ".sites.json"
     monkeypatch.setattr(executor, "_sites_file", str(sites))
     executor.fetch_page(f"{base}/plain")
-    assert sleeps == []
+    assert len(sleeps) == 1  # §6 third sweep: the page is spaced after the robots hit
     recorded = json.loads(sites.read_text(encoding="utf-8"))
     host = f"127.0.0.1:{base.rsplit(':', 1)[1]}"
     assert set(recorded) == {host}
@@ -540,7 +547,8 @@ def test_fetch_page_spacing_is_shared_through_the_sites_file(pages, tmp_path, mo
     monkeypatch.setattr(executor, "_site_last", {})
     monkeypatch.setattr(executor, "_robots", {})
     executor.fetch_page(f"{base}/plain")
-    assert len(sleeps) == 1 and 1.5 < sleeps[0] <= 2.0
+    # The next step's robots read waits on the shared record, then its page.
+    assert len(sleeps) == 3 and all(1.5 < s <= 2.0 for s in sleeps[1:])
 
 
 def test_fetch_page_tolerates_a_corrupt_sites_file(pages, tmp_path, monkeypatch):
@@ -551,7 +559,7 @@ def test_fetch_page_tolerates_a_corrupt_sites_file(pages, tmp_path, monkeypatch)
     sites.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(executor, "_sites_file", str(sites))
     assert executor.fetch_page(f"{base}/plain") == "naïve"
-    assert sleeps == []
+    assert len(sleeps) == 1  # only the page's spacing after the robots hit
     assert json.loads(sites.read_text(encoding="utf-8"))
 
 

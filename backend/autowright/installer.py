@@ -13,6 +13,7 @@ progress streams through a publish callback (the API layer forwards it as
 """
 from __future__ import annotations
 
+import glob
 import os
 import shlex
 import shutil
@@ -41,6 +42,25 @@ INSTALL_TIMEOUT_S = 15 * 60
 # Ollama binary runs to hundreds of MB, so the archive's 30 s / 64 MB don't fit.
 DOWNLOAD_READ_TIMEOUT_S = 120
 DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+# §3 shutdown sweep (third sweep, 2026-10-31): every installer child (the
+# vendor script, its curl download) is tracked here and group-killed by
+# `kill_running`, like the §19 Ollama pull children.
+_running_lock = threading.Lock()
+_running: set = set()
+
+
+def kill_running() -> None:
+    """§3 shutdown: hard-kill every tracked installer child by group."""
+    with _running_lock:
+        procs = list(_running)
+        _running.clear()
+    for proc in procs:
+        try:
+            platform.current().processes.signal_group(proc)
+        except Exception:  # noqa: BLE001 — a dead child must not break the sweep
+            pass
+
 
 CLAUDE_INSTALLER = "https://claude.ai/install.sh"
 OPENCODE_INSTALLER = "https://opencode.ai/install"
@@ -247,6 +267,18 @@ def _stream_shell(cmd: list[str], emit, provider_id: str,
                             # policy): the timeout kill reaches the whole
                             # pipeline (curl | bash spawns children)
                             **platform.current().processes.session_kwargs())
+    # §3 shutdown sweep: tracked until it settles (third sweep, 2026-10-31).
+    with _running_lock:
+        _running.add(proc)
+    try:
+        _follow_shell(proc, emit)
+    finally:
+        with _running_lock:
+            _running.discard(proc)
+
+
+def _follow_shell(proc: subprocess.Popen, emit) -> None:
+    """The read loop and verdict of one `_stream_shell` child."""
     timed_out = threading.Event()
     # §2 pipe-release contract (§19: the cap's kill releases the install's own
     # read): the same releasable reader harness._invoke uses.
@@ -415,7 +447,10 @@ def _run_installer_script(url: str, shell: str, emit, provider_id: str,
     try:
         try:
             _stream_shell(["/bin/bash", "-c",
-                           f"curl -fsSL -o {shlex.quote(script)} {shlex.quote(url)}"],
+                           # §19: https only end to end, redirects
+                           # included (third sweep, 2026-10-31).
+                           "curl -fsSL --proto '=https' --proto-redir '=https' "
+                           f"-o {shlex.quote(script)} {shlex.quote(url)}"],
                           emit, provider_id)
         except RuntimeError as e:
             raise RuntimeError(f"couldn't download the installer: {e}") from e
@@ -511,6 +546,10 @@ def _install_ollama_app(emit) -> str:
         staged = dest + ".ad-new"
         aside = f"{dest}.old-{os.getpid()}"
         shutil.rmtree(staged, ignore_errors=True)
+        # §19: a leftover aside of any pid (an install that crashed between
+        # the two renames) goes first (third sweep, 2026-10-31).
+        for leftover in glob.glob(glob.escape(dest) + ".old-*"):
+            shutil.rmtree(leftover, ignore_errors=True)
         moved_aside = False
         try:
             shutil.move(src, staged)

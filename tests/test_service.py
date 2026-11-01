@@ -145,7 +145,7 @@ def test_install_writes_plist_and_reloads(svc):
     with open(svc.plist, "rb") as f:
         plist = plistlib.load(f)
     assert plist["Label"] == "ai.autowright.backend"
-    assert plist["ProgramArguments"] == [sys.executable, "-m", "autowright.main"]
+    assert plist["ProgramArguments"] == [sys.executable, "-s", "-P", "-m", "autowright.main"]
     assert plist["RunAtLoad"] is True
     assert plist["KeepAlive"] is True
 
@@ -771,8 +771,8 @@ def test_republish_leaves_any_valid_file_alone(home):
 def test_trim_logs_drops_oldest_lines(home, monkeypatch):
     from autowright import main as backend_main, paths
 
-    monkeypatch.setattr(backend_main, "LOG_CAP", 1000)
-    monkeypatch.setattr(backend_main, "LOG_TRIM_TO", 500)
+    monkeypatch.setattr(paths, "LOG_CAP", 1000)
+    monkeypatch.setattr(paths, "LOG_TRIM_TO", 500)
     log = paths.app_log()
     lines = [f"line {i:04d}\n".encode() for i in range(200)]  # 2000 bytes
     log.write_bytes(b"".join(lines))
@@ -786,8 +786,8 @@ def test_trim_logs_drops_oldest_lines(home, monkeypatch):
 def test_trim_logs_leaves_small_and_missing_files_alone(home, monkeypatch):
     from autowright import main as backend_main, paths
 
-    monkeypatch.setattr(backend_main, "LOG_CAP", 1000)
-    monkeypatch.setattr(backend_main, "LOG_TRIM_TO", 500)
+    monkeypatch.setattr(paths, "LOG_CAP", 1000)
+    monkeypatch.setattr(paths, "LOG_TRIM_TO", 500)
     log = paths.logs_dir() / "backend.out.log"
     log.write_bytes(b"small\n" * 10)
     backend_main.trim_logs()  # backend.err.log missing — must not raise

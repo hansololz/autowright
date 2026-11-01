@@ -143,6 +143,15 @@ def send_reply(payload: dict, text: str,
     return None
 
 
+def reply_limit(payload: dict | None) -> int:
+    """§6.1: the character cap `send_reply` applies for the payload's medium
+    (Discord 2000, iMessage 4000). The engine clips a queued reply to it, so
+    the delivery queue never holds more text than the listener would send."""
+    if (payload or {}).get("kind") == "imessage":
+        return imessage.REPLY_LIMIT
+    return REPLY_LIMIT
+
+
 # §6 busy-notice delivery: ONE long-lived worker draining this queue, started
 # on the first notice and never stopped. A dropped-message burst must not spawn
 # an OS thread per message (each send is an HTTP round trip up to 10 s, so a

@@ -865,7 +865,7 @@ def test_linux_unit_pins_the_launchd_equivalents(systemd):
     text = linux.unit_path().read_text()
     # RunAtLoad → enabled WantedBy=default.target; KeepAlive → Restart=always
     # with launchd-style throttle and no start-limit give-up.
-    assert f'ExecStart="{sys.executable}" -m autowright.main\n' in text
+    assert f'ExecStart="{sys.executable}" -s -P -m autowright.main\n' in text
     assert "Restart=always\n" in text
     assert "RestartSec=2\n" in text
     assert "StartLimitIntervalSec=0\n" in text
@@ -992,7 +992,7 @@ def test_linux_unit_text_escapes_systemd_specials(systemd, monkeypatch):
 
     monkeypatch.setattr(linux, "sys", NS(executable='/odd path/100%/py"3'))
     text = linux.unit_text()
-    assert 'ExecStart="/odd path/100%%/py\\"3" -m autowright.main\n' in text
+    assert 'ExecStart="/odd path/100%%/py\\"3" -s -P -m autowright.main\n' in text
 
 
 def test_linux_notifier_posts_best_effort(monkeypatch):

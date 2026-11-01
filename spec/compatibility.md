@@ -341,16 +341,37 @@ version that writes the new shape, and the oldest shape still read.
   no written shape changes. Extended (second sweep): a `param_values` entry that is not a
   value of its definition's kind (non-finite number, non-text `kv` key) is ignored at load
   and the default applies — one `.inf` made every `GET /state` a 500. Fixture: a top-level
-  `param_values` with `.inf` and a `kv` row keyed by an integer.
+  `param_values` with `.inf` and a `kv` row keyed by an integer. Third sweep: a `kv`
+  value's rows are first coerced exactly like a `kv` default's (text key / text value via
+  `scalar_text`, a null value reads as "", a null-key row is dropped), and only a row that
+  still isn't text is a kind mismatch, so a stored `value: 8080` written by an older
+  agent round keeps its user value instead of falling to the default. Fixture: a `kv`
+  value row with an integer value.
   (c) Cron step on a bare number (second sweep): the §4.3 dialect now rejects `5/15` at
   every entry door, but released versions stored and fired it with Vixie's meaning
   (`5-59/15`), so a stored expression is **rewritten at load** to that range form —
   `a/n` → `a-<field max>/n` per field — and the load-time trigger check skips the new
   "never fires" rule (an expression that never fires stays stored and keeps not firing, as
-  it always did; only the API and import refuse it). Read-side migration: the rewritten
+  it always did; only the API and import refuse it, and the API only for a new or changed
+  expression, never for a stored one re-sent untouched by a trigger PATCH or an editor
+  Save, third sweep). Read-side migration: the rewritten
   form is written by the next save. Fixture: a v0.13.x automation.yaml with
   `expression: "5/15 * * * *"` and one with `0 0 30 2 *`, both still enabled after load,
   the first firing at :05, :20, :35, :50.
+- **2026-10-31 (third sweep) - audit batch.** (a) `_load_triggers` canonicalizes a
+  stored cron/time `timezone` through the §4.3 case-insensitive IANA match and a stored
+  `at` into the §4.3 canonical `YYYY-MM-DDTHH:MM[:SS]` form (the API door has done both
+  since 2026-10-31, the loader did neither: a hand-edited `timezone: europe/berlin` loaded
+  as-is and made `next_at_ms` raise on every `GET /state`, and a released-version
+  `at: 20261120T0900` reached the §9.2 editor garbled). Read-side migration: nothing is
+  rewritten at load, the canonical form is written by the next save, and every release's
+  loader reads both forms. Fixture: a v0.14.0 automation.yaml with both spellings.
+  (b) Any string loaded from a store file that holds a lone UTF-16 surrogate (`"\uD800"`
+  in YAML) has it replaced by U+FFFD at the read seam with a warning (§5): released
+  versions stored one from any JSON client (reproduced through `POST /automations` and a
+  crafted archive) and every later `GET /state` failed to encode as UTF-8. The written
+  shape is unchanged; the replaced text is written by the next save. Fixture: an
+  automation.yaml whose name and description carry one.
 - **2026-10-30 (second sweep) - audit batch.** (a) A crash-orphan version folder (§5,
   above `current_version`) is renamed aside to `vN.orphan` by the next save that numbers
   past it; older releases' loaders never match that name (their `v<digits>` match), nothing

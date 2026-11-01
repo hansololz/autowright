@@ -2753,7 +2753,7 @@ def test_ollama_pull_rides_server_api_when_answering(client, monkeypatch):
         calls["body"] = jsonlib.loads(req.data.decode())
         return FakeResp()
 
-    monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(harness, "ollama_urlopen", fake_urlopen)
 
     def no_popen(cmd, **kw):
         raise AssertionError("CLI must not be spawned when the server answers")

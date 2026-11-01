@@ -576,13 +576,15 @@ def test_fetch_page_spaces_same_host_by_two_seconds(monkeypatch, clean_fetch_sta
     clock, sleeps = clean_fetch_state
     _urlopen_router(monkeypatch, b"", b"body")
     fetch_page("https://example.com/a")
-    assert sleeps == []  # first hit: no wait
+    # §6 (third sweep): the robots read is the first hit, so the page waits
+    # the full spacing after it.
+    assert sleeps == [pytest.approx(2.0)]
     clock["t"] += 0.5
     fetch_page("https://example.com/b")
-    assert len(sleeps) == 1 and sleeps[0] == pytest.approx(1.5)  # tops up to 2s
+    assert len(sleeps) == 2 and sleeps[1] == pytest.approx(1.5)  # tops up to 2s
     clock["t"] += 10
     fetch_page("https://example.com/c")
-    assert len(sleeps) == 1  # ≥2s already elapsed: no extra wait
+    assert len(sleeps) == 2  # ≥2s already elapsed: no extra wait
 
 
 def test_fetch_page_retries_twice_then_raises(monkeypatch, clean_fetch_state):
@@ -593,7 +595,9 @@ def test_fetch_page_retries_twice_then_raises(monkeypatch, clean_fetch_state):
     with pytest.raises(RuntimeError, match="couldn't fetch .*conn reset"):
         fetch_page("https://example.com/a")
     assert calls.count("https://example.com/a") == 3  # first try + two retries
-    assert sleeps == [2, 2]  # no sleep after the final failure
+    # the robots-hit spacing, then the two retry pauses; no sleep after the
+    # final failure
+    assert sleeps == [pytest.approx(2.0), 2, 2]
 
 
 def test_fetch_page_second_attempt_succeeds(monkeypatch, clean_fetch_state):

@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
 from .marketplace import MAX_ENTRIES
 from .storage import STEP_TIMEOUT_MAX_S
+from .textsafe import LONE_SURROGATE_ERROR, any_string, has_lone_surrogate
 
 # A recurring pattern below: `field: StrictX = None` (no `| None` in the
 # annotation). Pydantic never validates defaults, so this reads "the key may be
@@ -21,7 +22,23 @@ from .storage import STEP_TIMEOUT_MAX_S
 # `StrictX | None = None` is used only where null is a meaningful value.
 
 
-class StepIn(BaseModel):
+class RequestModel(BaseModel):
+    """The one base of every request model. §19 lone-surrogate door (third
+    sweep, 2026-10-31): a body holding a lone UTF-16 surrogate in any string
+    (keys included) is refused before any field is read, since the store writes
+    YAML and the API answers JSON, both UTF-8, and one stored surrogate made
+    every later `GET /state` fail to encode. The 422 flattener renders this
+    error as the bare sentence."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_lone_surrogates(cls, data: Any) -> Any:
+        if any_string(data, has_lone_surrogate):
+            raise ValueError(LONE_SURROGATE_ERROR)
+        return data
+
+
+class StepIn(RequestModel):
     """One draft step. §4.1 spelling boundary: the API spelling of the step
     flags is camelCase (noTimeout, infiniteRetries, authoredBy); disk and the internal
     shape are snake_case only. This model is the one place the client spelling
@@ -71,7 +88,7 @@ class StepIn(BaseModel):
         return d
 
 
-class SpecBlockIn(BaseModel):
+class SpecBlockIn(RequestModel):
     """One §4.1 spec block — exactly the kinds specmd.py reads and writes. A
     wrong kind or a non-string text answers 422 before any version folder is
     written (§19), never a 500 half-way through the spec.md write."""
@@ -80,7 +97,7 @@ class SpecBlockIn(BaseModel):
     text: StrictStr
 
 
-class DraftIn(BaseModel):
+class DraftIn(RequestModel):
     """A §4.4 draft payload. Everything the store writes into a version folder
     is typed here — steps (each entry an object, the camelCase flag boundary
     above), the spec blocks, the notes doc, the param and package lists — so a
@@ -121,7 +138,7 @@ class DraftIn(BaseModel):
         return d
 
 
-class SnapshotSettingsPatch(BaseModel):
+class SnapshotSettingsPatch(RequestModel):
     """§6.3 automatic-snapshot toggles — partial object, sent keys merged."""
 
     preVersion: StrictBool = None
@@ -129,7 +146,7 @@ class SnapshotSettingsPatch(BaseModel):
     preRestore: StrictBool = None
 
 
-class AutomationPatch(BaseModel):
+class AutomationPatch(RequestModel):
     """PATCH /automations/{id} — user-owned fields only (§19)."""
 
     name: StrictStr | None = None            # blank/missing is ignored by the store
@@ -148,14 +165,14 @@ class AutomationPatch(BaseModel):
     notifications: Literal["attention", "all", "never"] | None = None
 
 
-class ConcurrencyIn(BaseModel):
+class ConcurrencyIn(RequestModel):
     """§8 chat-staged concurrency — partial object, same floors as the PATCH."""
 
     maxParallel: StrictInt = Field(default=None, ge=1)   # §6 — strict int, floor 1
     maxQueued: StrictInt = Field(default=None, ge=0)     # §6 — strict int, floor 0
 
 
-class AutomationCreate(BaseModel):
+class AutomationCreate(RequestModel):
     """POST /automations (§19)."""
 
     draft: DraftIn
@@ -170,7 +187,7 @@ class AutomationCreate(BaseModel):
     settlePending: bool = True
 
 
-class AutomationDuplicate(BaseModel):
+class AutomationDuplicate(RequestModel):
     """POST /automations/{id}/duplicate (§19): `name` trimmed, blank or
     omitted → the source name, deduped per §4.1 like create."""
 
@@ -178,7 +195,7 @@ class AutomationDuplicate(BaseModel):
     copyMemory: StrictBool = False
 
 
-class VersionSave(BaseModel):
+class VersionSave(RequestModel):
     """POST /automations/{id}/versions (§19)."""
 
     draft: DraftIn
@@ -193,7 +210,7 @@ class VersionSave(BaseModel):
     baseVersion: StrictInt | None = None
 
 
-class StepsValidate(BaseModel):
+class StepsValidate(RequestModel):
     """POST /validate-steps (§19) — the save endpoints' draft shape, plus the
     optional automation whose save context the pass reads."""
 
@@ -201,13 +218,13 @@ class StepsValidate(BaseModel):
     automationId: StrictStr | None = None
 
 
-class VersionRestore(BaseModel):
+class VersionRestore(RequestModel):
     """POST /automations/{id}/restore (§19)."""
 
     version: StrictInt
 
 
-class DraftPut(BaseModel):
+class DraftPut(RequestModel):
     """PUT /draft/{owner} — the §4.4 container snapshot for either owner.
     `agentId` rides beside the payload for the pending slot (the identity no
     automation record exists to hold); ignored for an automation owner."""
@@ -218,7 +235,7 @@ class DraftPut(BaseModel):
     baseVersion: StrictInt | None = None
 
 
-class ChatPut(BaseModel):
+class ChatPut(RequestModel):
     """PUT /chat/{owner} — the §11 thread, rewritten whole (§4.4 thread
     lifetime); an empty list unlinks the file (§11 Clear chat). Entry shapes
     are checked semantically by the store (kind-less entries are dropped)."""
@@ -226,7 +243,7 @@ class ChatPut(BaseModel):
     chat: list[dict[str, Any]]
 
 
-class TriggersPreview(BaseModel):
+class TriggersPreview(RequestModel):
     """POST /triggers/preview (§19) — a list of §4.3-shaped trigger dicts.
     Only a body that isn't a list of objects is a 422; a semantically invalid
     entry is a per-entry `valid: false` result."""
@@ -234,7 +251,7 @@ class TriggersPreview(BaseModel):
     triggers: list[dict[str, Any]]
 
 
-class ExecuteBody(BaseModel):
+class ExecuteBody(RequestModel):
     """POST /automations/{id}/execute (§19)."""
 
     version: StrictStr | None = None
@@ -244,14 +261,14 @@ class ExecuteBody(BaseModel):
     queue: StrictBool = False
 
 
-class AppStarted(BaseModel):
+class AppStarted(RequestModel):
     """POST /app-started (§19) — launchId is required and nonempty: the
     idempotency dedupe is the whole point of the endpoint."""
 
     launchId: StrictStr = Field(min_length=1)
 
 
-class TestStart(BaseModel):
+class TestStart(RequestModel):
     """POST /tests (§19). triggerMock's §4.3 field rules stay in the handler."""
 
     draft: DraftIn
@@ -265,7 +282,7 @@ class TestStart(BaseModel):
     stepsFingerprint: StrictStr | None = None
 
 
-class PackageRef(BaseModel):
+class PackageRef(RequestModel):
     """One §6.2 package declaration — `import` is a Python keyword, hence the
     alias; `plain()` emits the wire spelling the packages module reads."""
 
@@ -276,7 +293,7 @@ class PackageRef(BaseModel):
         return {"pip": self.pip, "import": self.import_}
 
 
-class PackagesBody(BaseModel):
+class PackagesBody(RequestModel):
     """POST /packages/check|install|outdated|update (§19)."""
 
     # §19: every packages body is capped — /outdated runs one PyPI lookup per
@@ -287,19 +304,19 @@ class PackagesBody(BaseModel):
     wait: bool = False
 
 
-class SnapshotCreate(BaseModel):
+class SnapshotCreate(RequestModel):
     """POST /automations/{id}/memory/snapshots (§6.3)."""
 
     name: StrictStr | None = None
 
 
-class SnapshotRename(BaseModel):
+class SnapshotRename(RequestModel):
     """PATCH /automations/{id}/memory/snapshots/{snapshot_id} — null/"" clears."""
 
     name: StrictStr | None = None
 
 
-class DraftJobStart(BaseModel):
+class DraftJobStart(RequestModel):
     """POST /drafts (§19) — a §8 drafting job."""
 
     mode: Literal["chat", "sync"]
@@ -314,25 +331,25 @@ class DraftJobStart(BaseModel):
     allowedSecrets: list[StrictStr] = None
 
 
-class SkipStep(BaseModel):
+class SkipStep(RequestModel):
     """POST /executions/{id}/skip-step (§7)."""
 
     index: StrictInt
 
 
-class ImportUrl(BaseModel):
+class ImportUrl(RequestModel):
     """POST /automations/import/url (§5.2)."""
 
     url: StrictStr
 
 
-class ImportConfirm(BaseModel):
+class ImportConfirm(RequestModel):
     """POST /automations/import/confirm (§5.2)."""
 
     token: StrictStr
 
 
-class MarketplaceAdd(BaseModel):
+class MarketplaceAdd(RequestModel):
     """POST /marketplace/sources (§22.4) - exactly one of the two, non-empty;
     the exactly-one rule and the https/absolute-path rules are the handler's."""
 
@@ -340,7 +357,7 @@ class MarketplaceAdd(BaseModel):
     path: StrictStr | None = None
 
 
-class MarketplaceSettings(BaseModel):
+class MarketplaceSettings(RequestModel):
     """PATCH /marketplace/sources/{id} (§22.4): every field optional, only the
     given ones change. `location` is text - blank, or an explicit null, means
     null; the handler tells an absent key from a null one by `model_fields_set`
@@ -351,7 +368,7 @@ class MarketplaceSettings(BaseModel):
     autoRefresh: StrictBool | None = None
 
 
-class MarketplaceCatalogEntry(BaseModel):
+class MarketplaceCatalogEntry(RequestModel):
     """One §22.7 editor row: exactly one of `path` (kept as written),
     `automationId` (exported on save), or `archiveFile` (listed where it is) -
     the exactly-one rule is the store's, so it names the entry."""
@@ -364,7 +381,7 @@ class MarketplaceCatalogEntry(BaseModel):
     archiveFile: StrictStr | None = None
 
 
-class MarketplaceCatalogSave(BaseModel):
+class MarketplaceCatalogSave(RequestModel):
     """PUT /marketplace/sources/{id}/catalog (§22.7). `exportFolder` is where
     automations from this app are exported when the catalog has no location."""
 
@@ -383,7 +400,7 @@ class MarketplaceCatalogCreate(MarketplaceCatalogSave):
     folder: StrictStr | None = None
 
 
-class AgentAdd(BaseModel):
+class AgentAdd(RequestModel):
     """POST /agents (§4.7) — harness membership and the mode/model matrix stay
     semantic (the handler's), the shapes are checked here."""
 
@@ -394,7 +411,7 @@ class AgentAdd(BaseModel):
     description: StrictStr | None = None
 
 
-class AgentPatch(BaseModel):
+class AgentPatch(RequestModel):
     """PATCH /agents/{id} — same shape rules as POST; `model: null` is a real
     value (the §4.7 matrix rejects it semantically where a model is needed)."""
 
@@ -406,7 +423,7 @@ class AgentPatch(BaseModel):
     default: StrictBool = None
 
 
-class CheckHarness(BaseModel):
+class CheckHarness(RequestModel):
     """POST /agents/check-harness (§19) — mode constrained like AgentAdd's,
     so an unknown mode answers 422 instead of silently reading as default."""
 
@@ -415,19 +432,19 @@ class CheckHarness(BaseModel):
     model: StrictStr | None = None
 
 
-class ProviderId(BaseModel):
+class ProviderId(RequestModel):
     """POST /agents/install · /agents/login — provider id body."""
 
     id: StrictStr
 
 
-class OllamaPull(BaseModel):
+class OllamaPull(RequestModel):
     """POST /ollama/pull (§19)."""
 
     model: StrictStr
 
 
-class SecretCreate(BaseModel):
+class SecretCreate(RequestModel):
     """POST /secrets (§4.8) — create: a blank value creates a placeholder.
     The name is validated (and checked unique) in the handler."""
 
@@ -436,7 +453,7 @@ class SecretCreate(BaseModel):
     description: StrictStr | None = None
 
 
-class SecretPut(BaseModel):
+class SecretPut(RequestModel):
     """PUT /secrets/{id} (§4.8) — edit: the name is immutable and not a field;
     a blank value keeps the stored state; description edits are
     presence-sensitive (exclude_unset)."""
@@ -445,7 +462,7 @@ class SecretPut(BaseModel):
     description: StrictStr | None = None
 
 
-class SettingsPatch(BaseModel):
+class SettingsPatch(RequestModel):
     """PATCH /settings (§4.9/§19) — strictly-typed: booleans must be booleans,
     days a real int (bool/float/string rejected), notifications the §4.9 enum."""
 
@@ -460,7 +477,7 @@ class SettingsPatch(BaseModel):
     days: StrictInt = None
 
 
-class DataPath(BaseModel):
+class DataPath(RequestModel):
     """POST /settings/data-path (§19)."""
 
     path: StrictStr

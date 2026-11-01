@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .textsafe import any_string, has_lone_surrogate, replace_lone_surrogates, walk_strings
 
 log = logging.getLogger("autowright.yamlio")
 
@@ -19,8 +22,18 @@ def load_yaml_checked(path: Path, default: Any = None) -> tuple[Any, bool]:
     store uses ok to make an unreadable top-level file read-only for the
     session, so a corrupt file is degraded, never overwritten by its default."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig (§5, third sweep, 2026-10-31): a hand-edited file written
+        # with a UTF-8 BOM (PowerShell and some editors add one) reads with
+        # the BOM stripped.
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = yaml.safe_load(f)
+        # §5 / §21 2026-10-31 third sweep (b): a lone UTF-16 surrogate (a
+        # `"\uD800"` escape) can't be encoded as UTF-8, and one such string
+        # stored anywhere made every later GET /state fail. It is replaced by
+        # U+FFFD at the read seam; the next save writes the replaced text.
+        if any_string(data, has_lone_surrogate):
+            log.warning("lone surrogate characters in %s replaced with U+FFFD", path)
+            data = walk_strings(data, replace_lone_surrogates)
         return (default if data is None else data), True
     except FileNotFoundError:
         return default, True
@@ -76,15 +89,27 @@ def _replace(source: str, target: Path) -> None:
 
 
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
+    # §5 (third sweep, 2026-10-31): the rename targets the real path behind a
+    # symlink, so a linked file (a user's own catalog.yaml) is updated in place
+    # and the link is never swapped for a regular file.
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        # §5 (third sweep, 2026-10-31): the temp file takes the existing
+        # file's mode (mkstemp creates 0600, which made a saved file unreadable
+        # to other users of a shared volume); a new file gets 0644. A caller
+        # that needs 0600 (the token-bearing backend.json) names it.
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            mode = 0o644
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ad-tmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        if mode is not None:
-            os.chmod(tmp, mode)
+        os.chmod(tmp, mode)
         _replace(tmp, path)
         _fsync_dir(path.parent)
     except BaseException:

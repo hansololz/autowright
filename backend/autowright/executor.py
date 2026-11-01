@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -225,7 +226,7 @@ class Result:
         # A chip is a short §4.5 badge — cap it so a runaway string can never
         # blow the engine's size-capped control-line read. §7: a guarded cut,
         # never a fixed slice ahead of the engine's redaction.
-        emit("result", field="chip", value=(_guarded_pieces(str(text), 1_000) or [""])[0])
+        emit("result", field="chip", value=_guarded_head(str(text), 1_000))
 
 
 def substantive_probe(part: str) -> bool:
@@ -300,7 +301,8 @@ def _json_string_leaves(value: str) -> list[str]:
 def secret_probes(value: str) -> list[str]:
     """§4.8 / §6: every text that counts as an occurrence of one secret value
     — the whole value first, then its JSON-escaped (`ensure_ascii` on and
-    off), `repr`, and trailing-newline-stripped forms, each line of a
+    off), `repr`, trailing-newline-stripped and whitespace-stripped forms
+    (the last at 8+ characters), each line of a
     multi-line value (`_line_probes`), and, when the value parses as JSON,
     every substantive secret-material string leaf (key-gated,
     `_secret_material_leaf`) with its escaped forms and its own lines —
@@ -324,6 +326,10 @@ def secret_probes(value: str) -> list[str]:
     for variant in (json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1],
                     repr(value)[1:-1], value.rstrip("\r\n")):
         add(variant, whole=True)
+    # §4.8 (third sweep, 2026-10-31): the whitespace-stripped value, for a
+    # pasted value with a stray space that the step `strip()`s; held to the
+    # 8-character minimum, since it is no longer the value as stored.
+    add(value.strip())
     if "\n" in value:
         for form in _line_probes(value):
             add(form)
@@ -539,13 +545,24 @@ def fetch_page(url: str) -> str:
     rp = _robots.get(host)
     if rp is None:
         rp = urllib.robotparser.RobotFileParser()
+        # §6 (third sweep, 2026-10-31): the robots read is a site hit like any
+        # other: spaced, stamped, and read under the page's deadline and cap,
+        # so a trickling robots.txt can't hold the step past the fetch budget
+        # and the page request below still waits the spacing after it.
+        wait = _site_wait(host)
+        if wait > 0:
+            time.sleep(wait)
+        _site_last[host] = time.monotonic()
+        _write_site_hit(host, time.time())
         try:
             # Fetch robots.txt ourselves: RobotFileParser.read() has no timeout,
             # so a black-holing server would hang the step until the watchdog.
+            deadline = time.monotonic() + FETCH_DEADLINE_S  # before the connect
             req = urllib.request.Request(f"{urlparse(url).scheme}://{host}/robots.txt",
                                          headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                rp.parse(r.read().decode("utf-8", errors="replace").splitlines())
+            timeout = max(0.1, min(FETCH_TIMEOUT_S, deadline - time.monotonic()))
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                rp.parse(_read_page(r, deadline).splitlines())
         except urllib.error.HTTPError as e:
             # Same semantics as RobotFileParser.read(): 401/403 mean "crawlers
             # not welcome" (disallow all); other 4xx (no robots.txt) allow all.
@@ -618,13 +635,15 @@ def _guard_tail(guards: list[str]) -> int:
     return max((len(guard) for guard in guards), default=1) - 1
 
 
-def _guarded_boundary(text: str, start: int, end: int, limit: int) -> int:
+def _guarded_boundary(text: str, start: int, end: int, limit: int,
+                      keep_long: bool = False) -> int:
     """§7: `end` moved back to just before any `_cut_guards` occurrence that
     straddles it (a guard longer than `limit` can't be kept whole and is
-    ignored). May return `start` — callers decide what an empty piece means."""
+    ignored, unless `keep_long`: a first-piece-only cut moves before it
+    too). May return `start` — callers decide what an empty piece means."""
     cut = end
     for guard in _cut_guards:
-        if len(guard) > limit:
+        if len(guard) > limit and not keep_long:
             continue
         # Any occurrence starting in this window straddles `end`.
         found = text.find(guard, max(start, end - len(guard) + 1), end + len(guard) - 1)
@@ -652,13 +671,24 @@ def _guarded_pieces(text: str, limit: int) -> list[str]:
     return pieces
 
 
-def _guarded_clip(text: str, limit: int, marker: str = CLIP_MARKER) -> str:
-    """§7: the first guarded piece of `text`, with `marker` appended when
-    something was cut — never a fixed slice that could leave a secret's head
-    behind as a fragment the engine's redaction can't match."""
+def _guarded_head(text: str, limit: int) -> str:
+    """§7: the first `limit` characters of `text` for a cut that keeps only
+    the first piece (the chip, the notification body, the error message):
+    the cut moves before any `_cut_guards` occurrence straddling it whatever
+    the guard's length, so a token longer than `limit` never leaves its head
+    behind; the head may then be empty (third sweep, 2026-10-31)."""
     if len(text) <= limit:
         return text
-    return _guarded_pieces(text, limit)[0] + marker
+    return text[:_guarded_boundary(text, 0, limit, limit, keep_long=True)]
+
+
+def _guarded_clip(text: str, limit: int, marker: str = CLIP_MARKER) -> str:
+    """§7: the guarded head of `text`, with `marker` appended when something
+    was cut — never a fixed slice that could leave a secret's head behind as
+    a fragment the engine's redaction can't match."""
+    if len(text) <= limit:
+        return text
+    return _guarded_head(text, limit) + marker
 
 
 def _emit_log(kind: str, text: str) -> None:
@@ -777,6 +807,12 @@ class _LineWriter(io.TextIOBase):
 
 
 def main() -> int:
+    # §3: the isolation is this interpreter's `-s -P` flags; a v0.14.0 service
+    # definition still sets the variable pair, so it is dropped before any
+    # step code runs and never reaches a step's own subprocesses (third
+    # sweep, 2026-10-31).
+    os.environ.pop("PYTHONNOUSERSITE", None)
+    os.environ.pop("PYTHONSAFEPATH", None)
     script = sys.argv[1]
     ctx = json.load(sys.stdin)
     # §6: take the automation-wide scan map off ctx — Agent keeps a ctx
@@ -796,8 +832,6 @@ def main() -> int:
     _sites_file = ctx.get("sites_file")
     workspace = Path(ctx["workspace"])
     workspace.mkdir(parents=True, exist_ok=True)
-    import os
-
     os.chdir(workspace)
 
     # §6.1: non-secret execution metadata + paths go into the environment too, so
@@ -830,7 +864,7 @@ def main() -> int:
         # macOS notifications show ~150 chars — cap well above that so an
         # oversize string can't blow the engine's control-line read. §7: a
         # guarded cut, never a fixed slice ahead of the engine's redaction.
-        emit("notify", text=(_guarded_pieces(str(text), 10_000) or [""])[0])
+        emit("notify", text=_guarded_head(str(text), 10_000))
 
     def reply(text: str) -> None:
         # §6.1: only message-trigger executions have an origin to answer; the
@@ -893,7 +927,10 @@ def main() -> int:
 
     atexit.register(final_flush)
     try:
-        source = Path(script).read_text(encoding="utf-8")
+        # §6: a leading BOM is dropped before the import check and the compile
+        # (the store strips it at load too; belt and braces, third sweep
+        # 2026-10-31).
+        source = Path(script).read_text(encoding="utf-8").removeprefix("\ufeff")
         # §6.2: re-validate the import allowlist at runtime — the draft-time
         # check alone doesn't cover hand-edited or stale scripts. The version's
         # declared packages extend the allowlist.

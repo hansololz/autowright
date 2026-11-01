@@ -243,33 +243,78 @@ export default function CreateFlow() {
     [rev, agentId],
   )
   const lastPersistKey = useRef<string | null>(null)
+  // §4.4 (third sweep, 2026-10-31): a failed debounced write is retried every
+  // 5 s, and at once on a reconnect, until it lands or the editor settles;
+  // after two consecutive failures the §11 hint slot says so. A single silent
+  // failure followed by a quit used to lose every edit since the last landed write.
+  const persistFailures = useRef(0)
+  const [persistRetrying, setPersistRetrying] = useState(false)
+  const persistRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearPersistRetry = () => {
+    if (persistRetryTimer.current) clearTimeout(persistRetryTimer.current)
+    persistRetryTimer.current = null
+  }
+  const armPersistRetry = () => {
+    clearPersistRetry()
+    if (draftSettled.current) return
+    persistRetryTimer.current = setTimeout(() => {
+      persistRetryTimer.current = null
+      if (draftSettled.current) return
+      // the leave path's own write is out: look again after it settles
+      if (closingRef.current) { armPersistRetry(); return }
+      persistNowRef.current()
+    }, 5000)
+  }
+  const persistNow = () => {
+    if (draftSettled.current) return // settled after the timer armed — never write
+    const r = revRef.current
+    const a = autoRef.current
+    if (!r) return
+    const key = JSON.stringify([serializeDraft(r), agentIdRef.current])
+    if (key === lastPersistKey.current) return // the same bytes are already written
+    let write: Promise<unknown> | null = null
+    if (isEdit) {
+      if (seedIsStale()) return // §4.4 one editor per version: write nothing
+      if (a && holdsDraftEdits(r, a)) {
+        write = api.putDraft(a.id, serializeDraft(r), undefined, seedVersionRef.current ?? undefined)
+      }
+    } else if (r.spec.length || r.steps.length) {
+      write = api.putDraft('pending', serializeDraft(r), agentIdRef.current)
+    }
+    if (!write) return
+    lastPersistKey.current = key
+    clearPersistRetry()
+    putInFlight.current = write.then(
+      () => {
+        persistFailures.current = 0
+        setPersistRetrying(false)
+      },
+      () => {
+        lastPersistKey.current = null
+        persistFailures.current += 1
+        if (persistFailures.current >= 2) setPersistRetrying(true)
+        armPersistRetry()
+      },
+    )
+  }
+  const persistNowRef = useRef(persistNow)
+  persistNowRef.current = persistNow
+  // unmount cancels a pending retry
+  useEffect(() => clearPersistRetry, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // §4.4: a reconnect retries a failing write at once
+  const persistReconnects = useStore((s) => s.reconnects)
+  useEffect(() => {
+    if (persistFailures.current === 0 || draftSettled.current) return
+    clearPersistRetry()
+    persistNowRef.current()
+  }, [persistReconnects]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!rev || draftSettled.current) return
     const worthKeeping = isEdit
       ? !!auto && holdsDraftEdits(rev, auto)
       : rev.spec.length > 0 || rev.steps.length > 0
     if (!worthKeeping) return
-    const t = setTimeout(() => {
-      if (draftSettled.current) return // settled after the timer armed — never write
-      const r = revRef.current
-      const a = autoRef.current
-      if (!r) return
-      const key = JSON.stringify([serializeDraft(r), agentIdRef.current])
-      if (key === lastPersistKey.current) return // the same bytes are already written
-      if (isEdit) {
-        if (seedIsStale()) return // §4.4 one editor per version: write nothing
-        if (a && holdsDraftEdits(r, a)) {
-          lastPersistKey.current = key
-          putInFlight.current = api.putDraft(a.id, serializeDraft(r), undefined, seedVersionRef.current ?? undefined)
-            .catch(() => { lastPersistKey.current = null })
-        }
-        return
-      }
-      if (r.spec.length || r.steps.length) {
-        lastPersistKey.current = key
-        putInFlight.current = api.putDraft('pending', serializeDraft(r), agentIdRef.current).catch(() => { lastPersistKey.current = null })
-      }
-    }, 1000)
+    const t = setTimeout(() => persistNowRef.current(), 1000)
     return () => clearTimeout(t) // each change resets the timer (debounce) and unmount cancels it
   }, [persistKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -615,6 +660,8 @@ export default function CreateFlow() {
     // over the settled one they were muted for.
     draftSettled.current = false
     lastPersistKey.current = null
+    persistFailures.current = 0
+    setPersistRetrying(false)
     composer.set((cur) => cur || firstRequest)
   }
 
@@ -1343,16 +1390,18 @@ export default function CreateFlow() {
                   {/* §11: the hint wraps inside a bounded width rather than
                       squeezing the title to an ellipsis — the §4.4 stale-seed
                       sentence is a full line (2026-10-31). */}
-                  {saveBlocked && !(isCreateEmpty && !anyJobBusy) && (
+                  {((saveBlocked && !(isCreateEmpty && !anyJobBusy)) || persistRetrying) && (
                     <span style={{
                       font: "400 12.5px var(--sans)", color: 'var(--amber)', lineHeight: '16px',
                       maxWidth: 380, whiteSpace: 'normal', textAlign: 'right', flex: '0 1 auto',
                     }}>
                       {seedStale && auto
                         ? `Version v${auto.version} was saved outside this editor — close and reopen Edit to continue from it.`
-                        : rev.syncBusy || rev.chatBusy
-                          ? jobStageTitle(rev)
-                          : 'Sync and review the steps before saving'}
+                        : persistRetrying
+                          ? 'Draft not saved yet — retrying…'
+                          : rev.syncBusy || rev.chatBusy
+                            ? jobStageTitle(rev)
+                            : 'Sync and review the steps before saving'}
                     </span>
                   )}
                   <button className="ad-btn-text dim" disabled={busyRewrite || saving !== null || closing} onClick={() => void startOver()}>

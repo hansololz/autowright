@@ -63,6 +63,11 @@ def _exit_http(e: urllib.error.HTTPError, base: str | None = None) -> None:
     try:
         parsed = json.loads(body)
     except ValueError:
+        # §20: a status of 500 or above is the backend answering, so it is
+        # named as such (third sweep, 2026-10-31: a bare 500 told the user to
+        # restart a backend that was up).
+        if e.code >= 500:
+            sys.exit(f"the backend answered HTTP {e.code} {_console_safe(e.reason)}")
         # §20: an error body that isn't JSON (an HTML page from a stale port
         # another server now owns, a truncated reply) is the backend not being
         # reachable - never printed raw.
@@ -359,7 +364,8 @@ def read_workdir(d: Path) -> dict[str, str]:
     for f in entries:
         if f.name in WORKDIR_META or STEP_FILE_RE.match(f.name):
             try:
-                files[f.name] = f.read_text(encoding="utf-8")
+                # §20: a BOM an editor wrote is not part of the text (third sweep)
+                files[f.name] = f.read_text(encoding="utf-8-sig")
             except OSError as e:
                 sys.exit(f"can't read {f}: {e.strerror or e}")
             except UnicodeDecodeError:
@@ -596,7 +602,7 @@ def _manifest_trigger_lines(text: str | None) -> list[dict]:
 def _read_manifest_text(d: Path) -> str | None:
     """The workdir manifest as it is on disk now, or None when unreadable."""
     try:
-        return (d / "manifest.yaml").read_text(encoding="utf-8")
+        return (d / "manifest.yaml").read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -736,8 +742,7 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
                      "not a plain step file name - fix the automation's manifest first")
         owners[fname] = s.get("name")
     d.mkdir(parents=True, exist_ok=True)
-    written = ["spec.md", "manifest.yaml"]
-    (d / "spec.md").write_text(specmd.blocks_to_md(auto.get("spec") or []), encoding="utf-8")
+    written = []
     manifest: dict = {"name": auto["name"], "description": auto.get("description", "")}
     if isinstance(auto.get("version"), int):
         # §20: the version this pull wrote - push compares the scripts against
@@ -772,14 +777,21 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
     if auto.get("packages"):
         manifest["packages"] = auto["packages"]
     manifest["steps"] = [_manifest_step(s) for s in auto.get("steps") or []]
-    (d / "manifest.yaml").write_text(
-        yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    # §20 write order: step files, spec.md, notes.md, each through a temp file
+    # renamed into place, and manifest.yaml LAST as the commit point (third
+    # sweep, 2026-10-31: a pull interrupted after the manifest landed left the
+    # new pulled_from beside the previous pull's step files).
     for s in auto.get("steps") or []:
-        (d / s["file"]).write_text(s.get("code", ""), encoding="utf-8")
+        _replace_file(d, s["file"], s.get("code", ""))
         written.append(s["file"])
+    _replace_file(d, "spec.md", specmd.blocks_to_md(auto.get("spec") or []))
+    written.append("spec.md")
     if (auto.get("notes") or "").strip():
-        (d / "notes.md").write_text(auto["notes"].strip() + "\n", encoding="utf-8")
+        _replace_file(d, "notes.md", auto["notes"].strip() + "\n")
         written.append("notes.md")
+    _replace_file(d, "manifest.yaml",
+                  yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True))
+    written.append("manifest.yaml")
     # §20: pull owns the workdir's managed files — every managed file it did
     # not write this time goes (a dropped step, a notes.md the version no
     # longer carries), so a re-pull into the same directory never resurrects
@@ -790,6 +802,25 @@ def _write_workdir(d: Path, auto: dict, yaml, specmd) -> list[str]:
         if f.name in WORKDIR_META or STEP_FILE_RE.match(f.name):
             f.unlink()
     return written
+
+
+def _replace_file(d: Path, name: str, text: str) -> None:
+    """Write `d/name` through a temp file in `d` renamed into place, so an
+    interrupted pull never leaves a half-written file (§20); the temp file is
+    removed when the write or the rename fails."""
+    import tempfile
+
+    fd, temp = tempfile.mkstemp(dir=d, prefix=f".{name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.replace(temp, d / name)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
 
 
 def merge_draft_triggers(stored: list[dict], drafted: list[dict]) -> list[dict]:
@@ -904,7 +935,7 @@ def _grants(args, draft: dict, agents: list[dict], secrets: list[dict],
         # §4.7 names are unique at write time, but duplicates already on disk
         # still load — two matches exit with the candidate list.
         match = [a for a in agents
-                 if (a.get("name") or a["harness"]).lower() == name.lower()]
+                 if _name_key(a.get("name") or a["harness"]) == _name_key(name)]
         if not match:
             sys.exit(f"no agent named {name!r} — have: {', '.join(known_agents) or '(none)'}")
         _exit_if_ambiguous(name, match, lambda a: a.get("name") or a["harness"])
@@ -1013,7 +1044,7 @@ def cmd_automation_show(c: Client, args) -> None:
         # §20 needs-fixing parity: one indented line per §4.1 problem label.
         print("needs fixing:")
         for p in full["problems"]:
-            print(f"  {p['label']}")
+            print(f"  {_console_safe(p['label'])}")
     for i, t in enumerate(full.get("triggers") or [], 1):
         print(f"trigger {i}: {_console_safe(t['label'])}" + _trigger_marks(t))
     for p in full.get("params") or []:
@@ -1046,8 +1077,33 @@ def cmd_automation_pull(c: Client, args) -> None:
     a = find_automation(c, args.automation)
     full = c.req("GET", f"/automations/{a['id']}")
     d = Path(args.dir or paths.safe_filename(full["name"]))
+    if not args.force:
+        _refuse_foreign_workdir(d, full)
     for name in write_workdir(d, full):
         print(f"wrote {d / name}")
+
+
+def _refuse_foreign_workdir(d: Path, full: dict) -> None:
+    """§20: a pull never overwrites the workdir of another automation (two
+    names can make one file-safe directory name): a manifest whose
+    `pulled_id` differs from this automation's, or managed files beside a
+    manifest without a `pulled_id`, exit 1 unless --force (third sweep)."""
+    from .drafting import STEP_FILE_RE
+
+    try:
+        entries = list(d.iterdir()) if d.is_dir() else []
+    except OSError as e:
+        sys.exit(f"can't read {d}: {e.strerror or e}")
+    if not any(f.name in WORKDIR_META or STEP_FILE_RE.match(f.name) for f in entries):
+        return
+    # A manifest that is missing or doesn't parse carries no pulled_id.
+    manifest = _pulled_baseline({"manifest.yaml": _read_manifest_text(d) or ""})
+    pulled_id = manifest.get("pulled_id")
+    if pulled_id is not None and pulled_id == full["id"]:
+        return
+    pulled_name = manifest.get("pulled_name")
+    owner = pulled_name if isinstance(pulled_name, str) else "another automation"
+    sys.exit(f"{d} holds the workdir of '{_console_safe(owner)}' - pass --force to replace it")
 
 
 def cmd_automation_push(c: Client, args) -> None:
@@ -1303,7 +1359,7 @@ def cmd_automation_create(c: Client, args) -> None:
     agent_id = None
     if args.agent:
         match = [a for a in agents
-                 if (a.get("name") or a["harness"]).lower() == args.agent.lower()]
+                 if _name_key(a.get("name") or a["harness"]) == _name_key(args.agent)]
         if not match:
             sys.exit(f"no agent named {args.agent!r} — have: "
                      f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
@@ -1412,13 +1468,17 @@ def cmd_automation_restore(c: Client, args) -> None:
     print(f"restored v{v} of {a['name']!r} as v{r.get('version', '?')}")
 
 
+_VERSION_LABEL_RE = re.compile(r"[vV]([0-9]+)", re.ASCII)
+
+
 def _version_arg(label: str) -> int:
-    # isdigit() is true for digits int() refuses ("³"), so the parse itself is
-    # the check — a usage error, never a traceback.
-    try:
-        return int(label.lstrip("vV"))
-    except ValueError:
+    # §20/§19 grammar: `v` plus ASCII digits only; "3", "vv3", "v1_0" and
+    # non-ASCII digits are refused before any request (third sweep) - a usage
+    # error, never a traceback.
+    match = _VERSION_LABEL_RE.fullmatch(label)
+    if not match:
         sys.exit(f"version must be vN, got {label!r}")
+    return int(match.group(1))
 
 
 DIFF_CONTEXT = 3       # §20/§9.2: same-rows kept on each side of a collapsed run
@@ -1470,7 +1530,7 @@ def cmd_automation_diff(c: Client, args) -> None:
     if args.json:
         _pjson(d)
         return
-    print(f"{a['name']}: v{d['from']} → v{d['to']}")
+    print(f"{_console_safe(a['name'])}: v{d['from']} → v{d['to']}")
     for f in d["files"]:
         status = f["status"]
         counts = f", +{f['added']} -{f['removed']}" if status == "changed" else ""
@@ -1604,20 +1664,20 @@ def parse_param_value(p: dict, raw: str):
     """§20: parse a `param set` VALUE by the definition's kind."""
     kind = p["kind"]
     if kind == "toggle":
-        return _toggle(f"param {p['name']}: toggle", raw)
+        return _toggle(f"param {_console_safe(p['name'])}: toggle", raw)
     if kind == "number":
         try:
             return int(raw)
         except ValueError:
-            sys.exit(f"param {p['name']}: number takes an integer, got {raw!r}")
+            sys.exit(f"param {_console_safe(p['name'])}: number takes an integer, got {raw!r}")
     if kind == "list":
         if raw.strip().startswith("["):
             try:
                 v = json.loads(raw)
             except ValueError as e:
-                sys.exit(f"param {p['name']}: bad JSON array — {e}")
+                sys.exit(f"param {_console_safe(p['name'])}: bad JSON array — {e}")
             if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
-                sys.exit(f"param {p['name']}: expected a JSON array of strings")
+                sys.exit(f"param {_console_safe(p['name'])}: expected a JSON array of strings")
             return v
         return [x.strip() for x in raw.split(",") if x.strip()]
     if kind == "kv":
@@ -1625,9 +1685,9 @@ def parse_param_value(p: dict, raw: str):
             try:
                 v = json.loads(raw)
             except ValueError as e:
-                sys.exit(f"param {p['name']}: bad JSON object — {e}")
+                sys.exit(f"param {_console_safe(p['name'])}: bad JSON object — {e}")
             if not isinstance(v, dict):
-                sys.exit(f"param {p['name']}: expected a JSON object")
+                sys.exit(f"param {_console_safe(p['name'])}: expected a JSON object")
             # §20: a non-string value is stored as its JSON text (`null`,
             # `true`, a nested object), never a Python repr.
             return [{"key": k, "value": x if isinstance(x, str) else json.dumps(x)}
@@ -1637,7 +1697,8 @@ def parse_param_value(p: dict, raw: str):
             if pair.strip():
                 k, sep, v = pair.partition("=")
                 if not sep or not k.strip():
-                    sys.exit(f"param {p['name']}: kv takes k=v[,k=v] or a JSON object, got {raw!r}")
+                    sys.exit(f"param {_console_safe(p['name'])}: kv takes k=v[,k=v] or a "
+                             f"JSON object, got {raw!r}")
                 rows.append({"key": k.strip(), "value": v.strip()})
         return rows
     return raw  # text
@@ -1650,7 +1711,7 @@ def cmd_param_list(c: Client, args) -> None:
         _pjson(params)
         return
     for p in params:
-        print(f"{p['name']:<24} {p['kind']:<8} {_param_value(p)!r}")
+        print(f"{_console_safe(p['name']):<24} {p['kind']:<8} {_param_value(p)!r}")
 
 
 def cmd_param_set(c: Client, args) -> None:
@@ -1683,7 +1744,7 @@ def cmd_trigger_list(c: Client, args) -> None:
         tail = f" or the {surface}" if surface else ""
         print(f"no triggers — executes only via `automation execute`{tail}")
     for i, t in enumerate(triggers, 1):
-        print(f"{i}. {t['label']}" + _trigger_marks(t))
+        print(f"{i}. {_console_safe(t['label'])}" + _trigger_marks(t))
 
 
 def _trigger_marks(t: dict) -> str:
@@ -1809,7 +1870,8 @@ def cmd_trigger_toggle(c: Client, args) -> None:
     t = _trigger_at_index(triggers, args.index)
     t["enabled"] = args.fn_enabled
     c.req("PATCH", f"/automations/{a['id']}", {"triggers": triggers})
-    print(f"trigger {args.index} ({t['short']}) now {'on' if t['enabled'] else 'off'}")
+    print(f"trigger {args.index} ({_console_safe(t['short'])}) now "
+          f"{'on' if t['enabled'] else 'off'}")
 
 
 def cmd_trigger_remove(c: Client, args) -> None:
@@ -1818,7 +1880,7 @@ def cmd_trigger_remove(c: Client, args) -> None:
     t = _trigger_at_index(triggers, args.index)
     triggers.remove(t)
     c.req("PATCH", f"/automations/{a['id']}", {"triggers": triggers})
-    print(f"removed trigger {args.index} ({t['short']})")
+    print(f"removed trigger {args.index} ({_console_safe(t['short'])})")
 
 
 # ----------------------------------------------------- automation memory/snapshot
@@ -1843,7 +1905,7 @@ def cmd_memory_show(c: Client, args) -> None:
         print("memory is empty")
         return
     for f in r["files"]:
-        print(f"{f['size']:>9}  {f['updated']:<16} {f['name']}")
+        print(f"{f['size']:>9}  {f['updated']:<16} {_console_safe(f['name'])}")
 
 
 def cmd_memory_clear(c: Client, args) -> None:
@@ -1875,7 +1937,7 @@ def cmd_snapshot_list(c: Client, args) -> None:
     for s in snaps:
         name = s.get("name") or ""
         print(f"{s['id'][:8]}  {s['when']:<16} {s['reason']:<11} {s['version']:<5} "
-              f"{s['size']:<9} {name}")
+              f"{s['size']:<9} {_console_safe(name)}")
 
 
 def cmd_snapshot_create(c: Client, args) -> None:
@@ -1975,7 +2037,8 @@ def cmd_execution_list(c: Client, args) -> None:
         _pjson(data)
         return
     for e in data["executions"]:
-        print(f"{e['started']:<22} {e['automationName']:<30} {e['versionLabel']:<6} {e['status']:<11} "
+        print(f"{e['started']:<22} {_console_safe(e['automationName']):<30} "
+              f"{e['versionLabel']:<6} {e['status']:<11} "
               f"{e['duration']:<8} {e['trigger']:<9} [{e['id'][:8]}]")
 
 
@@ -1985,7 +2048,8 @@ def cmd_execution_show(c: Client, args) -> None:
     if args.json:
         _pjson(full)
         return
-    print(f"{full['automationName']} {full['versionLabel']} — {full['status']} in {full['duration']} "
+    print(f"{_console_safe(full['automationName'])} {full['versionLabel']} — {full['status']} "
+          f"in {full['duration']} "
           f"({full['trigger']}, {full['started']}) [{full['id']}]")
     p = full.get("triggerPayload")
     if p:
@@ -1998,20 +2062,22 @@ def cmd_execution_show(c: Client, args) -> None:
         else:
             origin = p.get("channel")
         parts = [p["sender"], *([origin] if origin else []), p["at"]]
-        print("trigger message: " + " · ".join(parts))
-        print(f"  {p['text']}")
+        # §20 untrusted text: a Discord poster controls the sender and text
+        print("trigger message: " + _console_safe(" · ".join(str(x) for x in parts)))
+        print(f"  {_console_safe(p['text'])}")
     for i, s in enumerate(full.get("steps") or [], 1):
-        print(f"step {i}: {s['name']:<32} {s['status']:<11} {s.get('duration') or ''}")
+        print(f"step {i}: {_console_safe(s['name']):<32} {s['status']:<11} "
+              f"{s.get('duration') or ''}")
     if full.get("error"):
         err = full["error"]
-        print(f"error in {err['step']!r}: {err['message']}")
+        print(f"error in {_console_safe(repr(err['step']))}: {_console_safe(err['message'])}")
         if err.get("reason"):
-            print(f"possible reason: {err['reason']}")
+            print(f"possible reason: {_console_safe(err['reason'])}")
     r = full.get("result") or {}
     if r.get("chip"):
         print(f"result: {r['chip']}")
     for f in r.get("files") or []:
-        print(f"file: {f['name']} ({f['size']})")
+        print(f"file: {_console_safe(f['name'])} ({f['size']})")
 
 
 def cmd_execution_tail(c: Client, args) -> None:
@@ -2053,7 +2119,7 @@ def cmd_execution_result(c: Client, args) -> None:
     if not args.name:
         full = c.req("GET", f"/executions/{e['id']}")
         for f in (full.get("result") or {}).get("files") or []:
-            print(f"{f['name']} ({f['size']})")
+            print(f"{_console_safe(f['name'])} ({f['size']})")
         return
     from urllib.parse import quote
 
@@ -2080,8 +2146,9 @@ def cmd_secret_list(c: Client, args) -> None:
     for s in secrets:
         tag = "" if s.get("set", True) else " (not set)"
         # §4.8: usedBy entries are { id, name } — names are the display.
-        used = ", ".join(u["name"] for u in s.get("usedBy") or []) or "not used yet"
-        print(f"{s['name'] + tag:<28} used by: {used}")
+        used = ", ".join(_console_safe(u["name"]) for u in s.get("usedBy") or []) \
+            or "not used yet"
+        print(f"{_console_safe(s['name']) + tag:<28} used by: {used}")
 
 
 # §4.8 secret-name form - a copy of api.SECRET_NAME_RE (the CLI stays free of
@@ -2102,7 +2169,7 @@ def cmd_secret_set(c: Client, args) -> None:
     # read, so a lowercase name never asks for a value it will then refuse.
     # An existing name passes too (it edits via the id route), but any stored
     # name already has this form - the backend refuses the rest at create.
-    if not SECRET_NAME_RE.match(args.name):
+    if not SECRET_NAME_RE.fullmatch(args.name):
         sys.exit("secret names must match [A-Z][A-Z0-9_]* — "
                  "uppercase letters, digits and underscores, starting with a letter")
     # §20: --stdin takes the WHOLE of stdin, so a multi-line value (a PEM key)
@@ -2169,14 +2236,14 @@ def cmd_agent_list(c: Client, args) -> None:
         return
     for a in agents:
         star = "*" if a.get("default") else " "
-        print(f"{star} {(a.get('name') or a['harness']):<24} {a['harness']:<12} "
+        print(f"{star} {_console_safe(a.get('name') or a['harness']):<24} {a['harness']:<12} "
               f"{a['model'] or 'default model'}")
 
 
 def cmd_agent_check(c: Client, args) -> None:
     agents = c.req("GET", "/agents")
     match = [a for a in agents
-             if (a.get("name") or a["harness"]).lower() == args.agent.lower()]
+             if _name_key(a.get("name") or a["harness"]) == _name_key(args.agent)]
     if not match:
         sys.exit(f"no agent named {args.agent!r} — have: "
                  f"{', '.join(a.get('name') or a['harness'] for a in agents) or '(none)'}")
@@ -2949,7 +3016,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "A pull is a copy, not a lock: the automation can still execute, and "
                          "can still be edited in the app, while you have the files open. "
                          "Pushing saves your files as the next version whatever happened "
-                         "meanwhile, so pull again if you have been away a while.",
+                         "meanwhile, so pull again if you have been away a while."
+                         "\n\n"
+                         "A directory that already holds another automation's workdir is "
+                         "refused unless you pass --force.",
              epilog="Examples:\n"
                     "  autowright automation pull \"daily report\"            into ./daily report\n"
                     "  autowright automation pull \"daily report\" ./report   into ./report")
@@ -2957,6 +3027,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dir", nargs="?",
                    help="directory to write into (default: a new directory named after the "
                         "automation, in the current directory)")
+    p.add_argument("--force", action="store_true",
+                   help="replace a directory that holds another automation's workdir")
     p = _sub(ag, "push", cmd_automation_push, "save an edited directory as the next version",
              description="Validate a workdir and save it as this automation's next version. "
                          "The same checks the app runs when it builds an automation run "

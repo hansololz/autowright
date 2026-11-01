@@ -180,7 +180,9 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   unlocked `authoredBy: user` step (`--json` carries the fields themselves).
 - **Version diff** (`automation diff <ref> --from vN [--to vN]`): the §9.2 version diff
   modal's CLI parity, straight from §19 `GET .../diff` (`--to` defaults to the current
-  version; a `from` that is not `vN` exits with "version must be vN", and the API's 404 /
+  version; a `from` that is not `vN` exits with "version must be vN" (`vN` is `v` plus ASCII
+  digits, the §19 grammar: `3`, `vv3`, `v1_0` and non-ASCII digits are refused by the CLI
+  before any request, third sweep), and the API's 404 /
   400 surface as its detail line). Human output prints, per file in the endpoint's order,
   a header `== <file> (<status>[, +a -r][, moved from N])` (`unchanged` files are the
   header alone; `moved from N` names the step's 1-based position in the `from` version
@@ -223,7 +225,10 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   failed catalog) both flush under the same guard, so the interpreter's final flush never
   prints "Exception ignored" or exits 120. A reply that isn't JSON (a stale `backend.json`
   whose port another server now owns) is the same "backend isn't reachable" message as a
-  refused connection, never a decode traceback; link checks (`import`, `marketplace add`,
+  refused connection, never a decode traceback, **except** an HTTP status of 500 or above,
+  which is the backend answering: it prints `the backend answered HTTP <code> <reason>` and
+  exits 1 (third sweep, 2026-10-31: a bare 500 told the user to restart a backend that was
+  up); link checks (`import`, `marketplace add`,
   `set location=`) match the scheme case-insensitively like the backend.
 - **HTTP timeouts:** every backend request runs with a 30 s timeout, except the three calls
   that legitimately take long — package install (the §6.2 ensure runs pip), import (the
@@ -245,7 +250,7 @@ invoke the CLI** (§3) — the app installs the CLI shim but never executes it.
   poll sends the §19 `sinceSequence` of the last line it printed per log target, so a
   long-running step's log crosses the loopback once, not once per second.
 
-**Workdir (the authoring format).** `automation pull <ref> [dir]` materializes an automation
+**Workdir (the authoring format).** `automation pull <ref> [dir] [--force]` materializes an automation
 into a directory (dir defaults to the automation's name); `automation push <ref> <dir>
 [--note] [--grant-agent NAME]…
 [--grant-secret NAME]…` validates it and saves vN+1 (prints `saved '<name>' as vN`; when the
@@ -332,7 +337,11 @@ whatever the user is drafting in the app. Files:
 archive or a marketplace entry (`marketplace list`, `marketplace audit`, catalog fields, and
 the automation names, descriptions, step and param names and trigger labels that
 `automation list` / `automation show` and the execution candidate lists print, since an
-imported archive names them, 2026-10-31) has
+imported archive names them, 2026-10-31, and likewise every record field any other
+command prints: `execution list` / `execution show` names, step names, error messages and
+the trigger message's sender and text (a Discord poster controls that text), `trigger
+list` / `on` / `off` / `remove` labels, `param list`, `snapshot list` and `secret list`
+names, third sweep) has
 its control characters (C0 other than newline and tab, DEL, and the C1 range) shown as
 `\xNN` escapes and ANSI
 escape sequences stripped, so a lone carriage return or an escape sequence cannot hide a
@@ -374,7 +383,17 @@ and create — validate's help says so.
 managed files it did not write this time — a `notes.md` the version no
 longer carries, and any `NN-name.py` not in the manifest — so a re-pull into the same
 directory never resurrects deleted content on the next push. Files it doesn't manage (a
-README, a virtualenv) are left alone.
+README, a virtualenv) are left alone. Write order is step files, `spec.md`, `notes.md`
+first, each as a temp file renamed into place, and `manifest.yaml` **last** as the commit
+point (third sweep, 2026-10-31: a pull interrupted after the manifest had landed left the
+new `pulled_from` beside the previous pull's step files, the stale check passed, and the
+next push saved those old files as "user edits" over every in-app step change). A workdir
+that already belongs to another automation is refused: when the existing `manifest.yaml`
+carries a `pulled_id` that differs from the automation being pulled, or the directory holds
+managed files but no `pulled_id`, pull exits 1 with `<dir> holds the workdir of '<name>'
+- pass --force to replace it` (`<name>` from `pulled_name`, else "another automation") and
+writes nothing; `--force` replaces it. The default directory is the automation's name made
+file-safe, and two names can share one ("Report?" and "Report"), which this guard exists for.
 
 Push/create run the **same §8 validators the drafting pipeline uses**
 (`drafting.validate_spec` + `validate_steps` — schema, param kinds/defaults, step-file 1:1 and
@@ -401,7 +420,8 @@ learns about an install failure at build time, not when a trigger fires.
   repeatable `--grant-agent NAME` / `--grant-secret NAME` flags. Each flag must name a
   configured agent / stored secret; an unknown name exits 1 with the candidate list.
   Both flags take **names** — the human-friendly surface — and the CLI maps each to its id on
-  save: `--grant-agent` the agent's §8 grant name (case-insensitive — safe, §4.7 uniqueness),
+  save: `--grant-agent` the agent's §8 grant name by the §20 reference rule's name key
+  (trimmed, NFC, casefolded — the same key §4.7 uniqueness uses, third sweep),
   `--grant-secret` the secret's exact name (§4.8: canonical uppercase, unique); `stepAgents`
   stores agent ids and `allowedSecrets` stores secret ids (§4.1 — the enablement lists the
   engine and UI resolve by id).
@@ -449,6 +469,11 @@ words: "notifications must be one of inherit, attention, all, never"). Prints
 `updated '<name>' — notifications: never · maxParallel: 2` naming only the keys sent. An
 unknown key or a bare key without `=` is a usage error listing the three keys with their
 value forms, like `settings set`.
+
+The file-safe form of a name used for default paths (`pull`'s directory, `export`'s
+file) strips leading and trailing dots **and** whitespace after replacing the unsafe
+characters, so ". ." and "x ." never yield a bare space or a trailing-space name (third
+sweep, 2026-10-31).
 
 **`automation export [path]`** writes the §5.1 archive (default `<name>.autowright` in the
 current directory) and never clobbers: an existing file at the target exits 1 with

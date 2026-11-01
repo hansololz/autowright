@@ -1,5 +1,5 @@
 // Automations list (§4, prototype "Automations list" screen).
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
 import type { Automation, ImportSummary } from '../types'
@@ -269,21 +269,40 @@ export default function AutomationsList() {
   // owns — New automation starts fresh: confirm, cancel the job, delete the
   // slot, clear its chat thread, then open the create flow empty (the one
   // discard that deletes the thread).
+  // §9.1 (third sweep, 2026-10-31): while the discard chain runs, New
+  // automation and Resume draft disable, so a second click can't start a
+  // second chain; the create flow opens only if this list is still the shown
+  // page when the chain lands (the §9 landing rule).
+  const [discarding, setDiscarding] = useState(false)
+  const discardingRef = useRef(false)
   const startFresh = async () => {
     setConfirmFresh(false)
-    try {
-      // a job left building would land its draft back in the slot the discard
-      // just emptied
-      if (slotJobId) await api.cancelDraftJob(slotJobId)
-      await api.deleteDraft('pending')
-      await api.putChat('pending', [])
-    } catch (err) {
-      // A discard that did not complete must not open the editor: it would
-      // re-attach the job or draft the user just chose to throw away.
-      showToast((err as Error).message)
-      return
+    if (discardingRef.current) return
+    discardingRef.current = true
+    setDiscarding(true)
+    const clicked = useStore.getState()
+    const stillShown = () => {
+      const now = useStore.getState()
+      return now.surface === clicked.surface && now.page === clicked.page
     }
-    setSurface('create', 'app')
+    try {
+      try {
+        // a job left building would land its draft back in the slot the discard
+        // just emptied
+        if (slotJobId) await api.cancelDraftJob(slotJobId)
+        await api.deleteDraft('pending')
+        await api.putChat('pending', [])
+      } catch (err) {
+        // A discard that did not complete must not open the editor: it would
+        // re-attach the job or draft the user just chose to throw away.
+        showToast((err as Error).message)
+        return
+      }
+      if (stillShown()) setSurface('create', 'app')
+    } finally {
+      discardingRef.current = false
+      setDiscarding(false)
+    }
   }
 
   // §5.2/§9.1 import: the modal previews (URL or file), confirm lands it.
@@ -303,11 +322,12 @@ export default function AutomationsList() {
               Import
             </BtnGhost>
             {(pendingDraft || hasSlotJob) && (
-              <BtnGhost onClick={() => setSurface('create', 'app')}>
+              <BtnGhost disabled={discarding} onClick={() => setSurface('create', 'app')}>
                 Resume draft
               </BtnGhost>
             )}
             <BtnPrimary
+              disabled={discarding}
               onClick={() => (pendingDraft || hasSlotJob ? setConfirmFresh(true) : setSurface('create', 'app'))}
             >
               New automation
@@ -349,6 +369,7 @@ export default function AutomationsList() {
           text="No automations yet. Describe a job in plain words. Your AI writes it as scripts you can read, and Autowright executes them on your schedule."
           cta={(
             <BtnPrimary
+              disabled={discarding}
               onClick={() => (pendingDraft || hasSlotJob ? setConfirmFresh(true) : setSurface('create', 'app'))}
             >
               Create your first automation

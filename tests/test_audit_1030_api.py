@@ -252,8 +252,10 @@ def test_secret_update_restores_the_previous_value_when_the_save_fails(client, m
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(store, "save_secrets", failing_save)
-    with pytest.raises(OSError):
-        client.put(f"/secrets/{stored['id']}", json={"value": "new"})
+    # §19 (third sweep): the escaping OSError answers a JSON 500.
+    r = client.put(f"/secrets/{stored['id']}", json={"value": "new"})
+    assert r.status_code == 500
+    assert r.json()["detail"].startswith("couldn't write to disk")
     assert keychain.get_secret(stored["id"]) == "old"
 
 
@@ -268,8 +270,10 @@ def test_secret_update_of_a_placeholder_removes_the_value_when_the_save_fails(cl
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(store, "save_secrets", failing_save)
-    with pytest.raises(OSError):
-        client.put(f"/secrets/{stored['id']}", json={"value": "new"})
+    # §19 (third sweep): the escaping OSError answers a JSON 500.
+    r = client.put(f"/secrets/{stored['id']}", json={"value": "new"})
+    assert r.status_code == 500
+    assert r.json()["detail"].startswith("couldn't write to disk")
     assert keychain.get_secret(stored["id"]) is None
 
 

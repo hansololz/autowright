@@ -54,6 +54,15 @@ TRIGGER_LABELS = {
 }
 
 
+def _elapsed_clock() -> float:
+    """§5 retention session clock: seconds on a clock the wall clock can't
+    step. CLOCK_BOOTTIME on Linux keeps counting through suspend; elsewhere
+    `time.monotonic()`."""
+    if hasattr(time, "CLOCK_BOOTTIME"):
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic()
+
+
 def trigger_label(kind: str | None) -> str:
     if kind == "menubar":
         return paths.tray_trigger_label()
@@ -169,18 +178,24 @@ def normalize_param_definitions(params: list[dict]) -> list[dict]:
                 and not _kind_ok("number", entry["min"]):
             del entry["min"]
         if entry.get("kind") == "kv" and isinstance(entry.get("default"), list):
-            # A null value is an empty one (`value:` left blank by hand), not
-            # a reason to reset the whole default; a null key drops the row.
-            entry["default"] = [{"key": scalar_text(row.get("key")),
-                                 "value": "" if row.get("value") is None
-                                 else scalar_text(row.get("value"))}
-                                for row in entry["default"]
-                                if isinstance(row, dict) and scalar_text(row.get("key")) is not None]
+            entry["default"] = coerce_kv_rows(entry["default"])
         default = entry.get("default")
         if default is not None and not _kind_ok(entry.get("kind"), default):
             entry["default"] = param_default({k: v for k, v in entry.items() if k != "default"})
         out.append(entry)
     return out
+
+
+def coerce_kv_rows(rows: list) -> list:
+    """§5 migrate-on-load: `kv` rows (a default's or a stored value's) in the
+    §4.2 text key / text value form through `scalar_text`. A null value is an
+    empty one (`value:` left blank by hand), not a reason to reset the whole
+    list; a non-mapping row or one whose key is null is dropped. A row whose
+    value has no text form keeps None, so `_kind_ok` still refuses it."""
+    return [{"key": scalar_text(row.get("key")),
+             "value": "" if row.get("value") is None else scalar_text(row.get("value"))}
+            for row in rows
+            if isinstance(row, dict) and scalar_text(row.get("key")) is not None]
 
 
 def scalar_text(v: Any) -> str | None:
@@ -435,6 +450,36 @@ def iter_file_stats(d: Path):
             yield st
 
 
+# §6.1 `Memory.save` writes `.<name>.XXXX.tmp` beside its target and renames
+# it; a step killed mid-save leaves one behind. The §9.2 MEMORY listing, the
+# size and every memory copy skip them (third sweep, 2026-10-31).
+MEMORY_TEMP_RE = re.compile(r"^\..*\.tmp$")
+
+
+def is_memory_temp_name(name: str) -> bool:
+    return bool(MEMORY_TEMP_RE.match(name))
+
+
+def iter_memory_file_stats(d: Path):
+    """iter_file_stats for a memory dir, without the §6.1 save temp files."""
+    if not d.exists():
+        return
+    for f in d.rglob("*"):
+        if is_memory_temp_name(f.name):
+            continue
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            yield st
+
+
+def _ignore_memory_temp(directory: str, names: list[str]) -> list[str]:
+    """shutil.copytree `ignore` for every memory copy: the §6.1 save temps."""
+    return [n for n in names if is_memory_temp_name(n)]
+
+
 def size_label(n: int) -> str:
     """One humanized byte label for every surface (§4.1, §4.9)."""
     if n < 1024:
@@ -670,6 +715,11 @@ class Store:
         # about to run against it when an execution starts (§4.1
         # `step-modified`).
         self._sealed_shas: dict[tuple[str, ...], dict[str, str]] = {}
+        # §5 retention session clock, recorded by every load (see
+        # _record_retention_base); no base until the first load.
+        self._boot_wall = time.time()
+        self._boot_elapsed = _elapsed_clock()
+        self._retention_base: float | None = None
 
     @staticmethod
     def _seal_key(vd: Path) -> tuple[str, ...]:
@@ -848,6 +898,28 @@ class Store:
             self.execdb, self.execs = self._open_exec_index()
             self._reconcile_exec_index(index_mtime)
             self._refresh_exec_derived()
+            self._record_retention_base()
+
+    def _record_retention_base(self) -> None:
+        """§5 retention session clock (third sweep, 2026-10-31): at load,
+        the wall clock, the elapsed clock and the base, the newest parsable
+        started_at among the records loaded from disk that lies at most
+        FUTURE_STAMP_HOLD (§6) ahead of that wall clock. Records created later
+        in the session never feed it: a catch-up firing under a clock set
+        ahead stamps one at the bogus "now" before the first sweep runs."""
+        self._boot_wall = time.time()
+        self._boot_elapsed = _elapsed_clock()
+        limit = self._boot_wall + triggerlib.FUTURE_STAMP_HOLD.total_seconds()
+        base: float | None = None
+        for h in self.execs.values():
+            try:
+                started = datetime.fromisoformat(h["started_at"]).timestamp() \
+                    if h.get("started_at") else None
+            except (TypeError, ValueError):
+                started = None
+            if started is not None and started <= limit and (base is None or started > base):
+                base = started
+        self._retention_base = base
 
     def _load_toplevel_mapping(self, path: Path) -> dict:
         """§5: every top-level YAML is hand-editable — a readable file whose
@@ -1207,6 +1279,12 @@ class Store:
         # GET /state a 500. A value with no matching definition stays as is.
         definitions = {p["name"]: p for p in a["versions"][a["current_version"]].get("params") or []
                        if isinstance(p, dict) and isinstance(p.get("name"), str)}
+        # Third sweep (2026-10-31): a `kv` value's rows are first coerced like
+        # a `kv` default's (§21 2026-10-31 (b)), so a stored `value: 8080`
+        # keeps its user value; only a row still not text is a mismatch.
+        for key, v in list(a["param_values"].items()):
+            if key in definitions and definitions[key].get("kind") == "kv" and isinstance(v, list):
+                a["param_values"][key] = coerce_kv_rows(v)
         for key in [k for k, v in a["param_values"].items()
                     if k in definitions and not _kind_ok(definitions[k].get("kind"), v)]:
             log.warning("automation %r: stored value of param %r isn't a %s value — "
@@ -1256,6 +1334,11 @@ class Store:
             except Exception:  # noqa: BLE001
                 return False
 
+        def _canonical_at(at: str) -> str:
+            # §4.3 canonical `YYYY-MM-DDTHH:MM[:SS]`; _valid already parsed it.
+            moment = datetime.fromisoformat(at)
+            return moment.strftime("%Y-%m-%dT%H:%M:%S" if moment.second else "%Y-%m-%dT%H:%M")
+
         out = []
         seen_ids: set = set()
 
@@ -1292,7 +1375,9 @@ class Store:
                                {"every": triggerlib.canonical_duration(triggerlib.parse_duration(t["every"])),
                                 "source": t["source"]}
                                if t["kind"] == "interval" else
-                               {"at": t["at"]} if t["kind"] == "time" else
+                               # §21 2026-10-31 third sweep (a): the §4.3
+                               # canonical `at`, as normalize_triggers writes it.
+                               {"at": _canonical_at(t["at"])} if t["kind"] == "time" else
                                {"channel": t["channel"], "secret": t["secret"],
                                 **({"pattern": t["pattern"]} if t.get("pattern") else {}),
                                 **({"mention": True} if t.get("mention") else {}),
@@ -1302,7 +1387,10 @@ class Store:
                                {"from": t["from"],
                                 **({"pattern": t["pattern"]} if t.get("pattern") else {})}
                                if t["kind"] == "imessage" else {}),
-                            **({"timezone": t["timezone"]} if t.get("timezone") and t["kind"] in ("cron", "time") else {}),
+                            # §21 2026-10-31 third sweep (a): the canonical
+                            # IANA key (`europe/berlin` → `Europe/Berlin`).
+                            **({"timezone": triggerlib.canonical_timezone(t["timezone"])}
+                               if t.get("timezone") and t["kind"] in ("cron", "time") else {}),
                             # §4.3 `runIfMissed`: stored only when false; an
                             # absent key is the pre-field shape and reads true (§21).
                             **({triggerlib.RUN_IF_MISSED: False}
@@ -1404,7 +1492,9 @@ class Store:
                 # errors="replace": §5 lenient load — a step script saved in
                 # another encoding loads with the bad bytes replaced rather
                 # than making the whole version unreadable.
-                code = f.read_text(encoding="utf-8", errors="replace")
+                # utf-8-sig (§5, third sweep, 2026-10-31): a hand-edited script
+                # saved with a BOM failed its compile on U+FEFF.
+                code = f.read_text(encoding="utf-8-sig", errors="replace")
                 # §4.1 `step-modified`: the script on disk no longer matches
                 # the seal the version writer recorded. In-memory only.
                 if isinstance(sealed_sha, str) and sealed_sha \
@@ -1422,8 +1512,8 @@ class Store:
         notes = ""
         if (vd / "notes.md").exists():
             # errors="replace": §5 lenient load, like the step scripts above.
-            notes = (vd / "notes.md").read_text(encoding="utf-8", errors="replace").strip()
-        spec_md = (vd / "spec.md").read_text(encoding="utf-8", errors="replace") \
+            notes = (vd / "notes.md").read_text(encoding="utf-8-sig", errors="replace").strip()
+        spec_md = (vd / "spec.md").read_text(encoding="utf-8-sig", errors="replace") \
             if (vd / "spec.md").exists() else ""
         return {
             "when": meta.get("when"),
@@ -1773,10 +1863,18 @@ class Store:
             }
             ver = {**ver, "when": now, "note": ver.get("note") or "Created"}
             vd = self.auto_dir(a) / "versions" / "v1"
-            self._write_version_folder(vd, ver)
-            (self.auto_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
-            a["versions"][1] = self._reload_version(vd, ver)
-            self._write_toplevel(a)
+            try:
+                self._write_version_folder(vd, ver)
+                (self.auto_dir(a) / "memory").mkdir(parents=True, exist_ok=True)
+                a["versions"][1] = self._reload_version(vd, ver)
+                self._write_toplevel(a)
+            except BaseException:
+                # §5 (third sweep, 2026-10-31): a create whose writes failed
+                # (disk full) leaves no orphan folder behind; nothing was
+                # registered yet, so the fresh uuid dir is entirely ours.
+                shutil.rmtree(self.auto_dir(a), ignore_errors=True)
+                self._sealed_shas.pop(self._seal_key(vd), None)
+                raise
             self.autos[automation_id] = a
             return a
 
@@ -1820,9 +1918,10 @@ class Store:
                     changed = True
                 modified.append(s)
                 continue
-            # Newline-normalized as a load reads it (CRLF → LF), so the
-            # editor, `pull` and the next save hold what a restart would.
-            text = data.decode("utf-8", errors="replace").replace("\r\n", "\n") \
+            # Newline-normalized as a load reads it (CRLF → LF, a BOM
+            # stripped), so the editor, `pull` and the next save hold what a
+            # restart would.
+            text = data.decode("utf-8-sig", errors="replace").replace("\r\n", "\n") \
                 .replace("\r", "\n")
             if step_script_sha(data) == sealed:
                 if s.get("modifiedOnDisk"):
@@ -1968,7 +2067,8 @@ class Store:
         if not src.exists():
             return
         try:
-            shutil.copytree(src, tmp, symlinks=True)  # §6.3: links as links
+            shutil.copytree(src, tmp, symlinks=True,  # §6.3: links as links
+                            ignore=_ignore_memory_temp)
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
@@ -2561,6 +2661,15 @@ class Store:
                 log.warning("deleting %s failed: %s", self.auto_dir(a), e.strerror or e)
                 raise
             self.autos.pop(a["id"], None)
+            # §5 (third sweep, 2026-10-31): the in-memory memos keyed by the
+            # automation's dir go with it (the version seals, the draft
+            # container's test.yaml summary), or they outlive it for the
+            # whole session.
+            directory = self.auto_dir(a)
+            for key in [k for k in self._sealed_shas if k and k[0] == directory.name]:
+                del self._sealed_shas[key]
+            for f in [f for f in self._yaml_summaries if directory in f.parents]:
+                del self._yaml_summaries[f]
         if aside is not None:
             self._reap_later(aside)
         self.delete_test_execs(a["id"])  # §11 — real records stay (automationDeleted)
@@ -3179,21 +3288,13 @@ class Store:
             except (TypeError, ValueError):
                 n = None
             days = max(1, n) if n is not None else 90
-            # §5 (2026-10-31): the age is measured from the earlier of the wall
-            # clock and the newest parsable started_at — a clock set a year
-            # ahead must never read every record as ancient.
+            # §5 session clock (third sweep, 2026-10-31): the age is measured
+            # from the earlier of the wall clock and the load-time base plus
+            # the elapsed time since load, so a clock set ahead (before or
+            # during the session) never reads every record as ancient.
             anchor = datetime.now().timestamp()
-            newest: float | None = None
-            for h in self.execs.values():
-                try:
-                    started = datetime.fromisoformat(h["started_at"]).timestamp() \
-                        if h.get("started_at") else None
-                except (TypeError, ValueError):
-                    started = None
-                if started is not None and (newest is None or started > newest):
-                    newest = started
-            if newest is not None:
-                anchor = min(anchor, newest)
+            if self._retention_base is not None:
+                anchor = min(anchor, self._retention_base + (_elapsed_clock() - self._boot_elapsed))
             cutoff = anchor - days * 86400
             # §5: each automation's latest real execution (the §4.1 lastStatus
             # population — the `_latest_exec` rule) is exempt whatever its
@@ -3338,7 +3439,7 @@ class Store:
             try:
                 size = 0
                 newest: float | None = None
-                for st in iter_file_stats(d):
+                for st in iter_memory_file_stats(d):
                     size += st.st_size
                     newest = max(newest or 0, st.st_mtime)
                 label = size_label(size) if size else "empty"
@@ -3447,12 +3548,23 @@ class Store:
         if not d.exists():
             return out
         for f in d.rglob("*"):
+            if is_memory_temp_name(f.name):
+                continue
+            name = f.relative_to(d).as_posix()
+            try:
+                # §5 (third sweep, 2026-10-31): a name that isn't valid UTF-8
+                # (a Linux path decoded with surrogateescape) can't reach the
+                # JSON answer; skipped with a warning.
+                name.encode("utf-8")
+            except UnicodeEncodeError:
+                log.warning("memory listing: skipping %r, its name isn't valid UTF-8", name)
+                continue
             try:
                 st = f.stat()
             except OSError:
                 continue
             if stat.S_ISREG(st.st_mode):
-                out.append({"name": f.relative_to(d).as_posix(), "size": st.st_size,
+                out.append({"name": name, "size": st.st_size,
                             "updated": timefmt.date_label(datetime.fromtimestamp(st.st_mtime))})
         out.sort(key=lambda e: e["name"])
         return out
@@ -3481,7 +3593,7 @@ class Store:
 
     def _memory_file_stats(self, d: Path) -> tuple[int, int]:
         size = files = 0
-        for st in iter_file_stats(d):
+        for st in iter_memory_file_stats(d):
             size += st.st_size
             files += 1
         return size, files
@@ -3577,7 +3689,7 @@ class Store:
         try:
             # §6.3: a link is copied as a link, never followed (a dangling
             # venv interpreter failed every copy; a link to ~ copied home).
-            shutil.copytree(mem, staging / "memory", symlinks=True)
+            shutil.copytree(mem, staging / "memory", symlinks=True, ignore=_ignore_memory_temp)
         except BaseException:
             self.discard_snapshot(staging)
             raise
@@ -3698,7 +3810,8 @@ class Store:
             # sequence leaves zero surviving copies — with the pre-restore
             # toggle off there is no snapshot to recover from, so rmtree'ing
             # memory/ before the staged copy lands would be a data-loss window.
-            shutil.copytree(src, tmp, symlinks=True)  # §6.3: links as links
+            shutil.copytree(src, tmp, symlinks=True,  # §6.3: links as links
+                            ignore=_ignore_memory_temp)
         except BaseException:
             if pre is not None:
                 self.discard_snapshot(pre[0])

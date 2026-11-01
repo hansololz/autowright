@@ -593,25 +593,20 @@ def test_disallowed_imports_matches_drafting_rule():
     assert "requests" in ALLOWED_IMPORTS
 
 
-def test_sync_opencode_ollama_sidesteps_corrupt_config(monkeypatch, tmp_path):
-    # §19: corrupt (half-written) opencode.json is preserved as .corrupt and a
-    # fresh valid config written — the user's bytes are never silently replaced.
-    import json
-
+def test_sync_opencode_ollama_leaves_a_corrupt_config_untouched(monkeypatch, tmp_path):
+    # §19 (third sweep): a config that isn't plain JSON is never renamed aside
+    # or replaced; the sync fails and the user adds the provider by hand.
     from autowright import harness
 
     cfg = tmp_path / "opencode.json"
     corrupt = '{"theme": "dark", "provider": {'  # truncated mid-write
     cfg.write_text(corrupt)
     monkeypatch.setattr(harness, "_OPENCODE_CONFIG", str(cfg))
-    harness.sync_opencode_ollama("qwen3:8b")
+    with pytest.raises(harness.HarnessError, match="isn't plain JSON"):
+        harness.sync_opencode_ollama("qwen3:8b")
 
-    assert (tmp_path / "opencode.json.corrupt").read_text() == corrupt
-    out = json.loads(cfg.read_text())  # fresh file parses
-    assert "theme" not in out  # started clean, not from the corrupt bytes
-    entry = out["provider"]["ollama"]
-    assert entry["npm"] == "@ai-sdk/openai-compatible"
-    assert "qwen3:8b" in entry["models"]
+    assert cfg.read_text() == corrupt
+    assert not (tmp_path / "opencode.json.corrupt").exists()
 
 
 def test_spawn_env_path_prepend_dedupe_order(monkeypatch):
@@ -765,8 +760,6 @@ def test_ollama_models_parses_tags_and_none_on_error(monkeypatch):
     import threading
 
     from autowright import harness
-
-    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
 
     class Tags(http.server.BaseHTTPRequestHandler):
         def do_GET(self):

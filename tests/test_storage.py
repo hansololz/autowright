@@ -1988,13 +1988,13 @@ def test_memory_stats_memo_skips_the_walk_and_clear_invalidates(store, home, mon
     (store.auto_dir(a) / "memory" / "seen.yaml").write_text("v: 1\n", newline="")
 
     walks = []
-    real = storage_mod.iter_file_stats
+    real = storage_mod.iter_memory_file_stats
 
     def counting(d):
         walks.append(str(d))
         return real(d)
 
-    monkeypatch.setattr(storage_mod, "iter_file_stats", counting)
+    monkeypatch.setattr(storage_mod, "iter_memory_file_stats", counting)
     # The first call answers the placeholder at once and schedules the walk.
     assert store.memory_stats(a)["size"] == store.MEMORY_STATS_COMPUTING
     first = _settled_memory_stats(store, a)

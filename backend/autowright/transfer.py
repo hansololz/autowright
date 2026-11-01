@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from . import __version__, harness, packages as pkglib, paths, timefmt, triggers as triggerlib
+from . import __version__, harness, packages as pkglib, paths, textsafe, timefmt, triggers as triggerlib
 from .drafting import PARAM_FIELDS, STEP_FILE_RE, validate_step_refs
 from .specmd import blocks_to_md, md_to_blocks
 from .storage import (AGENT_REF_RE, SECRET_REF_RE, STEP_TIMEOUT_MAX_S, MissingStepScriptError,
@@ -496,6 +496,12 @@ def _yaml_or_reject(z: zipfile.ZipFile, path: str, required: bool = True) -> dic
         raise TransferError(f"{path} is nested too deeply to read") from None
     if data is None:
         return {}
+    # §5 text safety (third sweep, 2026-10-31): a YAML `\ud800` escape parses
+    # to a lone surrogate no store write or JSON answer can encode, so the
+    # archive is refused at the door. Every YAML member is read here; the
+    # text members decode as strict UTF-8, which never yields one.
+    if textsafe.any_string(data, textsafe.has_lone_surrogate):
+        raise TransferError(textsafe.LONE_SURROGATE_ERROR)
     if not isinstance(data, dict):
         raise TransferError(f"{path} must hold a YAML mapping")
     return data
@@ -909,7 +915,7 @@ def _validate(z: zipfile.ZipFile) -> dict:
                                 "needs a numbered ref")
         s["ref"] = ref
         if (not isinstance(s.get("name"), str)
-                or not SECRET_NAME_RE.match(s["name"])):
+                or not SECRET_NAME_RE.fullmatch(s["name"])):
             raise TransferError(f"invalid secret in the archive: {excerpt(s)}")
         if s.get("description") is not None and not isinstance(s["description"], str):
             raise TransferError(f"invalid secret in the archive: {excerpt(s)} - the "
@@ -990,6 +996,9 @@ def _validate(z: zipfile.ZipFile) -> dict:
     # §21.4 (2026-09-07): an archive from an older release may carry
     # automation/instructions.md; it is accepted as a member and ignored here.
     notes = _text(z, "automation/notes.md", required=False)
+    if notes is not None:
+        # §5.1: CRLF to LF like every other text member (third sweep, 2026-10-31).
+        notes = notes.replace("\r\n", "\n").replace("\r", "\n")
     return {"name": name.strip(), "agent": agent_ref, "os": os_token,
             "triggers": triggers, "param_values": values,
             "description": meta.get("description", ""), "params": params, "packages": packages,

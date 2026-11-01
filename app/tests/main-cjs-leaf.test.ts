@@ -178,7 +178,8 @@ describe('main.cjs CLI-leaf invariant (§2)', () => {
     // the heal only rewrites an already-ours file.
     expect(union).not.toMatch(/writeFileSync\(\s*'\/usr\/local\/bin/)
     expect(union).not.toMatch(/writeFileSync\(\s*SYSTEM_SHIM/)
-    expect(src).toMatch(/writeFileSync\(shim, shimText\(python\)/)
+    // §3 (third sweep): the shim lands through a same-directory temp + rename
+    expect(src).toMatch(/writeShimAtomically\(shim, shimText\(python\)/)
   })
 
   it('electron-updater is required lazily, behind the feed gate (§3)', () => {
@@ -855,9 +856,10 @@ describe('main.cjs IPC argument validation', () => {
 
   it('reveal-path ignores a non-string argument instead of throwing', async () => {
     const m = loadMain()
-    await expect(m.invoke('reveal-path', 42)).resolves.toBeUndefined()
-    await expect(m.invoke('reveal-path', null)).resolves.toBeUndefined()
-    await expect(m.invoke('reveal-path', undefined)).resolves.toBeUndefined()
+    const refused = { ok: false, error: 'no path was given' }
+    await expect(m.invoke('reveal-path', 42)).resolves.toEqual(refused)
+    await expect(m.invoke('reveal-path', null)).resolves.toEqual(refused)
+    await expect(m.invoke('reveal-path', undefined)).resolves.toEqual(refused)
     expect(m.revealed).toEqual([])
     expect(m.opened).toEqual([])
   })

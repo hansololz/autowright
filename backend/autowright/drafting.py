@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import signal
+import tempfile
 import threading
 import time
 import uuid
@@ -2059,10 +2060,15 @@ class LockedStepTampered(Exception):
     the job `failed` with the message. Deliberately not a HarnessError or
     ValueError, so the diagnosis call's fallback never swallows it."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, restore_error: str | None = None):
+        # §8 (third sweep, 2026-10-31): a failed restore is said, never
+        # claimed as a restore.
+        outcome = ("the file was restored" if restore_error is None
+                   else f"it couldn't be restored: {restore_error}")
         super().__init__(f"the agent changed the locked step '{name}' on disk — "
-                         "the file was restored; nothing from this response was applied")
+                         f"{outcome}; nothing from this response was applied")
         self.name = name
+        self.restore_error = restore_error
 
 
 def locked_step_paths(current: dict | None, folders: list[Path] | None) -> dict[Path, str]:
@@ -2113,14 +2119,40 @@ def snapshot_locked(guarded: dict[Path, str]) -> dict[Path, bytes | None]:
     return {path: _read_bytes(path) for path in guarded if path.parent.is_dir()}
 
 
+def _write_bytes_atomically(path: Path, data: bytes) -> None:
+    """§5 atomic write of raw bytes: a temp file beside the target, fsynced,
+    renamed into place. The parent folder must already exist."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ad-tmp-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def restore_locked(guarded: dict[Path, str],
-                   snapshot: dict[Path, bytes | None]) -> str | None:
+                   snapshot: dict[Path, bytes | None]) -> tuple[str, str | None] | None:
     """§8 locked-bytes guard, after a drafting call: re-reads every
     snapshotted path; a changed or vanished file is written back byte for
-    byte, an appeared one (snapshot None) is left alone. Returns the first
-    tampered step's name, or None when nothing changed."""
+    byte, an appeared one (snapshot None) is left alone. A path whose folder
+    vanished during the call (a Discard, a Save or an automation delete, not
+    tampering) is skipped, never re-created. The restore unlinks whatever
+    sits at the path first, so a planted symlink is replaced and never
+    written through (third sweep, 2026-10-31). Returns (step name, restore
+    error or None): the first step whose restore failed, else the first
+    tampered step; None when nothing changed."""
     first: str | None = None
+    failed: tuple[str, str] | None = None
     for path, before in snapshot.items():
+        if not path.parent.is_dir():
+            continue
         if _read_bytes(path) == before:
             continue
         if first is None:
@@ -2131,11 +2163,18 @@ def restore_locked(guarded: dict[Path, str],
             continue
         log.warning("locked-bytes guard: restoring %s after a drafting call changed it", path)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(before)
+            if os.path.lexists(path):
+                os.unlink(path)
+            _write_bytes_atomically(path, before)
         except OSError as e:
             log.error("locked-bytes guard: couldn't restore %s: %s", path, e)
-    return first
+            if failed is None:
+                failed = (guarded[path], e.strerror or str(e))
+    if failed is not None:
+        return failed
+    if first is None:
+        return None
+    return first, None
 
 
 # §19 background continuation: terminal statuses whose outcome is held for the
@@ -2719,7 +2758,7 @@ class DraftJobs:
         finally:
             tampered = restore_locked(guarded, snapshot)
             if tampered is not None:
-                raise LockedStepTampered(tampered)
+                raise LockedStepTampered(*tampered)
 
     def _invoke_unguarded(self, job: dict, agent: dict, prompt: str,
                           on_chunk, on_file) -> str:

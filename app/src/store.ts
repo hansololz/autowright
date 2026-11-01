@@ -180,6 +180,9 @@ let refreshSeq = 0
 // /state snapshot from before the bump is already stale and must refetch
 // rather than clobber the fresher event-applied rows (§19 event path).
 let eventSeq = 0
+// §9 (third sweep, 2026-10-31): the one pending re-armed /state attempt a
+// refresh past its retry budget schedules; a pending re-arm is never doubled.
+let refreshRearm: ReturnType<typeof setTimeout> | null = null
 // §19: the process's first ws.open is the boot connection — every later one is
 // a reconnect, which is what `reconnects` counts.
 let wsOpened = false
@@ -496,6 +499,9 @@ export const useStore = create<Model>((set, get) => ({
     // the teardown.
     bootGeneration++
     clearTimeout(bootTimer)
+    // A re-armed /state attempt (the refresh past its retry budget) must not
+    // fire after the teardown either.
+    if (refreshRearm) { clearTimeout(refreshRearm); refreshRearm = null }
     closeWs?.()
     closeWs = null
     // §19: the next socket this process opens is a boot connection again, not
@@ -510,14 +516,25 @@ export const useStore = create<Model>((set, get) => ({
       // A WS execution event landing while /state is in flight makes the
       // snapshot stale on arrival (an execution that just started would
       // vanish until the next event) — refetch instead of applying it.
-      // Bounded: after a few tries the last snapshot applies best-effort.
+      // Bounded: past the retry budget the stale body is never applied; one
+      // more coalesced attempt re-arms a second later (§9, third sweep
+      // 2026-10-31: applying it undid an execution.finished).
       for (let attempt = 0; ; attempt++) {
         const mut = eventSeq
         const s = await api.state()
         // A newer refresh started while this one was in flight — its snapshot is
         // fresher (or will be); applying this one would roll state backwards.
         if (n !== refreshSeq) return
-        if (mut !== eventSeq && attempt < 3) continue
+        if (mut !== eventSeq) {
+          if (attempt < 3) continue
+          if (!refreshRearm) {
+            refreshRearm = setTimeout(() => {
+              refreshRearm = null
+              coalescedRefresh(get().refresh)
+            }, 1000)
+          }
+          return
+        }
         // §19 reconnect rule: version rides along — after a §3 version-sync restarts
         // the backend, this refresh is what updates the §9.4 About page's number.
         set({ version: s.version, automations: mergeAutoRows(get().automations, s.automations), executions: s.executions, executionsTotal: s.executionsTotal, agents: s.agents, secrets: s.secrets, settings: s.settings, pendingDraft: s.pendingDraft, draftJobs: s.draftJobs ?? [] })

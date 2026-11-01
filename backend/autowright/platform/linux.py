@@ -86,8 +86,9 @@ def unit_text() -> str:
     `RestartSec=2` its throttle; `WantedBy=default.target` is RunAtLoad.
     `append:` log routing (systemd ≥ 240) matches launchd's file capture, so
     the §9.3 overlay and `main.py`'s startup trim work unchanged.
-    `Environment=` carries the §3 interpreter-isolation pair and pins the
-    install-time root variables (`_environment_lines`)."""
+    `ExecStart=` carries the §3 interpreter-isolation flags `-s -P`, and
+    `Environment=` pins the install-time root variables
+    (`_environment_lines`)."""
     logs = paths.logs_dir()
     return (
         "[Unit]\n"
@@ -95,12 +96,12 @@ def unit_text() -> str:
         "StartLimitIntervalSec=0\n"
         "\n"
         "[Service]\n"
-        # §3 interpreter isolation (2026-10-31): the user site dir and the
-        # unit's default cwd ($HOME) stay off the backend's sys.path.
-        "Environment=PYTHONNOUSERSITE=1\n"
-        "Environment=PYTHONSAFEPATH=1\n"
         f"{_environment_lines()}"
-        f"ExecStart={_unit_quote(sys.executable)} -m autowright.main\n"
+        # §3 interpreter isolation (2026-10-31): the user site dir and the
+        # unit's default cwd ($HOME) stay off the backend's sys.path, by
+        # flags and never by inherited environment variables (third sweep,
+        # 2026-10-31).
+        f"ExecStart={_unit_quote(sys.executable)} -s -P -m autowright.main\n"
         "Restart=always\n"
         "RestartSec=2\n"
         f"StandardOutput=append:{_unit_escape(str(logs / 'backend.out.log'))}\n"

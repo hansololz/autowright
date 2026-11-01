@@ -203,7 +203,8 @@ Part of the Autowright spec. Index and § map: [SPEC.md](../SPEC.md). § numbers
   an undeclared import under `infiniteRetries` respawned every second forever, 2026-10-31).
   A manual in-place retry writes the re-opened record to disk **before** it swaps it into
   the live table (§5 disk-first): a write that fails (ENOSPC, EIO) leaves the record
-  `failed` and answers 500 with the OS error, instead of an `executing` record with no
+  `failed` and answers 500 with the OS error (the §19 disk-error shape; the "retrying from
+  step N" log line is written only after that write landed, third sweep), instead of an `executing` record with no
   thread behind it that spun until restart and blocked a second retry and the §4.9
   data-path switch (2026-10-31). Attempts beyond the newest 20 are pruned with their log files (§4.5/§5).
 - **Failure diagnostics:** when a step fails, the executor reports the exception as a structured

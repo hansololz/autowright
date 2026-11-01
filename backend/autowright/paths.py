@@ -37,7 +37,14 @@ def safe_filename(name: str) -> str:
     rather than in `transfer` so the §20 CLI can reach it without importing the
     store (§15 leaf rule); `transfer.safe_filename` re-exports it."""
     cleaned = unicodedata.normalize("NFC", name)
-    cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", cleaned).strip().strip(".")
+    cleaned = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', " ", cleaned)
+    # §20 (third sweep, 2026-10-31): leading and trailing dots and whitespace
+    # are stripped until stable, so ". ." and "x ." never leave a bare space or
+    # a trailing-space name.
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = cleaned.strip().strip(".")
     # §5 (2026-10-31): the stem is capped at FILENAME_STEM_MAX_BYTES of UTF-8,
     # cut on a character boundary — NAME_MAX is 255 bytes, and a CJK name
     # reaches it at about 80 characters, leaving room for a " n" suffix and
@@ -263,3 +270,32 @@ def ensure_dirs() -> None:
     automations_dir().mkdir(parents=True, exist_ok=True)
     default_data_path().mkdir(parents=True, exist_ok=True)
     logs_dir().mkdir(parents=True, exist_ok=True)
+
+
+LOG_CAP = 100 * 1024 * 1024  # §5 log size cap
+LOG_TRIM_TO = LOG_CAP // 2  # trim target — half the cap, so a saturated log isn't rewritten every boot
+
+
+def trim_logs() -> None:
+    """§5 log size cap: at startup and from the §6 scheduler's hourly
+    housekeeping (third sweep, 2026-10-31), trim any over-cap backend log in
+    place to its newest LOG_TRIM_TO bytes (cut at a line boundary) — oldest
+    lines die first. In place because launchd holds backend.out/err.log open
+    in append mode; renaming would leave the live fd writing to the renamed
+    file."""
+    for name in ("app.log", "backend.out.log", "backend.err.log"):
+        path = logs_dir() / name
+        try:
+            if path.stat().st_size <= LOG_CAP:
+                continue
+            with open(path, "rb+") as f:
+                f.seek(-LOG_TRIM_TO, os.SEEK_END)
+                tail = f.read()
+                nl = tail.find(b"\n")
+                if nl != -1:
+                    tail = tail[nl + 1:]
+                f.seek(0)
+                f.write(tail)
+                f.truncate()
+        except OSError:
+            continue

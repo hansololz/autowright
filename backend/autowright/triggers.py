@@ -458,7 +458,8 @@ def run_if_missed(t: dict) -> bool:
     return t.get(RUN_IF_MISSED, True) is not False
 
 
-def validate_trigger(t: dict, allow_past: bool = False, *, at_load: bool = False) -> str | None:
+def validate_trigger(t: dict, allow_past: bool = False, *, at_load: bool = False,
+                     allow_never_fires: bool = False) -> str | None:
     """§19 PATCH rule: error message, or None when the trigger is storable.
     `allow_past` skips the future check for one-shots — an EXISTING stored
     trigger whose moment elapsed must not 422 every unrelated edit of the
@@ -466,7 +467,9 @@ def validate_trigger(t: dict, allow_past: bool = False, *, at_load: bool = False
     `at_load` (the §5 load-time check) skips only the cron "never fires"
     rule: a stored expression that never fires stays stored and keeps not
     firing, as it always did; only the API and import refuse it (§21 (c),
-    2026-10-31)."""
+    2026-10-31). `allow_never_fires` skips the same rule for a stored cron
+    re-sent with its expression unchanged (the save-side twin, third sweep):
+    one stored `0 0 30 2 *` must not 422 every edit of the automation."""
     kind = t.get("kind")
     if kind in RESERVED_KINDS:
         return f"{kind} triggers are coming soon"
@@ -527,7 +530,7 @@ def validate_trigger(t: dict, allow_past: bool = False, *, at_load: bool = False
             parse_cron(t.get("expression") or "")
         except CronError as e:
             return str(e)
-        if not at_load and cron_next(t.get("expression") or "") is None:
+        if not at_load and not allow_never_fires and cron_next(t.get("expression") or "") is None:
             # §4.3: valid field by field but no date matches ("0 0 30 2 *") —
             # it would sit enabled forever without firing (2026-10-31).
             return "this cron expression never fires — no date matches it"
@@ -568,8 +571,13 @@ def validate_trigger(t: dict, allow_past: bool = False, *, at_load: bool = False
 
 
 def normalize_triggers(raw: list,
-                       existing_ids: set[str] | None = None) -> tuple[list[dict], str | None]:
+                       existing_ids: set[str] | None = None,
+                       stored: dict[str, dict] | None = None) -> tuple[list[dict], str | None]:
     """Validate a whole list; assign ids to new entries. → (stored shape, error).
+
+    `stored` maps each existing trigger id to its stored shape; a cron whose
+    sent expression equals the stored one skips the "never fires" rule (§4.3,
+    §21 (c) save-side twin). When given it also supplies `existing_ids`.
 
     `existing_ids` is the set of trigger ids already stored on the automation:
     only those revalidate leniently (allow_past), so an elapsed one-shot can't
@@ -580,12 +588,19 @@ def normalize_triggers(raw: list,
     id still can't smuggle a past time into storage. None (the §19 preview,
     which has no automation context) trusts any id — display-only, nothing is
     stored there."""
+    if stored is not None and existing_ids is None:
+        existing_ids = set(stored)
     out: list[dict] = []
     for t in raw or []:
         if not isinstance(t, dict):
             return [], "each trigger must be an object"
         known = bool(t.get("id")) and (existing_ids is None or t["id"] in existing_ids)
-        err = validate_trigger(t, allow_past=known)
+        prior = (stored or {}).get(t.get("id")) if known else None
+        unchanged_cron = bool(
+            prior and prior.get("kind") == "cron" and t.get("kind") == "cron"
+            and isinstance(t.get("expression"), str)
+            and t["expression"].strip() == prior.get("expression"))
+        err = validate_trigger(t, allow_past=known, allow_never_fires=unchanged_cron)
         if err == PAST_ERROR and t.get("id") and existing_ids is not None:
             continue  # §4.3 spent-drop: staged one-shot elapsed before the save
         if err:

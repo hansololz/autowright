@@ -804,7 +804,9 @@ user moved to Secrets must not pull them back. Save sends the editor's seed vers
 `baseVersion` (§19); once the automation's version has moved past it (a §20 push while the
 editor was open) the editor stops persisting its draft, Save disables, and the hint under
 the header reads "Version vN was saved outside this editor — close and reopen Edit to
-continue from it." (the 409's sentence); a 409 that still arrives shows as the save error. a save whose versioned content is unchanged (only staged
+continue from it." (the 409's sentence); a 409 that still arrives shows as the save error.
+While the §4.4 continuous persist is failing (two consecutive failed writes) the same hint
+slot reads "Draft not saved yet — retrying…" and clears when a write lands. A save whose versioned content is unchanged (only staged
 values/triggers/concurrency/grants moved) still goes through the same button and endpoint — the
 backend applies the operational state without minting a version (§4.4), announced by
 the toast "Changes saved — triggers and values updated, no new version needed."

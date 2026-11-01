@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import errno
 import json
 import logging
 import os
@@ -18,6 +20,7 @@ from pathlib import Path
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnected
@@ -32,9 +35,10 @@ from .firing import (cancel_unmatched_queue, drain_queue, finish_never_ran, fini
                      fire_trigger, queue_manual)
 from .storage import (AutomationGoneError, LiveExecutionError, MissingStepScriptError,
                       NameTakenError, OrphanSetAsideError, StepModifiedError, StoreUnwritableError, _kind_ok, is_test, exec_started_ms,
-                      exec_version_label, iter_file_stats, new_id,
+                      exec_version_label, iter_file_stats, name_key, new_id,
                       size_label, store, strip_param_values)
 from . import testexec, versions_diff
+from .textsafe import LONE_SURROGATE_ERROR
 from .yamlio import dump_yaml
 
 log = logging.getLogger("autowright.api")
@@ -44,7 +48,9 @@ log = logging.getLogger("autowright.api")
 CURRENT_VERSION_UNREADABLE = transfer.CURRENT_VERSION_UNREADABLE
 
 AUTH_TOKEN = pysecrets.token_hex(24)
-SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# §4.8: always applied with fullmatch: `$` also matches before a trailing
+# newline, so "API_KEY\n" passed `match` (third sweep, 2026-10-31).
+SECRET_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
 engine = Engine(store)
 # §22.2: the marketplace sources store, loaded once at startup by main() next to
@@ -173,6 +179,16 @@ async def _lifespan(_: FastAPI):
         await run_in_threadpool(_kill_pull_procs)
     except Exception:  # noqa: BLE001
         log.exception("shutdown: killing model-pull children failed")
+    # §19: every pip run (the §6.2 package routes, an import start) and every
+    # vendor installer script dies with the backend too (third sweep,
+    # 2026-10-31): a surviving pip kept writing the §6.2 directory while the
+    # next backend's preflight ran a second one into it.
+    for sweep_name, sweep in (("pip runs", pkglib.kill_running),
+                              ("installer scripts", installer.kill_running)):
+        try:
+            await run_in_threadpool(sweep)
+        except Exception:  # noqa: BLE001
+            log.exception("shutdown: killing %s failed", sweep_name)
     # §3: main()'s registered cleanup (guard thread, backend.json unlink) —
     # error-tolerant, a failing callback must not keep the next one from
     # running.
@@ -183,18 +199,33 @@ async def _lifespan(_: FastAPI):
             pass
 
 
+class SafeJSONResponse(JSONResponse):
+    """§19 last defence behind the lone-surrogate door (third sweep,
+    2026-10-31): a lone surrogate already stored (an older version, a value
+    built from a non-UTF-8 path) encodes with replacement instead of failing
+    the whole response, so `GET /state` still answers."""
+
+    def render(self, content) -> bytes:
+        return json.dumps(content, ensure_ascii=False, allow_nan=False, indent=None,
+                          separators=(",", ":")).encode("utf-8", errors="replace")
+
+
 # §19: no interactive docs. /health is the only unauthenticated route, and any
 # website in a browser can reach localhost — the app must not hand one its
 # schema.
 app = FastAPI(title="Autowright backend", version=__version__, lifespan=_lifespan,
-              docs_url=None, redoc_url=None, openapi_url=None)
+              docs_url=None, redoc_url=None, openapi_url=None,
+              default_response_class=SafeJSONResponse)
 
 # §19: the Electron renderer calls us cross-origin — packaged it loads from
 # file:// (Origin: null), with the §15 renderer-URL knob from a local dev
-# server. Those are the only shapes allowed: a page on the open internet can
-# reach localhost too, and must not be handed even an unauthenticated response.
-# One rule for both modes — no dev-only branch. The bearer token remains the
-# real gate, and the service binds to 127.0.0.1 only.
+# server. Those are the only shapes allowed. The `null` origin is not only
+# the packaged renderer: any sandboxed iframe (on any website) sends it too,
+# so such a page can read the unauthenticated /health answer. That disclosure
+# is accepted (third sweep, 2026-10-31); every other route needs the bearer
+# token, which no web page holds. One rule for both modes, no dev-only
+# branch. The token remains the real gate, and the service binds to
+# 127.0.0.1 only.
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 app.add_middleware(
@@ -278,6 +309,11 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
 
     parts = []
     for e in exc.errors():
+        # §19 lone-surrogate door (third sweep, 2026-10-31): the request
+        # models' before-validator refuses the whole body, and the answer is
+        # that one sentence, never `Value error, ...` behind a location.
+        if e.get("type") == "value_error" and str((e.get("ctx") or {}).get("error")) == LONE_SURROGATE_ERROR:
+            return JSONResponse(status_code=422, content={"detail": LONE_SURROGATE_ERROR})
         loc = list(e.get("loc") or ())
         if loc and loc[0] in ("body", "query", "path", "header"):
             # Every source pydantic names is dropped alike — a query
@@ -341,6 +377,27 @@ async def _orphan_set_aside_handler(request: Request, exc: OrphanSetAsideError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+# §19: an OSError that escapes a handler (a store write hitting ENOSPC, EIO or
+# a read-only volume) answers a JSON 500 naming the reason and the path, never
+# starlette's bare text page, which the §20 CLI misread as the backend being
+# unreachable (third sweep, 2026-10-31). No handled error type derives from
+# OSError, so this never shadows a more specific handler or an HTTPException.
+_DISK_ERRNOS = frozenset(n for n in (errno.ENOSPC, errno.EROFS, errno.EIO, errno.EACCES,
+                                     getattr(errno, "EDQUOT", None)) if n is not None)
+
+
+@app.exception_handler(OSError)
+async def _os_error_handler(request: Request, exc: OSError):
+    log.warning("request %s %s failed with an OSError: %s", request.method, request.url.path, exc)
+    if exc.filename or exc.errno in _DISK_ERRNOS:
+        detail = f"couldn't write to disk — {exc.strerror or exc}: {exc.filename or ''}"
+    else:
+        # A network-side OSError (URLError, a socket timeout, ConnectionError)
+        # is not a disk problem and must not read like one.
+        detail = f"the backend hit an I/O error — {exc}"
+    return SafeJSONResponse(status_code=500, content={"detail": detail})
 
 
 def _auto_or_404(automation_id: str) -> dict:
@@ -438,10 +495,12 @@ def _check_grant_name_free(agent: dict, exclude_id: str | None = None) -> None:
     across agents, case-insensitively — the §8 grants yaml, the §20
     case-insensitive name flags, and unambiguous display all rely on it.
     Write-time only: duplicates already on disk still load."""
-    wanted = harness.grant_name(agent).lower()
+    # §4.7: compared through the §4.1 name key (trimmed, NFC, casefolded),
+    # so "Coder " clashes with "coder" (third sweep, 2026-10-31).
+    wanted = name_key(harness.grant_name(agent))
     with store.lock:
         clash = next((o for o in store.agents
-                      if o["id"] != exclude_id and harness.grant_name(o).lower() == wanted), None)
+                      if o["id"] != exclude_id and name_key(harness.grant_name(o)) == wanted), None)
     if clash is not None:
         raise HTTPException(
             422, f"an agent named {harness.grant_name(clash)!r} already exists - "
@@ -629,8 +688,15 @@ def _agents_json() -> list[dict]:
     return out
 
 
+# §4.9 / §19: the settings keys a client is answered (the renderer's Settings
+# type). The hidden `imessageAutomation` value and any unknown key hand-added
+# to settings.yaml stay out (third sweep, 2026-10-31).
+SETTINGS_RESPONSE_KEYS = ("login", "menuBarIcon", "keepAwake", "automaticUpdateCheck",
+                          "notifications", "days", "keepForever", "developerMode", "cliEnabled")
+
+
 def _settings_json() -> dict:
-    s = dict(store.settings)
+    s = {key: store.settings[key] for key in SETTINGS_RESPONSE_KEYS if key in store.settings}
     s["dataPath"] = str(store.data_path())
     s["dataSize"] = _data_size_label()
     s["appPath"] = str(paths.app_support())
@@ -789,7 +855,7 @@ def patch_auto(automation_id: str, body: models.AutomationPatch) -> dict:
     if "triggers" in patch:
         # §19: whole-list replace; message kinds / bad expressions / past times → 422.
         norm, err = triggerlib.normalize_triggers(
-            patch["triggers"], existing_ids={t["id"] for t in a["triggers"]})
+            patch["triggers"], stored={t["id"]: t for t in a["triggers"]})
         if err:
             raise HTTPException(422, err)
         patch = {**patch, "triggers": norm}
@@ -900,6 +966,11 @@ def delete_auto(automation_id: str) -> dict:
         with store.lock:
             a.pop("_deleting", None)
         raise
+    # §19: the deleted automation's draft generation goes with it, so the map
+    # never grows by one entry per automation ever deleted (third sweep,
+    # 2026-10-31).
+    with store.lock:
+        draft_generations.pop(automation_id, None)
     # §19: the deleted row travels as automation=None — clients drop it in place.
     hub.publish("automation.changed", automationId=automation_id, automation=None)
     return {"ok": True}
@@ -1002,28 +1073,47 @@ def create_auto(body: models.AutomationCreate) -> dict:
         enabled_agents=body.stepAgents,
         allowed_secrets=body.allowedSecrets,
     )
-    # §4.2/§19: the chat-staged value map applies after v1 lands — matched by
-    # name+kind against v1's definitions, unmatched entries dropped silently.
-    if body.paramValues:
-        if matched := _staged_values(a, body.paramValues):
-            store.patch_automation(a, {"paramValues": matched})
-    # §8/§19: the chat-staged concurrency object applies like the PATCH's
-    # fields — the request model validated the floors already.
-    if conc := (body.concurrency.model_dump(exclude_unset=True)
-                if body.concurrency is not None else None):
-        store.patch_automation(a, conc)
+    # §5.1/§19 post-create discipline (third sweep, 2026-10-31): the
+    # automation exists from here on, so nothing below may fail the request.
+    # The pending slot is consumed first, and a failing param-value,
+    # concurrency or chat-migration write is logged and the created automation
+    # answered, never a 500 that invites a second Create and a "Name (2)".
     # §19 settlePending false (the §20 CLI create): the pending slot, its
-    # chat, its jobs and its draft test are unrelated — nothing below runs.
+    # chat, its jobs and its draft test are unrelated — none of that runs.
     if body.settlePending:
         # §4.4 thread lifetime: the slot's chat moves onto the new automation —
         # the conversation continues on its edit page — behind the boundary
         # marker, so the pre-create session never reaches a later chat's agent.
-        store.migrate_pending_chat(a)
-        store.append_chat_marker(a, "Created as v1.")
+        try:
+            store.migrate_pending_chat(a)
+            store.append_chat_marker(a, "Created as v1.")
+        except (OSError, StoreUnwritableError):
+            log.warning("create: moving the pending chat onto %s failed", a["id"], exc_info=True)
         # §4.4: Create consumes the pending create-mode slot — settled drafts are
         # never resurrected.
-        _publish_execs_deleted(store.delete_draft(None, cancel=engine.cancel))
+        try:
+            _publish_execs_deleted(store.delete_draft(None, cancel=engine.cancel))
+        except (OSError, StoreUnwritableError):
+            log.warning("create: consuming the pending slot after %s failed", a["id"], exc_info=True)
         hub.publish("draft.changed")
+    # §4.2/§19: the chat-staged value map applies after v1 lands — matched by
+    # name+kind against v1's definitions, unmatched entries dropped silently.
+    if body.paramValues:
+        if matched := _staged_values(a, body.paramValues):
+            try:
+                store.patch_automation(a, {"paramValues": matched})
+            except (OSError, StoreUnwritableError):
+                log.warning("create: storing the staged param values on %s failed",
+                            a["id"], exc_info=True)
+    # §8/§19: the chat-staged concurrency object applies like the PATCH's
+    # fields — the request model validated the floors already.
+    if conc := (body.concurrency.model_dump(exclude_unset=True)
+                if body.concurrency is not None else None):
+        try:
+            store.patch_automation(a, conc)
+        except (OSError, StoreUnwritableError):
+            log.warning("create: storing the staged concurrency on %s failed",
+                        a["id"], exc_info=True)
     _publish_auto_changed(a)
     return _auto_json_locked(a)
 
@@ -1166,7 +1256,7 @@ def save_version(automation_id: str, body: models.VersionSave) -> dict:
     triggers = None
     if "triggers" in d:
         triggers, err = triggerlib.normalize_triggers(
-            d["triggers"], existing_ids={t["id"] for t in a["triggers"]})
+            d["triggers"], stored={t["id"]: t for t in a["triggers"]})
         if err:
             raise HTTPException(422, err)
     normalized = _validate_draft_steps(d, a)  # §19: the §8 validators run server-side
@@ -1486,14 +1576,37 @@ _import_parked: dict[str, tuple[float, Path]] = {}
 # the threadpool, so the sweep/evict/insert read-modify-write in _park_archive
 # and the pops genuinely race without it.
 _import_lock = threading.Lock()
+# §5.2 expiry timers (third sweep, 2026-10-31): one daemon timer per parked
+# slot, armed at park time and cancelled when the slot goes any other way
+# (eviction, confirm, sweep), so a modal the user simply closed never leaves
+# its spool file on disk for the life of the process.
+_import_timers: dict[str, threading.Timer] = {}
+
+
+def _forget_timer(token: str) -> None:
+    """Cancel and forget one slot's expiry timer. Caller holds _import_lock."""
+    timer = _import_timers.pop(token, None)
+    if timer is not None:
+        timer.cancel()
 
 
 def _drop_parked(token: str) -> None:
     """Forget one parked archive and delete its spool file. Caller holds
     _import_lock."""
+    _forget_timer(token)
     slot = _import_parked.pop(token, None)
     if slot is not None:
         slot[1].unlink(missing_ok=True)
+
+
+def _expire_parked(token: str) -> None:
+    """§5.2 timer callback: the slot's TTL ran out with no confirm. Its own
+    slot goes whatever the clock comparison says (the timer fired at expiry),
+    and every other expired slot goes with it."""
+    with _import_lock:
+        _import_timers.pop(token, None)
+        _drop_parked(token)
+    _sweep_parked()
 
 
 def _clear_import_spool() -> None:
@@ -1547,6 +1660,10 @@ def _park_archive(data: bytes) -> str:
         while len(_import_parked) >= _IMPORT_SLOTS:
             _drop_parked(min(_import_parked, key=lambda k: _import_parked[k][0]))
         _import_parked[token] = (now, p)
+        timer = threading.Timer(_IMPORT_TTL, _expire_parked, args=(token,))
+        timer.daemon = True
+        _import_timers[token] = timer
+        timer.start()
     return token
 
 
@@ -1584,6 +1701,7 @@ def import_url(body: models.ImportUrl) -> dict:
 def import_confirm(body: models.ImportConfirm) -> dict:
     _sweep_parked()  # §5.2: expired spool files go on every confirm, not just previews
     with _import_lock:
+        _forget_timer(body.token)
         slot = _import_parked.pop(body.token, None)
     if slot is None:
         raise HTTPException(404, _IMPORT_GONE)
@@ -1899,14 +2017,21 @@ def clear_memory(automation_id: str) -> dict:
             if token is None:
                 raise HTTPException(409, "an execution is in progress")
         staged = store.stage_snapshot(a, "pre-clear")  # §6.3 — None when memory is empty or the toggle is off
-        with store.lock:
-            # §6: no rmtree under the lock — a raced copy is discarded after
-            # the hold ends. §6.3: a run that started (and maybe finished)
-            # inside the copy moved the counter (2026-10-31 second sweep).
-            raced = store.start_token(a) != token
-            if not raced:
-                if staged is not None:
-                    store.commit_snapshot(a, staged, "pre-clear")
+        # §6.3 order (third sweep, 2026-10-31): stage the copy, clear the
+        # folder, then commit the snapshot. Committing first pruned the oldest
+        # snapshot and then failed the clear, so the card listed a snapshot
+        # that was gone and missed the one that existed. The staged copy is
+        # discarded on every path that doesn't commit it (a no-op once the
+        # commit renamed it into place).
+        cleared = False
+        try:
+            with store.lock:
+                # §6: no rmtree under the lock — a raced copy is discarded
+                # after the hold ends. §6.3: a run that started (and maybe
+                # finished) inside the copy moved the counter (2026-10-31
+                # second sweep).
+                if store.start_token(a) != token:
+                    raise HTTPException(409, "an execution is in progress")
                 try:
                     store.clear_memory(a)
                 except OSError as e:
@@ -1914,11 +2039,15 @@ def clear_memory(automation_id: str) -> dict:
                     # moved aside, so nothing was cleared and the client is told.
                     raise HTTPException(
                         409, f"couldn't remove it from disk: {e.strerror or e}") from e
-        if raced:
+                cleared = True
+                if staged is not None:
+                    store.commit_snapshot(a, staged, "pre-clear")
+        finally:
             if staged is not None:
                 store.discard_snapshot(staged[0])
-            raise HTTPException(409, "an execution is in progress")
-    _publish_auto_changed(a)
+            if cleared:
+                # The cleared folder, and the snapshot when its commit landed.
+                _publish_auto_changed(a)
     return {"ok": True}
 
 
@@ -2444,7 +2573,7 @@ def patch_agent(agent_id: str, patch: models.AgentPatch) -> dict:
         # the effective grant name (name, else harness): unrelated-field
         # patches of pre-existing on-disk duplicates keep working.
         merged = {**ag, **{k: body[k] for k in ("name", "harness") if k in body}}
-        if harness.grant_name(merged).lower() != harness.grant_name(ag).lower():
+        if name_key(harness.grant_name(merged)) != name_key(harness.grant_name(ag)):
             _check_grant_name_free(merged, exclude_id=agent_id)
         # After the last 422 above — a refused patch must not have already
         # flipped the in-memory default pointer (unsaved, unpublished, and
@@ -2714,7 +2843,9 @@ def _ollama_pull_http(model: str) -> None:
             f"{harness.OLLAMA_URL}/api/pull",
             data=json.dumps({"model": model}).encode(),
             headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as r:
+        # §19: the no-proxy opener, like every other OLLAMA_URL request: a
+        # system proxy must never carry a localhost pull (third sweep).
+        with harness.ollama_urlopen(req, timeout=30) as r:
             for raw in r:
                 if time.monotonic() > deadline:
                     # §19: the per-read timeout can't catch a server dribbling
@@ -2861,7 +2992,7 @@ def _secret_store_rejected(e: Exception) -> str:
 def create_secret(body: models.SecretCreate) -> dict:
     store.require_writable(paths.secrets_file())  # before the Keychain write
     name = body.name
-    if not SECRET_NAME_RE.match(name):
+    if not SECRET_NAME_RE.fullmatch(name):
         raise HTTPException(422, "secret names must match [A-Z][A-Z0-9_]* — "
                                  "uppercase letters, digits and underscores, starting with a letter")
     with store.lock:
@@ -3472,6 +3603,22 @@ async def ws(sock: WebSocket, token: str = Query(""), role: str = Query("")) -> 
             pass
 
 
+def _release_stranded(stranded: list[dict]) -> None:
+    """§3/§5 (third sweep, 2026-10-31): a stale record whose repair write
+    failed stays `executing` on disk and in the table, but no engine thread
+    owns it, so it is dropped from its automation's live set rather than
+    holding a capacity slot for the session. The next boot repairs it again.
+    Caller holds store.lock, after `_refresh_exec_derived`."""
+    for h in stranded:
+        if engine.is_live(h["id"]):
+            continue
+        a = store.autos.get(h["automation_id"])
+        if a is not None and h["id"] in (a.get("_live") or ()):
+            a["_live"].discard(h["id"])
+            log.warning("startup: stale execution %s dropped from %s's live set; "
+                        "the next boot repairs it again", h["id"], a["id"])
+
+
 def _repair_stale_executing() -> None:
     """§3: a record can only be 'executing' while an engine thread owns it —
     anything else (backend restart, a data-path switch onto a crashed tree) is
@@ -3483,28 +3630,45 @@ def _repair_stale_executing() -> None:
     `ps` per group, §3 pid-reuse guard) and that must never run under
     store.lock: collect the stale records under the lock, kill outside it, then
     re-take the lock to write the repairs. Callers must NOT hold store.lock."""
+    # §5 disk-first per record (third sweep, 2026-10-31): every branch builds
+    # its repaired copy and writes it before the live row changes. A successful
+    # terminal write is what swaps the row (update_execution's slim-on-finish
+    # replaces store.execs[id] with the copy's header), so a write that fails
+    # leaves memory exactly where disk is. One failing record (ENOSPC, a
+    # read-only volume at boot) is logged and skipped while the rest are still
+    # repaired, and the derived state is refreshed whatever happened, so a
+    # raise can never leave `_live` holding every stale id for the session.
     stale: list[dict] = []
+    stranded: list[dict] = []
     with store.lock:
-        for h in list(store.execs.values()):
-            if h["status"] not in ("queued", "executing"):
-                continue
-            if h["status"] == "executing" and engine.is_live(h["id"]):
-                continue
-            full = store.exec_full(h["id"]) or {**h, "steps": [], "redacted_secrets": [], "params": []}
-            if full["status"] not in ("queued", "executing"):
-                # §5: the yaml is authoritative — the index row went stale (a
-                # crash between the yaml write and the sqlite commit of a
-                # finish). Re-adopt the yaml truth instead of rewriting a
-                # completed execution as interrupted/skipped.
-                store.execs[full["id"]] = full
-                store.update_execution(full)
-                continue
-            if full["status"] == "queued":
-                store.execs[full["id"]] = full
-                finish_never_ran(store, full, "backend restarted before this ran")
-                continue
-            stale.append(full)
-        store._refresh_exec_derived()
+        try:
+            for h in list(store.execs.values()):
+                if h["status"] not in ("queued", "executing"):
+                    continue
+                if h["status"] == "executing" and engine.is_live(h["id"]):
+                    continue
+                try:
+                    full = store.exec_full(h["id"]) or {**h, "steps": [], "redacted_secrets": [], "params": []}
+                    if full["status"] not in ("queued", "executing"):
+                        # §5: the yaml is authoritative — the index row went
+                        # stale (a crash between the yaml write and the sqlite
+                        # commit of a finish). Re-adopt the yaml truth instead
+                        # of rewriting a completed execution as interrupted/skipped.
+                        store.update_execution(copy.deepcopy(full))
+                        continue
+                    if full["status"] == "queued":
+                        # finish_never_ran mutates the record it is handed:
+                        # a copy, so a failed write leaves the live row alone.
+                        finish_never_ran(store, copy.deepcopy(full), "backend restarted before this ran")
+                        continue
+                    stale.append(copy.deepcopy(full))
+                except OSError:
+                    log.warning("startup: repairing stale execution %s failed, left as it was",
+                                h["id"], exc_info=True)
+                    stranded.append(h)
+        finally:
+            store._refresh_exec_derived()
+            _release_stranded(stranded)
     if not stale:
         return
     # §3: the previous backend's step group may still be running — kill it
@@ -3518,26 +3682,33 @@ def _repair_stale_executing() -> None:
         for g in full.get("agent_pgids") or []:
             kill_orphan_agent_group(g)
     with store.lock:
-        for full in stale:
-            current = store.execs.get(full["id"])
-            if current is None or current["status"] != "executing":
-                # An engine thread adopted or finished the record while the
-                # kills ran — its truth wins, never this snapshot's.
-                continue
-            full["pgid"] = None
-            full["agent_pgids"] = []
-            full["status"] = "interrupted"
-            full["note"] = full["note"] or "backend restarted mid-execution"
-            # §7: the same shape the shutdown path settles — executing and
-            # queued steps both become `interrupted`.
-            for s in full["steps"]:
-                if s["status"] in ("executing", "queued"):
-                    s["status"] = "interrupted"
-                    for a in s.get("attempts", []):
-                        if a["status"] == "executing":
-                            a["status"] = "interrupted"
-            store.execs[full["id"]] = full
-            store.update_execution(full)
-        store._refresh_exec_derived()
+        try:
+            for full in stale:
+                current = store.execs.get(full["id"])
+                if current is None or current["status"] != "executing":
+                    # An engine thread adopted or finished the record while the
+                    # kills ran — its truth wins, never this snapshot's.
+                    continue
+                full["pgid"] = None
+                full["agent_pgids"] = []
+                full["status"] = "interrupted"
+                full["note"] = full["note"] or "backend restarted mid-execution"
+                # §7: the same shape the shutdown path settles — executing and
+                # queued steps both become `interrupted`.
+                for s in full["steps"]:
+                    if s["status"] in ("executing", "queued"):
+                        s["status"] = "interrupted"
+                        for a in s.get("attempts", []):
+                            if a["status"] == "executing":
+                                a["status"] = "interrupted"
+                try:
+                    store.update_execution(full)
+                except OSError:
+                    log.warning("startup: marking stale execution %s interrupted failed, left as it was",
+                                full["id"], exc_info=True)
+                    stranded.append(full)
+        finally:
+            store._refresh_exec_derived()
+            _release_stranded(stranded)
 
 

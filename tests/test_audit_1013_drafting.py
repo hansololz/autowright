@@ -224,7 +224,7 @@ def test_a_failed_installer_download_never_runs_the_script(monkeypatch):
         installer._install_claude(lambda **k: None)
     assert str(ei.value) == ("couldn't download the installer: "
                              "curl: (6) Could not resolve host: claude.ai")
-    assert len(calls) == 1 and "curl -fsSL -o" in calls[0][2]
+    assert len(calls) == 1 and "curl -fsSL --proto '=https' --proto-redir '=https' -o" in calls[0][2]
 
 
 def test_a_downloaded_installer_runs_from_the_file_and_is_removed(monkeypatch):

@@ -225,7 +225,7 @@ def test_ensure_cancelled_while_waiting_for_the_pip_lock():
 # ---------- §6.1: the reply budget ----------
 
 def test_reply_budget_drops_everything_past_100(store, monkeypatch):
-    """§6.1 "Reply budget": at most 100 replies per step attempt; the rest are
+    """§6.1 "Reply budget": at most 100 replies per execution; the rest are
     dropped with one err line."""
     from autowright import listeners
     from autowright.engine import Engine
@@ -254,7 +254,7 @@ def test_reply_budget_drops_everything_past_100(store, monkeypatch):
     assert len(sent) == 100
     dropped = [l for l in read_all_logs(store, h["id"]) if "reply dropped" in l["text"]]
     assert len(dropped) == 1
-    assert dropped[0]["text"] == "reply dropped — more than 100 replies in one step"
+    assert dropped[0]["text"] == "reply dropped — more than 100 replies in one execution"
 
 
 # ---------- §7: a pass that ended in an engine error counts toward the total ----------
