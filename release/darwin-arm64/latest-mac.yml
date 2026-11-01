@@ -1,8 +1,8 @@
-version: 0.14.0
+version: 0.15.0
 files:
-  - url: https://github.com/hansololz/autowright/releases/download/v0.14.0/Autowright-0.14.0-darwin-arm64.zip
-    sha512: vdVzLaw/3YkcvU/hZKWjZgimLvkS3GEsvbB59rEzJjdsHHEFoZjBeuTRQaRhTf7NkjWOKcz1hgV48eGxyeYrfw==
-    size: 163752611
-path: https://github.com/hansololz/autowright/releases/download/v0.14.0/Autowright-0.14.0-darwin-arm64.zip
-sha512: vdVzLaw/3YkcvU/hZKWjZgimLvkS3GEsvbB59rEzJjdsHHEFoZjBeuTRQaRhTf7NkjWOKcz1hgV48eGxyeYrfw==
-releaseDate: '2026-10-31T23:44:45.000Z'
+  - url: https://github.com/hansololz/autowright/releases/download/v0.15.0/Autowright-0.15.0-darwin-arm64.zip
+    sha512: 59QRA2x8BpjKQLc4rloaezDPjnlU57ABPyLRUKQhJyMcpQhw/F6HoJULpVHZv1tLo68Uo7WcOHA0MY7v1BwTzQ==
+    size: 163785090
+path: https://github.com/hansololz/autowright/releases/download/v0.15.0/Autowright-0.15.0-darwin-arm64.zip
+sha512: 59QRA2x8BpjKQLc4rloaezDPjnlU57ABPyLRUKQhJyMcpQhw/F6HoJULpVHZv1tLo68Uo7WcOHA0MY7v1BwTzQ==
+releaseDate: '2026-11-01T01:17:22.000Z'
