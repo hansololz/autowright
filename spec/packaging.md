@@ -667,8 +667,11 @@ the update bullets below).
   invocation `-m autowright.` (survives interpreter-path resolution in `ps`, which shows a
   venv python's resolved framework binary in dev), the current interpreter path
   (`sys.executable`, which in the packaged app is the in-bundle python and so also matches
-  pip children), the `bin/autowright*` entry scripts beside it, and on Windows the console
-  sibling from `paths.console_python()`. Never the realpath'd interpreter: in dev that is a
+  pip children), the `bin/autowright*` entry scripts beside it, on Windows the console
+  sibling from `paths.console_python()`, and — only when the interpreter is the §3 helper,
+  never a python-named one — `<sys.prefix>/bin/python3` (2026-11-01: a backend still started
+  from a v0.16.0 plist through that symlink spawns pip children whose command line carries
+  neither the helper path nor `-m autowright.`). Never the realpath'd interpreter: in dev that is a
   shared system python and would match unrelated processes. The invariant this buys:
   immediately after a successful quit-all, no process holds the app bundle open, so the user
   can move Autowright.app to the Trash with no "in use" alert. A sweep that ended processes
@@ -1031,10 +1034,30 @@ the update bullets below).
 - **Launch-time backend version compare (implemented, in ensure-backend):** when the probe
   finds a healthy backend, the main process compares `/health`'s `version` with its own
   `app.getVersion()` (one §17 version source, so app and bundled backend versions agree by
-  construction). On mismatch it waits for live executions to drain
+  construction) **and, for the §3 helper transition only, the interpreter the backend runs**
+  (2026-11-01): `backend.json`'s `python` (the backend's own `sys.executable`, §3 discovery) is
+  read, and the backend is also "outdated" when that file's name starts with `python` while
+  the §2 `bundledPythonPath`'s does not — the same rule `service install` uses for the
+  `backend-renamed` marker. A missing field never matches. It is deliberately **not** a path
+  comparison: a healthy same-version backend on a merely different path is still left alone,
+  because a Linux AppImage mounts at a new `/tmp/.mount_*` path every launch, an
+  App-Translocated macOS copy runs from a throwaway path, and a second copy of the same
+  version would otherwise re-point the registration at whichever copy was opened last (and
+  the translocated case would point it at a path that vanishes). The transition half exists
+  because the version half alone could not see it: on macOS the updater never stops the
+  backend before ShipIt swaps the bundle, and a v0.16.0 plist naming `bin/python3` keeps
+  working through the symlink to the helper — so a backend launchd restarted from that plist
+  (a crash or a reboot during the hours-long drain below, RunAtLoad at the next login, or a
+  hand-run `service install` through a v0.16.0 shim)
+  reports the **new** version from the **old** registration, and a version-only compare would
+  leave the plist on `bin/python3` forever: no `backend-renamed` marker, no notice, and the
+  shim, `backend.json` and every child carrying the symlink path. On
+  mismatch it waits for live executions to drain
   (`GET /executions?status=executing&status=queued`, polled every 30 s — the service is never restarted
-  mid-execution), then runs the same `service install` path, which rewrites the plist and
-  restarts the service on the current bundle's interpreter. Outcome lines append to `app.log`.
+  mid-execution), re-checks both halves right before the install (a backend that is current
+  on both — restarted meanwhile — is left alone), then runs the same `service install` path,
+  which rewrites the plist and restarts the service on the current bundle's interpreter.
+  Outcome lines append to `app.log`, naming which half mismatched.
 - Sleep: the service manager does not prevent sleep. Two idle-sleep assertions exist, both
   owned by the §2 platform layer's `PowerAssertion` (engine and settings code call the layer —
   `hold_execution()` / `reconcile(enabled)` — never an OS mechanism directly; a platform with
@@ -1272,8 +1295,9 @@ refuses, the package manager owns updates).
   `release.sh --check` performs, reimplemented in the script the way `prod.ps1` does —
   `release.sh` itself stays bash/BSD-sed and runs on macOS), `npm ci` + typechecked vite
   build, download python-build-standalone `x86_64-unknown-linux-gnu-install_only` (the
-  same pinned release tag and CPython version as `prod.sh`; the layout matches macOS —
-  `python/bin/python3`, resolved by the §2 `bundledPythonPath`), stage to `build/python`,
+  same pinned release tag and CPython version as `prod.sh`; the loose `python/bin/python3`
+  layout — unlike macOS since the §3 helper, Linux has no permission prompt to name — resolved
+  by the §2 `bundledPythonPath`), stage to `build/python`,
   pip install the backend with `-c constraints.txt`, bundled-interpreter smoke test with
   `PYTHONDONTWRITEBYTECODE=1` **before** packaging (same principle as the macOS seal rule:
   the artifact ships exactly what pip staged), then electron-builder

@@ -149,6 +149,13 @@ def sweep_markers() -> list[str]:
     markers = ["-m autowright.", str(exe), str(exe.parent / "autowright")]
     if console_python() != str(exe):
         markers.append(console_python())
+    # §3 backend identity transition: a backend still started from a
+    # v0.16.0 plist (through the bin/python3 symlink) spawns its pip children
+    # as `<prefix>/bin/python3 -m pip`, which carries neither the helper path
+    # nor `-m autowright.`. Only when this interpreter is the helper (not
+    # python-named): in dev that path would be the shared venv python.
+    if not exe.name.lower().startswith("python"):
+        markers.append(str(Path(sys.prefix) / "bin" / "python3"))
     return markers
 
 

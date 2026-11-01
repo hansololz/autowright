@@ -19,6 +19,7 @@ import functools
 import logging
 import os
 import plistlib
+import shlex
 import subprocess
 import sys
 import time
@@ -83,7 +84,7 @@ def _heal_one(p: Path) -> str | None:
         return f"CLI at {p}"
     except OSError as e:
         return (f"CLI shim at {p} not rewritable ({e}) — "
-                f"use `{sys.executable} -m autowright.cli`")
+                f"use `{shlex.quote(sys.executable)} -m autowright.cli`")
 
 
 def _heal_shim() -> str:
@@ -93,7 +94,8 @@ def _heal_shim() -> str:
     switch, update) is rewritten through a temp file and a rename."""
     notes = [n for n in (_heal_one(p) for p in shim_paths()) if n]
     if not notes:
-        return f"CLI not installed — use `{sys.executable} -m autowright.cli`"
+        # §3: the helper's path holds spaces — quoted, so the line pastes.
+        return f"CLI not installed — use `{shlex.quote(sys.executable)} -m autowright.cli`"
     return " · ".join(notes)
 
 

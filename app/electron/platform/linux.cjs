@@ -21,8 +21,9 @@ const OS_NAME = 'Linux' // §4.1 display form
 function dataRootDefault() { return roots.dataRootDefault('linux') }
 function logsRootDefault() { return roots.logsRootDefault('linux') }
 
-// python-build-standalone *-unknown-linux-gnu-install_only layout matches the
-// mac one: python/bin/python3 (§3).
+// python-build-standalone *-unknown-linux-gnu-install_only layout, loose
+// python/bin/python3 (§3). macOS wraps its interpreter in the Autowright
+// Backend helper for the permission prompts; Linux has none to name.
 function bundledPythonPath(resourcesPath) {
   return path.join(resourcesPath, 'python', 'bin', 'python3')
 }

@@ -300,6 +300,17 @@ def test_install_never_creates_shim(svc):
 
 
 @launchd_only
+def test_missing_shim_note_quotes_an_interpreter_path_with_spaces(svc, monkeypatch):
+    # §3: the packaged helper's path holds spaces — the manual-invocation
+    # note shell-quotes it, so the line pastes as one command.
+    helper = "/Applications/Autowright.app/Contents/Resources/python/Autowright Backend.app/Contents/MacOS/Autowright Backend"
+    monkeypatch.setattr(sys, "executable", helper)
+    out = svc.mod._heal_shim()
+    assert out == f"CLI not installed — use `'{helper}' -m autowright.cli`"
+    assert not svc.shim.exists()
+
+
+@launchd_only
 def test_install_heals_existing_shim(svc):
     # A moved bundle or dev↔prod switch heals through re-install (§3): our
     # marker + user-writable → rewritten in place onto this interpreter.

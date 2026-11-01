@@ -498,16 +498,39 @@ async function verifyBackendUp() {
 // ensure-backend again, and a second drain loop stacked beside the first.
 let versionSyncInFlight = null
 
-function syncBackendVersion(py, running) {
+// §3: why a healthy backend is outdated — a version mismatch, or (2026-11-01)
+// the helper transition: backend.json's `python` (its own sys.executable) is
+// python-named while this bundle's interpreter is not — the same rule
+// service.py's _note_identity_change applies. The version half alone cannot
+// see it: a v0.16 plist naming bin/python3 keeps working through the symlink
+// to the helper, so a backend launchd restarted from that plist reports the
+// NEW version from the OLD registration, and the plist would stay on
+// bin/python3 forever (no renamed marker, no notice, every child on the
+// symlink path). Deliberately NOT a path comparison: a Linux AppImage mounts
+// at a fresh /tmp/.mount_* path every launch, a translocated macOS copy runs
+// from a throwaway path, and a second copy of the same version must not
+// re-point the registration — a healthy same-version backend on a merely
+// different path stays untouched. A missing `python` field never matches.
+// Null ≙ current.
+function backendOutdatedReason(py, running) {
+  if (running !== app.getVersion()) return `backend ${running} != app ${app.getVersion()}`
+  const theirs = backendInfo()?.python
+  if (typeof theirs === 'string' && theirs
+    && /^python/i.test(path.basename(theirs)) && !/^python/i.test(path.basename(py))) {
+    return `backend runs ${theirs}, this bundle ships ${py}`
+  }
+  return null
+}
+
+function syncBackendVersion(py, reason) {
   if (!versionSyncInFlight) {
-    versionSyncInFlight = runVersionSync(py, running).finally(() => { versionSyncInFlight = null })
+    versionSyncInFlight = runVersionSync(py, reason).finally(() => { versionSyncInFlight = null })
   }
   return versionSyncInFlight
 }
 
-async function runVersionSync(py, running) {
-  appLog(`ensure-backend: backend ${running} != app ${app.getVersion()} — `
-    + 'restarting service once live executions finish')
+async function runVersionSync(py, reason) {
+  appLog(`ensure-backend: ${reason} — restarting service once live executions finish`)
   // This backend answered /health moments ago, so a transient probe failure
   // (a 5 s timeout while its thread pool is busy mid-execution, or a non-OK
   // answer) must NOT read as idle — §3: the service is never restarted
@@ -525,9 +548,10 @@ async function runVersionSync(py, running) {
     await new Promise((r) => setTimeout(r, 30_000))
   }
   // §3: the drain can take hours — re-probe right before the install, and a
-  // backend already at this app's version (restarted meanwhile) is left alone.
-  if (await backendVersion() === app.getVersion()) {
-    appLog('ensure-backend: version-sync: the backend is already at the app version — no install')
+  // backend current on both halves (restarted meanwhile) is left alone.
+  const current = await backendVersion()
+  if (current !== null && backendOutdatedReason(py, current) === null) {
+    appLog('ensure-backend: version-sync: the backend is already current — no install')
     return
   }
   runServiceInstall(py, (err, stdout, stderr) => {
@@ -595,7 +619,8 @@ async function ensureBackend() {
   }
   if (running !== null) {
     ensureStatus = { state: 'ok', detail: '' }
-    if (running !== app.getVersion()) void syncBackendVersion(py, running)
+    const reason = backendOutdatedReason(py, running)
+    if (reason) void syncBackendVersion(py, reason)
     return
   }
   ensureStatus = { state: 'installing', detail: '' }

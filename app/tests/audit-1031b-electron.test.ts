@@ -486,7 +486,7 @@ describe('main.cjs audit 2026-10-31 second sweep (§3, §9.4)', () => {
     // re-probe skips the install.
     running = '0.0.0'
     await vi.advanceTimersByTimeAsync(30_000)
-    expect(m.log()).toContain('version-sync: the backend is already at the app version')
+    expect(m.log()).toContain('version-sync: the backend is already current')
     expect(children).not.toContainEqual(INSTALL)
   })
 })

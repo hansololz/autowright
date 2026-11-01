@@ -195,6 +195,30 @@ def test_sweep_markers_cover_module_form_interpreter_and_entry_point(monkeypatch
         "-m autowright.", str(exe), str(tmp_path / "bin" / "autowright"), str(console)]
 
 
+def test_sweep_markers_add_the_bin_python3_symlink_only_for_the_helper(monkeypatch):
+    """§3 backend identity transition: when this interpreter is the helper
+    (not python-named), `<prefix>/bin/python3` is a marker too — a backend
+    still started from a v0.16.0 plist spawns its pip children through it."""
+    prefix = "/Applications/Autowright.app/Contents/Resources/python"
+    helper = f"{prefix}/Autowright Backend.app/Contents/MacOS/Autowright Backend"
+    monkeypatch.setattr(paths.sys, "executable", helper)
+    monkeypatch.setattr(paths.sys, "prefix", prefix)
+    monkeypatch.setattr(paths, "console_python", lambda: helper)
+    assert f"{prefix}/bin/python3" in paths.sweep_markers()
+
+
+def test_sweep_markers_skip_the_bin_python3_marker_for_a_python_named_interpreter(monkeypatch, tmp_path):
+    """In dev `<prefix>/bin/python3` is the shared venv python: a
+    python-named interpreter never adds it."""
+    exe = tmp_path / "bin" / "python3.13"
+    monkeypatch.setattr(paths.sys, "executable", str(exe))
+    monkeypatch.setattr(paths.sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(paths, "console_python", lambda: str(exe))
+    markers = paths.sweep_markers()
+    assert markers == ["-m autowright.", str(exe), str(tmp_path / "bin" / "autowright")]
+    assert str(tmp_path / "venv" / "bin" / "python3") not in markers
+
+
 # ------------------------------------------------- §3 quit-entirely sweep
 #
 # No process is ever signalled here: the POSIX tests drive the real

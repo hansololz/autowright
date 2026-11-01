@@ -1916,6 +1916,7 @@ describe('main.cjs bounded service children (§3)', () => {
 
 describe('main.cjs live-execution gate (§3)', () => {
   afterEach(() => {
+    vi.useRealTimers()
     restoreResourcesPath()
     if (savedHome === undefined) delete process.env.AUTOWRIGHT_HOME
     else process.env.AUTOWRIGHT_HOME = savedHome
@@ -1946,6 +1947,134 @@ describe('main.cjs live-execution gate (§3)', () => {
     // it, so a version-sync install still never lands mid-execution.
     expect(src).toContain("if (live === null || live === 'unknown') {")
     expect(src).toContain("return live === true || live === 'unknown'")
+  })
+
+  // §3 launch-time compare, interpreter half (2026-11-01): a backend at the
+  // app's version still syncs when backend.json's `python` names another
+  // interpreter than this bundle ships. /health always answers the app's own
+  // version (the stub's getVersion); `live` drives the executions probe.
+  function interpreterSync(
+    python: string | undefined,
+    bundledPythonPath: (resourcesPath: string) => string = platMod.bundledPythonPath,
+  ) {
+    const resources = mkdtempSync(join(tmpdir(), 'aw-res-'))
+    const bundled = bundledPythonPath(resources)
+    mkdirSync(dirname(bundled), { recursive: true })
+    writeFileSync(bundled, '#!/bin/sh\n')
+    nodeProcess.resourcesPath = resources
+    const state = { live: false }
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.includes('/health')) {
+        return Promise.resolve({ ok: true, json: async () => ({ app: 'Autowright', version: '0.0.0' }) } as Response)
+      }
+      if (url.includes('/executions')) {
+        const executions = state.live ? [{ id: 'e1' }] : []
+        return Promise.resolve({ ok: true, json: async () => ({ executions, total: executions.length }) } as Response)
+      }
+      return Promise.reject(new Error('offline in tests'))
+    })
+    const children: string[][] = []
+    const m = loadMain({
+      ready: true,
+      execFile: (_py, args, _o, cb) => { children.push(args); cb(null, 'installed', '') },
+      ...(bundledPythonPath === platMod.bundledPythonPath ? {} : { platform: { bundledPythonPath } }),
+    })
+    const writeInfo = (value: string | undefined) => {
+      const info: Record<string, unknown> = { port: 65000, token: 't' }
+      if (value !== undefined) info.python = value
+      writeFileSync(join(m.home, 'backend.json'), JSON.stringify(info))
+    }
+    writeInfo(python === 'bundled' ? bundled : python)
+    const installs = () => children.filter((args) => args.includes('install'))
+    const done = () => {
+      fetchSpy.mockRestore()
+      rmSync(resources, { recursive: true, force: true })
+    }
+    return { m, bundled, state, writeInfo, installs, done }
+  }
+
+  it('a backend on another interpreter than this bundle ships is version-synced (§3)', async () => {
+    vi.useFakeTimers()
+    // Pinned to the macOS resolver (the helper transition is a macOS rule), so the
+    // test means the same thing on a Linux or Windows host.
+    const darwin = realRequire(join(PLATFORM_DIR, 'darwin.cjs')) as { bundledPythonPath: (resourcesPath: string) => string }
+    const { m, bundled, installs, done } = interpreterSync('/usr/bin/python3', darwin.bundledPythonPath)
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(m.log()).toContain(`ensure-backend: backend runs /usr/bin/python3, this bundle ships ${bundled} — restarting service once live executions finish`)
+      // The drain finds nothing live, so the install follows.
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(installs()).toHaveLength(1)
+    } finally {
+      done()
+    }
+  })
+
+  it('a backend on this bundle\'s own interpreter is left alone (§3)', async () => {
+    vi.useFakeTimers()
+    const { m, installs, done } = interpreterSync('bundled')
+    try {
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
+      expect(m.log()).not.toContain('restarting service once live executions finish')
+      expect(installs()).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  it('a backend.json without a python field compares equal (§3)', async () => {
+    vi.useFakeTimers()
+    const { m, installs, done } = interpreterSync(undefined)
+    try {
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
+      expect(m.log()).not.toContain('restarting service once live executions finish')
+      expect(installs()).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  it('a python-named backend on another path than a python-named bundled interpreter is left alone (§3)', async () => {
+    // Deliberately not a path comparison: the linux layout ships
+    // python/bin/python3, and an AppImage mounts at a fresh path every launch,
+    // so two python-named interpreters on different paths never sync.
+    vi.useFakeTimers()
+    const linux = realRequire(join(PLATFORM_DIR, 'linux.cjs')) as { bundledPythonPath: (resourcesPath: string) => string }
+    const { m, bundled, installs, done } = interpreterSync('/usr/bin/python3', linux.bundledPythonPath)
+    try {
+      expect(bundled.endsWith(join('python', 'bin', 'python3'))).toBe(true)
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
+      expect(m.log()).not.toContain('restarting service once live executions finish')
+      expect(installs()).toEqual([])
+    } finally {
+      done()
+    }
+  })
+
+  it('a backend restarted onto this bundle during the drain is not reinstalled (§3)', async () => {
+    vi.useFakeTimers()
+    // Pinned to the macOS resolver (the helper transition is a macOS rule), so the
+    // test means the same thing on a Linux or Windows host.
+    const darwin = realRequire(join(PLATFORM_DIR, 'darwin.cjs')) as { bundledPythonPath: (resourcesPath: string) => string }
+    const { m, bundled, state, writeInfo, installs, done } = interpreterSync('/usr/bin/python3', darwin.bundledPythonPath)
+    state.live = true
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(m.log()).toContain('backend runs /usr/bin/python3')
+      // Meanwhile the backend came back on this bundle's interpreter and the
+      // live execution finished; the next drain poll ends the drain.
+      writeInfo(bundled)
+      state.live = false
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(m.log()).toContain('ensure-backend: version-sync: the backend is already current — no install')
+      expect(installs()).toEqual([])
+    } finally {
+      done()
+    }
   })
 })
 
@@ -1980,8 +2109,9 @@ describe('main.cjs /health probe retries (§3)', () => {
     const children: string[][] = []
     try {
       const m = loadMain({ ready: true, execFile: (_py, args) => { children.push(args) } })
+      // This bundle's own interpreter, so the interpreter half matches too.
       writeFileSync(join(m.home, 'backend.json'),
-        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+        JSON.stringify({ port: 65000, token: 't', python: bundled }))
       // Two 500 ms gaps between the three attempts.
       await vi.advanceTimersByTimeAsync(0)
       await vi.advanceTimersByTimeAsync(500)
@@ -1989,6 +2119,7 @@ describe('main.cjs /health probe retries (§3)', () => {
       expect(probes).toBe(3)
       expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
       expect(children).toEqual([])
+      expect(m.log()).not.toContain('restarting service once live executions finish')
     } finally {
       fetchSpy.mockRestore()
       rmSync(resources, { recursive: true, force: true })
@@ -2009,6 +2140,7 @@ describe('main.cjs /health probe retries (§3)', () => {
   it('a job the service manager reports active is waited for, never reinstalled', async () => {
     vi.useFakeTimers()
     const resources = withBundledPython()
+    const bundled = platMod.bundledPythonPath(resources)
     let healthy = false
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       if (!String(input).includes('/health') || !healthy) return Promise.reject(new Error('still coming up'))
@@ -2020,8 +2152,9 @@ describe('main.cjs /health probe retries (§3)', () => {
         ready: true,
         execFile: (_py, args, _o, cb) => { children.push(args); cb(null, 'active (pid 4242) · port 65000\n', '') },
       })
+      // This bundle's own interpreter, so nothing version-syncs once it answers.
       writeFileSync(join(m.home, 'backend.json'),
-        JSON.stringify({ port: 65000, token: 't', python: '/usr/bin/python3' }))
+        JSON.stringify({ port: 65000, token: 't', python: bundled }))
       // The first probe's three unanswered attempts, then the status ask.
       await vi.advanceTimersByTimeAsync(1000)
       expect(children).toEqual([['-m', 'autowright.service', 'status']])
@@ -2033,6 +2166,7 @@ describe('main.cjs /health probe retries (§3)', () => {
       expect(await m.invoke('backend-status')).toEqual({ state: 'ok', detail: '' })
       await vi.advanceTimersByTimeAsync(30_000)
       expect(children).toEqual([['-m', 'autowright.service', 'status']])
+      expect(m.log()).not.toContain('restarting service once live executions finish')
     } finally {
       fetchSpy.mockRestore()
       rmSync(resources, { recursive: true, force: true })
