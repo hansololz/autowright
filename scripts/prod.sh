@@ -358,7 +358,7 @@ PROBE_SRC="$(find "$APP/Contents/Resources/python/lib" -name '*.so' -print | hea
 [ -n "$PROBE_SRC" ] || { echo "no extension module found for the ad-hoc probe"; exit 1; }
 cp "$PROBE_SRC" "$PROBE"
 codesign --force -s - "$PROBE"
-PYTHONDONTWRITEBYTECODE=1 "$APP/Contents/Resources/python/bin/python3" -c \
+PYTHONDONTWRITEBYTECODE=1 "$BACKEND_EXE" -c \
   'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$PROBE" \
   || { echo "signed interpreter cannot load an ad-hoc-signed extension: interpreter entitlement missing (SPEC §3)"; exit 1; }
 rm -f "$PROBE"
