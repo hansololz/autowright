@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.1 - 2026-11-01
+
+- macOS permission prompts now name Autowright instead of a bundled Python executable, so it is clear what you are approving.
+- Autowright tells you when it needs Full Disk Access granted again after this update, and names the exact row to turn on.
+- Triggers whose time zone was stored with unusual capitalization now fire at the right time on every platform.
+
 ## v0.16.0 - 2026-10-31
 
 - Installing an automation from the marketplace, or importing one exported by an older version, no longer fails with a "the default isn't a list value" error.
