@@ -2432,25 +2432,30 @@ def test_interval_next_at_ms_uses_the_run_baseline(store):
     """§4.3: an automation's `nextAtMs` for an interval is one `every` past the
     anchor — created_at while it has never run, the enable stamp when that is
     later, and the latest real execution's start once it has run."""
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
+    # Compared as aware instants, never as local naive datetimes: §4.3 runs
+    # interval math on instants, so across a DST fall-back `now + 5h` on the
+    # wall clock is an hour off the real occurrence (this failed on the night
+    # of 2026-10-31 with naive arithmetic).
     def next_at(a):
-        return datetime.fromtimestamp(store.auto_json(a)["nextAtMs"] / 1000)
+        return datetime.fromtimestamp(store.auto_json(a)["nextAtMs"] / 1000, UTC)
 
-    now = datetime.now()
+    now = datetime.now(UTC)
+    local = now.astimezone().replace(tzinfo=None)  # stamps are local naive
     a = store.create_automation(make_version(), "Six hourly", None, triggers=[
         {"id": "iv", "kind": "interval", "enabled": True, "every": "PT6H",
          "source": "user"}])
-    a["created_at"] = (now - timedelta(hours=1)).isoformat()
-    a["triggers"][0]["enabledAt"] = (now - timedelta(hours=3)).isoformat()
+    a["created_at"] = (local - timedelta(hours=1)).isoformat()
+    a["triggers"][0]["enabledAt"] = (local - timedelta(hours=3)).isoformat()
     assert abs(next_at(a) - (now + timedelta(hours=5))) < timedelta(seconds=5)
 
     # a stamp later than created_at wins — the anchor is the re-enable
-    a["triggers"][0]["enabledAt"] = (now - timedelta(minutes=30)).isoformat()
+    a["triggers"][0]["enabledAt"] = (local - timedelta(minutes=30)).isoformat()
     assert abs(next_at(a) - (now + timedelta(hours=5, minutes=30))) < timedelta(seconds=5)
 
     # once it has run, the run's start is the anchor
-    a["_last_exec_at"] = (now - timedelta(minutes=10)).isoformat()
+    a["_last_exec_at"] = (local - timedelta(minutes=10)).isoformat()
     assert abs(next_at(a) - (now + timedelta(hours=5, minutes=50))) < timedelta(seconds=5)
 
 
