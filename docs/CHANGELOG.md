@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.16.0 - 2026-10-31
+
+- Installing an automation from the marketplace, or importing one exported by an older version, no longer fails with a "the default isn't a list value" error.
+
 ## v0.15.0 - 2026-10-31
 
 - Autowright now warns you when you save a trigger that can never fire.
